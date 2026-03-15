@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { AgenticLoop } from "../types/agentic";
 
@@ -21,20 +21,23 @@ export function useAgenticLoops(sessionId: string | undefined) {
     }
   }, [sessionId]);
 
+  const refetchRef = useRef(refetch);
+  refetchRef.current = refetch;
+
   useEffect(() => {
     if (sessionId) {
-      void refetch();
+      void refetchRef.current();
     } else {
       setLoops([]);
     }
-  }, [sessionId, refetch]);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId) return;
-    const handler = () => void refetch();
+    const handler = () => void refetchRef.current();
     window.addEventListener(AGENTIC_LOOP_UPDATE_EVENT, handler);
     return () => window.removeEventListener(AGENTIC_LOOP_UPDATE_EVENT, handler);
-  }, [sessionId, refetch]);
+  }, [sessionId]);
 
   return { loops, loading, refetch };
 }

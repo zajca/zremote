@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Project, api } from "../lib/api";
 
 export const PROJECT_UPDATE_EVENT = "myremote:project-update";
@@ -22,22 +22,24 @@ export function useProjects(hostId: string | undefined) {
     }
   }, [hostId]);
 
+  const refetchRef = useRef(refetch);
+  refetchRef.current = refetch;
+
   useEffect(() => {
     if (hostId) {
-      void refetch();
+      void refetchRef.current();
     } else {
       setProjects([]);
       setLoading(false);
     }
-  }, [hostId, refetch]);
+  }, [hostId]);
 
   useEffect(() => {
-    const handler = () => {
-      void refetch();
-    };
+    if (!hostId) return;
+    const handler = () => void refetchRef.current();
     window.addEventListener(PROJECT_UPDATE_EVENT, handler);
     return () => window.removeEventListener(PROJECT_UPDATE_EVENT, handler);
-  }, [refetch]);
+  }, [hostId]);
 
   return { projects, loading, error, refetch };
 }

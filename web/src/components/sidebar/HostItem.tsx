@@ -1,5 +1,5 @@
 import { ChevronRight, Plus, Search } from "lucide-react";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Host } from "../../lib/api";
 import { api } from "../../lib/api";
@@ -57,6 +57,22 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
     [navigate, host.id],
   );
 
+  // Split sessions into project-linked and orphan
+  const { projectSessionsMap, orphanSessions } = useMemo(() => {
+    const map = new Map<string, typeof sessions>();
+    const orphans: typeof sessions = [];
+    for (const session of sessions) {
+      if (session.project_id) {
+        const existing = map.get(session.project_id) ?? [];
+        existing.push(session);
+        map.set(session.project_id, existing);
+      } else {
+        orphans.push(session);
+      }
+    }
+    return { projectSessionsMap: map, orphanSessions: orphans };
+  }, [sessions]);
+
   return (
     <div>
       <div
@@ -112,17 +128,33 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                 </button>
               </div>
               {projects.map((project) => (
-                <ProjectItem key={project.id} project={project} />
+                <ProjectItem
+                  key={project.id}
+                  project={project}
+                  sessions={projectSessionsMap.get(project.id) ?? []}
+                  hostId={host.id}
+                />
               ))}
             </div>
           )}
-          {sessions.map((session) => (
-            <SessionItem
-              key={session.id}
-              session={session}
-              hostId={host.id}
-            />
-          ))}
+          {orphanSessions.length > 0 && (
+            <div>
+              {projects.length > 0 && (
+                <div className="px-2 py-0.5">
+                  <span className="text-[10px] font-medium tracking-wider text-text-tertiary uppercase">
+                    Sessions
+                  </span>
+                </div>
+              )}
+              {orphanSessions.map((session) => (
+                <SessionItem
+                  key={session.id}
+                  session={session}
+                  hostId={host.id}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

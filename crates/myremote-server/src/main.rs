@@ -110,6 +110,10 @@ fn create_router(state: Arc<AppState>) -> Router {
                 .delete(routes::projects::delete_project),
         )
         .route(
+            "/api/projects/{project_id}/sessions",
+            get(routes::projects::list_project_sessions),
+        )
+        .route(
             "/api/config/{key}",
             get(routes::config::get_global_config)
                 .put(routes::config::set_global_config),
@@ -912,5 +916,270 @@ mod tests {
 
         // Connection should be unregistered
         assert_eq!(state.connections.connected_count().await, 0);
+    }
+
+    // --- Session-project linking tests ---
+
+    async fn insert_test_project(state: &AppState, id: &str, host_id: &str, path: &str, name: &str) {
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(host_id)
+        .bind(path)
+        .bind(name)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_session_links_project_by_working_dir() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+        insert_test_project(&state, &project_id, &host_id_str, "/home/user/project", "project").await;
+
+        // Register connection
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state.connections.register(host_id, "host".to_string(), tx).await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"cols": 80, "rows": 24, "working_dir": "/home/user/project"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap();
+
+        // Verify session has project_id linked
+        let app2 = create_router(state);
+        let get_resp = app2
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(session["project_id"], project_id);
+    }
+
+    #[tokio::test]
+    async fn create_session_links_project_by_subdirectory() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+        insert_test_project(&state, &project_id, &host_id_str, "/home/user/project", "project").await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state.connections.register(host_id, "host".to_string(), tx).await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"cols": 80, "rows": 24, "working_dir": "/home/user/project/src"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap();
+
+        let app2 = create_router(state);
+        let get_resp = app2
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(session["project_id"], project_id);
+    }
+
+    #[tokio::test]
+    async fn create_session_without_matching_project_leaves_null() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state.connections.register(host_id, "host".to_string(), tx).await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"cols": 80, "rows": 24, "working_dir": "/tmp/random"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap();
+
+        let app2 = create_router(state);
+        let get_resp = app2
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(session["project_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn list_project_sessions_returns_linked_sessions() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+        insert_test_project(&state, &project_id, &host_id, "/home/user/project", "project").await;
+
+        // Insert sessions: one linked, one not
+        let linked_session_id = uuid::Uuid::new_v4().to_string();
+        let orphan_session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)")
+            .bind(&linked_session_id)
+            .bind(&host_id)
+            .bind(&project_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&orphan_session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/projects/{project_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["id"], linked_session_id);
+    }
+
+    #[tokio::test]
+    async fn delete_project_sets_session_project_id_null() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+        insert_test_project(&state, &project_id, &host_id, "/home/user/project", "project").await;
+
+        sqlx::query("INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)")
+            .bind(&session_id)
+            .bind(&host_id)
+            .bind(&project_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify session's project_id is now NULL
+        let row: (Option<String>,) = sqlx::query_as("SELECT project_id FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(row.0.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_response_includes_project_id() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // project_id field exists and is null
+        assert!(session.get("project_id").is_some());
+        assert!(session["project_id"].is_null());
     }
 }

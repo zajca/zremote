@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Host, api } from "../lib/api";
 
 export function useHosts() {
@@ -19,9 +19,12 @@ export function useHosts() {
     }
   }, []);
 
+  const refetchRef = useRef(refetch);
+  refetchRef.current = refetch;
+
   useEffect(() => {
-    void refetch();
-  }, [refetch]);
+    void refetchRef.current();
+  }, []);
 
   return { hosts, loading, error, refetch };
 }

@@ -20,6 +20,7 @@ export interface Session {
   closed_at: string | null;
   exit_code: number | null;
   working_dir: string | null;
+  project_id: string | null;
 }
 
 export interface Project {
@@ -139,6 +140,8 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+    sessions: (projectId: string) =>
+      request<Session[]>(`/api/projects/${projectId}/sessions`),
   },
   analytics: {
     tokens: (params?: { by?: string; from?: string; to?: string }) => {
