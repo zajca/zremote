@@ -21,3 +21,4 @@ url.workspace = true
 rand.workspace = true
 chrono.workspace = true
 portable-pty.workspace = true
+sysinfo.workspace = true

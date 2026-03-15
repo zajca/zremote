@@ -6,12 +6,14 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
 use myremote_protocol::{AgentMessage, HostId, ServerMessage};
+use myremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::auth;
-use crate::state::{AppState, HostInfo, ServerEvent, SessionInfo};
+use crate::state::{AgenticLoopState, AppState, HostInfo, PendingToolCall, ServerEvent, SessionInfo};
 
 /// Timeout for the first message (Register) after WebSocket upgrade.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,6 +47,31 @@ struct RegisteredAgent {
     arch: String,
 }
 
+/// Receive a raw `AgentMessage` during registration (before the main loop).
+async fn recv_terminal_message(socket: &mut WebSocket) -> Option<AgentMessage> {
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<AgentMessage>(&text) {
+                    Ok(msg) => return Some(msg),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to deserialize register message");
+                    }
+                }
+            }
+            Some(Ok(Message::Close(_))) | None => return None,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            Some(Ok(Message::Binary(_))) => {
+                tracing::warn!("received unexpected binary message from agent");
+            }
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "WebSocket receive error");
+                return None;
+            }
+        }
+    }
+}
+
 /// Perform the registration handshake: wait for Register message, validate
 /// token, upsert host, register connection, and send `RegisterAck`.
 /// Returns `None` if any step fails (errors are sent to the agent).
@@ -53,7 +80,7 @@ async fn register_agent(
     state: &Arc<AppState>,
 ) -> Option<RegisteredAgent> {
     // 1. Wait for Register message with timeout
-    let register_msg = match tokio::time::timeout(REGISTER_TIMEOUT, recv_agent_message(socket))
+    let register_msg = match tokio::time::timeout(REGISTER_TIMEOUT, recv_terminal_message(socket))
         .await
     {
         Ok(Some(msg)) => msg,
@@ -188,14 +215,22 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
         tokio::select! {
             // Inbound from agent WebSocket
             msg = recv_agent_message(&mut socket) => {
-                if let Some(agent_msg) = msg {
-                    if let Err(e) = handle_agent_message(&state, host_id, agent_msg, &mut socket).await {
-                        tracing::error!(host_id = %host_id, error = %e, "error handling agent message");
+                match msg {
+                    Some(InboundMessage::Terminal(agent_msg)) => {
+                        if let Err(e) = handle_agent_message(&state, host_id, agent_msg, &mut socket).await {
+                            tracing::error!(host_id = %host_id, error = %e, "error handling agent message");
+                            break;
+                        }
+                    }
+                    Some(InboundMessage::Agentic(agentic_msg)) => {
+                        if let Err(e) = handle_agentic_message(&state, host_id, agentic_msg).await {
+                            tracing::error!(host_id = %host_id, error = %e, "error handling agentic message");
+                        }
+                    }
+                    None => {
+                        tracing::info!(host_id = %host_id, "agent disconnected");
                         break;
                     }
-                } else {
-                    tracing::info!(host_id = %host_id, "agent disconnected");
-                    break;
                 }
             }
             // Outbound from server to agent
@@ -218,17 +253,25 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
     cleanup_agent(&state, &host_id, generation).await;
 }
 
+/// Enum representing either a terminal or agentic message from the agent.
+enum InboundMessage {
+    Terminal(AgentMessage),
+    Agentic(AgenticAgentMessage),
+}
+
 /// Receive and deserialize an agent message from the WebSocket.
-async fn recv_agent_message(socket: &mut WebSocket) -> Option<AgentMessage> {
+/// Tries `AgentMessage` first, then `AgenticAgentMessage`.
+async fn recv_agent_message(socket: &mut WebSocket) -> Option<InboundMessage> {
     loop {
         match socket.recv().await {
             Some(Ok(Message::Text(text))) => {
-                match serde_json::from_str::<AgentMessage>(&text) {
-                    Ok(msg) => return Some(msg),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize agent message");
-                    }
+                if let Ok(msg) = serde_json::from_str::<AgentMessage>(&text) {
+                    return Some(InboundMessage::Terminal(msg));
                 }
+                if let Ok(msg) = serde_json::from_str::<AgenticAgentMessage>(&text) {
+                    return Some(InboundMessage::Agentic(msg));
+                }
+                tracing::warn!("failed to deserialize agent message: unrecognized format");
             }
             Some(Ok(Message::Close(_))) | None => return None,
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -402,6 +445,247 @@ async fn handle_agent_message(
         }
         AgentMessage::Register { .. } => {
             tracing::warn!(host_id = %host_id, "agent sent duplicate Register message");
+        }
+    }
+    Ok(())
+}
+
+/// Handle an agentic agent message: update DB and in-memory state.
+#[allow(clippy::too_many_lines)]
+async fn handle_agentic_message(
+    state: &AppState,
+    host_id: HostId,
+    msg: AgenticAgentMessage,
+) -> Result<(), String> {
+    match msg {
+        AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path,
+            tool_name,
+            model,
+        } => {
+            let loop_id_str = loop_id.to_string();
+            let session_id_str = session_id.to_string();
+
+            if let Err(e) = sqlx::query(
+                "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&loop_id_str)
+            .bind(&session_id_str)
+            .bind(&project_path)
+            .bind(&tool_name)
+            .bind(&model)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(loop_id = %loop_id, error = %e, "failed to insert agentic loop");
+                return Err(format!("failed to insert agentic loop: {e}"));
+            }
+
+            state.agentic_loops.insert(
+                loop_id,
+                AgenticLoopState {
+                    loop_id,
+                    session_id,
+                    status: AgenticStatus::Working,
+                    pending_tool_calls: std::collections::VecDeque::new(),
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    estimated_cost_usd: 0.0,
+                    last_updated: Instant::now(),
+                },
+            );
+
+            tracing::info!(host_id = %host_id, loop_id = %loop_id, tool_name = %tool_name, "agentic loop detected");
+        }
+        AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status,
+            ..
+        } => {
+            // Update in-memory state
+            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                entry.status = status;
+                entry.last_updated = Instant::now();
+            }
+
+            // Update DB
+            let loop_id_str = loop_id.to_string();
+            let status_str = serde_json::to_value(status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{status:?}").to_lowercase());
+
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET status = ? WHERE id = ?",
+            )
+            .bind(&status_str)
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
+            }
+        }
+        AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id,
+            tool_name,
+            arguments_json,
+            status,
+        } => {
+            let tool_call_id_str = tool_call_id.to_string();
+            let loop_id_str = loop_id.to_string();
+            let status_str = serde_json::to_value(status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{status:?}").to_lowercase());
+
+            if let Err(e) = sqlx::query(
+                "INSERT INTO tool_calls (id, loop_id, tool_name, arguments_json, status) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&tool_call_id_str)
+            .bind(&loop_id_str)
+            .bind(&tool_name)
+            .bind(&arguments_json)
+            .bind(&status_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to insert tool call");
+            }
+
+            // Add to in-memory pending queue if pending
+            if status == myremote_protocol::ToolCallStatus::Pending
+                && let Some(mut entry) = state.agentic_loops.get_mut(&loop_id)
+            {
+                entry.pending_tool_calls.push_back(PendingToolCall {
+                    tool_call_id,
+                    tool_name,
+                    arguments_json,
+                });
+                entry.last_updated = Instant::now();
+            }
+        }
+        AgenticAgentMessage::LoopToolResult {
+            loop_id,
+            tool_call_id,
+            result_preview,
+            duration_ms,
+        } => {
+            let tool_call_id_str = tool_call_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            if let Err(e) = sqlx::query(
+                "UPDATE tool_calls SET status = 'completed', result_preview = ?, \
+                 duration_ms = ?, resolved_at = ? WHERE id = ?",
+            )
+            .bind(&result_preview)
+            .bind(i64::try_from(duration_ms).unwrap_or(i64::MAX))
+            .bind(&now)
+            .bind(&tool_call_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update tool call result");
+            }
+
+            // Remove from pending queue
+            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                entry.pending_tool_calls.retain(|tc| tc.tool_call_id != tool_call_id);
+                entry.last_updated = Instant::now();
+            }
+        }
+        AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role,
+            content,
+            tool_call_id,
+            timestamp,
+        } => {
+            let loop_id_str = loop_id.to_string();
+            let role_str = serde_json::to_value(role)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{role:?}").to_lowercase());
+            let tool_call_id_str = tool_call_id.map(|id: uuid::Uuid| id.to_string());
+            let timestamp_str = timestamp.to_rfc3339();
+
+            if let Err(e) = sqlx::query(
+                "INSERT INTO transcript_entries (loop_id, role, content, tool_call_id, timestamp) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&loop_id_str)
+            .bind(&role_str)
+            .bind(&content)
+            .bind(&tool_call_id_str)
+            .bind(&timestamp_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to insert transcript entry");
+            }
+        }
+        AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in,
+            tokens_out,
+            estimated_cost_usd,
+            ..
+        } => {
+            // Update in-memory state
+            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                entry.tokens_in = tokens_in;
+                entry.tokens_out = tokens_out;
+                entry.estimated_cost_usd = estimated_cost_usd;
+                entry.last_updated = Instant::now();
+            }
+
+            // Update DB
+            let loop_id_str = loop_id.to_string();
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
+                 estimated_cost_usd = ? WHERE id = ?",
+            )
+            .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
+            .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
+            .bind(estimated_cost_usd)
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
+            }
+        }
+        AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason,
+            summary,
+        } => {
+            let loop_id_str = loop_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET status = 'completed', ended_at = ?, \
+                 end_reason = ?, summary = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&reason)
+            .bind(&summary)
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop ended in DB");
+            }
+
+            // Remove from in-memory state
+            state.agentic_loops.remove(&loop_id);
+
+            tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
         }
     }
     Ok(())

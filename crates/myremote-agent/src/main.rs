@@ -1,3 +1,4 @@
+mod agentic;
 mod config;
 mod connection;
 mod pty;

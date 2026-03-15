@@ -10,6 +10,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     reader_handle: JoinHandle<()>,
+    pid: u32,
 }
 
 impl PtySession {
@@ -79,9 +80,15 @@ impl PtySession {
             master: pair.master,
             child,
             reader_handle,
+            pid,
         };
 
         Ok((session, pid))
+    }
+
+    /// Return the PID of the child shell process.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Write data to the PTY stdin.

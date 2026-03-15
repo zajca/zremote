@@ -82,6 +82,11 @@ impl SessionManager {
         }
     }
 
+    /// Return an iterator of `(session_id, shell_pid)` for all active sessions.
+    pub fn session_pids(&self) -> impl Iterator<Item = (SessionId, u32)> + '_ {
+        self.sessions.iter().map(|(id, s)| (*id, s.pid()))
+    }
+
     /// Return the number of active sessions.
     #[cfg(test)]
     pub fn count(&self) -> usize {

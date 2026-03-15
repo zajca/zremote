@@ -48,6 +48,15 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+import type {
+  AgenticLoop,
+  AgenticMetrics,
+  PermissionRule,
+  ToolCall,
+  TranscriptEntry,
+  UserAction,
+} from "../types/agentic";
+
 export const api = {
   hosts: {
     list: () => request<Host[]>("/api/hosts"),
@@ -67,5 +76,35 @@ export const api = {
       request<void>(`/api/hosts/${hostId}/sessions/${sessionId}`, {
         method: "DELETE",
       }),
+  },
+  loops: {
+    list: (filters?: { session_id?: string; status?: string }) => {
+      const params = new URLSearchParams();
+      if (filters?.session_id) params.set("session_id", filters.session_id);
+      if (filters?.status) params.set("status", filters.status);
+      const qs = params.toString();
+      return request<AgenticLoop[]>(`/api/loops${qs ? `?${qs}` : ""}`);
+    },
+    get: (id: string) => request<AgenticLoop>(`/api/loops/${id}`),
+    tools: (id: string) => request<ToolCall[]>(`/api/loops/${id}/tools`),
+    transcript: (id: string) =>
+      request<TranscriptEntry[]>(`/api/loops/${id}/transcript`),
+    action: (id: string, action: UserAction, payload?: string) =>
+      request<void>(`/api/loops/${id}/action`, {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      }),
+    metrics: (id: string) =>
+      request<AgenticMetrics>(`/api/loops/${id}/metrics`),
+  },
+  permissions: {
+    list: () => request<PermissionRule[]>("/api/permissions"),
+    upsert: (rule: Omit<PermissionRule, "id"> & { id?: string }) =>
+      request<PermissionRule>("/api/permissions", {
+        method: "PUT",
+        body: JSON.stringify(rule),
+      }),
+    delete: (id: string) =>
+      request<void>(`/api/permissions/${id}`, { method: "DELETE" }),
   },
 };

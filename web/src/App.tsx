@@ -3,6 +3,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { WelcomePage } from "./pages/WelcomePage";
 import { HostPage } from "./pages/HostPage";
 import { SessionPage } from "./pages/SessionPage";
+import { AgenticLoopPage } from "./pages/AgenticLoopPage";
 
 const router = createBrowserRouter([
   {
@@ -13,6 +14,10 @@ const router = createBrowserRouter([
       {
         path: "hosts/:hostId/sessions/:sessionId",
         element: <SessionPage />,
+      },
+      {
+        path: "hosts/:hostId/sessions/:sessionId/loops/:loopId",
+        element: <AgenticLoopPage />,
       },
     ],
   },
