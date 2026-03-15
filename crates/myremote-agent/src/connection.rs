@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use myremote_protocol::{AgentMessage, HostId, ServerMessage, SessionId};
+use myremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId};
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::agentic::manager::AgenticLoopManager;
 use crate::config::AgentConfig;
 use crate::session::SessionManager;
 
@@ -65,6 +66,7 @@ type WsStream =
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Establish a WebSocket connection to the server.
 async fn connect(config: &AgentConfig) -> Result<WsStream, ConnectionError> {
@@ -138,6 +140,12 @@ fn serialize_agent_message(msg: &AgentMessage) -> Result<Message, ConnectionErro
     Ok(Message::Text(json.into()))
 }
 
+/// Serialize an `AgenticAgentMessage` to a WS text message.
+fn serialize_agentic_message(msg: &AgenticAgentMessage) -> Result<Message, ConnectionError> {
+    let json = serde_json::to_string(msg).map_err(ConnectionError::Serialize)?;
+    Ok(Message::Text(json.into()))
+}
+
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
 fn handle_session_create(
     session_manager: &mut SessionManager,
@@ -200,7 +208,13 @@ pub async fn run_connection(
     // Session manager
     let mut session_manager = SessionManager::new(pty_output_tx);
 
-    // Spawn sender task: drains outbound channel + heartbeats -> WS sink
+    // Agentic loop manager
+    let mut agentic_manager = AgenticLoopManager::new();
+
+    // Channel for outbound agentic messages
+    let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
+
+    // Spawn sender task: drains outbound channel + agentic channel + heartbeats -> WS sink
     let sender_shutdown = shutdown.clone();
     let sender_handle = tokio::spawn(async move {
         let mut heartbeat_interval = interval(HEARTBEAT_INTERVAL);
@@ -219,6 +233,19 @@ pub async fn run_connection(
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "failed to serialize outbound message");
+                        }
+                    }
+                }
+                Some(msg) = agentic_rx.recv() => {
+                    match serialize_agentic_message(&msg) {
+                        Ok(ws_msg) => {
+                            if let Err(e) = ws_sink.send(ws_msg).await {
+                                tracing::error!(error = %e, "failed to send agentic message");
+                                return ws_sink;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize agentic message");
                         }
                     }
                 }
@@ -247,6 +274,11 @@ pub async fn run_connection(
         }
     });
 
+    // Periodic agentic tool detection
+    let mut agentic_check_interval = interval(AGENTIC_CHECK_INTERVAL);
+    // Skip the first immediate tick
+    agentic_check_interval.tick().await;
+
     // Main message loop
     let result = loop {
         tokio::select! {
@@ -259,7 +291,9 @@ pub async fn run_connection(
                                     &server_msg,
                                     &host_id,
                                     &mut session_manager,
+                                    &mut agentic_manager,
                                     &outbound_tx,
+                                    &agentic_tx,
                                 );
                             }
                             Err(e) => {
@@ -287,6 +321,11 @@ pub async fn run_connection(
             Some((session_id, data)) = pty_output_rx.recv() => {
                 if data.is_empty() {
                     // Session ended (EOF from PTY reader)
+                    if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
+                        && agentic_tx.try_send(loop_ended).is_err()
+                    {
+                        tracing::warn!("agentic channel full, LoopEnded dropped");
+                    }
                     let exit_code = session_manager.close(&session_id);
                     tracing::info!(session_id = %session_id, exit_code = ?exit_code, "PTY session ended");
                     if outbound_tx.try_send(AgentMessage::SessionClosed {
@@ -295,11 +334,29 @@ pub async fn run_connection(
                     }).is_err() {
                         tracing::warn!("outbound channel full, message dropped");
                     }
-                } else if outbound_tx.try_send(AgentMessage::TerminalOutput {
+                } else {
+                    // Pass output through agentic manager for parsing
+                    let agentic_msgs = agentic_manager.process_output(&session_id, &data);
+                    for msg in agentic_msgs {
+                        if agentic_tx.try_send(msg).is_err() {
+                            tracing::warn!("agentic channel full, message dropped");
+                        }
+                    }
+
+                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
                     }).is_err() {
                         tracing::warn!("outbound channel full, message dropped");
+                    }
+                }
+            }
+            _ = agentic_check_interval.tick() => {
+                let messages = agentic_manager.check_sessions(session_manager.session_pids());
+                for msg in messages {
+                    if agentic_tx.try_send(msg).is_err() {
+                        tracing::warn!("agentic channel full, message dropped");
+                    }
                 }
             }
             () = wait_for_shutdown(shutdown.clone()) => {
@@ -331,7 +388,9 @@ fn handle_server_message(
     msg: &ServerMessage,
     host_id: &HostId,
     session_manager: &mut SessionManager,
+    agentic_manager: &mut AgenticLoopManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
+    agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -355,6 +414,12 @@ fn handle_server_message(
             );
         }
         ServerMessage::SessionClose { session_id } => {
+            // Clean up agentic loop if any
+            if let Some(loop_ended) = agentic_manager.on_session_closed(session_id)
+                && agentic_tx.try_send(loop_ended).is_err()
+            {
+                tracing::warn!("agentic channel full, LoopEnded dropped");
+            }
             let exit_code = session_manager.close(session_id);
             tracing::info!(session_id = %session_id, exit_code = ?exit_code, "session closed by server");
             if outbound_tx.try_send(AgentMessage::SessionClosed {
@@ -384,6 +449,43 @@ fn handle_server_message(
         ServerMessage::RegisterAck { .. } => {
             tracing::warn!(host_id = %host_id, "received unexpected RegisterAck after registration");
         }
+        ServerMessage::AgenticAction(agentic_msg) => {
+            handle_agentic_server_message(agentic_msg, session_manager, agentic_manager);
+        }
+    }
+}
+
+/// Handle an agentic server message (user actions forwarded from the server).
+fn handle_agentic_server_message(
+    msg: &AgenticServerMessage,
+    session_manager: &mut SessionManager,
+    agentic_manager: &mut AgenticLoopManager,
+) {
+    match msg {
+        AgenticServerMessage::UserAction {
+            loop_id,
+            action,
+            payload,
+        } => {
+            if let Some((session_id, bytes)) =
+                agentic_manager.handle_user_action(loop_id, *action, payload.as_deref())
+            {
+                if let Err(e) = session_manager.write_to(&session_id, &bytes) {
+                    tracing::warn!(
+                        loop_id = %loop_id,
+                        session_id = %session_id,
+                        error = %e,
+                        "failed to write agentic action to PTY"
+                    );
+                }
+            } else {
+                tracing::warn!(loop_id = %loop_id, "user action for unknown loop");
+            }
+        }
+        AgenticServerMessage::PermissionRulesUpdate { rules } => {
+            tracing::info!(count = rules.len(), "received permission rules update");
+            // Permission rules will be implemented in Phase 4.5
+        }
     }
 }
 
@@ -406,6 +508,30 @@ mod tests {
     use super::*;
     use myremote_protocol::ServerMessage;
     use uuid::Uuid;
+
+    /// Helper to create test fixtures for `handle_server_message`.
+    fn make_test_context() -> (
+        SessionManager,
+        AgenticLoopManager,
+        mpsc::Sender<AgentMessage>,
+        mpsc::Receiver<AgentMessage>,
+        mpsc::Sender<AgenticAgentMessage>,
+        mpsc::Receiver<AgenticAgentMessage>,
+    ) {
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let session_manager = SessionManager::new(pty_tx);
+        let agentic_manager = AgenticLoopManager::new();
+        let (outbound_tx, outbound_rx) = mpsc::channel(16);
+        let (agentic_tx, agentic_rx) = mpsc::channel(16);
+        (
+            session_manager,
+            agentic_manager,
+            outbound_tx,
+            outbound_rx,
+            agentic_tx,
+            agentic_rx,
+        )
+    }
 
     #[test]
     fn connection_error_display_connect() {
@@ -450,52 +576,43 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        // Should not panic
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, mut orx, atx, _arx) = make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
 
         // Should send SessionClosed with exit_code = None
-        let sent = outbound_rx.try_recv().unwrap();
+        let sent = orx.try_recv().unwrap();
         match sent {
             AgentMessage::SessionClosed {
                 session_id: sid,
@@ -511,36 +628,50 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        // Should not panic, just log a warning
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let mut session_manager = SessionManager::new(pty_tx);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
             rows: 40,
         };
-        // Should not panic, just log a warning
-        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+    }
+
+    #[tokio::test]
+    async fn handle_agentic_user_action_unknown_loop() {
+        let (mut sm, mut am, _otx, _orx, _atx, _arx) = make_test_context();
+        let msg = AgenticServerMessage::UserAction {
+            loop_id: Uuid::new_v4(),
+            action: myremote_protocol::UserAction::Approve,
+            payload: None,
+        };
+        // Should not panic
+        handle_agentic_server_message(&msg, &mut sm, &mut am);
+    }
+
+    #[tokio::test]
+    async fn handle_agentic_permission_rules_update() {
+        let (mut sm, mut am, _otx, _orx, _atx, _arx) = make_test_context();
+        let msg = AgenticServerMessage::PermissionRulesUpdate {
+            rules: vec![],
+        };
+        handle_agentic_server_message(&msg, &mut sm, &mut am);
     }
 
     #[tokio::test]
     async fn wait_for_shutdown_returns_immediately_if_already_true() {
         let (tx, rx) = tokio::sync::watch::channel(true);
-        // Should return immediately without blocking
         tokio::time::timeout(Duration::from_millis(100), wait_for_shutdown(rx))
             .await
             .expect("should complete immediately when already shut down");
@@ -554,7 +685,6 @@ mod tests {
             wait_for_shutdown(rx).await;
         });
 
-        // Signal shutdown
         tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_millis(100), handle)
             .await

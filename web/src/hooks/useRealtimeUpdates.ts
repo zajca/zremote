@@ -1,4 +1,10 @@
 import { useEffect, useRef } from "react";
+import { useAgenticStore } from "../stores/agentic-store";
+import type {
+  AgenticLoop,
+  ToolCall,
+  TranscriptEntry,
+} from "../types/agentic";
 
 interface EventHandler {
   onHostUpdate?: () => void;
@@ -7,6 +13,10 @@ interface EventHandler {
 
 interface ServerEvent {
   type: string;
+  loop?: AgenticLoop;
+  tool_call?: ToolCall;
+  transcript_entry?: TranscriptEntry;
+  loop_id?: string;
 }
 
 const RECONNECT_DELAY_MS = 3000;
@@ -35,6 +45,8 @@ export function useRealtimeUpdates(handlers: EventHandler) {
           return;
         }
 
+        const store = useAgenticStore.getState();
+
         switch (parsed.type) {
           case "host_connected":
           case "host_disconnected":
@@ -46,9 +58,45 @@ export function useRealtimeUpdates(handlers: EventHandler) {
             handlersRef.current.onSessionUpdate?.();
             break;
           case "lagged":
-            // Server says we missed events, refetch everything
             handlersRef.current.onHostUpdate?.();
             handlersRef.current.onSessionUpdate?.();
+            break;
+          case "agentic_loop_detected":
+          case "agentic_loop_state_update":
+            if (parsed.loop) {
+              store.updateLoop(parsed.loop);
+              window.dispatchEvent(
+                new Event("myremote:agentic-loop-update"),
+              );
+            }
+            break;
+          case "agentic_loop_ended":
+            if (parsed.loop) {
+              store.updateLoop(parsed.loop);
+              window.dispatchEvent(
+                new Event("myremote:agentic-loop-update"),
+              );
+            }
+            break;
+          case "agentic_loop_tool_call":
+            if (parsed.tool_call && parsed.loop_id) {
+              store.addToolCall(parsed.loop_id, parsed.tool_call);
+            }
+            break;
+          case "agentic_loop_tool_result":
+            if (parsed.tool_call && parsed.loop_id) {
+              store.updateToolCall(parsed.loop_id, parsed.tool_call);
+            }
+            break;
+          case "agentic_loop_transcript":
+            if (parsed.transcript_entry && parsed.loop_id) {
+              store.addTranscript(parsed.loop_id, parsed.transcript_entry);
+            }
+            break;
+          case "agentic_loop_metrics":
+            if (parsed.loop) {
+              store.updateLoop(parsed.loop);
+            }
             break;
         }
       };

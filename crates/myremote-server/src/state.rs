@@ -2,7 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use myremote_protocol::{HostId, ServerMessage, SessionId};
+use dashmap::DashMap;
+use myremote_protocol::{AgenticLoopId, HostId, ServerMessage, SessionId};
+use myremote_protocol::agentic::AgenticStatus;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -162,6 +164,30 @@ pub enum BrowserMessage {
 /// Thread-safe store for active session state.
 pub type SessionStore = Arc<RwLock<HashMap<SessionId, SessionState>>>;
 
+/// In-memory state for an active agentic loop.
+#[derive(Debug)]
+pub struct AgenticLoopState {
+    pub loop_id: AgenticLoopId,
+    pub session_id: SessionId,
+    pub status: AgenticStatus,
+    pub pending_tool_calls: VecDeque<PendingToolCall>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub estimated_cost_usd: f64,
+    pub last_updated: Instant,
+}
+
+/// A pending tool call in the agentic loop queue.
+#[derive(Debug, Clone)]
+pub struct PendingToolCall {
+    pub tool_call_id: uuid::Uuid,
+    pub tool_name: String,
+    pub arguments_json: String,
+}
+
+/// Thread-safe store for active agentic loop state.
+pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
+
 /// Real-time events broadcast to browser WebSocket clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -204,6 +230,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub connections: Arc<ConnectionManager>,
     pub sessions: SessionStore,
+    pub agentic_loops: AgenticLoopStore,
     pub agent_token_hash: String,
     pub shutdown: CancellationToken,
     pub events: broadcast::Sender<ServerEvent>,

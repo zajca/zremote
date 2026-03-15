@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +43,36 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/ws/terminal/{session_id}",
             get(routes::terminal::ws_handler),
         )
+        .route("/api/loops", get(routes::agentic::list_loops))
+        .route(
+            "/api/loops/{loop_id}",
+            get(routes::agentic::get_loop),
+        )
+        .route(
+            "/api/loops/{loop_id}/tools",
+            get(routes::agentic::get_loop_tools),
+        )
+        .route(
+            "/api/loops/{loop_id}/transcript",
+            get(routes::agentic::get_loop_transcript),
+        )
+        .route(
+            "/api/loops/{loop_id}/action",
+            post(routes::agentic::post_loop_action),
+        )
+        .route(
+            "/api/loops/{loop_id}/metrics",
+            get(routes::agentic::get_loop_metrics),
+        )
+        .route(
+            "/api/permissions",
+            get(routes::permissions::list_permissions)
+                .put(routes::permissions::upsert_permission),
+        )
+        .route(
+            "/api/permissions/{rule_id}",
+            delete(routes::permissions::delete_permission),
+        )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())
@@ -80,6 +110,7 @@ async fn main() {
     let shutdown = CancellationToken::new();
 
     let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
 
     let (events_tx, _) = tokio::sync::broadcast::channel(1024);
 
@@ -87,6 +118,7 @@ async fn main() {
         db: pool,
         connections: Arc::clone(&connections),
         sessions,
+        agentic_loops,
         agent_token_hash: auth::hash_token(&agent_token),
         shutdown: shutdown.clone(),
         events: events_tx,
@@ -141,11 +173,13 @@ mod tests {
         let pool = db::init_db("sqlite::memory:").await.unwrap();
         let connections = Arc::new(ConnectionManager::new());
         let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
         let (events_tx, _) = tokio::sync::broadcast::channel(1024);
         Arc::new(AppState {
             db: pool,
             connections,
             sessions,
+            agentic_loops,
             agent_token_hash: auth::hash_token("test-token"),
             shutdown: CancellationToken::new(),
             events: events_tx,
