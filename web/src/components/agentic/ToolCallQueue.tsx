@@ -13,15 +13,15 @@ function statusBadgeVariant(
   status: ToolCallStatus,
 ): "online" | "offline" | "error" | "warning" | "creating" {
   switch (status) {
-    case "Completed":
+    case "completed":
       return "online";
-    case "Running":
-    case "Approved":
+    case "running":
+    case "approved":
       return "creating";
-    case "Pending":
+    case "pending":
       return "warning";
-    case "Rejected":
-    case "Failed":
+    case "rejected":
+    case "failed":
       return "error";
     default:
       return "offline";
@@ -30,13 +30,13 @@ function statusBadgeVariant(
 
 function StatusIcon({ status }: { status: ToolCallStatus }) {
   switch (status) {
-    case "Running":
+    case "running":
       return <Loader2 size={12} className="animate-spin text-accent" />;
-    case "Completed":
+    case "completed":
       return <Check size={12} className="text-status-online" />;
-    case "Failed":
+    case "failed":
       return <X size={12} className="text-status-error" />;
-    case "Pending":
+    case "pending":
       return <Clock size={12} className="text-status-warning" />;
     default:
       return null;
@@ -60,11 +60,11 @@ export function ToolCallQueue({
   onApprove,
   onReject,
 }: ToolCallQueueProps) {
-  const pending = toolCalls.filter((tc) => tc.status === "Pending");
-  const running = toolCalls.filter((tc) => tc.status === "Running");
+  const pending = toolCalls.filter((tc) => tc.status === "pending");
+  const running = toolCalls.filter((tc) => tc.status === "running");
   const history = toolCalls.filter(
     (tc) =>
-      tc.status !== "Pending" && tc.status !== "Running",
+      tc.status !== "pending" && tc.status !== "running",
   );
 
   return (

@@ -39,10 +39,10 @@ export const SessionItem = memo(function SessionItem({
   );
 
   const activeLoops = loops.filter(
-    (l) => l.status !== "Completed" && l.status !== "Error",
+    (l) => l.status !== "completed" && l.status !== "error",
   );
   const waitingLoops = activeLoops.filter(
-    (l) => l.status === "WaitingForInput",
+    (l) => l.status === "waiting_for_input",
   );
 
   const handleClick = useCallback(() => {
@@ -89,13 +89,13 @@ export const SessionItem = memo(function SessionItem({
           onClick={(e) => handleLoopClick(e, loop.id)}
           className="flex h-6 w-full items-center gap-1.5 pl-7 pr-2 text-[11px] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
         >
-          <Bot size={11} className={loop.status === "WaitingForInput" ? "animate-pulse text-status-warning" : "text-accent"} />
+          <Bot size={11} className={loop.status === "waiting_for_input" ? "animate-pulse text-status-warning" : "text-accent"} />
           <span className="truncate">{loop.tool_name}</span>
           <Badge
             variant={
-              loop.status === "WaitingForInput"
+              loop.status === "waiting_for_input"
                 ? "warning"
-                : loop.status === "Working"
+                : loop.status === "working"
                   ? "creating"
                   : "offline"
             }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use myremote_protocol::agentic::{AgenticServerMessage, UserAction};
+use myremote_protocol::agentic::{AgenticServerMessage, AgenticStatus, UserAction};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppJson};
@@ -212,6 +212,18 @@ pub async fn post_loop_action(
     let parsed_host_id: uuid::Uuid = host_id_str
         .parse()
         .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    // Check loop status — only allow actions when the loop is in an actionable state
+    if let Some(entry) = state.agentic_loops.get(&parsed_loop_id) {
+        match entry.status {
+            AgenticStatus::Working | AgenticStatus::WaitingForInput | AgenticStatus::Paused => {}
+            _ => {
+                return Err(AppError::Conflict(
+                    "Loop is not in an actionable state".to_string(),
+                ));
+            }
+        }
+    }
 
     // Send AgenticServerMessage::UserAction to the agent via ConnectionManager
     let sender = state

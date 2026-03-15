@@ -259,19 +259,50 @@ enum InboundMessage {
     Agentic(AgenticAgentMessage),
 }
 
+/// Known `AgentMessage` type tags.
+const TERMINAL_MSG_TYPES: &[&str] = &[
+    "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
+];
+
+/// Known `AgenticAgentMessage` type tags.
+const AGENTIC_MSG_TYPES: &[&str] = &[
+    "LoopDetected", "LoopStateUpdate", "LoopToolCall", "LoopToolResult",
+    "LoopTranscript", "LoopMetrics", "LoopEnded",
+];
+
 /// Receive and deserialize an agent message from the WebSocket.
-/// Tries `AgentMessage` first, then `AgenticAgentMessage`.
+/// Parses to `serde_json::Value` first, then dispatches based on the "type" tag.
 async fn recv_agent_message(socket: &mut WebSocket) -> Option<InboundMessage> {
     loop {
         match socket.recv().await {
             Some(Ok(Message::Text(text))) => {
-                if let Ok(msg) = serde_json::from_str::<AgentMessage>(&text) {
-                    return Some(InboundMessage::Terminal(msg));
+                let value: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to parse agent message as JSON");
+                        continue;
+                    }
+                };
+
+                let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+
+                if TERMINAL_MSG_TYPES.contains(&msg_type.as_str()) {
+                    match serde_json::from_value::<AgentMessage>(value) {
+                        Ok(msg) => return Some(InboundMessage::Terminal(msg)),
+                        Err(e) => {
+                            tracing::warn!(msg_type = %msg_type, error = %e, "failed to deserialize terminal message");
+                        }
+                    }
+                } else if AGENTIC_MSG_TYPES.contains(&msg_type.as_str()) {
+                    match serde_json::from_value::<AgenticAgentMessage>(value) {
+                        Ok(msg) => return Some(InboundMessage::Agentic(msg)),
+                        Err(e) => {
+                            tracing::warn!(msg_type = %msg_type, error = %e, "failed to deserialize agentic message");
+                        }
+                    }
+                } else {
+                    tracing::warn!(msg_type = %msg_type, "unknown agent message type");
                 }
-                if let Ok(msg) = serde_json::from_str::<AgenticAgentMessage>(&text) {
-                    return Some(InboundMessage::Agentic(msg));
-                }
-                tracing::warn!("failed to deserialize agent message: unrecognized format");
             }
             Some(Ok(Message::Close(_))) | None => return None,
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -536,6 +567,15 @@ async fn handle_agentic_message(
             arguments_json,
             status,
         } => {
+            // Validate arguments_json is valid JSON
+            let arguments_json = match serde_json::from_str::<serde_json::Value>(&arguments_json) {
+                Ok(_) => arguments_json,
+                Err(e) => {
+                    tracing::warn!(loop_id = %loop_id, tool_call_id = %tool_call_id, error = %e, "invalid arguments_json, replacing with empty object");
+                    "{}".to_string()
+                }
+            };
+
             let tool_call_id_str = tool_call_id.to_string();
             let loop_id_str = loop_id.to_string();
             let status_str = serde_json::to_value(status)
@@ -693,6 +733,7 @@ async fn handle_agentic_message(
 
 /// Upsert a host record in the database. Look up by hostname only.
 /// If found, update the existing record. Otherwise, create a new host.
+// TODO(phase-3): Validate token matches stored hash before allowing upsert to prevent hostname hijack
 async fn upsert_host(
     state: &AppState,
     hostname: &str,
