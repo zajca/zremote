@@ -1,24 +1,41 @@
-use axum::{Json, Router, routing::get};
-use serde::Serialize;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::routing::get;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-}
+mod auth;
+mod db;
+mod error;
+mod routes;
+mod state;
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+use state::{AppState, ConnectionManager};
+
+fn create_router(state: Arc<AppState>) -> Router {
+    // TODO(phase-3): Add authentication middleware for REST API endpoints
+    Router::new()
+        .route("/", get(root))
+        .route("/health", get(routes::health::health))
+        .route("/ws/agent", get(routes::agents::ws_handler))
+        .route("/api/hosts", get(routes::hosts::list_hosts))
+        .route(
+            "/api/hosts/{host_id}",
+            get(routes::hosts::get_host)
+                .patch(routes::hosts::update_host)
+                .delete(routes::hosts::delete_host),
+        )
+        .layer(TraceLayer::new_for_http())
+        // TODO(phase-3): Restrict CORS to known UI origins
+        .layer(CorsLayer::permissive())
+        .with_state(state)
 }
 
 async fn root() -> &'static str {
     "MyRemote Server"
-}
-
-fn create_router() -> Router {
-    Router::new()
-        .route("/", get(root))
-        .route("/health", get(health))
 }
 
 #[tokio::main]
@@ -28,21 +45,67 @@ async fn main() {
         .json()
         .init();
 
-    let port: u16 = std::env::var("MYREMOTE_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
+    // Fail fast if MYREMOTE_TOKEN is not set
+    let agent_token = std::env::var("MYREMOTE_TOKEN").unwrap_or_else(|_| {
+        tracing::error!("MYREMOTE_TOKEN environment variable is required");
+        std::process::exit(1);
+    });
+
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        tracing::warn!("DATABASE_URL not set, using default: sqlite:myremote.db");
+        "sqlite:myremote.db".to_string()
+    });
+
+    let pool = db::init_db(&database_url).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to initialize database");
+        std::process::exit(1);
+    });
+
+    let connections = Arc::new(ConnectionManager::new());
+    let shutdown = CancellationToken::new();
+
+    let state = Arc::new(AppState {
+        db: pool,
+        connections: Arc::clone(&connections),
+        agent_token_hash: auth::hash_token(&agent_token),
+        shutdown: shutdown.clone(),
+    });
+
+    // Spawn heartbeat monitor background task
+    routes::agents::spawn_heartbeat_monitor(Arc::clone(&state), shutdown.clone());
+
+    let port: u16 = match std::env::var("MYREMOTE_PORT") {
+        Ok(val) => val.parse().unwrap_or_else(|_| {
+            tracing::warn!(value = %val, "MYREMOTE_PORT is not a valid port number, falling back to 3000");
+            3000
+        }),
+        Err(_) => 3000,
+    };
 
     let addr = format!("0.0.0.0:{port}");
-    tracing::info!("MyRemote Server starting on {addr}");
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(addr = %addr, error = %e, "failed to bind TCP listener");
+            std::process::exit(1);
+        }
+    };
 
-    axum::serve(listener, create_router())
+    tracing::info!(addr = %addr, "Server ready on {addr}");
+
+    axum::serve(listener, create_router(state))
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("server error");
+}
+
+async fn shutdown_signal(cancel: CancellationToken) {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install Ctrl+C handler");
+    tracing::info!("shutdown signal received, starting graceful shutdown");
+    cancel.cancel();
 }
 
 #[cfg(test)]
@@ -53,9 +116,21 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    async fn test_state() -> Arc<AppState> {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(ConnectionManager::new());
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            agent_token_hash: auth::hash_token("test-token"),
+            shutdown: CancellationToken::new(),
+        })
+    }
+
     #[tokio::test]
     async fn health_returns_ok() {
-        let app = create_router();
+        let state = test_state().await;
+        let app = create_router(state);
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -66,11 +141,13 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "ok");
+        assert_eq!(health["connected_hosts"], 0);
     }
 
     #[tokio::test]
     async fn root_returns_server_name() {
-        let app = create_router();
+        let state = test_state().await;
+        let app = create_router(state);
         let response = app
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
@@ -80,5 +157,380 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"MyRemote Server");
+    }
+
+    #[tokio::test]
+    async fn list_hosts_returns_empty_array() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(Request::get("/api/hosts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let hosts: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(hosts, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_host_not_found() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/hosts/00000000-0000-0000-0000-000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_host_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/hosts/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_host_not_found() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete("/api/hosts/00000000-0000-0000-0000-000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Insert a host directly into the DB for testing.
+    async fn insert_test_host(state: &AppState, id: &str, name: &str, hostname: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, agent_version, os, arch, \
+             status, last_seen_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'testhash', '0.1.0', 'linux', 'x86_64', 'online', \
+             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(hostname)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_hosts_returns_hosts_when_present() {
+        let state = test_state().await;
+        insert_test_host(&state, "11111111-1111-1111-1111-111111111111", "alpha", "alpha-host").await;
+        insert_test_host(&state, "22222222-2222-2222-2222-222222222222", "beta", "beta-host").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(Request::get("/api/hosts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let hosts: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(hosts.len(), 2);
+        // Ordered by name
+        assert_eq!(hosts[0]["name"], "alpha");
+        assert_eq!(hosts[1]["name"], "beta");
+    }
+
+    #[tokio::test]
+    async fn get_host_returns_host_when_found() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "my-server", "my-hostname").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let host: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(host["id"], host_id);
+        assert_eq!(host["name"], "my-server");
+        assert_eq!(host["hostname"], "my-hostname");
+        assert_eq!(host["status"], "online");
+        assert_eq!(host["os"], "linux");
+        assert_eq!(host["arch"], "x86_64");
+    }
+
+    #[tokio::test]
+    async fn patch_host_updates_name() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "old-name", "host").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/hosts/{host_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "new-name"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let host: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(host["name"], "new-name");
+    }
+
+    #[tokio::test]
+    async fn patch_host_not_found() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/hosts/00000000-0000-0000-0000-000000000000")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_host_invalid_body_returns_422() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "host", "host").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/hosts/{host_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"invalid_field": 123}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // AppJson converts deserialization failures to BAD_REQUEST
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_host_empty_name_returns_bad_request() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "host", "host").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/hosts/{host_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": ""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_host_too_long_name_returns_bad_request() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "host", "host").await;
+
+        let long_name = "a".repeat(256);
+        let body = format!(r#"{{"name": "{long_name}"}}"#);
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&format!("/api/hosts/{host_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_host_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/hosts/not-a-uuid")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_host_removes_existing_host() {
+        let state = test_state().await;
+        let host_id = "11111111-1111-1111-1111-111111111111";
+        insert_test_host(&state, host_id, "host", "host").await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/hosts/{host_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hosts WHERE id = ?")
+            .bind(host_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_host_with_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete("/api/hosts/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn health_shows_connected_hosts_count() {
+        let state = test_state().await;
+        // Register a mock connection
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(uuid::Uuid::new_v4(), "test-host".to_string(), tx)
+            .await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["connected_hosts"], 1);
+    }
+
+    #[tokio::test]
+    async fn nonexistent_route_returns_404() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(Request::get("/nonexistent").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_host_disconnects_connected_agent() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "connected-host", "connected-host").await;
+
+        // Register a connection for this host
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "connected-host".to_string(), tx)
+            .await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/hosts/{host_id_str}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // The agent should have received an error message before disconnection
+        let msg = rx.try_recv();
+        assert!(msg.is_ok(), "agent should receive disconnect notification");
+        if let Ok(myremote_protocol::ServerMessage::Error { message }) = msg {
+            assert_eq!(message, "host deleted");
+        }
+
+        // Connection should be unregistered
+        assert_eq!(state.connections.connected_count().await, 0);
     }
 }
