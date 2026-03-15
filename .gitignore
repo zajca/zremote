@@ -1,0 +1,34 @@
+# Rust
+/target/
+
+# Web / Bun
+web/node_modules/
+web/dist/
+web/dist-node/
+web/.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# Nix
+result
