@@ -158,12 +158,31 @@ impl SessionState {
     }
 }
 
+mod base64_serde {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(data: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(data))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Messages sent from server to browser WebSocket clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum BrowserMessage {
     #[serde(rename = "output")]
-    Output { data: Vec<u8> },
+    Output {
+        #[serde(with = "base64_serde")]
+        data: Vec<u8>,
+    },
     #[serde(rename = "session_closed")]
     SessionClosed { exit_code: Option<i32> },
     #[serde(rename = "error")]
@@ -241,6 +260,8 @@ pub enum ServerEvent {
         tool_name: String,
         arguments_preview: String,
     },
+    #[serde(rename = "projects_updated")]
+    ProjectsUpdated { host_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,7 +531,8 @@ mod tests {
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "output");
-        assert!(json.get("data").is_some());
+        // base64 encoding of "Hello"
+        assert_eq!(json["data"], "SGVsbG8=");
     }
 
     #[test]
@@ -558,6 +580,24 @@ mod tests {
             let json = serde_json::to_string(msg).unwrap();
             let parsed: BrowserMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(format!("{parsed:?}"), format!("{msg:?}"));
+        }
+    }
+
+    #[test]
+    fn browser_message_output_base64_encoding() {
+        let msg = BrowserMessage::Output {
+            data: vec![72, 101, 108, 108, 111],
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        // Verify it's a string, not an array of numbers
+        assert!(json_str.contains("\"SGVsbG8=\""));
+        assert!(!json_str.contains("[72,"));
+
+        // Verify roundtrip
+        let parsed: BrowserMessage = serde_json::from_str(&json_str).unwrap();
+        match parsed {
+            BrowserMessage::Output { data } => assert_eq!(data, vec![72, 101, 108, 108, 111]),
+            _ => panic!("expected Output variant"),
         }
     }
 
@@ -643,6 +683,16 @@ mod tests {
     }
 
     #[test]
+    fn server_event_projects_updated_serialization() {
+        let event = ServerEvent::ProjectsUpdated {
+            host_id: "host-1".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "projects_updated");
+        assert_eq!(json["host_id"], "host-1");
+    }
+
+    #[test]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {
@@ -697,6 +747,9 @@ mod tests {
                 hostname: "host".to_string(),
                 tool_name: "Bash".to_string(),
                 arguments_preview: r#"{"cmd":"ls"}"#.to_string(),
+            },
+            ServerEvent::ProjectsUpdated {
+                host_id: "h1".to_string(),
             },
         ];
         for event in &events {

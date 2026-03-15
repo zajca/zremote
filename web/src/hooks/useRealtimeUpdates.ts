@@ -13,6 +13,7 @@ import type {
 interface EventHandler {
   onHostUpdate?: () => void;
   onSessionUpdate?: () => void;
+  onProjectUpdate?: () => void;
 }
 
 interface ServerEvent {
@@ -65,9 +66,13 @@ export function useRealtimeUpdates(handlers: EventHandler) {
           case "session_closed":
             handlersRef.current.onSessionUpdate?.();
             break;
+          case "projects_updated":
+            handlersRef.current.onProjectUpdate?.();
+            break;
           case "lagged":
             handlersRef.current.onHostUpdate?.();
             handlersRef.current.onSessionUpdate?.();
+            handlersRef.current.onProjectUpdate?.();
             break;
           case "agentic_loop_detected":
           case "agentic_loop_state_update":

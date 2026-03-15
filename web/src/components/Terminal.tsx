@@ -12,7 +12,7 @@ interface TerminalProps {
 
 interface WsMessage {
   type: "output" | "session_closed" | "error";
-  data?: number[] | string;
+  data?: string;
   exit_code?: number | null;
   message?: string;
 }
@@ -99,11 +99,9 @@ export function Terminal({ sessionId }: TerminalProps) {
     }
 
     if (msg.type === "output" && msg.data) {
-      // Server sends Vec<u8> which serializes as a JSON number array
-      const payload = Array.isArray(msg.data)
-        ? new Uint8Array(msg.data)
-        : msg.data;
-      termRef.current.write(payload);
+      // Server sends base64-encoded terminal output
+      const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+      termRef.current.write(bytes);
     } else if (msg.type === "session_closed") {
       closedRef.current = true;
       termRef.current.write(

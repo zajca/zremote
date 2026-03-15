@@ -19,6 +19,7 @@ export interface Session {
   created_at: string;
   closed_at: string | null;
   exit_code: number | null;
+  working_dir: string | null;
 }
 
 export interface Project {
@@ -83,10 +84,10 @@ export const api = {
       request<Session[]>(`/api/hosts/${hostId}/sessions`),
     get: (hostId: string, sessionId: string) =>
       request<Session>(`/api/hosts/${hostId}/sessions/${sessionId}`),
-    create: (hostId: string, cols = 80, rows = 24) =>
+    create: (hostId: string, cols = 80, rows = 24, workingDir?: string) =>
       request<Session>(`/api/hosts/${hostId}/sessions`, {
         method: "POST",
-        body: JSON.stringify({ cols, rows }),
+        body: JSON.stringify({ cols, rows, working_dir: workingDir }),
       }),
     close: (hostId: string, sessionId: string) =>
       request<void>(`/api/hosts/${hostId}/sessions/${sessionId}`, {

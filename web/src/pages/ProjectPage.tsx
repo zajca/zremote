@@ -1,4 +1,4 @@
-import { FolderGit2, Link as LinkIcon, Trash2 } from "lucide-react";
+import { FolderGit2, Link as LinkIcon, Terminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { api, type Project } from "../lib/api";
@@ -40,6 +40,21 @@ export function ProjectPage() {
       console.error("failed to delete project", e);
     }
   }, [projectId, project, navigate]);
+
+  const handleOpenTerminal = useCallback(async () => {
+    if (!project) return;
+    try {
+      const session = await api.sessions.create(
+        project.host_id,
+        80,
+        24,
+        project.path,
+      );
+      void navigate(`/hosts/${project.host_id}/sessions/${session.id}`);
+    } catch (e) {
+      console.error("failed to create terminal session", e);
+    }
+  }, [project, navigate]);
 
   if (loading) {
     return (
@@ -89,6 +104,14 @@ export function ProjectPage() {
           >
             <LinkIcon size={14} />
             Host
+          </Button>
+          <Button
+            onClick={() => void handleOpenTerminal()}
+            variant="ghost"
+            size="sm"
+          >
+            <Terminal size={14} />
+            Terminal
           </Button>
           <Button
             onClick={() => void handleDelete()}

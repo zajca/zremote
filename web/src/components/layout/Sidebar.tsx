@@ -3,6 +3,7 @@ import { BarChart3, Clock, Monitor, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useRealtimeUpdates } from "../../hooks/useRealtimeUpdates";
+import { PROJECT_UPDATE_EVENT } from "../../hooks/useProjects";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { HostItem } from "../sidebar/HostItem";
 
@@ -13,9 +14,14 @@ export function Sidebar() {
     window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
   }, []);
 
+  const onProjectUpdate = useCallback(() => {
+    window.dispatchEvent(new Event(PROJECT_UPDATE_EVENT));
+  }, []);
+
   useRealtimeUpdates({
     onHostUpdate: refetchHosts,
     onSessionUpdate,
+    onProjectUpdate,
   });
 
   return (
