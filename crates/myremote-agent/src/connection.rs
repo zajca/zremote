@@ -1,15 +1,19 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use myremote_protocol::knowledge::KnowledgeServerMessage;
-use myremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId};
+use myremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId, UserAction};
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::agentic::manager::AgenticLoopManager;
 use crate::config::AgentConfig;
+use crate::hooks::mapper::SessionMapper;
+use crate::hooks::permission::{PermissionDecision, PermissionManager};
+use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
@@ -234,6 +238,27 @@ pub async fn run_connection(
     // Channel for outbound agentic messages
     let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
 
+    // Hooks sidecar (CC hook integration)
+    let session_mapper = SessionMapper::new();
+    let permission_manager = Arc::new(PermissionManager::new());
+    let hooks_server = HooksServer::new(
+        agentic_tx.clone(),
+        session_mapper.clone(),
+        permission_manager.clone(),
+    );
+    match hooks_server.start(shutdown.clone()).await {
+        Ok(addr) => {
+            tracing::info!(port = addr.port(), "hooks sidecar started");
+            // Install hooks into Claude Code settings
+            if let Err(e) = crate::hooks::installer::install_hooks().await {
+                tracing::warn!(error = %e, "failed to install CC hooks (non-fatal)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to start hooks sidecar (non-fatal)");
+        }
+    }
+
     // Knowledge manager (optional, based on config)
     #[allow(clippy::similar_names)]
     let (knowledge_sender, mut knowledge_receiver) = if config.openviking_enabled {
@@ -336,6 +361,7 @@ pub async fn run_connection(
                                     &outbound_tx,
                                     &agentic_tx,
                                     knowledge_sender.as_ref(),
+                                    &permission_manager,
                                 );
                             }
                             Err(e) => {
@@ -408,6 +434,25 @@ pub async fn run_connection(
             }
             _ = agentic_check_interval.tick() => {
                 let messages = agentic_manager.check_sessions(session_manager.session_pids());
+                for msg in &messages {
+                    // Register loop mapping when a new loop is detected
+                    if let AgenticAgentMessage::LoopDetected { loop_id, session_id, .. } = msg {
+                        let mapper = session_mapper.clone();
+                        let lid = *loop_id;
+                        let sid = *session_id;
+                        tokio::spawn(async move {
+                            mapper.register_loop(sid, lid).await;
+                        });
+                    }
+                    // Clean up mapping when loop ends
+                    if let AgenticAgentMessage::LoopEnded { loop_id, .. } = msg {
+                        let mapper = session_mapper.clone();
+                        let lid = *loop_id;
+                        tokio::spawn(async move {
+                            mapper.remove_loop(&lid).await;
+                        });
+                    }
+                }
                 for msg in messages {
                     if agentic_tx.try_send(msg).is_err() {
                         tracing::warn!("agentic channel full, message dropped");
@@ -449,6 +494,7 @@ fn handle_server_message(
     outbound_tx: &mpsc::Sender<AgentMessage>,
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
     knowledge_tx: Option<&mpsc::Sender<KnowledgeServerMessage>>,
+    permission_manager: &Arc<PermissionManager>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -508,7 +554,7 @@ fn handle_server_message(
             tracing::warn!(host_id = %host_id, "received unexpected RegisterAck after registration");
         }
         ServerMessage::AgenticAction(agentic_msg) => {
-            handle_agentic_server_message(agentic_msg, session_manager, agentic_manager);
+            handle_agentic_server_message(agentic_msg, session_manager, agentic_manager, permission_manager);
         }
         ServerMessage::ProjectScan => {
             if project_scanner.should_debounce() {
@@ -575,6 +621,7 @@ fn handle_agentic_server_message(
     msg: &AgenticServerMessage,
     session_manager: &mut SessionManager,
     agentic_manager: &mut AgenticLoopManager,
+    permission_manager: &Arc<PermissionManager>,
 ) {
     match msg {
         AgenticServerMessage::UserAction {
@@ -582,6 +629,20 @@ fn handle_agentic_server_message(
             action,
             payload,
         } => {
+            // Resolve any pending permission requests for this loop
+            if *action == UserAction::Approve || *action == UserAction::Reject {
+                let pm = permission_manager.clone();
+                let lid = *loop_id;
+                let decision = if *action == UserAction::Approve {
+                    PermissionDecision::Allow
+                } else {
+                    PermissionDecision::Deny
+                };
+                tokio::spawn(async move {
+                    pm.resolve_any_pending(lid, decision).await;
+                });
+            }
+
             if let Some((session_id, bytes)) =
                 agentic_manager.handle_user_action(loop_id, *action, payload.as_deref())
             {
@@ -599,7 +660,11 @@ fn handle_agentic_server_message(
         }
         AgenticServerMessage::PermissionRulesUpdate { rules } => {
             tracing::info!(count = rules.len(), "received permission rules update");
-            // Permission rules will be implemented in Phase 4.5
+            let pm = permission_manager.clone();
+            let rules = rules.clone();
+            tokio::spawn(async move {
+                pm.update_rules(rules).await;
+            });
         }
     }
 }
@@ -625,6 +690,7 @@ mod tests {
     use uuid::Uuid;
 
     /// Helper to create test fixtures for `handle_server_message`.
+    #[allow(clippy::type_complexity)]
     fn make_test_context() -> (
         SessionManager,
         AgenticLoopManager,
@@ -634,6 +700,7 @@ mod tests {
         mpsc::Sender<AgenticAgentMessage>,
         mpsc::Receiver<AgenticAgentMessage>,
         Option<mpsc::Sender<KnowledgeServerMessage>>,
+        Arc<PermissionManager>,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx);
@@ -641,6 +708,7 @@ mod tests {
         let project_scanner = ProjectScanner::new();
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
         let (agentic_tx, agentic_rx) = mpsc::channel(16);
+        let permission_manager = Arc::new(PermissionManager::new());
         (
             session_manager,
             agentic_manager,
@@ -650,6 +718,7 @@ mod tests {
             agentic_tx,
             agentic_rx,
             None,
+            permission_manager,
         )
     }
 
@@ -696,40 +765,40 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
     }
 
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
     }
 
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
     }
 
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, pm) = make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
 
         // Should send SessionClosed with exit_code = None
         let sent = orx.try_recv().unwrap();
@@ -748,45 +817,45 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
     }
 
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
             rows: 40,
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref());
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
     }
 
     #[tokio::test]
     async fn handle_agentic_user_action_unknown_loop() {
-        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm) = make_test_context();
         let msg = AgenticServerMessage::UserAction {
             loop_id: Uuid::new_v4(),
             action: myremote_protocol::UserAction::Approve,
             payload: None,
         };
         // Should not panic
-        handle_agentic_server_message(&msg, &mut sm, &mut am);
+        handle_agentic_server_message(&msg, &mut sm, &mut am, &pm);
     }
 
     #[tokio::test]
     async fn handle_agentic_permission_rules_update() {
-        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm) = make_test_context();
         let msg = AgenticServerMessage::PermissionRulesUpdate {
             rules: vec![],
         };
-        handle_agentic_server_message(&msg, &mut sm, &mut am);
+        handle_agentic_server_message(&msg, &mut sm, &mut am, &pm);
     }
 
     #[tokio::test]
