@@ -1,7 +1,12 @@
 import { Bot, Clock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAgenticStore } from "../../stores/agentic-store";
-import type { AgenticStatus, UserAction } from "../../types/agentic";
+import type {
+  AgenticStatus,
+  ToolCall,
+  TranscriptEntry,
+  UserAction,
+} from "../../types/agentic";
 import { Badge } from "../ui/Badge";
 import { AgenticActionBar } from "./AgenticActionBar";
 import { ContextUsageBar } from "./ContextUsageBar";
@@ -14,6 +19,9 @@ interface AgenticLoopPanelProps {
 }
 
 type TabId = "terminal" | "tools" | "transcript";
+
+const EMPTY_TOOL_CALLS: ToolCall[] = [];
+const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 
 function statusBadgeVariant(
   status: AgenticStatus,
@@ -66,16 +74,17 @@ function useDurationTimer(startedAt: string, endedAt: string | null): string {
 export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("tools");
   const loop = useAgenticStore((s) => s.activeLoops.get(loopId));
-  const toolCalls = useAgenticStore((s) => s.toolCalls.get(loopId) ?? []);
-  const transcript = useAgenticStore((s) => s.transcripts.get(loopId) ?? []);
-  const { fetchLoop, fetchToolCalls, fetchTranscript, sendAction } =
-    useAgenticStore();
+  const toolCalls =
+    useAgenticStore((s) => s.toolCalls.get(loopId)) ?? EMPTY_TOOL_CALLS;
+  const transcript =
+    useAgenticStore((s) => s.transcripts.get(loopId)) ?? EMPTY_TRANSCRIPT;
 
   useEffect(() => {
-    void fetchLoop(loopId);
-    void fetchToolCalls(loopId);
-    void fetchTranscript(loopId);
-  }, [loopId, fetchLoop, fetchToolCalls, fetchTranscript]);
+    const store = useAgenticStore.getState();
+    void store.fetchLoop(loopId);
+    void store.fetchToolCalls(loopId);
+    void store.fetchTranscript(loopId);
+  }, [loopId]);
 
   const duration = useDurationTimer(
     loop?.started_at ?? new Date().toISOString(),
@@ -84,23 +93,23 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
 
   const handleAction = useCallback(
     (action: UserAction, payload?: string) => {
-      void sendAction(loopId, action, payload);
+      void useAgenticStore.getState().sendAction(loopId, action, payload);
     },
-    [loopId, sendAction],
+    [loopId],
   );
 
   const handleToolApprove = useCallback(
     (_toolCallId: string) => {
-      void sendAction(loopId, "approve");
+      void useAgenticStore.getState().sendAction(loopId, "approve");
     },
-    [loopId, sendAction],
+    [loopId],
   );
 
   const handleToolReject = useCallback(
     (_toolCallId: string) => {
-      void sendAction(loopId, "reject");
+      void useAgenticStore.getState().sendAction(loopId, "reject");
     },
-    [loopId, sendAction],
+    [loopId],
   );
 
   // Tab switching via number keys
