@@ -187,6 +187,10 @@ pub enum BrowserMessage {
     SessionClosed { exit_code: Option<i32> },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "scrollback_start")]
+    ScrollbackStart,
+    #[serde(rename = "scrollback_end")]
+    ScrollbackEnd,
 }
 
 /// Thread-safe store for active session state.
@@ -596,6 +600,8 @@ mod tests {
             BrowserMessage::Error {
                 message: "fail".to_string(),
             },
+            BrowserMessage::ScrollbackStart,
+            BrowserMessage::ScrollbackEnd,
         ];
         for msg in &messages {
             let json = serde_json::to_string(msg).unwrap();
@@ -620,6 +626,20 @@ mod tests {
             BrowserMessage::Output { data } => assert_eq!(data, vec![72, 101, 108, 108, 111]),
             _ => panic!("expected Output variant"),
         }
+    }
+
+    #[test]
+    fn browser_message_scrollback_start_serialization() {
+        let msg = BrowserMessage::ScrollbackStart;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "scrollback_start");
+    }
+
+    #[test]
+    fn browser_message_scrollback_end_serialization() {
+        let msg = BrowserMessage::ScrollbackEnd;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "scrollback_end");
     }
 
     // --- ServerEvent serialization tests ---
