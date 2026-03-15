@@ -41,12 +41,9 @@ export const ProjectItem = memo(function ProjectItem({
     async (e: React.MouseEvent) => {
       e.stopPropagation();
       try {
-        const session = await api.sessions.create(
-          hostId,
-          80,
-          24,
-          project.path,
-        );
+        const session = await api.sessions.create(hostId, {
+          workingDir: project.path,
+        });
         void navigate(`/hosts/${hostId}/sessions/${session.id}`);
       } catch (err) {
         console.error("failed to create session", err);

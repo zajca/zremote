@@ -12,6 +12,7 @@ export interface Host {
 export interface Session {
   id: string;
   host_id: string;
+  name: string | null;
   shell: string | null;
   status: "creating" | "active" | "closed" | "error";
   cols: number;
@@ -92,14 +93,31 @@ export const api = {
       request<Session[]>(`/api/hosts/${hostId}/sessions`),
     get: (hostId: string, sessionId: string) =>
       request<Session>(`/api/hosts/${hostId}/sessions/${sessionId}`),
-    create: (hostId: string, cols = 80, rows = 24, workingDir?: string) =>
+    create: (hostId: string, options?: {
+      name?: string;
+      shell?: string;
+      cols?: number;
+      rows?: number;
+      workingDir?: string;
+    }) =>
       request<Session>(`/api/hosts/${hostId}/sessions`, {
         method: "POST",
-        body: JSON.stringify({ cols, rows, working_dir: workingDir }),
+        body: JSON.stringify({
+          name: options?.name,
+          shell: options?.shell,
+          cols: options?.cols ?? 80,
+          rows: options?.rows ?? 24,
+          working_dir: options?.workingDir,
+        }),
       }),
     close: (hostId: string, sessionId: string) =>
       request<void>(`/api/hosts/${hostId}/sessions/${sessionId}`, {
         method: "DELETE",
+      }),
+    rename: (sessionId: string, name: string | null) =>
+      request<Session>(`/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
       }),
   },
   loops: {

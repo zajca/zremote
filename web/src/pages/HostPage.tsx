@@ -1,5 +1,5 @@
 import { Plus, Terminal } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useHosts } from "../hooks/useHosts";
 import { useSessions } from "../hooks/useSessions";
@@ -7,25 +7,31 @@ import { api } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { StatusDot } from "../components/ui/StatusDot";
+import { NewSessionDialog } from "../components/NewSessionDialog";
 
 export function HostPage() {
   const { hostId } = useParams<{ hostId: string }>();
   const navigate = useNavigate();
   const { hosts } = useHosts();
   const { sessions, loading } = useSessions(hostId);
+  const [showNewSession, setShowNewSession] = useState(false);
 
   const host = hosts.find((h) => h.id === hostId);
 
-  const handleNewSession = useCallback(async () => {
-    if (!hostId) return;
-    try {
-      const session = await api.sessions.create(hostId);
-      void navigate(`/hosts/${hostId}/sessions/${session.id}`);
-    } catch (e) {
-      console.error("failed to create session", e);
-      alert("Failed to create session. Check the console for details.");
-    }
-  }, [hostId, navigate]);
+  const handleNewSessionSubmit = useCallback(
+    async (options: { name?: string; shell?: string; workingDir?: string }) => {
+      if (!hostId) return;
+      setShowNewSession(false);
+      try {
+        const session = await api.sessions.create(hostId, options);
+        void navigate(`/hosts/${hostId}/sessions/${session.id}`);
+      } catch (e) {
+        console.error("failed to create session", e);
+        alert("Failed to create session. Check the console for details.");
+      }
+    },
+    [hostId, navigate],
+  );
 
   if (!host) {
     return (
@@ -56,7 +62,7 @@ export function HostPage() {
             Last seen: {new Date(host.last_seen).toLocaleString()}
           </span>
         </div>
-        <Button onClick={() => void handleNewSession()} size="sm">
+        <Button onClick={() => setShowNewSession(true)} size="sm">
           <Plus size={14} />
           New Session
         </Button>
@@ -69,7 +75,7 @@ export function HostPage() {
           <div className="flex flex-col items-center gap-4 pt-24 text-center">
             <Terminal size={32} className="text-text-tertiary" />
             <p className="text-sm text-text-secondary">No active sessions</p>
-            <Button onClick={() => void handleNewSession()} size="sm">
+            <Button onClick={() => setShowNewSession(true)} size="sm">
               <Plus size={14} />
               Start Session
             </Button>
@@ -88,7 +94,7 @@ export function HostPage() {
               >
                 <Terminal size={16} className="shrink-0 text-text-tertiary" />
                 <span className="text-sm text-text-primary">
-                  {session.shell ?? "shell"}
+                  {session.name || session.shell || "shell"}
                 </span>
                 <span className="font-mono text-xs text-text-tertiary">
                   {session.id.slice(0, 8)}
@@ -119,6 +125,12 @@ export function HostPage() {
           </div>
         )}
       </div>
+
+      <NewSessionDialog
+        open={showNewSession}
+        onClose={() => setShowNewSession(false)}
+        onSubmit={(options) => void handleNewSessionSubmit(options)}
+      />
     </div>
   );
 }

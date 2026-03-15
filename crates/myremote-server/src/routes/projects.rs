@@ -171,7 +171,7 @@ pub async fn list_project_sessions(
     let _parsed = parse_project_id(&project_id)?;
 
     let sessions: Vec<SessionResponse> = sqlx::query_as(
-        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE project_id = ? ORDER BY created_at DESC",
     )
     .bind(&project_id)

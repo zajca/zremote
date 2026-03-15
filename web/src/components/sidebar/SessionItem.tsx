@@ -66,7 +66,7 @@ export const SessionItem = memo(function SessionItem({
         className={`flex h-7 w-full items-center gap-2 px-2 text-[13px] transition-colors duration-150 hover:bg-bg-hover ${isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}
       >
         <Terminal size={13} className="shrink-0 text-text-tertiary" />
-        <span className="truncate">{session.shell ?? "shell"}</span>
+        <span className="truncate">{session.name || session.shell || "shell"}</span>
         <Badge variant={sessionStatusVariant(session.status)}>
           {session.status}
         </Badge>
