@@ -1,8 +1,9 @@
-import { ChevronRight, FolderGit2, Plus } from "lucide-react";
+import { Brain, ChevronRight, FolderGit2, Plus } from "lucide-react";
 import { memo, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
 import { api } from "../../lib/api";
+import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { SessionItem } from "./SessionItem";
 
 interface ProjectItemProps {
@@ -19,6 +20,9 @@ export const ProjectItem = memo(function ProjectItem({
   const navigate = useNavigate();
   const location = useLocation();
   const isActive = location.pathname === `/projects/${project.id}`;
+  const knowledgeStatus = useKnowledgeStore(
+    (s) => s.statusByProject[project.id]?.status,
+  );
   const [expanded, setExpanded] = useState(sessions.length > 0);
 
   const handleClick = useCallback(() => {
@@ -81,6 +85,11 @@ export const ProjectItem = memo(function ProjectItem({
           )}
           <span className="truncate">{project.name}</span>
         </button>
+        {knowledgeStatus === "ready" && (
+          <span title="Knowledge base active">
+            <Brain size={11} className="shrink-0 text-accent" />
+          </span>
+        )}
         {project.has_claude_config && (
           <span
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"

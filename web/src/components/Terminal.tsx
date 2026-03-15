@@ -1,10 +1,10 @@
 import "@xterm/xterm/css/xterm.css";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { WebglAddon } from "@xterm/addon-webgl";
 
 interface TerminalProps {
   sessionId: string;
@@ -21,15 +21,131 @@ export function Terminal({ sessionId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const closedRef = useRef(false);
+  const retriesRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unmountedRef = useRef(false);
+  // RAF-based write batching: accumulate chunks, flush once per frame
+  const writeBufferRef = useRef<Uint8Array[]>([]);
+  const rafIdRef = useRef<number | null>(null);
 
-  const { sendMessage, lastMessage, readyState } = useWebSocket(
-    `/ws/terminal/${sessionId}`,
+  const flushWrites = useCallback(() => {
+    rafIdRef.current = null;
+    const term = termRef.current;
+    const chunks = writeBufferRef.current;
+    if (!term || chunks.length === 0) return;
+
+    // Concatenate all buffered chunks into a single write
+    if (chunks.length === 1) {
+      term.write(chunks[0]!);
+    } else {
+      let totalLen = 0;
+      for (const c of chunks) totalLen += c.length;
+      const merged = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const c of chunks) {
+        merged.set(c, offset);
+        offset += c.length;
+      }
+      term.write(merged);
+    }
+    writeBufferRef.current = [];
+  }, []);
+
+  const scheduleWrite = useCallback(
+    (bytes: Uint8Array) => {
+      writeBufferRef.current.push(bytes);
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(flushWrites);
+      }
+    },
+    [flushWrites],
   );
 
-  // Initialize xterm.js
+  const handleWsMessage = useCallback(
+    (event: MessageEvent) => {
+      const term = termRef.current;
+      if (!term) return;
+
+      let msg: WsMessage;
+      try {
+        msg = JSON.parse(
+          typeof event.data === "string"
+            ? event.data
+            : new TextDecoder().decode(event.data as ArrayBuffer),
+        ) as WsMessage;
+      } catch {
+        console.error("failed to parse terminal WebSocket message");
+        return;
+      }
+
+      if (msg.type === "output" && msg.data) {
+        const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+        scheduleWrite(bytes);
+      } else if (msg.type === "session_closed") {
+        closedRef.current = true;
+        term.write(
+          `\r\n\x1b[90m[Session closed${msg.exit_code != null ? ` (exit code: ${String(msg.exit_code)})` : ""}]\x1b[0m`,
+        );
+      } else if (msg.type === "error" && msg.message) {
+        term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);
+      }
+    },
+    [scheduleWrite],
+  );
+
+  // Connect WebSocket directly (bypass React state)
+  const connect = useCallback(() => {
+    if (unmountedRef.current) return;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal/${sessionId}`;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (unmountedRef.current) {
+        ws.close();
+        return;
+      }
+      retriesRef.current = 0;
+      // Focus terminal on connect
+      termRef.current?.focus();
+      // Send initial resize so the server knows our dimensions
+      const term = termRef.current;
+      if (term) {
+        ws.send(
+          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+        );
+      }
+    };
+
+    ws.onmessage = handleWsMessage;
+
+    ws.onclose = () => {
+      if (unmountedRef.current) return;
+      wsRef.current = null;
+
+      const delay = Math.min(1000 * 2 ** retriesRef.current, 30000);
+      retriesRef.current += 1;
+      reconnectTimerRef.current = setTimeout(() => {
+        if (!unmountedRef.current) {
+          connect();
+        }
+      }, delay);
+    };
+
+    ws.onerror = () => {
+      // onclose fires after onerror
+    };
+  }, [sessionId, handleWsMessage]);
+
+  // Initialize xterm.js + WebSocket
   useEffect(() => {
     if (!containerRef.current) return;
+    unmountedRef.current = false;
 
     const term = new XTerm({
       theme: {
@@ -51,6 +167,15 @@ export function Terminal({ sessionId }: TerminalProps) {
     term.loadAddon(webLinksAddon);
     term.open(containerRef.current);
 
+    // Try WebGL renderer, fall back to canvas
+    try {
+      const webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => webglAddon.dispose());
+      term.loadAddon(webglAddon);
+    } catch {
+      // WebGL not available, canvas renderer is fine
+    }
+
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
@@ -59,74 +184,21 @@ export function Terminal({ sessionId }: TerminalProps) {
       fitAddon.fit();
     });
 
-    return () => {
-      term.dispose();
-      termRef.current = null;
-      fitAddonRef.current = null;
-    };
-  }, []);
-
-  // Handle user input -> send to WS
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-
-    const disposable = term.onData((data) => {
-      if (!closedRef.current) {
-        sendMessage(JSON.stringify({ type: "input", data }));
+    // User input -> send directly via WS ref
+    const inputDisposable = term.onData((data) => {
+      if (!closedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "input", data }));
       }
     });
 
-    return () => {
-      disposable.dispose();
-    };
-  }, [sendMessage]);
-
-  // Handle incoming WS messages
-  useEffect(() => {
-    if (!lastMessage || !termRef.current) return;
-
-    let msg: WsMessage;
-    try {
-      msg = JSON.parse(
-        typeof lastMessage.data === "string"
-          ? lastMessage.data
-          : new TextDecoder().decode(lastMessage.data as ArrayBuffer),
-      ) as WsMessage;
-    } catch {
-      console.error("failed to parse terminal WebSocket message");
-      return;
-    }
-
-    if (msg.type === "output" && msg.data) {
-      // Server sends base64-encoded terminal output
-      const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
-      termRef.current.write(bytes);
-    } else if (msg.type === "session_closed") {
-      closedRef.current = true;
-      termRef.current.write(
-        `\r\n\x1b[90m[Session closed${msg.exit_code != null ? ` (exit code: ${String(msg.exit_code)})` : ""}]\x1b[0m`,
-      );
-    } else if (msg.type === "error" && msg.message) {
-      termRef.current.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);
-    }
-  }, [lastMessage]);
-
-  // Send resize events to server
-  useEffect(() => {
-    const fitAddon = fitAddonRef.current;
-    const term = termRef.current;
-    const container = containerRef.current;
-    if (!fitAddon || !term || !container) return;
-
+    // Resize handling
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-
     const observer = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         fitAddon.fit();
-        if (readyState === WebSocket.OPEN) {
-          sendMessage(
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
             JSON.stringify({
               type: "resize",
               cols: term.cols,
@@ -136,21 +208,37 @@ export function Terminal({ sessionId }: TerminalProps) {
         }
       }, 150);
     });
+    observer.observe(containerRef.current);
 
-    observer.observe(container);
+    // Start WebSocket connection
+    connect();
 
     return () => {
+      unmountedRef.current = true;
       observer.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
-    };
-  }, [sendMessage, readyState]);
+      inputDisposable.dispose();
 
-  // Focus terminal when WS connects
-  useEffect(() => {
-    if (readyState === WebSocket.OPEN && termRef.current) {
-      termRef.current.focus();
-    }
-  }, [readyState]);
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      writeBufferRef.current = [];
+
+      term.dispose();
+      termRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [connect]);
 
   return (
     <div

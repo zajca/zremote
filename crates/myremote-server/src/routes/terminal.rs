@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -6,6 +7,7 @@ use axum::response::IntoResponse;
 use myremote_protocol::ServerMessage;
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::state::{AppState, BrowserMessage};
 
@@ -96,8 +98,23 @@ async fn handle_terminal_connection(
         }
     }
 
-    // Bidirectional relay loop
+    // Bidirectional relay loop with output coalescing.
+    // Instead of forwarding every PTY chunk individually, we collect output
+    // over a short window (~16ms, one frame) and send as a single combined
+    // message. This reduces WebSocket message count and browser JSON parsing.
+    const COALESCE_WINDOW: Duration = Duration::from_millis(16);
+    let mut output_buf: Vec<u8> = Vec::new();
+    let mut coalesce_deadline: Option<Instant> = None;
+
     loop {
+        // If we have buffered output, use a timeout so we flush promptly.
+        let flush_sleep = async {
+            match coalesce_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             // Browser -> server
             ws_msg = socket.recv() => {
@@ -108,6 +125,17 @@ async fn handle_terminal_connection(
                                 if data.len() > 4096 {
                                     tracing::warn!("browser terminal input exceeds 4096 bytes, closing connection");
                                     break;
+                                }
+                                // Flush any buffered output before forwarding input
+                                // to keep output/input ordering correct.
+                                if !output_buf.is_empty() {
+                                    let msg = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                                    coalesce_deadline = None;
+                                    if let Ok(json) = serde_json::to_string(&msg)
+                                        && socket.send(Message::Text(json.into())).await.is_err()
+                                    {
+                                        break;
+                                    }
                                 }
                                 if let Some(sender) = state.connections.get_sender(&host_id).await {
                                     let msg = ServerMessage::TerminalInput {
@@ -143,10 +171,26 @@ async fn handle_terminal_connection(
                     }
                 }
             }
-            // Server -> browser
+            // Server -> browser: receive and buffer output chunks
             browser_msg = rx.recv() => {
                 match browser_msg {
+                    Some(BrowserMessage::Output { data }) => {
+                        output_buf.extend_from_slice(&data);
+                        if coalesce_deadline.is_none() {
+                            coalesce_deadline = Some(Instant::now() + COALESCE_WINDOW);
+                        }
+                    }
                     Some(msg) => {
+                        // Non-output messages (session_closed, error) flush buffer first, then send immediately.
+                        if !output_buf.is_empty() {
+                            let flush = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                            coalesce_deadline = None;
+                            if let Ok(json) = serde_json::to_string(&flush)
+                                && socket.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
                         if let Ok(json) = serde_json::to_string(&msg)
                             && socket.send(Message::Text(json.into())).await.is_err()
                         {
@@ -154,6 +198,18 @@ async fn handle_terminal_connection(
                         }
                     }
                     None => break,
+                }
+            }
+            // Flush coalesced output when the window expires
+            () = flush_sleep => {
+                if !output_buf.is_empty() {
+                    let msg = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                    coalesce_deadline = None;
+                    if let Ok(json) = serde_json::to_string(&msg)
+                        && socket.send(Message::Text(json.into())).await.is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }

@@ -1,8 +1,10 @@
 pub mod agentic;
+pub mod knowledge;
 pub mod project;
 mod terminal;
 
 pub use agentic::*;
+pub use knowledge::*;
 pub use project::*;
 pub use terminal::*;
 
