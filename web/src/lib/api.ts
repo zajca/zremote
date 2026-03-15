@@ -21,6 +21,22 @@ export interface Session {
   exit_code: number | null;
 }
 
+export interface Project {
+  id: string;
+  host_id: string;
+  path: string;
+  name: string;
+  has_claude_config: boolean;
+  project_type: string;
+  created_at: string;
+}
+
+export interface ConfigValue {
+  key: string;
+  value: string;
+  updated_at: string;
+}
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -106,5 +122,123 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/permissions/${id}`, { method: "DELETE" }),
+  },
+  projects: {
+    list: (hostId: string) =>
+      request<Project[]>(`/api/hosts/${hostId}/projects`),
+    get: (id: string) => request<Project>(`/api/projects/${id}`),
+    scan: (hostId: string) =>
+      request<void>(`/api/hosts/${hostId}/projects/scan`, {
+        method: "POST",
+      }),
+    add: (hostId: string, path: string) =>
+      request<Project>(`/api/hosts/${hostId}/projects`, {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }),
+    delete: (id: string) =>
+      request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+  },
+  analytics: {
+    tokens: (params?: { by?: string; from?: string; to?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.by) qs.set("by", params.by);
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const s = qs.toString();
+      return request<
+        { label: string; tokens_in: number; tokens_out: number }[]
+      >(`/api/analytics/tokens${s ? `?${s}` : ""}`);
+    },
+    cost: (params?: { granularity?: string; from?: string; to?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.granularity) qs.set("granularity", params.granularity);
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const s = qs.toString();
+      return request<{ period: string; cost: number }[]>(
+        `/api/analytics/cost${s ? `?${s}` : ""}`,
+      );
+    },
+    sessions: (params?: { from?: string; to?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const s = qs.toString();
+      return request<{
+        total_sessions: number;
+        active_sessions: number;
+        avg_duration_seconds: number | null;
+      }>(`/api/analytics/sessions${s ? `?${s}` : ""}`);
+    },
+    loops: (params?: { from?: string; to?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.from) qs.set("from", params.from);
+      if (params?.to) qs.set("to", params.to);
+      const s = qs.toString();
+      return request<{
+        total_loops: number;
+        completed: number;
+        errored: number;
+        avg_cost_usd: number | null;
+        total_cost_usd: number;
+        total_tokens_in: number;
+        total_tokens_out: number;
+      }>(`/api/analytics/loops${s ? `?${s}` : ""}`);
+    },
+  },
+  search: {
+    transcripts: (params: {
+      q?: string;
+      host?: string;
+      project?: string;
+      from?: string;
+      to?: string;
+      page?: number;
+      per_page?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params.q) qs.set("q", params.q);
+      if (params.host) qs.set("host", params.host);
+      if (params.project) qs.set("project", params.project);
+      if (params.from) qs.set("from", params.from);
+      if (params.to) qs.set("to", params.to);
+      if (params.page) qs.set("page", String(params.page));
+      if (params.per_page) qs.set("per_page", String(params.per_page));
+      const s = qs.toString();
+      return request<{
+        results: {
+          transcript_id: number;
+          loop_id: string;
+          role: string;
+          content: string;
+          timestamp: string;
+          tool_name: string;
+          project_path: string | null;
+          loop_status: string;
+          model: string | null;
+          estimated_cost_usd: number | null;
+        }[];
+        total: number;
+        page: number;
+        per_page: number;
+      }>(`/api/search/transcripts${s ? `?${s}` : ""}`);
+    },
+  },
+  config: {
+    getGlobal: (key: string) =>
+      request<ConfigValue>(`/api/config/${key}`),
+    setGlobal: (key: string, value: string) =>
+      request<ConfigValue>(`/api/config/${key}`, {
+        method: "PUT",
+        body: JSON.stringify({ value }),
+      }),
+    getHost: (hostId: string, key: string) =>
+      request<ConfigValue>(`/api/hosts/${hostId}/config/${key}`),
+    setHost: (hostId: string, key: string, value: string) =>
+      request<ConfigValue>(`/api/hosts/${hostId}/config/${key}`, {
+        method: "PUT",
+        body: JSON.stringify({ value }),
+      }),
   },
 };

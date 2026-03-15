@@ -12,9 +12,11 @@ mod db;
 mod error;
 mod routes;
 mod state;
+mod telegram;
 
 use state::{AppState, ConnectionManager};
 
+#[allow(clippy::too_many_lines)]
 fn create_router(state: Arc<AppState>) -> Router {
     // TODO(phase-3): Add authentication middleware for REST API endpoints
     Router::new()
@@ -73,6 +75,50 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/permissions/{rule_id}",
             delete(routes::permissions::delete_permission),
         )
+        .route(
+            "/api/analytics/tokens",
+            get(routes::analytics::get_tokens),
+        )
+        .route(
+            "/api/analytics/cost",
+            get(routes::analytics::get_cost),
+        )
+        .route(
+            "/api/analytics/sessions",
+            get(routes::analytics::get_sessions),
+        )
+        .route(
+            "/api/analytics/loops",
+            get(routes::analytics::get_loops),
+        )
+        .route(
+            "/api/search/transcripts",
+            get(routes::search::search_transcripts),
+        )
+        .route(
+            "/api/hosts/{host_id}/projects",
+            get(routes::projects::list_projects)
+                .post(routes::projects::add_project),
+        )
+        .route(
+            "/api/hosts/{host_id}/projects/scan",
+            post(routes::projects::trigger_scan),
+        )
+        .route(
+            "/api/projects/{project_id}",
+            get(routes::projects::get_project)
+                .delete(routes::projects::delete_project),
+        )
+        .route(
+            "/api/config/{key}",
+            get(routes::config::get_global_config)
+                .put(routes::config::set_global_config),
+        )
+        .route(
+            "/api/hosts/{host_id}/config/{key}",
+            get(routes::config::get_host_config)
+                .put(routes::config::set_host_config),
+        )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())
@@ -126,6 +172,9 @@ async fn main() {
 
     // Spawn heartbeat monitor background task
     routes::agents::spawn_heartbeat_monitor(Arc::clone(&state), shutdown.clone());
+
+    // Start Telegram bot (optional -- skipped if TELEGRAM_BOT_TOKEN not set)
+    telegram::try_start(Arc::clone(&state), shutdown.clone());
 
     let port: u16 = match std::env::var("MYREMOTE_PORT") {
         Ok(val) => val.parse().unwrap_or_else(|_| {

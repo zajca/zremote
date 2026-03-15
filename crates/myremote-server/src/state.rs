@@ -93,6 +93,15 @@ impl ConnectionManager {
         self.connections.read().await.len()
     }
 
+    /// Get the hostname for a specific host.
+    pub async fn get_hostname(&self, host_id: &HostId) -> Option<String> {
+        self.connections
+            .read()
+            .await
+            .get(host_id)
+            .map(|conn| conn.hostname.clone())
+    }
+
     /// Update the last heartbeat timestamp for a host.
     pub async fn update_heartbeat(&self, host_id: &HostId) {
         let mut conns = self.connections.write().await;
@@ -188,7 +197,7 @@ pub struct PendingToolCall {
 /// Thread-safe store for active agentic loop state.
 pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
 
-/// Real-time events broadcast to browser WebSocket clients.
+/// Real-time events broadcast to browser WebSocket clients and Telegram bot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
@@ -204,6 +213,33 @@ pub enum ServerEvent {
     SessionClosed {
         session_id: String,
         exit_code: Option<i32>,
+    },
+    #[serde(rename = "loop_status_changed")]
+    LoopStatusChanged {
+        loop_id: String,
+        session_id: String,
+        host_id: String,
+        hostname: String,
+        status: String,
+        tool_name: String,
+    },
+    #[serde(rename = "loop_ended")]
+    LoopEnded {
+        loop_id: String,
+        host_id: String,
+        hostname: String,
+        reason: String,
+        summary: Option<String>,
+        cost: f64,
+    },
+    #[serde(rename = "tool_call_pending")]
+    ToolCallPending {
+        loop_id: String,
+        tool_call_id: String,
+        host_id: String,
+        hostname: String,
+        tool_name: String,
+        arguments_preview: String,
     },
 }
 
@@ -637,6 +673,30 @@ mod tests {
             ServerEvent::SessionClosed {
                 session_id: "s1".to_string(),
                 exit_code: Some(1),
+            },
+            ServerEvent::LoopStatusChanged {
+                loop_id: "l1".to_string(),
+                session_id: "s1".to_string(),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+                status: "working".to_string(),
+                tool_name: "claude".to_string(),
+            },
+            ServerEvent::LoopEnded {
+                loop_id: "l1".to_string(),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+                reason: "completed".to_string(),
+                summary: Some("done".to_string()),
+                cost: 0.42,
+            },
+            ServerEvent::ToolCallPending {
+                loop_id: "l1".to_string(),
+                tool_call_id: "tc1".to_string(),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+                tool_name: "Bash".to_string(),
+                arguments_preview: r#"{"cmd":"ls"}"#.to_string(),
             },
         ];
         for event in &events {

@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::agentic::manager::AgenticLoopManager;
 use crate::config::AgentConfig;
+use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 
 const DEFAULT_SHELL: &str = "/bin/sh";
@@ -211,6 +212,23 @@ pub async fn run_connection(
     // Agentic loop manager
     let mut agentic_manager = AgenticLoopManager::new();
 
+    // Project scanner
+    let mut project_scanner = ProjectScanner::new();
+
+    // Run initial project scan in background
+    {
+        let tx = outbound_tx.clone();
+        let mut scanner = ProjectScanner::new();
+        tokio::spawn(async move {
+            let projects = tokio::task::spawn_blocking(move || scanner.scan())
+                .await
+                .unwrap_or_default();
+            if tx.send(AgentMessage::ProjectList { projects }).await.is_err() {
+                tracing::warn!("outbound channel closed, initial project list dropped");
+            }
+        });
+    }
+
     // Channel for outbound agentic messages
     let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
 
@@ -292,6 +310,7 @@ pub async fn run_connection(
                                     &host_id,
                                     &mut session_manager,
                                     &mut agentic_manager,
+                                    &mut project_scanner,
                                     &outbound_tx,
                                     &agentic_tx,
                                 );
@@ -384,11 +403,13 @@ pub async fn run_connection(
 }
 
 /// Handle a server message, dispatching session-related messages to the session manager.
+#[allow(clippy::too_many_lines)]
 fn handle_server_message(
     msg: &ServerMessage,
     host_id: &HostId,
     session_manager: &mut SessionManager,
     agentic_manager: &mut AgenticLoopManager,
+    project_scanner: &mut ProjectScanner,
     outbound_tx: &mpsc::Sender<AgentMessage>,
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
 ) {
@@ -452,6 +473,54 @@ fn handle_server_message(
         ServerMessage::AgenticAction(agentic_msg) => {
             handle_agentic_server_message(agentic_msg, session_manager, agentic_manager);
         }
+        ServerMessage::ProjectScan => {
+            if project_scanner.should_debounce() {
+                tracing::info!("project scan debounced, skipping");
+                return;
+            }
+            let tx = outbound_tx.clone();
+            let mut scanner = ProjectScanner::new();
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    tokio::task::spawn_blocking(move || scanner.scan()),
+                )
+                .await
+                {
+                    Ok(Ok(projects)) => {
+                        if tx.send(AgentMessage::ProjectList { projects }).await.is_err() {
+                            tracing::warn!("outbound channel closed, project list dropped");
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "project scan task panicked");
+                    }
+                    Err(_) => {
+                        tracing::warn!("project scan timed out after 30s");
+                    }
+                }
+            });
+            // Update debounce tracking on the main scanner
+            project_scanner.mark_scanned();
+        }
+        ServerMessage::ProjectRegister { path } => {
+            tracing::info!(path = %path, "registering project path from server");
+            if let Some(info) = ProjectScanner::detect_at(std::path::Path::new(path)) {
+                if outbound_tx.try_send(AgentMessage::ProjectDiscovered {
+                    path: info.path,
+                    name: info.name,
+                    has_claude_config: info.has_claude_config,
+                    project_type: info.project_type,
+                }).is_err() {
+                    tracing::warn!("outbound channel full, ProjectDiscovered dropped");
+                }
+            } else {
+                tracing::warn!(path = %path, "path is not a recognized project");
+            }
+        }
+        ServerMessage::ProjectRemove { path } => {
+            tracing::info!(path = %path, "project removal acknowledged");
+        }
     }
 }
 
@@ -513,6 +582,7 @@ mod tests {
     fn make_test_context() -> (
         SessionManager,
         AgenticLoopManager,
+        ProjectScanner,
         mpsc::Sender<AgentMessage>,
         mpsc::Receiver<AgentMessage>,
         mpsc::Sender<AgenticAgentMessage>,
@@ -521,11 +591,13 @@ mod tests {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx);
         let agentic_manager = AgenticLoopManager::new();
+        let project_scanner = ProjectScanner::new();
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
         let (agentic_tx, agentic_rx) = mpsc::channel(16);
         (
             session_manager,
             agentic_manager,
+            project_scanner,
             outbound_tx,
             outbound_rx,
             agentic_tx,
@@ -576,40 +648,40 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, mut orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx) = make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
 
         // Should send SessionClosed with exit_code = None
         let sent = orx.try_recv().unwrap();
@@ -628,29 +700,29 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, otx, _orx, atx, _arx) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx) = make_test_context();
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
             rows: 40,
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &otx, &atx);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx);
     }
 
     #[tokio::test]
     async fn handle_agentic_user_action_unknown_loop() {
-        let (mut sm, mut am, _otx, _orx, _atx, _arx) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx) = make_test_context();
         let msg = AgenticServerMessage::UserAction {
             loop_id: Uuid::new_v4(),
             action: myremote_protocol::UserAction::Approve,
@@ -662,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agentic_permission_rules_update() {
-        let (mut sm, mut am, _otx, _orx, _atx, _arx) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx) = make_test_context();
         let msg = AgenticServerMessage::PermissionRulesUpdate {
             rules: vec![],
         };
