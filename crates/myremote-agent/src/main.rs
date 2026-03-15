@@ -1,5 +1,7 @@
 mod config;
 mod connection;
+mod pty;
+mod session;
 
 use std::time::Duration;
 

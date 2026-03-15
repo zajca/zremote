@@ -20,3 +20,4 @@ hostname.workspace = true
 url.workspace = true
 rand.workspace = true
 chrono.workspace = true
+portable-pty.workspace = true

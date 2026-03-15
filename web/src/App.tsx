@@ -1,9 +1,23 @@
-function App() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-950 text-white">
-      <h1 className="text-4xl font-bold">MyRemote</h1>
-    </div>
-  );
-}
+import { createBrowserRouter, RouterProvider } from "react-router";
+import { AppLayout } from "./components/layout/AppLayout";
+import { WelcomePage } from "./pages/WelcomePage";
+import { HostPage } from "./pages/HostPage";
+import { SessionPage } from "./pages/SessionPage";
 
-export default App;
+const router = createBrowserRouter([
+  {
+    element: <AppLayout />,
+    children: [
+      { index: true, element: <WelcomePage /> },
+      { path: "hosts/:hostId", element: <HostPage /> },
+      {
+        path: "hosts/:hostId/sessions/:sessionId",
+        element: <SessionPage />,
+      },
+    ],
+  },
+]);
+
+export default function App() {
+  return <RouterProvider router={router} />;
+}
