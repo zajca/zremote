@@ -262,6 +262,7 @@ enum InboundMessage {
 /// Known `AgentMessage` type tags.
 const TERMINAL_MSG_TYPES: &[&str] = &[
     "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
+    "ProjectDiscovered", "ProjectList",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -477,6 +478,60 @@ async fn handle_agent_message(
         AgentMessage::Register { .. } => {
             tracing::warn!(host_id = %host_id, "agent sent duplicate Register message");
         }
+        AgentMessage::ProjectDiscovered {
+            path,
+            name,
+            has_claude_config,
+            project_type,
+        } => {
+            let host_id_str = host_id.to_string();
+            let project_id = Uuid::new_v4().to_string();
+            if let Err(e) = sqlx::query(
+                "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(host_id, path) DO UPDATE SET \
+                 name = excluded.name, has_claude_config = excluded.has_claude_config, \
+                 project_type = excluded.project_type",
+            )
+            .bind(&project_id)
+            .bind(&host_id_str)
+            .bind(&path)
+            .bind(&name)
+            .bind(has_claude_config)
+            .bind(&project_type)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(host_id = %host_id, path = %path, error = %e, "failed to upsert project");
+            } else {
+                tracing::info!(host_id = %host_id, path = %path, name = %name, "project discovered");
+            }
+        }
+        AgentMessage::ProjectList { projects } => {
+            let host_id_str = host_id.to_string();
+            tracing::info!(host_id = %host_id, count = projects.len(), "received project list");
+            for project in projects {
+                let project_id = Uuid::new_v4().to_string();
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type) \
+                     VALUES (?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(host_id, path) DO UPDATE SET \
+                     name = excluded.name, has_claude_config = excluded.has_claude_config, \
+                     project_type = excluded.project_type",
+                )
+                .bind(&project_id)
+                .bind(&host_id_str)
+                .bind(&project.path)
+                .bind(&project.name)
+                .bind(project.has_claude_config)
+                .bind(&project.project_type)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to upsert project");
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -537,6 +592,7 @@ async fn handle_agentic_message(
             ..
         } => {
             // Update in-memory state
+            let session_id_for_event = state.agentic_loops.get(&loop_id).map(|e| e.session_id);
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
                 entry.status = status;
                 entry.last_updated = Instant::now();
@@ -559,6 +615,27 @@ async fn handle_agentic_message(
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
             }
+
+            // Look up tool_name from DB for the event
+            let tool_name: String = sqlx::query_scalar(
+                "SELECT tool_name FROM agentic_loops WHERE id = ?",
+            )
+            .bind(&loop_id_str)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            let _ = state.events.send(ServerEvent::LoopStatusChanged {
+                loop_id: loop_id_str,
+                session_id: session_id_for_event.map_or_else(String::new, |s| s.to_string()),
+                host_id: host_id.to_string(),
+                hostname,
+                status: status_str,
+                tool_name,
+            });
         }
         AgenticAgentMessage::LoopToolCall {
             loop_id,
@@ -599,15 +676,32 @@ async fn handle_agentic_message(
             }
 
             // Add to in-memory pending queue if pending
-            if status == myremote_protocol::ToolCallStatus::Pending
-                && let Some(mut entry) = state.agentic_loops.get_mut(&loop_id)
-            {
-                entry.pending_tool_calls.push_back(PendingToolCall {
-                    tool_call_id,
+            if status == myremote_protocol::ToolCallStatus::Pending {
+                if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                    entry.pending_tool_calls.push_back(PendingToolCall {
+                        tool_call_id,
+                        tool_name: tool_name.clone(),
+                        arguments_json: arguments_json.clone(),
+                    });
+                    entry.last_updated = Instant::now();
+                }
+
+                // Truncate arguments preview for the event
+                let arguments_preview = if arguments_json.len() > 200 {
+                    format!("{}...", &arguments_json[..200])
+                } else {
+                    arguments_json
+                };
+
+                let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+                let _ = state.events.send(ServerEvent::ToolCallPending {
+                    loop_id: loop_id_str,
+                    tool_call_id: tool_call_id_str,
+                    host_id: host_id.to_string(),
+                    hostname,
                     tool_name,
-                    arguments_json,
+                    arguments_preview,
                 });
-                entry.last_updated = Instant::now();
             }
         }
         AgenticAgentMessage::LoopToolResult {
@@ -708,6 +802,12 @@ async fn handle_agentic_message(
             let loop_id_str = loop_id.to_string();
             let now = chrono::Utc::now().to_rfc3339();
 
+            // Grab cost before removing from in-memory state
+            let cost = state
+                .agentic_loops
+                .get(&loop_id)
+                .map_or(0.0, |e| e.estimated_cost_usd);
+
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET status = 'completed', ended_at = ?, \
                  end_reason = ?, summary = ? WHERE id = ?",
@@ -724,6 +824,16 @@ async fn handle_agentic_message(
 
             // Remove from in-memory state
             state.agentic_loops.remove(&loop_id);
+
+            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            let _ = state.events.send(ServerEvent::LoopEnded {
+                loop_id: loop_id_str,
+                host_id: host_id.to_string(),
+                hostname,
+                reason: reason.clone(),
+                summary: summary.clone(),
+                cost,
+            });
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
         }

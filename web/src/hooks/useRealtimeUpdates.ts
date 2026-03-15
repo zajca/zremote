@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useAgenticStore } from "../stores/agentic-store";
+import {
+  dispatchWsDisconnected,
+  dispatchWsReconnected,
+} from "../components/layout/ReconnectBanner";
 import type {
   AgenticLoop,
   ToolCall,
@@ -36,6 +40,10 @@ export function useRealtimeUpdates(handlers: EventHandler) {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const url = `${protocol}//${window.location.host}/ws/events`;
       ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        dispatchWsReconnected();
+      };
 
       ws.onmessage = (event: MessageEvent) => {
         let parsed: ServerEvent;
@@ -103,6 +111,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
 
       ws.onclose = () => {
         if (!disposed) {
+          dispatchWsDisconnected();
           reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
         }
       };

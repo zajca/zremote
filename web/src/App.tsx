@@ -1,9 +1,32 @@
+import { lazy, Suspense } from "react";
 import { createBrowserRouter, RouterProvider } from "react-router";
 import { AppLayout } from "./components/layout/AppLayout";
 import { WelcomePage } from "./pages/WelcomePage";
 import { HostPage } from "./pages/HostPage";
 import { SessionPage } from "./pages/SessionPage";
 import { AgenticLoopPage } from "./pages/AgenticLoopPage";
+import { ProjectPage } from "./pages/ProjectPage";
+import { SettingsPage } from "./components/settings/SettingsPage";
+
+const AnalyticsDashboard = lazy(() =>
+  import("./pages/AnalyticsDashboard").then((m) => ({
+    default: m.AnalyticsDashboard,
+  })),
+);
+
+const HistoryBrowser = lazy(() =>
+  import("./pages/HistoryBrowser").then((m) => ({
+    default: m.HistoryBrowser,
+  })),
+);
+
+function LazyFallback() {
+  return (
+    <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
+      Loading...
+    </div>
+  );
+}
 
 const router = createBrowserRouter([
   {
@@ -19,6 +42,24 @@ const router = createBrowserRouter([
         path: "hosts/:hostId/sessions/:sessionId/loops/:loopId",
         element: <AgenticLoopPage />,
       },
+      {
+        path: "analytics",
+        element: (
+          <Suspense fallback={<LazyFallback />}>
+            <AnalyticsDashboard />
+          </Suspense>
+        ),
+      },
+      {
+        path: "history",
+        element: (
+          <Suspense fallback={<LazyFallback />}>
+            <HistoryBrowser />
+          </Suspense>
+        ),
+      },
+      { path: "projects/:projectId", element: <ProjectPage /> },
+      { path: "settings", element: <SettingsPage /> },
     ],
   },
 ]);

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agentic::AgenticServerMessage;
+use crate::project::ProjectInfo;
 use crate::{HostId, SessionId};
 
 /// Messages sent from agent to server (terminal/connection layer).
@@ -34,6 +35,15 @@ pub enum AgentMessage {
     Error {
         session_id: Option<SessionId>,
         message: String,
+    },
+    ProjectDiscovered {
+        path: String,
+        name: String,
+        has_claude_config: bool,
+        project_type: String,
+    },
+    ProjectList {
+        projects: Vec<ProjectInfo>,
     },
 }
 
@@ -70,6 +80,13 @@ pub enum ServerMessage {
         message: String,
     },
     AgenticAction(AgenticServerMessage),
+    ProjectScan,
+    ProjectRegister {
+        path: String,
+    },
+    ProjectRemove {
+        path: String,
+    },
 }
 
 #[cfg(test)]
@@ -196,6 +213,56 @@ mod tests {
         });
         roundtrip_server(&ServerMessage::Error {
             message: "unknown host".to_string(),
+        });
+    }
+
+    #[test]
+    fn project_discovered_roundtrip() {
+        roundtrip_agent(&AgentMessage::ProjectDiscovered {
+            path: "/home/user/myproject".to_string(),
+            name: "myproject".to_string(),
+            has_claude_config: true,
+            project_type: "rust".to_string(),
+        });
+    }
+
+    #[test]
+    fn project_list_roundtrip() {
+        use crate::project::ProjectInfo;
+        roundtrip_agent(&AgentMessage::ProjectList {
+            projects: vec![
+                ProjectInfo {
+                    path: "/home/user/project-a".to_string(),
+                    name: "project-a".to_string(),
+                    has_claude_config: true,
+                    project_type: "rust".to_string(),
+                },
+                ProjectInfo {
+                    path: "/home/user/project-b".to_string(),
+                    name: "project-b".to_string(),
+                    has_claude_config: false,
+                    project_type: "node".to_string(),
+                },
+            ],
+        });
+    }
+
+    #[test]
+    fn project_scan_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectScan);
+    }
+
+    #[test]
+    fn project_register_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectRegister {
+            path: "/home/user/myproject".to_string(),
+        });
+    }
+
+    #[test]
+    fn project_remove_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectRemove {
+            path: "/home/user/myproject".to_string(),
         });
     }
 }

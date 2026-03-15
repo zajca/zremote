@@ -1,9 +1,12 @@
-import { ChevronRight, Plus } from "lucide-react";
+import { ChevronRight, Plus, Search } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Host } from "../../lib/api";
+import { api } from "../../lib/api";
+import { useProjects } from "../../hooks/useProjects";
 import { useSessions } from "../../hooks/useSessions";
 import { StatusDot } from "../ui/StatusDot";
+import { ProjectItem } from "./ProjectItem";
 import { SessionItem } from "./SessionItem";
 
 interface HostItemProps {
@@ -24,6 +27,15 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
   });
 
   const { sessions } = useSessions(expanded ? host.id : undefined);
+  const { projects } = useProjects(expanded ? host.id : undefined);
+
+  const handleScanProjects = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      void api.projects.scan(host.id);
+    },
+    [host.id],
+  );
 
   useEffect(() => {
     localStorage.setItem(getStorageKey(host.id), String(expanded));
@@ -85,6 +97,25 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
       </div>
       {expanded && (
         <div className="ml-4">
+          {projects.length > 0 && (
+            <div className="mb-0.5">
+              <div className="flex items-center justify-between px-2 py-0.5">
+                <span className="text-[10px] font-medium tracking-wider text-text-tertiary uppercase">
+                  Projects
+                </span>
+                <button
+                  onClick={handleScanProjects}
+                  className="flex h-4 w-4 items-center justify-center rounded text-text-tertiary hover:bg-bg-active hover:text-text-primary"
+                  title="Scan for projects"
+                >
+                  <Search size={10} />
+                </button>
+              </div>
+              {projects.map((project) => (
+                <ProjectItem key={project.id} project={project} />
+              ))}
+            </div>
+          )}
           {sessions.map((session) => (
             <SessionItem
               key={session.id}

@@ -1,7 +1,9 @@
 pub mod agentic;
+pub mod project;
 mod terminal;
 
 pub use agentic::*;
+pub use project::*;
 pub use terminal::*;
 
 use uuid::Uuid;

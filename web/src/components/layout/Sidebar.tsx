@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { Monitor, Settings } from "lucide-react";
+import { BarChart3, Clock, Monitor, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useRealtimeUpdates } from "../../hooks/useRealtimeUpdates";
@@ -41,7 +41,21 @@ export function Sidebar() {
         )}
       </nav>
 
-      <div className="border-t border-border p-2">
+      <div className="space-y-0.5 border-t border-border p-2">
+        <Link
+          to="/analytics"
+          className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+        >
+          <BarChart3 size={16} />
+          Analytics
+        </Link>
+        <Link
+          to="/history"
+          className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+        >
+          <Clock size={16} />
+          History
+        </Link>
         <Link
           to="/settings"
           className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
