@@ -11,7 +11,7 @@ interface TerminalProps {
 }
 
 interface WsMessage {
-  type: "output" | "session_closed" | "error";
+  type: "output" | "session_closed" | "error" | "scrollback_start" | "scrollback_end";
   data?: string;
   exit_code?: number | null;
   message?: string;
@@ -80,7 +80,20 @@ export function Terminal({ sessionId }: TerminalProps) {
         return;
       }
 
-      if (msg.type === "output" && msg.data) {
+      if (msg.type === "scrollback_start") {
+        // Cancel pending RAF and clear write buffer to avoid stale data
+        if (rafIdRef.current !== null) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+        writeBufferRef.current = [];
+        // Full reset: clears buffer + resets ANSI parser state
+        term.reset();
+        return;
+      } else if (msg.type === "scrollback_end") {
+        // Marker for future use
+        return;
+      } else if (msg.type === "output" && msg.data) {
         const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
         scheduleWrite(bytes);
       } else if (msg.type === "session_closed") {

@@ -120,16 +120,32 @@ async fn handle_terminal_connection(
         session.browser_senders.push(tx);
     }
 
-    // Send scrollback buffer without holding the write lock
-    for chunk in &scrollback_data {
-        let msg = BrowserMessage::Output {
-            data: chunk.clone(),
-        };
-        if let Ok(json) = serde_json::to_string(&msg)
-            && socket
-                .send(Message::Text(json.into()))
-                .await
-                .is_err()
+    // Send merged scrollback buffer with framing messages
+    if !scrollback_data.is_empty() {
+        // Send scrollback_start so the browser can reset terminal state
+        let start_msg = BrowserMessage::ScrollbackStart;
+        if let Ok(json) = serde_json::to_string(&start_msg)
+            && socket.send(Message::Text(json.into())).await.is_err()
+        {
+            return;
+        }
+
+        // Merge all chunks into a single blob to avoid ANSI escape fragmentation
+        let mut merged = Vec::new();
+        for chunk in &scrollback_data {
+            merged.extend_from_slice(chunk);
+        }
+        let output_msg = BrowserMessage::Output { data: merged };
+        if let Ok(json) = serde_json::to_string(&output_msg)
+            && socket.send(Message::Text(json.into())).await.is_err()
+        {
+            return;
+        }
+
+        // Send scrollback_end marker
+        let end_msg = BrowserMessage::ScrollbackEnd;
+        if let Ok(json) = serde_json::to_string(&end_msg)
+            && socket.send(Message::Text(json.into())).await.is_err()
         {
             return;
         }
