@@ -190,6 +190,40 @@ async fn main() {
         std::process::exit(1);
     });
 
+    // Clean stale data from previous server runs.
+    // At startup no agents are connected and SessionStore is empty,
+    // so any "active" or "creating" entries are leftovers.
+    let startup_now = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = sqlx::query(
+        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE status IN ('creating', 'active')",
+    )
+    .bind(&startup_now)
+    .execute(&pool)
+    .await
+    {
+        tracing::error!(error = %e, "failed to close stale sessions at startup");
+    }
+    if let Err(e) = sqlx::query(
+        "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'server_restart' \
+         WHERE status != 'completed' AND ended_at IS NULL",
+    )
+    .bind(&startup_now)
+    .execute(&pool)
+    .await
+    {
+        tracing::error!(error = %e, "failed to close stale agentic loops at startup");
+    }
+    if let Err(e) = sqlx::query(
+        "UPDATE hosts SET status = 'offline', updated_at = ? WHERE status = 'online'",
+    )
+    .bind(&startup_now)
+    .execute(&pool)
+    .await
+    {
+        tracing::error!(error = %e, "failed to mark hosts offline at startup");
+    }
+    tracing::info!("stale data cleanup completed");
+
     let connections = Arc::new(ConnectionManager::new());
     let shutdown = CancellationToken::new();
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
-use myremote_protocol::{AgentMessage, HostId, ServerMessage};
+use myremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 use myremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -474,6 +475,37 @@ async fn handle_agent_message(
                 error_message = %message,
                 "agent reported error"
             );
+
+            if let Some(session_id) = session_id {
+                // Update session status to error in DB
+                let now = Utc::now().to_rfc3339();
+                if let Err(e) = sqlx::query(
+                    "UPDATE sessions SET status = 'error', closed_at = ? WHERE id = ? AND status != 'closed'",
+                )
+                .bind(&now)
+                .bind(session_id.to_string())
+                .execute(&state.db)
+                .await
+                {
+                    tracing::error!(session_id = %session_id, error = %e, "failed to update session error status in DB");
+                }
+
+                // Notify browser senders and remove from store
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.remove(&session_id) {
+                    let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                    for sender in &session.browser_senders {
+                        let _ = sender.try_send(browser_msg.clone());
+                    }
+                }
+                drop(sessions);
+
+                // Emit SessionClosed event
+                let _ = state.events.send(ServerEvent::SessionClosed {
+                    session_id: session_id.to_string(),
+                    exit_code: None,
+                });
+            }
         }
         AgentMessage::Register { .. } => {
             tracing::warn!(host_id = %host_id, "agent sent duplicate Register message");
@@ -1257,13 +1289,86 @@ async fn upsert_host(
     Ok(host_id)
 }
 
-/// Clean up after an agent disconnects: remove from connection manager
-/// (only if generation matches) and mark as offline in the database.
+/// Clean up after an agent disconnects: close sessions, clean agentic loops,
+/// remove from connection manager (only if generation matches), and mark as offline.
 async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
     let removed = state.connections.unregister_if_generation(host_id, generation).await;
 
     let now = Utc::now().to_rfc3339();
     let host_id_str = host_id.to_string();
+
+    // Close all sessions belonging to this host
+    let closed_session_ids: Vec<_> = {
+        let mut sessions = state.sessions.write().await;
+        let session_ids: Vec<_> = sessions
+            .iter()
+            .filter(|(_, s)| s.host_id == *host_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for &sid in &session_ids {
+            if let Some(session) = sessions.remove(&sid) {
+                let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                for sender in &session.browser_senders {
+                    let _ = sender.try_send(browser_msg.clone());
+                }
+            }
+        }
+
+        session_ids
+    };
+
+    // Batch update sessions in DB
+    if let Err(e) = sqlx::query(
+        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE host_id = ? AND status != 'closed'",
+    )
+    .bind(&now)
+    .bind(&host_id_str)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(host_id = %host_id, error = %e, "failed to close sessions in database");
+    }
+
+    // Clean orphaned agentic loops from DashMap
+    let closed_set: HashSet<_> = closed_session_ids.iter().copied().collect();
+    let orphaned_loop_ids: Vec<AgenticLoopId> = state
+        .agentic_loops
+        .iter()
+        .filter(|entry| closed_set.contains(&entry.value().session_id))
+        .map(|entry| *entry.key())
+        .collect();
+
+    for loop_id in &orphaned_loop_ids {
+        state.agentic_loops.remove(loop_id);
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'agent_disconnected' \
+         WHERE session_id IN (SELECT id FROM sessions WHERE host_id = ?) \
+         AND status != 'completed' AND ended_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&host_id_str)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(host_id = %host_id, error = %e, "failed to complete orphaned agentic loops in database");
+    }
+
+    // Emit SessionClosed events
+    for sid in &closed_session_ids {
+        let _ = state.events.send(ServerEvent::SessionClosed {
+            session_id: sid.to_string(),
+            exit_code: None,
+        });
+    }
+
+    if !closed_session_ids.is_empty() {
+        tracing::info!(host_id = %host_id, count = closed_session_ids.len(), "closed sessions for disconnected agent");
+    }
+
+    // Mark host offline in DB
     let result =
         sqlx::query("UPDATE hosts SET status = 'offline', updated_at = ? WHERE id = ?")
             .bind(&now)
