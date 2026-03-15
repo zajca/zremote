@@ -1,0 +1,55 @@
+import { useCallback } from "react";
+import { Monitor, Settings } from "lucide-react";
+import { Link } from "react-router";
+import { useHosts } from "../../hooks/useHosts";
+import { useRealtimeUpdates } from "../../hooks/useRealtimeUpdates";
+import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
+import { HostItem } from "../sidebar/HostItem";
+
+export function Sidebar() {
+  const { hosts, loading, refetch: refetchHosts } = useHosts();
+
+  const onSessionUpdate = useCallback(() => {
+    window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
+  }, []);
+
+  useRealtimeUpdates({
+    onHostUpdate: refetchHosts,
+    onSessionUpdate,
+  });
+
+  return (
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-bg-secondary">
+      <div className="flex h-12 items-center gap-2 border-b border-border px-4">
+        <Monitor size={18} className="text-accent" />
+        <span className="text-sm font-semibold text-text-primary">
+          MyRemote
+        </span>
+      </div>
+
+      <nav className="flex-1 overflow-y-auto py-2">
+        {loading ? (
+          <div className="px-4 py-2 text-[13px] text-text-tertiary">
+            Loading hosts...
+          </div>
+        ) : hosts.length === 0 ? (
+          <div className="px-4 py-2 text-[13px] text-text-tertiary">
+            No hosts connected
+          </div>
+        ) : (
+          hosts.map((host) => <HostItem key={host.id} host={host} />)
+        )}
+      </nav>
+
+      <div className="border-t border-border p-2">
+        <Link
+          to="/settings"
+          className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+        >
+          <Settings size={16} />
+          Settings
+        </Link>
+      </div>
+    </aside>
+  );
+}

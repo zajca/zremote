@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tokio_util::sync::CancellationToken;
@@ -21,12 +21,27 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(root))
         .route("/health", get(routes::health::health))
         .route("/ws/agent", get(routes::agents::ws_handler))
+        .route("/ws/events", get(routes::events::ws_handler))
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route(
             "/api/hosts/{host_id}",
             get(routes::hosts::get_host)
                 .patch(routes::hosts::update_host)
                 .delete(routes::hosts::delete_host),
+        )
+        .route(
+            "/api/hosts/{host_id}/sessions",
+            post(routes::sessions::create_session)
+                .get(routes::sessions::list_sessions),
+        )
+        .route(
+            "/api/sessions/{session_id}",
+            get(routes::sessions::get_session)
+                .delete(routes::sessions::close_session),
+        )
+        .route(
+            "/ws/terminal/{session_id}",
+            get(routes::terminal::ws_handler),
         )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
@@ -64,11 +79,17 @@ async fn main() {
     let connections = Arc::new(ConnectionManager::new());
     let shutdown = CancellationToken::new();
 
+    let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+
     let state = Arc::new(AppState {
         db: pool,
         connections: Arc::clone(&connections),
+        sessions,
         agent_token_hash: auth::hash_token(&agent_token),
         shutdown: shutdown.clone(),
+        events: events_tx,
     });
 
     // Spawn heartbeat monitor background task
@@ -119,11 +140,15 @@ mod tests {
     async fn test_state() -> Arc<AppState> {
         let pool = db::init_db("sqlite::memory:").await.unwrap();
         let connections = Arc::new(ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
         Arc::new(AppState {
             db: pool,
             connections,
+            sessions,
             agent_token_hash: auth::hash_token("test-token"),
             shutdown: CancellationToken::new(),
+            events: events_tx,
         })
     }
 
@@ -491,6 +516,278 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(Request::get("/nonexistent").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Session route tests ---
+
+    #[tokio::test]
+    async fn create_session_with_valid_host_returns_201() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+
+        // Register a connection so the host appears online
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx)
+            .await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "creating");
+        assert!(json["id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_session_with_unknown_host_returns_404() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_session_with_offline_host_returns_409() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        // Host exists in DB but no active connection registered
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_empty_for_host() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_sessions_for_host() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        // Insert a session directly
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')",
+        )
+        .bind(&session_id)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["id"], session_id);
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_detail() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
+        )
+        .bind(&session_id)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(session["id"], session_id);
+        assert_eq!(session["host_id"], host_id);
+        assert_eq!(session["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn get_session_not_found() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn close_session_returns_202() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
+        )
+        .bind(&session_id)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Register connection so the agent can receive the close message
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx)
+            .await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn close_session_not_found() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn close_already_closed_session_returns_not_found() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')",
+        )
+        .bind(&session_id)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(&format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::auth;
-use crate::state::AppState;
+use crate::state::{AppState, HostInfo, ServerEvent, SessionInfo};
 
 /// Timeout for the first message (Register) after WebSocket upgrade.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +39,10 @@ struct RegisteredAgent {
     host_id: HostId,
     generation: u64,
     rx: mpsc::Receiver<ServerMessage>,
+    hostname: String,
+    agent_version: String,
+    os: String,
+    arch: String,
 }
 
 /// Perform the registration handshake: wait for Register message, validate
@@ -140,7 +144,15 @@ async fn register_agent(
         return None;
     }
 
-    Some(RegisteredAgent { host_id, generation, rx })
+    Some(RegisteredAgent {
+        host_id,
+        generation,
+        rx,
+        hostname,
+        agent_version,
+        os,
+        arch,
+    })
 }
 
 /// Main agent connection handler. Runs the full lifecycle:
@@ -150,10 +162,26 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
         host_id,
         generation,
         mut rx,
+        hostname,
+        agent_version,
+        os,
+        arch,
     }) = register_agent(&mut socket, &state).await
     else {
         return;
     };
+
+    // Emit HostConnected event
+    let _ = state.events.send(ServerEvent::HostConnected {
+        host: HostInfo {
+            id: host_id.to_string(),
+            hostname,
+            status: "online".to_string(),
+            agent_version: Some(agent_version),
+            os: Some(os),
+            arch: Some(arch),
+        },
+    });
 
     // Bidirectional message loop
     loop {
@@ -234,6 +262,7 @@ async fn send_server_message(
 }
 
 /// Handle a single agent message.
+#[allow(clippy::too_many_lines)]
 async fn handle_agent_message(
     state: &AppState,
     host_id: HostId,
@@ -263,34 +292,101 @@ async fn handle_agent_message(
                 .await
                 .map_err(|e| format!("failed to send HeartbeatAck: {e}"))?;
         }
-        AgentMessage::TerminalOutput { session_id, .. } => {
-            // Phase 2 stub: will relay to browser sessions
-            tracing::debug!(host_id = %host_id, session_id = %session_id, "received terminal output (stub)");
+        AgentMessage::TerminalOutput { session_id, data } => {
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                let browser_msg = crate::state::BrowserMessage::Output { data: data.clone() };
+                session.append_scrollback(data);
+                // Forward to all browser senders, remove dead ones
+                session.browser_senders.retain(|sender| {
+                    sender.try_send(browser_msg.clone()).is_ok()
+                });
+            }
         }
         AgentMessage::SessionCreated {
             session_id,
             shell,
             pid,
         } => {
-            // Phase 2 stub: will update session in DB
-            tracing::debug!(
+            // Update DB
+            let session_id_str = session_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = sqlx::query(
+                "UPDATE sessions SET status = 'active', shell = ?, pid = ?, created_at = ? WHERE id = ?",
+            )
+            .bind(&shell)
+            .bind(i64::from(pid))
+            .bind(&now)
+            .bind(&session_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(session_id = %session_id, error = %e, "failed to update session in DB");
+            }
+
+            // Update in-memory state
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.status = "active".to_string();
+            }
+
+            // Emit SessionCreated event
+            let _ = state.events.send(ServerEvent::SessionCreated {
+                session: SessionInfo {
+                    id: session_id.to_string(),
+                    host_id: host_id.to_string(),
+                    shell: Some(shell.clone()),
+                    status: "active".to_string(),
+                },
+            });
+
+            tracing::info!(
                 host_id = %host_id,
                 session_id = %session_id,
                 shell = %shell,
                 pid = pid,
-                "session created (stub)"
+                "session created"
             );
         }
         AgentMessage::SessionClosed {
             session_id,
             exit_code,
         } => {
-            // Phase 2 stub: will update session in DB
-            tracing::debug!(
+            // Update DB
+            let session_id_str = session_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = sqlx::query(
+                "UPDATE sessions SET status = 'closed', exit_code = ?, closed_at = ? WHERE id = ?",
+            )
+            .bind(exit_code)
+            .bind(&now)
+            .bind(&session_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(session_id = %session_id, error = %e, "failed to update session closed in DB");
+            }
+
+            // Notify browser senders and remove from store
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.remove(&session_id) {
+                let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code };
+                for sender in &session.browser_senders {
+                    let _ = sender.try_send(browser_msg.clone());
+                }
+            }
+
+            // Emit SessionClosed event
+            let _ = state.events.send(ServerEvent::SessionClosed {
+                session_id: session_id.to_string(),
+                exit_code,
+            });
+
+            tracing::info!(
                 host_id = %host_id,
                 session_id = %session_id,
                 exit_code = ?exit_code,
-                "session closed (stub)"
+                "session closed"
             );
         }
         AgentMessage::Error {
@@ -387,7 +483,7 @@ async fn upsert_host(
 /// Clean up after an agent disconnects: remove from connection manager
 /// (only if generation matches) and mark as offline in the database.
 async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
-    state.connections.unregister_if_generation(host_id, generation).await;
+    let removed = state.connections.unregister_if_generation(host_id, generation).await;
 
     let now = Utc::now().to_rfc3339();
     let host_id_str = host_id.to_string();
@@ -400,6 +496,12 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
 
     if let Err(e) = result {
         tracing::error!(host_id = %host_id, error = %e, "failed to mark host offline in database");
+    }
+
+    if removed {
+        let _ = state.events.send(ServerEvent::HostDisconnected {
+            host_id: host_id_str,
+        });
     }
 
     tracing::info!(host_id = %host_id, "agent connection cleaned up");
@@ -416,6 +518,10 @@ pub fn spawn_heartbeat_monitor(state: Arc<AppState>, cancel: CancellationToken) 
                     let stale_hosts = state.connections.check_stale(HEARTBEAT_MAX_AGE).await;
                     for (host_id, generation) in stale_hosts {
                         tracing::warn!(host_id = %host_id, "agent heartbeat timeout, marking offline");
+                        let _ = state.events.send(ServerEvent::HostStatusChanged {
+                            host_id: host_id.to_string(),
+                            status: "offline".to_string(),
+                        });
                         cleanup_agent(&state, &host_id, generation).await;
                     }
                 }

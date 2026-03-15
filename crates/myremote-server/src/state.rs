@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use myremote_protocol::{HostId, ServerMessage};
+use myremote_protocol::{HostId, ServerMessage, SessionId};
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -111,12 +112,101 @@ impl ConnectionManager {
     }
 }
 
+const MAX_SCROLLBACK_BYTES: usize = 100 * 1024; // 100KB
+
+/// In-memory state for an active terminal session.
+pub struct SessionState {
+    pub session_id: SessionId,
+    pub host_id: HostId,
+    pub status: String,
+    pub browser_senders: Vec<mpsc::Sender<BrowserMessage>>,
+    pub scrollback: VecDeque<Vec<u8>>,
+    pub scrollback_size: usize,
+}
+
+impl SessionState {
+    pub fn new(session_id: SessionId, host_id: HostId) -> Self {
+        Self {
+            session_id,
+            host_id,
+            status: "creating".to_string(),
+            browser_senders: Vec::new(),
+            scrollback: VecDeque::new(),
+            scrollback_size: 0,
+        }
+    }
+
+    pub fn append_scrollback(&mut self, data: Vec<u8>) {
+        self.scrollback_size += data.len();
+        self.scrollback.push_back(data);
+        while self.scrollback_size > MAX_SCROLLBACK_BYTES {
+            if let Some(old) = self.scrollback.pop_front() {
+                self.scrollback_size -= old.len();
+            }
+        }
+    }
+}
+
+/// Messages sent from server to browser WebSocket clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BrowserMessage {
+    #[serde(rename = "output")]
+    Output { data: Vec<u8> },
+    #[serde(rename = "session_closed")]
+    SessionClosed { exit_code: Option<i32> },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+/// Thread-safe store for active session state.
+pub type SessionStore = Arc<RwLock<HashMap<SessionId, SessionState>>>;
+
+/// Real-time events broadcast to browser WebSocket clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServerEvent {
+    #[serde(rename = "host_connected")]
+    HostConnected { host: HostInfo },
+    #[serde(rename = "host_disconnected")]
+    HostDisconnected { host_id: String },
+    #[serde(rename = "host_status_changed")]
+    HostStatusChanged { host_id: String, status: String },
+    #[serde(rename = "session_created")]
+    SessionCreated { session: SessionInfo },
+    #[serde(rename = "session_closed")]
+    SessionClosed {
+        session_id: String,
+        exit_code: Option<i32>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub id: String,
+    pub hostname: String,
+    pub status: String,
+    pub agent_version: Option<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub host_id: String,
+    pub shell: Option<String>,
+    pub status: String,
+}
+
 /// Shared application state.
 pub struct AppState {
     pub db: SqlitePool,
     pub connections: Arc<ConnectionManager>,
+    pub sessions: SessionStore,
     pub agent_token_hash: String,
     pub shutdown: CancellationToken,
+    pub events: broadcast::Sender<ServerEvent>,
 }
 
 #[cfg(test)]
@@ -285,5 +375,247 @@ mod tests {
             mgr.register(Uuid::new_v4(), "host".to_string(), tx).await;
         }
         assert_eq!(mgr.connected_count().await, 5);
+    }
+
+    // --- SessionState tests ---
+
+    #[test]
+    fn session_state_new_has_empty_scrollback() {
+        let state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
+        assert!(state.scrollback.is_empty());
+        assert_eq!(state.scrollback_size, 0);
+        assert_eq!(state.status, "creating");
+    }
+
+    #[test]
+    fn append_scrollback_within_limit() {
+        let mut state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
+        let data = vec![0x41; 100]; // 100 bytes
+        state.append_scrollback(data.clone());
+        assert_eq!(state.scrollback.len(), 1);
+        assert_eq!(state.scrollback_size, 100);
+        assert_eq!(state.scrollback[0], data);
+    }
+
+    #[test]
+    fn append_scrollback_multiple_chunks() {
+        let mut state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
+        state.append_scrollback(vec![1; 50]);
+        state.append_scrollback(vec![2; 75]);
+        state.append_scrollback(vec![3; 25]);
+        assert_eq!(state.scrollback.len(), 3);
+        assert_eq!(state.scrollback_size, 150);
+    }
+
+    #[test]
+    fn append_scrollback_evicts_old_data_when_exceeding_limit() {
+        let mut state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
+        // MAX_SCROLLBACK_BYTES = 100 * 1024 = 102400
+        let chunk_size = 40_000;
+        // Add 3 chunks = 120_000 bytes, which exceeds the limit
+        state.append_scrollback(vec![1; chunk_size]); // 40k
+        state.append_scrollback(vec![2; chunk_size]); // 80k
+        state.append_scrollback(vec![3; chunk_size]); // 120k -> evict first -> 80k
+
+        // First chunk should have been evicted
+        assert_eq!(state.scrollback.len(), 2);
+        assert_eq!(state.scrollback_size, 80_000);
+        // Remaining chunks should be the second and third
+        assert_eq!(state.scrollback[0][0], 2);
+        assert_eq!(state.scrollback[1][0], 3);
+    }
+
+    #[test]
+    fn append_scrollback_evicts_multiple_old_chunks() {
+        let mut state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
+        // Fill with many small chunks
+        for i in 0..10 {
+            state.append_scrollback(vec![i; 20_000]); // 20k each
+        }
+        // Total would be 200k but limit is ~100k, so oldest chunks get evicted
+        assert!(state.scrollback_size <= super::MAX_SCROLLBACK_BYTES);
+        // With 20k chunks and 100k limit, we should have at most 5 chunks
+        assert!(state.scrollback.len() <= 5);
+    }
+
+    // --- BrowserMessage serialization tests ---
+
+    #[test]
+    fn browser_message_output_serialization() {
+        let msg = BrowserMessage::Output {
+            data: vec![72, 101, 108, 108, 111],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "output");
+        assert!(json.get("data").is_some());
+    }
+
+    #[test]
+    fn browser_message_session_closed_serialization() {
+        let msg = BrowserMessage::SessionClosed {
+            exit_code: Some(0),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert_eq!(json["exit_code"], 0);
+    }
+
+    #[test]
+    fn browser_message_session_closed_no_exit_code() {
+        let msg = BrowserMessage::SessionClosed { exit_code: None };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert!(json["exit_code"].is_null());
+    }
+
+    #[test]
+    fn browser_message_error_serialization() {
+        let msg = BrowserMessage::Error {
+            message: "test error".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["message"], "test error");
+    }
+
+    #[test]
+    fn browser_message_roundtrip() {
+        let messages = vec![
+            BrowserMessage::Output {
+                data: vec![1, 2, 3],
+            },
+            BrowserMessage::SessionClosed {
+                exit_code: Some(42),
+            },
+            BrowserMessage::Error {
+                message: "fail".to_string(),
+            },
+        ];
+        for msg in &messages {
+            let json = serde_json::to_string(msg).unwrap();
+            let parsed: BrowserMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{parsed:?}"), format!("{msg:?}"));
+        }
+    }
+
+    // --- ServerEvent serialization tests ---
+
+    #[test]
+    fn server_event_host_connected_serialization() {
+        let event = ServerEvent::HostConnected {
+            host: HostInfo {
+                id: "host-1".to_string(),
+                hostname: "my-host".to_string(),
+                status: "online".to_string(),
+                agent_version: Some("0.1.0".to_string()),
+                os: Some("linux".to_string()),
+                arch: Some("x86_64".to_string()),
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "host_connected");
+        assert_eq!(json["host"]["id"], "host-1");
+        assert_eq!(json["host"]["hostname"], "my-host");
+    }
+
+    #[test]
+    fn server_event_host_disconnected_serialization() {
+        let event = ServerEvent::HostDisconnected {
+            host_id: "host-1".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "host_disconnected");
+        assert_eq!(json["host_id"], "host-1");
+    }
+
+    #[test]
+    fn server_event_host_status_changed_serialization() {
+        let event = ServerEvent::HostStatusChanged {
+            host_id: "host-1".to_string(),
+            status: "offline".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "host_status_changed");
+        assert_eq!(json["host_id"], "host-1");
+        assert_eq!(json["status"], "offline");
+    }
+
+    #[test]
+    fn server_event_session_created_serialization() {
+        let event = ServerEvent::SessionCreated {
+            session: SessionInfo {
+                id: "sess-1".to_string(),
+                host_id: "host-1".to_string(),
+                shell: Some("/bin/bash".to_string()),
+                status: "creating".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "session_created");
+        assert_eq!(json["session"]["id"], "sess-1");
+        assert_eq!(json["session"]["shell"], "/bin/bash");
+    }
+
+    #[test]
+    fn server_event_session_closed_serialization() {
+        let event = ServerEvent::SessionClosed {
+            session_id: "sess-1".to_string(),
+            exit_code: Some(0),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert_eq!(json["session_id"], "sess-1");
+        assert_eq!(json["exit_code"], 0);
+    }
+
+    #[test]
+    fn server_event_session_closed_no_exit_code() {
+        let event = ServerEvent::SessionClosed {
+            session_id: "sess-1".to_string(),
+            exit_code: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert!(json["exit_code"].is_null());
+    }
+
+    #[test]
+    fn server_event_roundtrip() {
+        let events = vec![
+            ServerEvent::HostConnected {
+                host: HostInfo {
+                    id: "h1".to_string(),
+                    hostname: "host".to_string(),
+                    status: "online".to_string(),
+                    agent_version: None,
+                    os: None,
+                    arch: None,
+                },
+            },
+            ServerEvent::HostDisconnected {
+                host_id: "h1".to_string(),
+            },
+            ServerEvent::HostStatusChanged {
+                host_id: "h1".to_string(),
+                status: "offline".to_string(),
+            },
+            ServerEvent::SessionCreated {
+                session: SessionInfo {
+                    id: "s1".to_string(),
+                    host_id: "h1".to_string(),
+                    shell: None,
+                    status: "creating".to_string(),
+                },
+            },
+            ServerEvent::SessionClosed {
+                session_id: "s1".to_string(),
+                exit_code: Some(1),
+            },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+        }
     }
 }

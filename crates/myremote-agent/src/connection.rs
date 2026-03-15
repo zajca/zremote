@@ -2,11 +2,15 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use myremote_protocol::{AgentMessage, HostId, ServerMessage};
+use myremote_protocol::{AgentMessage, HostId, ServerMessage, SessionId};
+use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::AgentConfig;
+use crate::session::SessionManager;
+
+const DEFAULT_SHELL: &str = "/bin/sh";
 
 /// Errors that can occur during a WebSocket connection lifecycle.
 #[derive(Debug)]
@@ -108,7 +112,7 @@ async fn register(ws: &mut WsStream, config: &AgentConfig) -> Result<HostId, Con
                 }
                 Message::Close(_) => return Err(ConnectionError::ConnectionClosed),
                 // Skip ping/pong/binary during registration
-                _ => {},
+                _ => {}
             }
         }
         Err(ConnectionError::ConnectionClosed)
@@ -128,54 +132,51 @@ async fn register(ws: &mut WsStream, config: &AgentConfig) -> Result<HostId, Con
     }
 }
 
-/// Handle a server message. Returns `false` if the connection should be closed.
-fn handle_server_message(msg: &ServerMessage, host_id: &HostId) -> bool {
-    match msg {
-        ServerMessage::HeartbeatAck { timestamp } => {
-            tracing::debug!(host_id = %host_id, timestamp = %timestamp, "heartbeat acknowledged");
+/// Serialize an `AgentMessage` to a WS text message.
+fn serialize_agent_message(msg: &AgentMessage) -> Result<Message, ConnectionError> {
+    let json = serde_json::to_string(msg).map_err(ConnectionError::Serialize)?;
+    Ok(Message::Text(json.into()))
+}
+
+/// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
+fn handle_session_create(
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    session_id: SessionId,
+    shell: Option<&str>,
+    cols: u16,
+    rows: u16,
+    working_dir: Option<&str>,
+) {
+    let shell = shell.unwrap_or(DEFAULT_SHELL);
+    match session_manager.create(session_id, shell, cols, rows, working_dir) {
+        Ok(pid) => {
+            tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
+            if outbound_tx.try_send(AgentMessage::SessionCreated {
+                session_id,
+                shell: shell.to_string(),
+                pid,
+            }).is_err() {
+                tracing::warn!("outbound channel full, message dropped");
+            }
         }
-        ServerMessage::SessionCreate { session_id, .. } => {
-            tracing::warn!(
-                host_id = %host_id,
-                session_id = %session_id,
-                "received SessionCreate but PTY sessions are not yet implemented"
-            );
-        }
-        ServerMessage::SessionClose { session_id } => {
-            tracing::warn!(
-                host_id = %host_id,
-                session_id = %session_id,
-                "received SessionClose but PTY sessions are not yet implemented"
-            );
-        }
-        ServerMessage::TerminalInput { session_id, .. } => {
-            tracing::warn!(
-                host_id = %host_id,
-                session_id = %session_id,
-                "received TerminalInput but PTY sessions are not yet implemented"
-            );
-        }
-        ServerMessage::TerminalResize { session_id, .. } => {
-            tracing::warn!(
-                host_id = %host_id,
-                session_id = %session_id,
-                "received TerminalResize but PTY sessions are not yet implemented"
-            );
-        }
-        ServerMessage::Error { message } => {
-            tracing::error!(host_id = %host_id, error = %message, "server error");
-        }
-        ServerMessage::RegisterAck { .. } => {
-            tracing::warn!(host_id = %host_id, "received unexpected RegisterAck after registration");
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "failed to create PTY session");
+            if outbound_tx.try_send(AgentMessage::Error {
+                session_id: Some(session_id),
+                message: format!("failed to spawn PTY: {e}"),
+            }).is_err() {
+                tracing::warn!("outbound channel full, message dropped");
+            }
         }
     }
-    true
 }
 
 /// Run a single connection lifecycle: connect, register, then process messages.
 ///
 /// Returns `Ok(())` on clean disconnect, `Err` on failure.
 /// The caller is responsible for reconnection logic.
+#[allow(clippy::too_many_lines)]
 pub async fn run_connection(
     config: &AgentConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -190,34 +191,56 @@ pub async fn run_connection(
     // Split the WebSocket for concurrent read/write
     let (mut ws_sink, mut ws_stream) = ws.split();
 
-    // Spawn heartbeat task
-    let heartbeat_shutdown = shutdown.clone();
-    let heartbeat_handle = tokio::spawn(async move {
+    // Channel for outbound agent messages (from main loop + PTY output)
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(256);
+
+    // Channel for PTY output data
+    let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<(SessionId, Vec<u8>)>(256);
+
+    // Session manager
+    let mut session_manager = SessionManager::new(pty_output_tx);
+
+    // Spawn sender task: drains outbound channel + heartbeats -> WS sink
+    let sender_shutdown = shutdown.clone();
+    let sender_handle = tokio::spawn(async move {
         let mut heartbeat_interval = interval(HEARTBEAT_INTERVAL);
         // Skip the first immediate tick
         heartbeat_interval.tick().await;
 
         loop {
             tokio::select! {
+                Some(msg) = outbound_rx.recv() => {
+                    match serialize_agent_message(&msg) {
+                        Ok(ws_msg) => {
+                            if let Err(e) = ws_sink.send(ws_msg).await {
+                                tracing::error!(error = %e, "failed to send outbound message");
+                                return ws_sink;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize outbound message");
+                        }
+                    }
+                }
                 _ = heartbeat_interval.tick() => {
                     let msg = AgentMessage::Heartbeat {
                         timestamp: Utc::now(),
                     };
-                    let json = match serde_json::to_string(&msg) {
-                        Ok(j) => j,
+                    match serialize_agent_message(&msg) {
+                        Ok(ws_msg) => {
+                            if let Err(e) = ws_sink.send(ws_msg).await {
+                                tracing::error!(error = %e, "failed to send heartbeat");
+                                return ws_sink;
+                            }
+                            tracing::debug!("heartbeat sent");
+                        }
                         Err(e) => {
                             tracing::error!(error = %e, "failed to serialize heartbeat");
-                            continue;
                         }
-                    };
-                    if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
-                        tracing::error!(error = %e, "failed to send heartbeat");
-                        return ws_sink;
                     }
-                    tracing::debug!("heartbeat sent");
                 }
-                () = wait_for_shutdown(heartbeat_shutdown.clone()) => {
-                    tracing::debug!("heartbeat task shutting down");
+                () = wait_for_shutdown(sender_shutdown.clone()) => {
+                    tracing::debug!("sender task shutting down");
                     return ws_sink;
                 }
             }
@@ -232,9 +255,12 @@ pub async fn run_connection(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ServerMessage>(&text) {
                             Ok(server_msg) => {
-                                if !handle_server_message(&server_msg, &host_id) {
-                                    break Ok(());
-                                }
+                                handle_server_message(
+                                    &server_msg,
+                                    &host_id,
+                                    &mut session_manager,
+                                    &outbound_tx,
+                                );
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "failed to parse server message, ignoring");
@@ -258,6 +284,24 @@ pub async fn run_connection(
                     }
                 }
             }
+            Some((session_id, data)) = pty_output_rx.recv() => {
+                if data.is_empty() {
+                    // Session ended (EOF from PTY reader)
+                    let exit_code = session_manager.close(&session_id);
+                    tracing::info!(session_id = %session_id, exit_code = ?exit_code, "PTY session ended");
+                    if outbound_tx.try_send(AgentMessage::SessionClosed {
+                        session_id,
+                        exit_code,
+                    }).is_err() {
+                        tracing::warn!("outbound channel full, message dropped");
+                    }
+                } else if outbound_tx.try_send(AgentMessage::TerminalOutput {
+                        session_id,
+                        data,
+                    }).is_err() {
+                        tracing::warn!("outbound channel full, message dropped");
+                }
+            }
             () = wait_for_shutdown(shutdown.clone()) => {
                 tracing::info!(host_id = %host_id, "shutdown signal received, closing connection");
                 break Ok(());
@@ -265,18 +309,82 @@ pub async fn run_connection(
         }
     };
 
-    // Wait for heartbeat task to finish and close the WebSocket cleanly
-    match heartbeat_handle.await {
+    // Clean up all PTY sessions
+    session_manager.close_all();
+
+    // Wait for sender task to finish and close the WebSocket cleanly
+    match sender_handle.await {
         Ok(mut sink) => {
             let _ = sink.send(Message::Close(None)).await;
             let _ = sink.close().await;
         }
         Err(e) => {
-            tracing::error!(error = %e, "heartbeat task panicked");
+            tracing::error!(error = %e, "sender task panicked");
         }
     }
 
     result
+}
+
+/// Handle a server message, dispatching session-related messages to the session manager.
+fn handle_server_message(
+    msg: &ServerMessage,
+    host_id: &HostId,
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+) {
+    match msg {
+        ServerMessage::HeartbeatAck { timestamp } => {
+            tracing::debug!(host_id = %host_id, timestamp = %timestamp, "heartbeat acknowledged");
+        }
+        ServerMessage::SessionCreate {
+            session_id,
+            shell,
+            cols,
+            rows,
+            working_dir,
+        } => {
+            handle_session_create(
+                session_manager,
+                outbound_tx,
+                *session_id,
+                shell.as_deref(),
+                *cols,
+                *rows,
+                working_dir.as_deref(),
+            );
+        }
+        ServerMessage::SessionClose { session_id } => {
+            let exit_code = session_manager.close(session_id);
+            tracing::info!(session_id = %session_id, exit_code = ?exit_code, "session closed by server");
+            if outbound_tx.try_send(AgentMessage::SessionClosed {
+                session_id: *session_id,
+                exit_code,
+            }).is_err() {
+                tracing::warn!("outbound channel full, message dropped");
+            }
+        }
+        ServerMessage::TerminalInput { session_id, data } => {
+            if let Err(e) = session_manager.write_to(session_id, data) {
+                tracing::warn!(session_id = %session_id, error = %e, "failed to write to PTY");
+            }
+        }
+        ServerMessage::TerminalResize {
+            session_id,
+            cols,
+            rows,
+        } => {
+            if let Err(e) = session_manager.resize(session_id, *cols, *rows) {
+                tracing::warn!(session_id = %session_id, error = %e, "failed to resize PTY");
+            }
+        }
+        ServerMessage::Error { message } => {
+            tracing::error!(host_id = %host_id, error = %message, "server error");
+        }
+        ServerMessage::RegisterAck { .. } => {
+            tracing::warn!(host_id = %host_id, "received unexpected RegisterAck after registration");
+        }
+    }
 }
 
 /// Wait until the shutdown signal is received.
@@ -339,74 +447,94 @@ mod tests {
         assert!(err.to_string().contains("closed"));
     }
 
-    #[test]
-    fn handle_server_message_heartbeat_ack_returns_true() {
+    #[tokio::test]
+    async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        assert!(handle_server_message(&msg, &host_id));
+        // Should not panic
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
     }
 
-    #[test]
-    fn handle_server_message_session_create_returns_true() {
+    #[tokio::test]
+    async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let msg = ServerMessage::SessionCreate {
-            session_id: Uuid::new_v4(),
-            shell: Some("/bin/bash".to_string()),
-            cols: 80,
-            rows: 24,
-            working_dir: None,
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let msg = ServerMessage::Error {
+            message: "test error".to_string(),
         };
-        assert!(handle_server_message(&msg, &host_id));
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
     }
 
-    #[test]
-    fn handle_server_message_session_close_returns_true() {
+    #[tokio::test]
+    async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let msg = ServerMessage::SessionClose {
-            session_id: Uuid::new_v4(),
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let msg = ServerMessage::RegisterAck {
+            host_id: Uuid::new_v4(),
         };
-        assert!(handle_server_message(&msg, &host_id));
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
     }
 
-    #[test]
-    fn handle_server_message_terminal_input_returns_true() {
+    #[tokio::test]
+    async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        let session_id = Uuid::new_v4();
+        let msg = ServerMessage::SessionClose { session_id };
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
+
+        // Should send SessionClosed with exit_code = None
+        let sent = outbound_rx.try_recv().unwrap();
+        match sent {
+            AgentMessage::SessionClosed {
+                session_id: sid,
+                exit_code,
+            } => {
+                assert_eq!(sid, session_id);
+                assert_eq!(exit_code, None);
+            }
+            other => panic!("expected SessionClosed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_terminal_input_nonexistent_session() {
+        let host_id = Uuid::new_v4();
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        assert!(handle_server_message(&msg, &host_id));
+        // Should not panic, just log a warning
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
     }
 
-    #[test]
-    fn handle_server_message_terminal_resize_returns_true() {
+    #[tokio::test]
+    async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
+        let (pty_tx, _pty_rx) = mpsc::channel(16);
+        let mut session_manager = SessionManager::new(pty_tx);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
             rows: 40,
         };
-        assert!(handle_server_message(&msg, &host_id));
-    }
-
-    #[test]
-    fn handle_server_message_error_returns_true() {
-        let host_id = Uuid::new_v4();
-        let msg = ServerMessage::Error {
-            message: "test error".to_string(),
-        };
-        assert!(handle_server_message(&msg, &host_id));
-    }
-
-    #[test]
-    fn handle_server_message_unexpected_register_ack_returns_true() {
-        let host_id = Uuid::new_v4();
-        let msg = ServerMessage::RegisterAck {
-            host_id: Uuid::new_v4(),
-        };
-        assert!(handle_server_message(&msg, &host_id));
+        // Should not panic, just log a warning
+        handle_server_message(&msg, &host_id, &mut session_manager, &outbound_tx);
     }
 
     #[tokio::test]
