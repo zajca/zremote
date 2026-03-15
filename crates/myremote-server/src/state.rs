@@ -262,6 +262,26 @@ pub enum ServerEvent {
     },
     #[serde(rename = "projects_updated")]
     ProjectsUpdated { host_id: String },
+    #[serde(rename = "knowledge_status_changed")]
+    KnowledgeStatusChanged {
+        host_id: String,
+        status: String,
+        error: Option<String>,
+    },
+    #[serde(rename = "indexing_progress")]
+    IndexingProgress {
+        project_id: String,
+        project_path: String,
+        status: String,
+        files_processed: u64,
+        files_total: u64,
+    },
+    #[serde(rename = "memory_extracted")]
+    MemoryExtracted {
+        project_id: String,
+        loop_id: String,
+        memory_count: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +311,7 @@ pub struct AppState {
     pub agent_token_hash: String,
     pub shutdown: CancellationToken,
     pub events: broadcast::Sender<ServerEvent>,
+    pub knowledge_requests: Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<myremote_protocol::knowledge::KnowledgeAgentMessage>>>,
 }
 
 #[cfg(test)]
@@ -693,6 +714,64 @@ mod tests {
     }
 
     #[test]
+    fn server_event_knowledge_status_changed_serialization() {
+        let event = ServerEvent::KnowledgeStatusChanged {
+            host_id: "host-1".to_string(),
+            status: "ready".to_string(),
+            error: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "knowledge_status_changed");
+        assert_eq!(json["host_id"], "host-1");
+        assert_eq!(json["status"], "ready");
+        assert!(json["error"].is_null());
+    }
+
+    #[test]
+    fn server_event_knowledge_status_changed_with_error() {
+        let event = ServerEvent::KnowledgeStatusChanged {
+            host_id: "host-1".to_string(),
+            status: "error".to_string(),
+            error: Some("failed to start".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "knowledge_status_changed");
+        assert_eq!(json["error"], "failed to start");
+    }
+
+    #[test]
+    fn server_event_indexing_progress_serialization() {
+        let event = ServerEvent::IndexingProgress {
+            project_id: "proj-1".to_string(),
+            project_path: "/home/user/project".to_string(),
+            status: "in_progress".to_string(),
+            files_processed: 42,
+            files_total: 150,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "indexing_progress");
+        assert_eq!(json["project_id"], "proj-1");
+        assert_eq!(json["project_path"], "/home/user/project");
+        assert_eq!(json["status"], "in_progress");
+        assert_eq!(json["files_processed"], 42);
+        assert_eq!(json["files_total"], 150);
+    }
+
+    #[test]
+    fn server_event_memory_extracted_serialization() {
+        let event = ServerEvent::MemoryExtracted {
+            project_id: "proj-1".to_string(),
+            loop_id: "loop-1".to_string(),
+            memory_count: 3,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "memory_extracted");
+        assert_eq!(json["project_id"], "proj-1");
+        assert_eq!(json["loop_id"], "loop-1");
+        assert_eq!(json["memory_count"], 3);
+    }
+
+    #[test]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {
@@ -750,6 +829,23 @@ mod tests {
             },
             ServerEvent::ProjectsUpdated {
                 host_id: "h1".to_string(),
+            },
+            ServerEvent::KnowledgeStatusChanged {
+                host_id: "h1".to_string(),
+                status: "ready".to_string(),
+                error: None,
+            },
+            ServerEvent::IndexingProgress {
+                project_id: "p1".to_string(),
+                project_path: "/home/user/project".to_string(),
+                status: "in_progress".to_string(),
+                files_processed: 10,
+                files_total: 100,
+            },
+            ServerEvent::MemoryExtracted {
+                project_id: "p1".to_string(),
+                loop_id: "l1".to_string(),
+                memory_count: 5,
             },
         ];
         for event in &events {

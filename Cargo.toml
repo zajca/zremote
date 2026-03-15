@@ -13,7 +13,7 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -39,6 +39,7 @@ url = "2"
 rand = "0.9"
 sysinfo = "0.34"
 base64 = "0.22"
+reqwest = { version = "0.12", features = ["json"] }
 
 # Internal
 myremote-protocol = { path = "crates/myremote-protocol" }

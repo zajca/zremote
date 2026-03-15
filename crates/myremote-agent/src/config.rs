@@ -7,6 +7,14 @@ pub struct AgentConfig {
     pub server_url: Url,
     /// Authentication token shared with the server.
     pub token: String,
+    /// Whether `OpenViking` knowledge service is enabled.
+    pub openviking_enabled: bool,
+    /// Path to the `OpenViking` binary.
+    pub openviking_binary: String,
+    /// Port for the `OpenViking` HTTP API.
+    pub openviking_port: u16,
+    /// Data directory for `OpenViking` storage.
+    pub openviking_data_dir: std::path::PathBuf,
 }
 
 impl AgentConfig {
@@ -36,7 +44,32 @@ impl AgentConfig {
             tracing::warn!("Using unencrypted WebSocket connection (ws://). Use wss:// for production.");
         }
 
-        Ok(Self { server_url, token })
+        let openviking_enabled = std::env::var("OPENVIKING_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let openviking_binary = std::env::var("OPENVIKING_BINARY")
+            .unwrap_or_else(|_| "openviking".to_string());
+
+        let openviking_port = std::env::var("OPENVIKING_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1933);
+
+        let openviking_data_dir = std::env::var("OPENVIKING_DATA_DIR")
+            .map_or_else(
+                |_| std::path::PathBuf::from("/var/lib/openviking"),
+                std::path::PathBuf::from,
+            );
+
+        Ok(Self {
+            server_url,
+            token,
+            openviking_enabled,
+            openviking_binary,
+            openviking_port,
+            openviking_data_dir,
+        })
     }
 }
 

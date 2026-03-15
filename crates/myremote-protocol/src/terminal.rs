@@ -2,11 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agentic::AgenticServerMessage;
+use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::ProjectInfo;
 use crate::{HostId, SessionId};
 
 /// Messages sent from agent to server (terminal/connection layer).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum AgentMessage {
     Register {
@@ -45,6 +46,7 @@ pub enum AgentMessage {
     ProjectList {
         projects: Vec<ProjectInfo>,
     },
+    KnowledgeAction(KnowledgeAgentMessage),
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -80,6 +82,7 @@ pub enum ServerMessage {
         message: String,
     },
     AgenticAction(AgenticServerMessage),
+    KnowledgeAction(KnowledgeServerMessage),
     ProjectScan,
     ProjectRegister {
         path: String,
@@ -264,5 +267,27 @@ mod tests {
         roundtrip_server(&ServerMessage::ProjectRemove {
             path: "/home/user/myproject".to_string(),
         });
+    }
+
+    #[test]
+    fn knowledge_agent_action_roundtrip() {
+        use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServiceStatus};
+        roundtrip_agent(&AgentMessage::KnowledgeAction(
+            KnowledgeAgentMessage::ServiceStatus {
+                status: KnowledgeServiceStatus::Ready,
+                version: Some("0.1.0".to_string()),
+                error: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn knowledge_server_action_roundtrip() {
+        use crate::knowledge::{KnowledgeServerMessage, ServiceAction};
+        roundtrip_server(&ServerMessage::KnowledgeAction(
+            KnowledgeServerMessage::ServiceControl {
+                action: ServiceAction::Start,
+            },
+        ));
     }
 }

@@ -262,7 +262,7 @@ enum InboundMessage {
 /// Known `AgentMessage` type tags.
 const TERMINAL_MSG_TYPES: &[&str] = &[
     "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
-    "ProjectDiscovered", "ProjectList",
+    "ProjectDiscovered", "ProjectList", "KnowledgeAction",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -508,6 +508,11 @@ async fn handle_agent_message(
                 let _ = state.events.send(ServerEvent::ProjectsUpdated {
                     host_id: host_id.to_string(),
                 });
+            }
+        }
+        AgentMessage::KnowledgeAction(knowledge_msg) => {
+            if let Err(e) = handle_knowledge_message(state, host_id, knowledge_msg).await {
+                tracing::error!(host_id = %host_id, error = %e, "error handling knowledge message");
             }
         }
         AgentMessage::ProjectList { projects } => {
@@ -833,7 +838,7 @@ async fn handle_agentic_message(
 
             let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
             let _ = state.events.send(ServerEvent::LoopEnded {
-                loop_id: loop_id_str,
+                loop_id: loop_id_str.clone(),
                 host_id: host_id.to_string(),
                 hostname,
                 reason: reason.clone(),
@@ -842,6 +847,337 @@ async fn handle_agentic_message(
             });
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
+
+            // Auto-extract memories if configured
+            {
+                let auto_extract: Option<(String,)> = sqlx::query_as(
+                    "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'"
+                )
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+
+                let should_extract = auto_extract
+                    .is_some_and(|(v,)| v == "true" || v == "1");
+
+                if should_extract {
+                    // Fetch project_path for this loop
+                    let project_path: Option<(Option<String>,)> = sqlx::query_as(
+                        "SELECT project_path FROM agentic_loops WHERE id = ?"
+                    )
+                    .bind(&loop_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+
+                    if let Some((Some(ref path),)) = project_path
+                        && !path.is_empty()
+                    {
+                        // Fetch transcript
+                        let transcript_rows: Vec<(String, String, String)> = sqlx::query_as(
+                            "SELECT role, content, timestamp FROM transcript_entries WHERE loop_id = ? ORDER BY id"
+                        )
+                        .bind(&loop_id_str)
+                        .fetch_all(&state.db)
+                        .await
+                        .unwrap_or_default();
+
+                        if !transcript_rows.is_empty() {
+                            let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> = transcript_rows
+                                .into_iter()
+                                .map(|(role, content, timestamp)| myremote_protocol::knowledge::TranscriptFragment {
+                                    role,
+                                    content,
+                                    timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
+                                })
+                                .collect();
+
+                            if let Some(sender) = state.connections.get_sender(&host_id).await {
+                                let _ = sender.send(myremote_protocol::ServerMessage::KnowledgeAction(
+                                    myremote_protocol::knowledge::KnowledgeServerMessage::ExtractMemory {
+                                        loop_id,
+                                        project_path: path.clone(),
+                                        transcript,
+                                    }
+                                )).await;
+                                tracing::info!(loop_id = %loop_id, project_path = %path, "triggered auto memory extraction");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handle a knowledge agent message: update DB and in-memory state.
+#[allow(clippy::too_many_lines)]
+async fn handle_knowledge_message(
+    state: &AppState,
+    host_id: HostId,
+    msg: myremote_protocol::knowledge::KnowledgeAgentMessage,
+) -> Result<(), String> {
+    use myremote_protocol::knowledge::KnowledgeAgentMessage;
+
+    let host_id_str = host_id.to_string();
+
+    match msg {
+        KnowledgeAgentMessage::ServiceStatus {
+            status,
+            version,
+            error,
+        } => {
+            let status_str = serde_json::to_value(status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{status:?}").to_lowercase());
+
+            let kb_id = Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Upsert knowledge_bases
+            if let Err(e) = sqlx::query(
+                "INSERT INTO knowledge_bases (id, host_id, status, openviking_version, last_error, started_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(host_id) DO UPDATE SET \
+                 status = excluded.status, openviking_version = COALESCE(excluded.openviking_version, knowledge_bases.openviking_version), \
+                 last_error = excluded.last_error, updated_at = excluded.updated_at",
+            )
+            .bind(&kb_id)
+            .bind(&host_id_str)
+            .bind(&status_str)
+            .bind(&version)
+            .bind(&error)
+            .bind(if status_str == "ready" {
+                Some(&now)
+            } else {
+                None
+            })
+            .bind(&now)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(host_id = %host_id, error = %e, "failed to upsert knowledge base status");
+            }
+
+            let _ = state.events.send(crate::state::ServerEvent::KnowledgeStatusChanged {
+                host_id: host_id_str,
+                status: status_str,
+                error,
+            });
+        }
+        KnowledgeAgentMessage::KnowledgeBaseReady {
+            project_path,
+            total_files,
+            total_chunks,
+        } => {
+            tracing::info!(
+                host_id = %host_id,
+                project_path,
+                total_files,
+                total_chunks,
+                "knowledge base ready"
+            );
+        }
+        KnowledgeAgentMessage::IndexingProgress {
+            project_path,
+            status,
+            files_processed,
+            files_total,
+            error,
+        } => {
+            let status_str = serde_json::to_value(status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{status:?}").to_lowercase());
+
+            // Find project_id from path + host
+            let project: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM projects WHERE host_id = ? AND path = ?",
+            )
+            .bind(&host_id_str)
+            .bind(&project_path)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+            if let Some((project_id,)) = project {
+                let indexing_id = Uuid::new_v4().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+
+                // Upsert indexing status
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO knowledge_indexing (id, project_id, status, files_processed, files_total, started_at, error) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(id) DO UPDATE SET \
+                     status = excluded.status, files_processed = excluded.files_processed, \
+                     files_total = excluded.files_total, error = excluded.error, \
+                     completed_at = CASE WHEN excluded.status IN ('completed', 'failed') THEN ? ELSE NULL END",
+                )
+                .bind(&indexing_id)
+                .bind(&project_id)
+                .bind(&status_str)
+                .bind(i64::try_from(files_processed).unwrap_or(0))
+                .bind(i64::try_from(files_total).unwrap_or(0))
+                .bind(&now)
+                .bind(&error)
+                .bind(&now)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::warn!(error = %e, "failed to upsert indexing status");
+                }
+
+                let _ = state.events.send(crate::state::ServerEvent::IndexingProgress {
+                    project_id,
+                    project_path: project_path.clone(),
+                    status: status_str,
+                    files_processed,
+                    files_total,
+                });
+            } else {
+                tracing::warn!(
+                    host_id = %host_id,
+                    project_path,
+                    "indexing progress for unknown project"
+                );
+            }
+        }
+        KnowledgeAgentMessage::SearchResults {
+            project_path: _,
+            request_id,
+            results,
+            duration_ms,
+        } => {
+            // Route response to waiting HTTP handler via oneshot
+            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
+                let _ = sender.send(KnowledgeAgentMessage::SearchResults {
+                    project_path: String::new(),
+                    request_id,
+                    results,
+                    duration_ms,
+                });
+            } else {
+                tracing::warn!(request_id = %request_id, "no pending request for search results");
+            }
+        }
+        KnowledgeAgentMessage::MemoryExtracted { loop_id, memories } => {
+            let loop_id_str = loop_id.to_string();
+
+            // Find project from loop's project_path
+            let project_path: Option<(String,)> = sqlx::query_as(
+                "SELECT project_path FROM agentic_loops WHERE id = ?",
+            )
+            .bind(&loop_id_str)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+            if let Some((ref path,)) = project_path {
+                let project: Option<(String,)> = sqlx::query_as(
+                    "SELECT id FROM projects WHERE host_id = ? AND path = ?",
+                )
+                .bind(&host_id_str)
+                .bind(path)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+
+                if let Some((project_id,)) = project {
+                    let memory_count = u32::try_from(memories.len()).unwrap_or(u32::MAX);
+
+                    for memory in &memories {
+                        let memory_id = Uuid::new_v4().to_string();
+                        let category_str = serde_json::to_value(memory.category)
+                            .ok()
+                            .and_then(|v| v.as_str().map(String::from))
+                            .unwrap_or_else(|| "pattern".to_string());
+
+                        // Check for existing memory with same key (dedup)
+                        let existing: Option<(String, f64)> = sqlx::query_as(
+                            "SELECT id, confidence FROM knowledge_memories WHERE project_id = ? AND key = ?"
+                        )
+                        .bind(&project_id)
+                        .bind(&memory.key)
+                        .fetch_optional(&state.db)
+                        .await
+                        .unwrap_or(None);
+
+                        match existing {
+                            Some((existing_id, existing_conf)) if memory.confidence > existing_conf => {
+                                // Update existing memory with higher confidence
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE knowledge_memories SET content = ?, confidence = ?, loop_id = ?, \
+                                     category = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?"
+                                )
+                                .bind(&memory.content)
+                                .bind(memory.confidence)
+                                .bind(&loop_id_str)
+                                .bind(&category_str)
+                                .bind(&existing_id)
+                                .execute(&state.db)
+                                .await {
+                                    tracing::warn!(error = %e, "failed to update memory");
+                                }
+                            }
+                            Some(_) => {
+                                // Existing memory has equal or higher confidence, skip
+                                tracing::debug!(key = %memory.key, "skipping memory with lower confidence");
+                            }
+                            None => {
+                                // Insert new memory
+                                if let Err(e) = sqlx::query(
+                                    "INSERT INTO knowledge_memories (id, project_id, loop_id, key, content, category, confidence) \
+                                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                                )
+                                .bind(&memory_id)
+                                .bind(&project_id)
+                                .bind(&loop_id_str)
+                                .bind(&memory.key)
+                                .bind(&memory.content)
+                                .bind(&category_str)
+                                .bind(memory.confidence)
+                                .execute(&state.db)
+                                .await {
+                                    tracing::warn!(error = %e, "failed to insert memory");
+                                }
+                            }
+                        }
+                    }
+
+                    let _ = state.events.send(crate::state::ServerEvent::MemoryExtracted {
+                        project_id,
+                        loop_id: loop_id_str,
+                        memory_count,
+                    });
+                }
+            }
+        }
+        KnowledgeAgentMessage::InstructionsGenerated {
+            project_path,
+            content,
+            memories_used,
+        } => {
+            // Generate the same deterministic request_id to find the waiting handler
+            let request_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("instructions:{host_id_str}:{project_path}").as_bytes(),
+            );
+
+            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
+                let _ = sender.send(KnowledgeAgentMessage::InstructionsGenerated {
+                    project_path,
+                    content,
+                    memories_used,
+                });
+            } else {
+                tracing::warn!(
+                    host_id = %host_id,
+                    project_path,
+                    "no pending request for generated instructions"
+                );
+            }
         }
     }
     Ok(())

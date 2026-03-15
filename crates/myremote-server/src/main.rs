@@ -123,6 +123,40 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::config::get_host_config)
                 .put(routes::config::set_host_config),
         )
+        // Knowledge routes
+        .route(
+            "/api/projects/{project_id}/knowledge/status",
+            get(routes::knowledge::get_status),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/index",
+            post(routes::knowledge::trigger_index),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/search",
+            post(routes::knowledge::search),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/memories",
+            get(routes::knowledge::list_memories),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/memories/{memory_id}",
+            delete(routes::knowledge::delete_memory)
+                .put(routes::knowledge::update_memory),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/extract",
+            post(routes::knowledge::extract_memories),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/generate-instructions",
+            post(routes::knowledge::generate_instructions),
+        )
+        .route(
+            "/api/hosts/{host_id}/knowledge/service",
+            post(routes::knowledge::control_service),
+        )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())
@@ -164,6 +198,8 @@ async fn main() {
 
     let (events_tx, _) = tokio::sync::broadcast::channel(1024);
 
+    let knowledge_requests = std::sync::Arc::new(dashmap::DashMap::new());
+
     let state = Arc::new(AppState {
         db: pool,
         connections: Arc::clone(&connections),
@@ -172,6 +208,7 @@ async fn main() {
         agent_token_hash: auth::hash_token(&agent_token),
         shutdown: shutdown.clone(),
         events: events_tx,
+        knowledge_requests,
     });
 
     // Spawn heartbeat monitor background task
@@ -236,6 +273,7 @@ mod tests {
             agent_token_hash: auth::hash_token("test-token"),
             shutdown: CancellationToken::new(),
             events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

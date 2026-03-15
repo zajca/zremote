@@ -1,6 +1,7 @@
 mod agentic;
 mod config;
 mod connection;
+mod knowledge;
 mod project;
 mod pty;
 mod session;

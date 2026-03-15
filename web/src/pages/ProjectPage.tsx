@@ -5,8 +5,9 @@ import { api, type Project, type Session } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { SessionItem } from "../components/sidebar/SessionItem";
+import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 
-type Tab = "sessions" | "loops" | "config";
+type Tab = "sessions" | "loops" | "knowledge" | "config";
 
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -139,7 +140,7 @@ export function ProjectPage() {
           <span className="font-mono">{project.path}</span>
         </div>
         <div className="mt-2 flex gap-4">
-          {(["sessions", "loops", "config"] as const).map((tab) => (
+          {(["sessions", "loops", "knowledge", "config"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -179,6 +180,9 @@ export function ProjectPage() {
           <div className="text-sm text-text-tertiary">
             Agentic loops for this project will appear here.
           </div>
+        )}
+        {activeTab === "knowledge" && (
+          <KnowledgePanel projectId={project.id} hostId={project.host_id} />
         )}
         {activeTab === "config" && (
           <div className="text-sm text-text-tertiary">

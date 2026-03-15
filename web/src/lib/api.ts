@@ -74,6 +74,13 @@ import type {
   TranscriptEntry,
   UserAction,
 } from "../types/agentic";
+import type {
+  KnowledgeBase,
+  KnowledgeMemory,
+  MemoryCategory,
+  SearchResponse,
+  SearchTier,
+} from "../types/knowledge";
 
 export const api = {
   hosts: {
@@ -243,6 +250,72 @@ export const api = {
       request<ConfigValue>(`/api/hosts/${hostId}/config/${key}`, {
         method: "PUT",
         body: JSON.stringify({ value }),
+      }),
+  },
+  knowledge: {
+    getStatus: (projectId: string) =>
+      request<KnowledgeBase | null>(
+        `/api/projects/${projectId}/knowledge/status`,
+      ),
+    triggerIndex: (projectId: string, forceReindex = false) =>
+      request<void>(`/api/projects/${projectId}/knowledge/index`, {
+        method: "POST",
+        body: JSON.stringify({ force_reindex: forceReindex }),
+      }),
+    search: (
+      projectId: string,
+      query: string,
+      tier?: SearchTier,
+      maxResults?: number,
+    ) =>
+      request<SearchResponse>(
+        `/api/projects/${projectId}/knowledge/search`,
+        {
+          method: "POST",
+          body: JSON.stringify({ query, tier, max_results: maxResults }),
+        },
+      ),
+    listMemories: (projectId: string, category?: MemoryCategory) => {
+      const params = category ? `?category=${category}` : "";
+      return request<KnowledgeMemory[]>(
+        `/api/projects/${projectId}/knowledge/memories${params}`,
+      );
+    },
+    updateMemory: (
+      projectId: string,
+      memoryId: string,
+      data: { content?: string; category?: string },
+    ) =>
+      request<KnowledgeMemory>(
+        `/api/projects/${projectId}/knowledge/memories/${memoryId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(data),
+        },
+      ),
+    deleteMemory: (projectId: string, memoryId: string) =>
+      request<void>(
+        `/api/projects/${projectId}/knowledge/memories/${memoryId}`,
+        {
+          method: "DELETE",
+        },
+      ),
+    extractMemories: (projectId: string, loopId: string) =>
+      request<void>(`/api/projects/${projectId}/knowledge/extract`, {
+        method: "POST",
+        body: JSON.stringify({ loop_id: loopId }),
+      }),
+    generateInstructions: (projectId: string) =>
+      request<{ status: string }>(
+        `/api/projects/${projectId}/knowledge/generate-instructions`,
+        {
+          method: "POST",
+        },
+      ),
+    controlService: (hostId: string, action: "start" | "stop" | "restart") =>
+      request<void>(`/api/hosts/${hostId}/knowledge/service`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
       }),
   },
 };
