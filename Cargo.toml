@@ -38,6 +38,7 @@ hostname = "0.4"
 url = "2"
 rand = "0.9"
 sysinfo = "0.34"
+base64 = "0.22"
 
 # Internal
 myremote-protocol = { path = "crates/myremote-protocol" }

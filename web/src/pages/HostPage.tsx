@@ -93,6 +93,11 @@ export function HostPage() {
                 <span className="font-mono text-xs text-text-tertiary">
                   {session.id.slice(0, 8)}
                 </span>
+                {session.working_dir && (
+                  <span className="truncate font-mono text-xs text-text-tertiary">
+                    {session.working_dir.split("/").pop()}
+                  </span>
+                )}
                 <Badge
                   variant={
                     session.status === "active"

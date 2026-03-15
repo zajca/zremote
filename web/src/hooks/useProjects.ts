@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { type Project, api } from "../lib/api";
 
+export const PROJECT_UPDATE_EVENT = "myremote:project-update";
+
 export function useProjects(hostId: string | undefined) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,6 +30,14 @@ export function useProjects(hostId: string | undefined) {
       setLoading(false);
     }
   }, [hostId, refetch]);
+
+  useEffect(() => {
+    const handler = () => {
+      void refetch();
+    };
+    window.addEventListener(PROJECT_UPDATE_EVENT, handler);
+    return () => window.removeEventListener(PROJECT_UPDATE_EVENT, handler);
+  }, [refetch]);
 
   return { projects, loading, error, refetch };
 }

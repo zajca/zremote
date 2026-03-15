@@ -505,6 +505,9 @@ async fn handle_agent_message(
                 tracing::warn!(host_id = %host_id, path = %path, error = %e, "failed to upsert project");
             } else {
                 tracing::info!(host_id = %host_id, path = %path, name = %name, "project discovered");
+                let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                    host_id: host_id.to_string(),
+                });
             }
         }
         AgentMessage::ProjectList { projects } => {
@@ -531,6 +534,9 @@ async fn handle_agent_message(
                     tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to upsert project");
                 }
             }
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id.to_string(),
+            });
         }
     }
     Ok(())
