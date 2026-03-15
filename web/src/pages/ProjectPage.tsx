@@ -1,9 +1,10 @@
 import { FolderGit2, Link as LinkIcon, Terminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { api, type Project } from "../lib/api";
+import { api, type Project, type Session } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { SessionItem } from "../components/sidebar/SessionItem";
 
 type Tab = "sessions" | "loops" | "config";
 
@@ -13,6 +14,7 @@ export function ProjectPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("sessions");
+  const [projectSessions, setProjectSessions] = useState<Session[]>([]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -26,6 +28,14 @@ export function ProjectPage() {
         setProject(null);
         setLoading(false);
       },
+    );
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    void api.projects.sessions(projectId).then(
+      (s) => setProjectSessions(s),
+      () => setProjectSessions([]),
     );
   }, [projectId]);
 
@@ -147,8 +157,22 @@ export function ProjectPage() {
 
       <div className="flex-1 overflow-auto p-6">
         {activeTab === "sessions" && (
-          <div className="text-sm text-text-tertiary">
-            Sessions associated with this project will appear here.
+          <div>
+            {projectSessions.length === 0 ? (
+              <div className="text-sm text-text-tertiary">
+                No sessions linked to this project yet.
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {projectSessions.map((session) => (
+                  <SessionItem
+                    key={session.id}
+                    session={session}
+                    hostId={project.host_id}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {activeTab === "loops" && (

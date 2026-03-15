@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson};
+use crate::routes::sessions::SessionResponse;
 use crate::state::AppState;
 
 /// Project representation for API responses.
@@ -160,6 +161,24 @@ pub async fn get_project(
     .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
     Ok(Json(project))
+}
+
+/// `GET /api/projects/:project_id/sessions` - list sessions linked to a project.
+pub async fn list_project_sessions(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<SessionResponse>>, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let sessions: Vec<SessionResponse> = sqlx::query_as(
+        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+         FROM sessions WHERE project_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&project_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(sessions))
 }
 
 /// `DELETE /api/projects/:project_id` - unregister project.

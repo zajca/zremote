@@ -28,6 +28,7 @@ pub struct SessionResponse {
     pub shell: Option<String>,
     pub status: String,
     pub working_dir: Option<String>,
+    pub project_id: Option<String>,
     pub pid: Option<i64>,
     pub exit_code: Option<i32>,
     pub created_at: String,
@@ -67,13 +68,28 @@ pub async fn create_session(
     let session_id = Uuid::new_v4();
     let session_id_str = session_id.to_string();
 
+    // Resolve project_id from working_dir
+    let project_id: Option<String> = if let Some(ref wd) = body.working_dir {
+        sqlx::query_scalar(
+            "SELECT id FROM projects WHERE host_id = ? AND (? = path OR ? LIKE path || '/%') LIMIT 1",
+        )
+        .bind(&host_id)
+        .bind(wd)
+        .bind(wd)
+        .fetch_optional(&state.db)
+        .await?
+    } else {
+        None
+    };
+
     // Insert into DB with status "creating"
     sqlx::query(
-        "INSERT INTO sessions (id, host_id, status, working_dir) VALUES (?, ?, 'creating', ?)",
+        "INSERT INTO sessions (id, host_id, status, working_dir, project_id) VALUES (?, ?, 'creating', ?, ?)",
     )
     .bind(&session_id_str)
     .bind(&host_id)
     .bind(&body.working_dir)
+    .bind(&project_id)
     .execute(&state.db)
     .await?;
 
@@ -117,7 +133,7 @@ pub async fn list_sessions(
         .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
 
     let sessions: Vec<SessionResponse> = sqlx::query_as(
-        "SELECT id, host_id, shell, status, working_dir, pid, exit_code, created_at, closed_at \
+        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
     )
     .bind(&host_id)
@@ -137,7 +153,7 @@ pub async fn get_session(
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
     let session: SessionResponse = sqlx::query_as(
-        "SELECT id, host_id, shell, status, working_dir, pid, exit_code, created_at, closed_at \
+        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE id = ?",
     )
     .bind(&session_id)

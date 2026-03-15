@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Session, api } from "../lib/api";
 
 export const SESSION_UPDATE_EVENT = "myremote:session-update";
@@ -22,25 +22,25 @@ export function useSessions(hostId: string | undefined) {
     }
   }, [hostId]);
 
+  const refetchRef = useRef(refetch);
+  refetchRef.current = refetch;
+
   useEffect(() => {
     if (hostId) {
-      void refetch();
+      void refetchRef.current();
     } else {
       setSessions([]);
       setLoading(false);
     }
-  }, [hostId, refetch]);
+  }, [hostId]);
 
   // Listen for real-time session update events
   useEffect(() => {
     if (!hostId) return;
-
-    const handler = () => {
-      void refetch();
-    };
+    const handler = () => void refetchRef.current();
     window.addEventListener(SESSION_UPDATE_EVENT, handler);
     return () => window.removeEventListener(SESSION_UPDATE_EVENT, handler);
-  }, [hostId, refetch]);
+  }, [hostId]);
 
   return { sessions, loading, error, refetch };
 }
