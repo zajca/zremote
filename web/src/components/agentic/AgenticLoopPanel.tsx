@@ -19,15 +19,15 @@ function statusBadgeVariant(
   status: AgenticStatus,
 ): "online" | "offline" | "error" | "warning" | "creating" {
   switch (status) {
-    case "Working":
+    case "working":
       return "creating";
-    case "WaitingForInput":
+    case "waiting_for_input":
       return "warning";
-    case "Paused":
+    case "paused":
       return "offline";
-    case "Error":
+    case "error":
       return "error";
-    case "Completed":
+    case "completed":
       return "online";
   }
 }
@@ -91,14 +91,14 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
 
   const handleToolApprove = useCallback(
     (_toolCallId: string) => {
-      void sendAction(loopId, "Approve");
+      void sendAction(loopId, "approve");
     },
     [loopId, sendAction],
   );
 
   const handleToolReject = useCallback(
     (_toolCallId: string) => {
-      void sendAction(loopId, "Reject");
+      void sendAction(loopId, "reject");
     },
     [loopId, sendAction],
   );
@@ -112,6 +112,10 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
       ) {
         return;
       }
+      // Don't capture shortcuts when terminal has focus
+      const target = e.target as HTMLElement;
+      if (target.closest('.xterm')) return;
+
       switch (e.key) {
         case "1":
           setActiveTab("terminal");

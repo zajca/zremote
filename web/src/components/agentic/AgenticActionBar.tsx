@@ -20,9 +20,9 @@ export function AgenticActionBar({ status, onAction }: AgenticActionBarProps) {
   const [showInput, setShowInput] = useState(false);
   const [inputValue, setInputValue] = useState("");
 
-  const isWaiting = status === "WaitingForInput";
-  const isWorking = status === "Working";
-  const isPaused = status === "Paused";
+  const isWaiting = status === "waiting_for_input";
+  const isWorking = status === "working";
+  const isPaused = status === "paused";
   const isActive = isWaiting || isWorking || isPaused;
 
   const handleAction = useCallback(
@@ -36,11 +36,11 @@ export function AgenticActionBar({ status, onAction }: AgenticActionBarProps) {
   );
 
   const handleApprove = useCallback(() => {
-    if (isWaiting) handleAction("Approve");
+    if (isWaiting) handleAction("approve");
   }, [isWaiting, handleAction]);
 
   const handleReject = useCallback(() => {
-    if (isWaiting) handleAction("Reject");
+    if (isWaiting) handleAction("reject");
   }, [isWaiting, handleAction]);
 
   const handleProvideInput = useCallback(() => {
@@ -50,20 +50,20 @@ export function AgenticActionBar({ status, onAction }: AgenticActionBarProps) {
 
   const handleSubmitInput = useCallback(() => {
     if (inputValue.trim()) {
-      handleAction("ProvideInput", inputValue.trim());
+      handleAction("provide_input", inputValue.trim());
       setShowInput(false);
       setInputValue("");
     }
   }, [inputValue, handleAction]);
 
   const handlePauseResume = useCallback(() => {
-    if (isWorking) handleAction("Pause");
-    else if (isPaused) handleAction("Resume");
+    if (isWorking) handleAction("pause");
+    else if (isPaused) handleAction("resume");
   }, [isWorking, isPaused, handleAction]);
 
   const handleStop = useCallback(() => {
     if (isActive && window.confirm("Stop this agentic loop?")) {
-      handleAction("Stop");
+      handleAction("stop");
     }
   }, [isActive, handleAction]);
 
@@ -77,6 +77,9 @@ export function AgenticActionBar({ status, onAction }: AgenticActionBarProps) {
       ) {
         return;
       }
+      // Don't capture shortcuts when terminal has focus
+      const target = e.target as HTMLElement;
+      if (target.closest('.xterm')) return;
 
       switch (e.key) {
         case "Enter":
@@ -136,22 +139,22 @@ export function AgenticActionBar({ status, onAction }: AgenticActionBarProps) {
       <Button
         size="sm"
         variant="primary"
-        disabled={!isWaiting || pendingAction === "Approve"}
+        disabled={!isWaiting || pendingAction === "approve"}
         onClick={handleApprove}
         className="bg-status-online hover:bg-status-online/80"
       >
         <Check size={14} />
-        {pendingAction === "Approve" ? "Approving..." : "Approve"}
+        {pendingAction === "approve" ? "Approving..." : "Approve"}
       </Button>
 
       <Button
         size="sm"
         variant="danger"
-        disabled={!isWaiting || pendingAction === "Reject"}
+        disabled={!isWaiting || pendingAction === "reject"}
         onClick={handleReject}
       >
         <X size={14} />
-        {pendingAction === "Reject" ? "Rejecting..." : "Reject"}
+        {pendingAction === "reject" ? "Rejecting..." : "Reject"}
       </Button>
 
       <Button

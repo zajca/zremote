@@ -1,29 +1,29 @@
 export type AgenticStatus =
-  | "Working"
-  | "WaitingForInput"
-  | "Paused"
-  | "Error"
-  | "Completed";
+  | "working"
+  | "waiting_for_input"
+  | "paused"
+  | "error"
+  | "completed";
 
 export type ToolCallStatus =
-  | "Pending"
-  | "Approved"
-  | "Rejected"
-  | "Running"
-  | "Completed"
-  | "Failed";
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "running"
+  | "completed"
+  | "failed";
 
 export type UserAction =
-  | "Approve"
-  | "Reject"
-  | "ProvideInput"
-  | "Pause"
-  | "Resume"
-  | "Stop";
+  | "approve"
+  | "reject"
+  | "provide_input"
+  | "pause"
+  | "resume"
+  | "stop";
 
-export type TranscriptRole = "Assistant" | "User" | "Tool" | "System";
+export type TranscriptRole = "assistant" | "user" | "tool" | "system";
 
-export type PermissionAction = "AutoApprove" | "Ask" | "Deny";
+export type PermissionAction = "auto_approve" | "ask" | "deny";
 
 export interface AgenticLoop {
   id: string;

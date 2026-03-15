@@ -8,26 +8,26 @@ interface TranscriptViewProps {
 
 function roleStyles(role: TranscriptRole): string {
   switch (role) {
-    case "Assistant":
+    case "assistant":
       return "self-start bg-bg-tertiary text-text-primary rounded-lg rounded-bl-sm";
-    case "User":
+    case "user":
       return "self-end bg-accent/15 text-text-primary rounded-lg rounded-br-sm";
-    case "Tool":
+    case "tool":
       return "self-start bg-bg-secondary text-text-secondary font-mono text-xs rounded-md border border-border";
-    case "System":
+    case "system":
       return "self-center bg-transparent text-text-tertiary text-xs italic";
   }
 }
 
 function roleLabel(role: TranscriptRole): string | null {
   switch (role) {
-    case "Assistant":
+    case "assistant":
       return "Assistant";
-    case "User":
+    case "user":
       return "You";
-    case "Tool":
+    case "tool":
       return "Tool";
-    case "System":
+    case "system":
       return null;
   }
 }
