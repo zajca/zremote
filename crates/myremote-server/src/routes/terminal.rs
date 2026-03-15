@@ -48,14 +48,51 @@ async fn handle_terminal_connection(
     let (tx, mut rx) = mpsc::channel::<BrowserMessage>(BROWSER_CHANNEL_SIZE);
     let host_id;
 
-    // Clone scrollback and register sender under the lock, then drop the lock before sending
+    // Phase 1: Check existence with read lock
+    let session_exists = {
+        let sessions = state.sessions.read().await;
+        sessions.contains_key(&session_id)
+    };
+
+    if !session_exists {
+        // Query DB for diagnostics before returning error
+        let error_message = match sqlx::query_as::<_, (String,)>(
+            "SELECT status FROM sessions WHERE id = ?",
+        )
+        .bind(session_id.to_string())
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(Some((status,))) if status == "active" || status == "creating" => {
+                "session is stale (agent disconnected or server restarted)".to_string()
+            }
+            Ok(Some((status,))) => {
+                format!("session is {status}")
+            }
+            Ok(None) => "session not found".to_string(),
+            Err(_) => "session not found or not active".to_string(),
+        };
+
+        let error_msg = serde_json::json!({
+            "type": "error",
+            "message": error_message
+        });
+        let _ = socket
+            .send(Message::Text(error_msg.to_string().into()))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    // Phase 2: Take write lock for the happy path
     let scrollback_data;
     {
         let mut sessions = state.sessions.write().await;
         let Some(session) = sessions.get_mut(&session_id) else {
+            // Session was removed between read and write lock
             let error_msg = serde_json::json!({
                 "type": "error",
-                "message": "session not found or not active"
+                "message": "session was closed while connecting"
             });
             let _ = socket
                 .send(Message::Text(error_msg.to_string().into()))
