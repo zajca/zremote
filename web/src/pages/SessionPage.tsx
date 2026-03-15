@@ -1,5 +1,5 @@
-import { ArrowLeft, X } from "lucide-react";
-import { useCallback, useState } from "react";
+import { ArrowLeft, Pencil, X } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useHosts } from "../hooks/useHosts";
 import { useSessions } from "../hooks/useSessions";
@@ -15,8 +15,11 @@ export function SessionPage() {
   }>();
   const navigate = useNavigate();
   const { hosts } = useHosts();
-  const { sessions } = useSessions(hostId);
+  const { sessions, refetch } = useSessions(hostId);
   const [closing, setClosing] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   const host = hosts.find((h) => h.id === hostId);
   const session = sessions.find((s) => s.id === sessionId);
@@ -32,6 +35,37 @@ export function SessionPage() {
       setClosing(false);
     }
   }, [hostId, sessionId, closing, navigate]);
+
+  const handleStartEditing = useCallback(() => {
+    if (!session) return;
+    setNameValue(session.name ?? "");
+    setEditingName(true);
+    setTimeout(() => nameInputRef.current?.focus(), 50);
+  }, [session]);
+
+  const handleRenameSubmit = useCallback(async () => {
+    if (!sessionId) return;
+    setEditingName(false);
+    const trimmed = nameValue.trim();
+    try {
+      await api.sessions.rename(sessionId, trimmed || null);
+      void refetch();
+    } catch (e) {
+      console.error("failed to rename session", e);
+    }
+  }, [sessionId, nameValue, refetch]);
+
+  const handleRenameKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void handleRenameSubmit();
+      } else if (e.key === "Escape") {
+        setEditingName(false);
+      }
+    },
+    [handleRenameSubmit],
+  );
 
   if (!session) {
     return (
@@ -53,7 +87,30 @@ export function SessionPage() {
         <span className="font-mono text-xs text-text-tertiary">
           {sessionId?.slice(0, 8)}
         </span>
-        <span className="text-sm text-text-primary">{session.shell ?? "shell"}</span>
+        {editingName ? (
+          <input
+            ref={nameInputRef}
+            value={nameValue}
+            onChange={(e) => setNameValue(e.target.value)}
+            onBlur={() => void handleRenameSubmit()}
+            onKeyDown={handleRenameKeyDown}
+            className="h-6 rounded border border-accent bg-bg-tertiary px-2 text-sm text-text-primary focus:ring-2 focus:ring-accent/20 focus:outline-none"
+            placeholder="Session name"
+          />
+        ) : (
+          <>
+            <span className="text-sm text-text-primary">
+              {session.name || session.shell || "shell"}
+            </span>
+            <button
+              onClick={handleStartEditing}
+              className="text-text-tertiary transition-colors duration-150 hover:text-text-primary"
+              title="Rename session"
+            >
+              <Pencil size={12} />
+            </button>
+          </>
+        )}
         {host && (
           <Link
             to={`/hosts/${hostId}`}

@@ -55,12 +55,9 @@ export function ProjectPage() {
   const handleOpenTerminal = useCallback(async () => {
     if (!project) return;
     try {
-      const session = await api.sessions.create(
-        project.host_id,
-        80,
-        24,
-        project.path,
-      );
+      const session = await api.sessions.create(project.host_id, {
+        workingDir: project.path,
+      });
       void navigate(`/hosts/${project.host_id}/sessions/${session.id}`);
     } catch (e) {
       console.error("failed to create terminal session", e);

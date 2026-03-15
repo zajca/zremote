@@ -39,6 +39,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{session_id}",
             get(routes::sessions::get_session)
+                .patch(routes::sessions::update_session)
                 .delete(routes::sessions::close_session),
         )
         .route(

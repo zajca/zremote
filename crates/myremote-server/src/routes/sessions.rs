@@ -18,6 +18,7 @@ pub struct CreateSessionRequest {
     pub cols: u16,
     pub rows: u16,
     pub working_dir: Option<String>,
+    pub name: Option<String>,
 }
 
 /// Session representation for API responses.
@@ -25,6 +26,7 @@ pub struct CreateSessionRequest {
 pub struct SessionResponse {
     pub id: String,
     pub host_id: String,
+    pub name: Option<String>,
     pub shell: Option<String>,
     pub status: String,
     pub working_dir: Option<String>,
@@ -84,10 +86,11 @@ pub async fn create_session(
 
     // Insert into DB with status "creating"
     sqlx::query(
-        "INSERT INTO sessions (id, host_id, status, working_dir, project_id) VALUES (?, ?, 'creating', ?, ?)",
+        "INSERT INTO sessions (id, host_id, name, status, working_dir, project_id) VALUES (?, ?, ?, 'creating', ?, ?)",
     )
     .bind(&session_id_str)
     .bind(&host_id)
+    .bind(&body.name)
     .bind(&body.working_dir)
     .bind(&project_id)
     .execute(&state.db)
@@ -133,7 +136,7 @@ pub async fn list_sessions(
         .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
 
     let sessions: Vec<SessionResponse> = sqlx::query_as(
-        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
     )
     .bind(&host_id)
@@ -153,7 +156,40 @@ pub async fn get_session(
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
     let session: SessionResponse = sqlx::query_as(
-        "SELECT id, host_id, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+         FROM sessions WHERE id = ?",
+    )
+    .bind(&session_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+
+    Ok(Json(session))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionRequest {
+    pub name: Option<String>,
+}
+
+/// `PATCH /api/sessions/:session_id` - update session metadata.
+pub async fn update_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<UpdateSessionRequest>,
+) -> Result<Json<SessionResponse>, AppError> {
+    let _parsed: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    sqlx::query("UPDATE sessions SET name = ? WHERE id = ?")
+        .bind(&body.name)
+        .bind(&session_id)
+        .execute(&state.db)
+        .await?;
+
+    let session: SessionResponse = sqlx::query_as(
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE id = ?",
     )
     .bind(&session_id)

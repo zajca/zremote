@@ -18,7 +18,12 @@ use crate::knowledge::KnowledgeManager;
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 
-const DEFAULT_SHELL: &str = "/bin/sh";
+fn default_shell() -> &'static str {
+    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    })
+}
 
 /// Errors that can occur during a WebSocket connection lifecycle.
 #[derive(Debug)]
@@ -163,7 +168,7 @@ fn handle_session_create(
     rows: u16,
     working_dir: Option<&str>,
 ) {
-    let shell = shell.unwrap_or(DEFAULT_SHELL);
+    let shell = shell.unwrap_or(default_shell());
     match session_manager.create(session_id, shell, cols, rows, working_dir) {
         Ok(pid) => {
             tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
