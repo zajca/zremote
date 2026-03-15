@@ -30,5 +30,13 @@ logs/
 *.db-shm
 *.db-wal
 
+# TypeScript build info
+*.tsbuildinfo
+
 # Nix
 result
+
+# Claude Code - keep skills, ignore the rest
+.claude/**
+!.claude/skills/
+!.claude/skills/**
