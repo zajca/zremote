@@ -453,6 +453,59 @@ async fn handle_agent_message(
                 }
             }
 
+            // Check if session has a linked claude_session in starting/active state
+            {
+                let now_ct = chrono::Utc::now().to_rfc3339();
+                // starting -> error (session closed before Claude started)
+                if let Ok(result) = sqlx::query(
+                    "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+                     WHERE session_id = ? AND status = 'starting'",
+                )
+                .bind(&now_ct)
+                .bind(&session_id_str)
+                .execute(&state.db)
+                .await
+                    && result.rows_affected() > 0
+                    && let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
+                        "SELECT id FROM claude_sessions WHERE session_id = ? AND status = 'error'",
+                    )
+                    .bind(&session_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                {
+                    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                        task_id,
+                        status: "error".to_string(),
+                        summary: Some("session closed before Claude started".to_string()),
+                        total_cost_usd: 0.0,
+                    });
+                }
+                // active -> completed (normal exit)
+                if let Ok(result) = sqlx::query(
+                    "UPDATE claude_sessions SET status = 'completed', ended_at = ? \
+                     WHERE session_id = ? AND status = 'active'",
+                )
+                .bind(&now_ct)
+                .bind(&session_id_str)
+                .execute(&state.db)
+                .await
+                    && result.rows_affected() > 0
+                    && let Ok(Some((task_id, cost))) = sqlx::query_as::<_, (String, f64)>(
+                        "SELECT id, COALESCE(total_cost_usd, 0.0) FROM claude_sessions WHERE session_id = ?",
+                    )
+                    .bind(&session_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                {
+                    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                        task_id,
+                        status: "completed".to_string(),
+                        summary: None,
+                        total_cost_usd: cost,
+                    });
+                }
+            }
+
             // Emit SessionClosed event
             let _ = state.events.send(ServerEvent::SessionClosed {
                 session_id: session_id.to_string(),
@@ -1393,7 +1446,39 @@ async fn handle_claude_message(
                 count = sessions.len(),
                 "claude sessions discovered"
             );
-            // TODO: Phase 2 - store/relay discovered sessions
+
+            // Resolve pending discover request via oneshot channel
+            let request_key = format!("{host_id}:{project_path}");
+            if let Some((_, tx)) = state.claude_discover_requests.remove(&request_key) {
+                let _ = tx.send(sessions);
+            }
+        }
+        ClaudeAgentMessage::SessionIdCaptured {
+            claude_task_id,
+            cc_session_id,
+        } => {
+            let task_id_str = claude_task_id.to_string();
+            tracing::info!(
+                host_id = %host_id,
+                task_id = %task_id_str,
+                cc_session_id = %cc_session_id,
+                "claude session ID captured"
+            );
+
+            if let Err(e) = sqlx::query(
+                "UPDATE claude_sessions SET claude_session_id = ? WHERE id = ?",
+            )
+            .bind(&cc_session_id)
+            .bind(&task_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(
+                    task_id = %task_id_str,
+                    error = %e,
+                    "failed to store claude_session_id"
+                );
+            }
         }
     }
     Ok(())
@@ -1932,6 +2017,19 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
     .await
     {
         tracing::error!(host_id = %host_id, error = %e, "failed to complete orphaned agentic loops in database");
+    }
+
+    // Mark starting/active claude_sessions for this host as error
+    if let Err(e) = sqlx::query(
+        "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+         WHERE host_id = ? AND status IN ('starting', 'active')",
+    )
+    .bind(&now)
+    .bind(&host_id_str)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(host_id = %host_id, error = %e, "failed to mark claude sessions as error on disconnect");
     }
 
     // Emit SessionClosed events

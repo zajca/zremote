@@ -1,8 +1,8 @@
-import { Bot, ChevronDown, Loader2, X } from "lucide-react";
+import { Bot, ChevronDown, History, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../lib/api";
-import type { ToolPreset } from "../types/claude-session";
+import type { ClaudeTask, ToolPreset } from "../types/claude-session";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 
@@ -27,6 +27,18 @@ const TOOL_PRESET_OPTIONS: { value: ToolPreset; label: string }[] = [
   { value: "custom", label: "Custom" },
 ];
 
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
 export function StartClaudeDialog({
   projectName,
   projectPath,
@@ -47,10 +59,34 @@ export function StartClaudeDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Resume-related state
+  const [completedTasks, setCompletedTasks] = useState<ClaudeTask[]>([]);
+  const [loadingPrevious, setLoadingPrevious] = useState(false);
+  const [resumingId, setResumingId] = useState<string | null>(null);
+
   useEffect(() => {
     const timer = setTimeout(() => textareaRef.current?.focus(), 50);
     return () => clearTimeout(timer);
   }, []);
+
+  // Fetch completed tasks for resume
+  useEffect(() => {
+    setLoadingPrevious(true);
+    const filters: { host_id: string; status: string; project_id?: string } = {
+      host_id: hostId,
+      status: "completed",
+    };
+    if (projectId) {
+      filters.project_id = projectId;
+    }
+    void api.claudeTasks.list(filters).then(
+      (tasks) => {
+        setCompletedTasks(tasks.slice(0, 5));
+        setLoadingPrevious(false);
+      },
+      () => setLoadingPrevious(false),
+    );
+  }, [hostId, projectId]);
 
   const handleSubmit = useCallback(async () => {
     if (loading) return;
@@ -99,6 +135,23 @@ export function StartClaudeDialog({
     onClose,
   ]);
 
+  const handleResume = useCallback(
+    async (taskId: string) => {
+      setResumingId(taskId);
+      setError(null);
+      try {
+        const newTask = await api.claudeTasks.resume(taskId);
+        void navigate(`/hosts/${hostId}/sessions/${newTask.session_id}`);
+        onClose();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to resume task");
+      } finally {
+        setResumingId(null);
+      }
+    },
+    [navigate, hostId, onClose],
+  );
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -118,7 +171,7 @@ export function StartClaudeDialog({
       onKeyDown={handleKeyDown}
     >
       <div
-        className="w-full max-w-lg rounded-lg border border-border bg-bg-primary p-6 shadow-xl"
+        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-bg-primary p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -139,6 +192,48 @@ export function StartClaudeDialog({
         <p className="mb-4 text-xs text-text-tertiary">
           Project: {projectName}
         </p>
+
+        {/* Resume previous section */}
+        {!loadingPrevious && completedTasks.length > 0 && (
+          <div className="mb-4">
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-text-secondary">
+              <History size={12} />
+              Resume previous
+            </div>
+            <div className="space-y-1.5">
+              {completedTasks.map((task) => (
+                <button
+                  key={task.id}
+                  onClick={() => void handleResume(task.id)}
+                  disabled={resumingId !== null}
+                  className="flex w-full items-center gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-left transition-colors duration-150 hover:bg-bg-hover disabled:opacity-50"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium text-text-primary">
+                      {task.initial_prompt ?? task.model ?? "Claude task"}
+                    </p>
+                    <p className="text-[10px] text-text-tertiary">
+                      {task.model && `${task.model} · `}
+                      {formatRelativeTime(task.started_at)}
+                      {task.total_cost_usd > 0 && ` · $${task.total_cost_usd.toFixed(2)}`}
+                    </p>
+                    {task.summary && (
+                      <p className="mt-0.5 line-clamp-1 text-[10px] text-text-tertiary">
+                        {task.summary}
+                      </p>
+                    )}
+                  </div>
+                  {resumingId === task.id ? (
+                    <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+                  ) : (
+                    <span className="shrink-0 text-[10px] text-accent">Resume</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="my-4 border-t border-border" />
+          </div>
+        )}
 
         <div className="flex flex-col gap-4">
           {/* Prompt textarea */}

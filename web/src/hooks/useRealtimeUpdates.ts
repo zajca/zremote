@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useAgenticStore } from "../stores/agentic-store";
+import { useClaudeTaskStore } from "../stores/claude-task-store";
 import {
   dispatchWsDisconnected,
   dispatchWsReconnected,
@@ -26,6 +27,12 @@ interface ServerEvent {
   host_id?: string;
   project_path?: string;
   message?: string;
+  // Claude task event fields
+  task_id?: string;
+  session_id?: string;
+  status?: string;
+  summary?: string;
+  total_cost_usd?: number;
 }
 
 const RECONNECT_DELAY_MS = 3000;
@@ -59,6 +66,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
         }
 
         const store = useAgenticStore.getState();
+        const taskStore = useClaudeTaskStore.getState();
 
         switch (parsed.type) {
           case "host_connected":
@@ -120,6 +128,35 @@ export function useRealtimeUpdates(handlers: EventHandler) {
           case "worktree_error":
             if (parsed.message) {
               showToast(`Worktree error: ${parsed.message}`, "error");
+            }
+            break;
+          case "claude_task_started":
+            if (parsed.task_id && parsed.session_id && parsed.host_id && parsed.project_path) {
+              taskStore.handleTaskStarted({
+                task_id: parsed.task_id,
+                session_id: parsed.session_id,
+                host_id: parsed.host_id,
+                project_path: parsed.project_path,
+              });
+            }
+            break;
+          case "claude_task_updated":
+            if (parsed.task_id && parsed.status) {
+              taskStore.handleTaskUpdated({
+                task_id: parsed.task_id,
+                status: parsed.status,
+                loop_id: parsed.loop_id ?? null,
+              });
+            }
+            break;
+          case "claude_task_ended":
+            if (parsed.task_id && parsed.status) {
+              taskStore.handleTaskEnded({
+                task_id: parsed.task_id,
+                status: parsed.status,
+                summary: parsed.summary ?? null,
+                total_cost_usd: parsed.total_cost_usd ?? 0,
+              });
             }
             break;
         }
