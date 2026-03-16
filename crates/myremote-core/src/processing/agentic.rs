@@ -1499,6 +1499,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_loop_ended_auto_extract_with_transcript() {
+        // Exercises the auto-extract path when auto_extract is enabled (default),
+        // project_path is non-empty, and transcript rows exist.
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop with non-empty project_path
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/home/user/my-project".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Add transcript entries so the auto-extract path processes them
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::User,
+            content: "Fix the database migration".to_string(),
+            tool_call_id: None,
+            timestamp: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::Assistant,
+            content: "I will update the migration file.".to_string(),
+            tool_call_id: None,
+            timestamp: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        // End the loop - should trigger auto-extract code path
+        let result = proc
+            .handle_message(AgenticAgentMessage::LoopEnded {
+                loop_id,
+                reason: "completed".to_string(),
+                summary: Some("Fixed migration".to_string()),
+            })
+            .await;
+        assert!(result.is_ok());
+
+        // Verify loop was completed
+        let (status,): (String,) = sqlx::query_as(
+            "SELECT status FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_auto_extract_disabled_with_zero() {
+        // Test auto_extract disabled via "0" value
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        sqlx::query("INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', '0')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let result = proc
+            .handle_message(AgenticAgentMessage::LoopEnded {
+                loop_id,
+                reason: "done".to_string(),
+                summary: None,
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_auto_extract_empty_project_path() {
+        // When project_path is empty, auto-extract should skip extraction
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect with empty project path
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: String::new(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Add a transcript entry
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::User,
+            content: "test content".to_string(),
+            tool_call_id: None,
+            timestamp: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        let result = proc
+            .handle_message(AgenticAgentMessage::LoopEnded {
+                loop_id,
+                reason: "done".to_string(),
+                summary: None,
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn full_lifecycle_detect_tools_metrics_end() {
         let db = test_db().await;
         let proc = make_processor(db.clone());

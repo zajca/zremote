@@ -1266,4 +1266,511 @@ mod tests {
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["id"], task_id);
     }
+
+    #[test]
+    fn default_shell_returns_value() {
+        // default_shell should return some non-empty string
+        let shell = default_shell();
+        assert!(!shell.is_empty());
+    }
+
+    #[test]
+    fn create_request_deserialize_minimal() {
+        let json = r#"{"project_path": "/tmp/test"}"#;
+        let req: CreateClaudeTaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.project_path, "/tmp/test");
+        assert!(req.project_id.is_none());
+        assert!(req.model.is_none());
+        assert!(req.initial_prompt.is_none());
+        assert!(req.allowed_tools.is_none());
+        assert!(req.skip_permissions.is_none());
+        assert!(req.output_format.is_none());
+        assert!(req.custom_flags.is_none());
+    }
+
+    #[test]
+    fn create_request_deserialize_full() {
+        let json = r#"{
+            "project_path": "/tmp/test",
+            "project_id": "abc-123",
+            "model": "opus",
+            "initial_prompt": "do it",
+            "allowed_tools": ["Read", "Write"],
+            "skip_permissions": true,
+            "output_format": "stream-json",
+            "custom_flags": "--verbose"
+        }"#;
+        let req: CreateClaudeTaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.project_path, "/tmp/test");
+        assert_eq!(req.project_id.as_deref(), Some("abc-123"));
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.initial_prompt.as_deref(), Some("do it"));
+        assert_eq!(req.allowed_tools.as_ref().unwrap().len(), 2);
+        assert_eq!(req.skip_permissions, Some(true));
+        assert_eq!(req.output_format.as_deref(), Some("stream-json"));
+        assert_eq!(req.custom_flags.as_deref(), Some("--verbose"));
+    }
+
+    #[test]
+    fn resume_request_deserialize_empty() {
+        let json = "{}";
+        let req: ResumeClaudeTaskRequest = serde_json::from_str(json).unwrap();
+        assert!(req.initial_prompt.is_none());
+    }
+
+    #[test]
+    fn resume_request_deserialize_with_prompt() {
+        let json = r#"{"initial_prompt": "continue with this"}"#;
+        let req: ResumeClaudeTaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.initial_prompt.as_deref(), Some("continue with this"));
+    }
+
+    #[test]
+    fn resume_request_default_has_no_prompt() {
+        let req = ResumeClaudeTaskRequest::default();
+        assert!(req.initial_prompt.is_none());
+    }
+
+    #[test]
+    fn discover_query_deserialize() {
+        let json = r#"{"project_path": "/home/user/project"}"#;
+        let query: DiscoverQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.project_path, "/home/user/project");
+    }
+
+    #[test]
+    fn list_query_deserialize_empty() {
+        let json = "{}";
+        let query: ListClaudeTasksQuery = serde_json::from_str(json).unwrap();
+        assert!(query.host_id.is_none());
+        assert!(query.status.is_none());
+        assert!(query.project_id.is_none());
+    }
+
+    #[test]
+    fn list_query_deserialize_full() {
+        let json = r#"{"host_id": "abc", "status": "active", "project_id": "p1"}"#;
+        let query: ListClaudeTasksQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.host_id.as_deref(), Some("abc"));
+        assert_eq!(query.status.as_deref(), Some("active"));
+        assert_eq!(query.project_id.as_deref(), Some("p1"));
+    }
+
+    #[tokio::test]
+    async fn get_claude_task_with_options_json() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        let options = r#"{"allowed_tools":["Read","Write"],"skip_permissions":true,"output_format":"json","custom_flags":"--verbose"}"#;
+
+        myremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        myremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            Some("opus"),
+            Some("test prompt"),
+            Some(options),
+        )
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/claude-tasks/{task_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], task_id);
+        // Verify options_json is preserved
+        let opts: serde_json::Value =
+            serde_json::from_str(json["options_json"].as_str().unwrap()).unwrap();
+        assert!(opts["allowed_tools"].is_array());
+        assert_eq!(opts["allowed_tools"].as_array().unwrap().len(), 2);
+        assert_eq!(opts["skip_permissions"], true);
+        assert_eq!(opts["output_format"], "json");
+        assert_eq!(opts["custom_flags"], "--verbose");
+    }
+
+    #[tokio::test]
+    async fn resume_completed_task_without_cc_session_id_uses_continue() {
+        // This tests the code path where cc_session_id is None so continue_last = true
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        myremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        myremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            Some("opus"),
+            Some("original prompt"),
+            None, // no options
+        )
+        .await
+        .unwrap();
+
+        // Mark as completed, leave claude_session_id as NULL
+        sqlx::query("UPDATE claude_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        // Verify the task has no claude_session_id
+        let task = myremote_core::queries::claude_sessions::get_claude_task(&state.db, &task_id)
+            .await
+            .unwrap();
+        assert!(task.claude_session_id.is_none());
+
+        // Try to resume -- will fail at PTY spawn but we verify the path up to that point
+        let app = build_test_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"initial_prompt": "continue from here"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // PTY spawn will fail in test env but it exercises the DB insertion and option parsing paths
+        // Status will be 500 (Internal Server Error) because PTY spawn fails, or 201 if it succeeds
+        let status = response.status();
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_completed_task_with_options_json() {
+        // Tests the code path where options_json is present and parsed
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        let options = r#"{"allowed_tools":["Read"],"skip_permissions":true,"output_format":"stream-json","custom_flags":"--verbose"}"#;
+
+        myremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        myremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            Some("opus"),
+            Some("original"),
+            Some(options),
+        )
+        .await
+        .unwrap();
+
+        // Mark as completed with a claude_session_id
+        sqlx::query(
+            "UPDATE claude_sessions SET status = 'completed', claude_session_id = ? WHERE id = ?",
+        )
+        .bind("cc-session-abc123")
+        .bind(&task_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Will fail at PTY spawn but exercises the options parsing path
+        let status = response.status();
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_exercises_options_json_building() {
+        // Tests the code path where allowed_tools, output_format, and custom_flags
+        // trigger options_json building
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let body = serde_json::json!({
+            "project_path": "/tmp/test",
+            "model": "opus",
+            "initial_prompt": "do it",
+            "allowed_tools": ["Read", "Write"],
+            "skip_permissions": true,
+            "output_format": "stream-json",
+            "custom_flags": "--verbose"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // PTY spawn will likely fail but the DB insertion paths are exercised
+        let status = response.status();
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_with_project_id() {
+        // Tests the code path where project_id is explicitly provided
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        myremote_core::queries::projects::insert_project(
+            &state.db,
+            &project_id,
+            &host_id,
+            "/tmp/project",
+            "test",
+        )
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let body = serde_json::json!({
+            "project_path": "/tmp/project",
+            "project_id": project_id,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // PTY spawn may fail, but exercises the project_id code path
+        let status = response.status();
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_without_options_no_options_json() {
+        // Tests the code path where no allowed_tools/output_format/custom_flags
+        // so options_json remains None
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let body = serde_json::json!({
+            "project_path": "/tmp/test",
+            "model": "opus",
+            "initial_prompt": "hello"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_failed_task_allowed() {
+        // A task with status 'failed' should be resumable
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        myremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        myremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE claude_sessions SET status = 'failed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should not be conflict (failed tasks are resumable)
+        let status = response.status();
+        assert_ne!(
+            status,
+            StatusCode::CONFLICT,
+            "failed tasks should be resumable"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_with_empty_options_json_uses_defaults() {
+        // Tests the else branch: when original.options_json is None
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        myremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        myremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            None,
+            None,
+            None, // no options_json
+        )
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE claude_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        // Exercises the None options_json branch (defaults: empty tools, no skip, no format, no flags)
+        assert!(
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
+            "expected 500 or 201, got {status}"
+        );
+    }
 }

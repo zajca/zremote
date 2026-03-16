@@ -336,6 +336,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_session_closed_multiple_browser_senders() {
+        let db = test_db().await;
+        let sessions: SessionStore = Arc::new(RwLock::new(HashMap::new()));
+        let proc = make_processor(db.clone(), sessions.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Add session with multiple browser senders
+        let (tx1, mut rx1) = mpsc::channel(8);
+        let (tx2, mut rx2) = mpsc::channel(8);
+        let mut state = SessionState::new(session_id, proc.host_id);
+        state.browser_senders.push(tx1);
+        state.browser_senders.push(tx2);
+        sessions.write().await.insert(session_id, state);
+
+        proc.handle_session_closed(session_id, Some(137)).await;
+
+        // Both senders should have received the SessionClosed message
+        let msg1 = rx1.try_recv().unwrap();
+        let msg2 = rx2.try_recv().unwrap();
+        match (msg1, msg2) {
+            (
+                crate::state::BrowserMessage::SessionClosed { exit_code: ec1 },
+                crate::state::BrowserMessage::SessionClosed { exit_code: ec2 },
+            ) => {
+                assert_eq!(ec1, Some(137));
+                assert_eq!(ec2, Some(137));
+            }
+            other => panic!("expected SessionClosed messages, got {other:?}"),
+        }
+
+        // Session should be removed from store
+        assert!(!sessions.read().await.contains_key(&session_id));
+    }
+
+    #[tokio::test]
     async fn handle_session_closed_without_memory_entry() {
         // Should work gracefully even if session is not in memory
         let db = test_db().await;

@@ -146,6 +146,248 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    use tower::ServiceExt;
+
+    // --- Route-level integration tests ---
+
+    async fn test_state() -> std::sync::Arc<crate::state::AppState> {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let connections =
+            std::sync::Arc::new(crate::state::ConnectionManager::new());
+        let sessions = std::sync::Arc::new(
+            tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        );
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        std::sync::Arc::new(crate::state::AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    async fn seed_search_data(pool: &sqlx::SqlitePool) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, project_path, started_at) \
+             VALUES ('l1', 's1', 'claude', 'opus', 'completed', '/home/user/project', '2026-03-10T10:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) \
+             VALUES ('l1', 'assistant', 'Implementing the search function for the project', '2026-03-10T10:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) \
+             VALUES ('l1', 'user', 'Can you fix the bug in the parser?', '2026-03-10T10:01:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_route_with_query() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?q=function")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 1);
+        assert_eq!(resp["results"].as_array().unwrap().len(), 1);
+        assert_eq!(resp["page"], 1);
+        assert_eq!(resp["per_page"], 20);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_route_no_results() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?q=nonexistent_xyz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 0);
+        assert!(resp["results"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_empty_query_returns_all() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        // Empty q= triggers search_without_fts which returns all transcripts
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?q=")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_no_query_param_returns_all() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_pagination() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?per_page=1&page=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["results"].as_array().unwrap().len(), 1);
+        assert_eq!(resp["total"], 2);
+        assert_eq!(resp["per_page"], 1);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_host_filter() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?host=test-host")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_nonexistent_host_filter() {
+        let state = test_state().await;
+        seed_search_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/search/transcripts?host=nonexistent")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["total"], 0);
+    }
+
     #[tokio::test]
     async fn fts_delete_sync() {
         let pool = setup_db().await;

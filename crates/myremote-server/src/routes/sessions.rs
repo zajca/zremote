@@ -195,3 +195,308 @@ pub async fn purge_session(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AppState, ConnectionManager};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn test_state() -> Arc<AppState> {
+        let pool = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    fn create_router(state: Arc<AppState>) -> axum::Router {
+        crate::create_router(state)
+    }
+
+    async fn insert_test_host(state: &AppState, id: &str, name: &str, hostname: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, agent_version, os, arch, \
+             status, last_seen_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'testhash', '0.1.0', 'linux', 'x86_64', 'online', \
+             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(hostname)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_test_session(state: &AppState, session_id: &str, host_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(host_id)
+        .bind(status)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_session_invalid_host_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts/not-a-uuid/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_invalid_host_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/hosts/not-a-uuid/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_session_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/sessions/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn close_session_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete("/api/sessions/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn close_session_when_agent_offline_still_returns_202() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id_str, "active").await;
+
+        // No connection registered -- agent is offline
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // close_session sends to agent if connected but still returns ACCEPTED
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn update_session_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/sessions/not-a-uuid")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_session_sets_name() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(session["name"], "renamed");
+    }
+
+    #[tokio::test]
+    async fn purge_session_invalid_uuid_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete("/api/sessions/not-a-uuid/purge")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn purge_session_not_found_returns_404() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn purge_active_session_returns_conflict() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn purge_closed_session_returns_no_content() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "closed").await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify session is actually gone
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_for_nonexistent_host_returns_empty() {
+        let state = test_state().await;
+        // Host ID is valid UUID but not in DB -- list_sessions doesn't check host existence
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(sessions.is_empty());
+    }
+}

@@ -150,3 +150,219 @@ pub async fn get_project_info(
             .await?;
     row.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    async fn setup_db() -> SqlitePool {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    async fn insert_project(pool: &SqlitePool, id: &str, host_id: &str, path: &str, name: &str) {
+        super::insert_project(pool, id, host_id, path, name)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_projects_empty() {
+        let pool = setup_db().await;
+        let projects = list_projects(&pool, "h1").await.unwrap();
+        assert!(projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_projects_returns_all_for_host() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj-a", "proj-a").await;
+        insert_project(&pool, "p2", "h1", "/home/user/proj-b", "proj-b").await;
+
+        let projects = list_projects(&pool, "h1").await.unwrap();
+        assert_eq!(projects.len(), 2);
+        // Ordered by name
+        assert_eq!(projects[0].name, "proj-a");
+        assert_eq!(projects[1].name, "proj-b");
+    }
+
+    #[tokio::test]
+    async fn get_project_found() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert_eq!(project.id, "p1");
+        assert_eq!(project.path, "/home/user/proj");
+    }
+
+    #[tokio::test]
+    async fn get_project_not_found() {
+        let pool = setup_db().await;
+        let result = get_project(&pool, "nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_project_by_host_and_path_found() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let project = get_project_by_host_and_path(&pool, "h1", "/home/user/proj")
+            .await
+            .unwrap();
+        assert_eq!(project.id, "p1");
+    }
+
+    #[tokio::test]
+    async fn get_project_by_host_and_path_not_found() {
+        let pool = setup_db().await;
+        let result = get_project_by_host_and_path(&pool, "h1", "/nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_project_host_and_path_found() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let result = get_project_host_and_path(&pool, "p1").await.unwrap();
+        assert!(result.is_some());
+        let (host_id, path) = result.unwrap();
+        assert_eq!(host_id, "h1");
+        assert_eq!(path, "/home/user/proj");
+    }
+
+    #[tokio::test]
+    async fn get_project_host_and_path_not_found() {
+        let pool = setup_db().await;
+        let result = get_project_host_and_path(&pool, "nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_project_removes_row() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let affected = delete_project(&pool, "p1").await.unwrap();
+        assert_eq!(affected, 1);
+
+        let projects = list_projects(&pool, "h1").await.unwrap();
+        assert!(projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_project_nonexistent_returns_zero() {
+        let pool = setup_db().await;
+        let affected = delete_project(&pool, "nonexistent").await.unwrap();
+        assert_eq!(affected, 0);
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_empty() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let worktrees = list_worktrees(&pool, "p1").await.unwrap();
+        assert!(worktrees.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_returns_children() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        // Insert worktree as child project
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, parent_project_id) VALUES ('wt1', 'h1', '/home/user/proj-wt', 'proj-wt', 'p1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let worktrees = list_worktrees(&pool, "p1").await.unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].id, "wt1");
+        assert_eq!(worktrees[0].parent_project_id, Some("p1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_worktree_path_found() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, parent_project_id) VALUES ('wt1', 'h1', '/home/user/proj-wt', 'proj-wt', 'p1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let path = get_worktree_path(&pool, "wt1", "p1").await.unwrap();
+        assert_eq!(path, Some("/home/user/proj-wt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_worktree_path_not_found() {
+        let pool = setup_db().await;
+        let path = get_worktree_path(&pool, "nonexistent", "p1").await.unwrap();
+        assert!(path.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_worktree_path_wrong_parent() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, parent_project_id) VALUES ('wt1', 'h1', '/home/user/proj-wt', 'proj-wt', 'p1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Query with wrong parent ID
+        let path = get_worktree_path(&pool, "wt1", "wrong-parent").await.unwrap();
+        assert!(path.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_project_info_found() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let (id, host_id, path) = get_project_info(&pool, "p1").await.unwrap();
+        assert_eq!(id, "p1");
+        assert_eq!(host_id, "h1");
+        assert_eq!(path, "/home/user/proj");
+    }
+
+    #[tokio::test]
+    async fn get_project_info_not_found() {
+        let pool = setup_db().await;
+        let result = get_project_info(&pool, "nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn insert_project_ignores_duplicate() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+        // Inserting again with same ID should not fail (INSERT OR IGNORE)
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let projects = list_projects(&pool, "h1").await.unwrap();
+        assert_eq!(projects.len(), 1);
+    }
+}
