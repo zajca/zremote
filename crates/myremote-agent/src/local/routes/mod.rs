@@ -1,3 +1,4 @@
+pub mod agentic;
 pub mod events;
 pub mod health;
 pub mod hosts;
