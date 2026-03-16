@@ -134,10 +134,11 @@ export const api = {
       }),
   },
   loops: {
-    list: (filters?: { session_id?: string; status?: string }) => {
+    list: (filters?: { session_id?: string; status?: string; project_id?: string }) => {
       const params = new URLSearchParams();
       if (filters?.session_id) params.set("session_id", filters.session_id);
       if (filters?.status) params.set("status", filters.status);
+      if (filters?.project_id) params.set("project_id", filters.project_id);
       const qs = params.toString();
       return request<AgenticLoop[]>(`/api/loops${qs ? `?${qs}` : ""}`);
     },

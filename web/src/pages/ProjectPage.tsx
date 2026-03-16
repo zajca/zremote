@@ -16,6 +16,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { SessionItem } from "../components/sidebar/SessionItem";
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
+import { ProjectLoopsTab } from "../components/agentic/ProjectLoopsTab";
 
 type Tab = "sessions" | "loops" | "knowledge" | "config" | "git";
 
@@ -287,9 +288,7 @@ export function ProjectPage() {
           </div>
         )}
         {activeTab === "loops" && (
-          <div className="text-sm text-text-tertiary">
-            Agentic loops for this project will appear here.
-          </div>
+          <ProjectLoopsTab projectId={project.id} hostId={project.host_id} />
         )}
         {activeTab === "knowledge" && (
           <KnowledgePanel projectId={project.id} hostId={project.host_id} />

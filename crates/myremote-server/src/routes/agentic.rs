@@ -14,6 +14,7 @@ pub struct ListLoopsQuery {
     pub status: Option<String>,
     pub host_id: Option<String>,
     pub session_id: Option<String>,
+    pub project_id: Option<String>,
 }
 
 /// Agentic loop response for API.
@@ -109,6 +110,12 @@ pub async fn list_loops(
             " AND session_id IN (SELECT id FROM sessions WHERE host_id = ?)",
         );
         binds.push(host_id.clone());
+    }
+    if let Some(ref project_id) = query.project_id {
+        sql.push_str(
+            " AND session_id IN (SELECT id FROM sessions WHERE project_id = ?)",
+        );
+        binds.push(project_id.clone());
     }
 
     sql.push_str(" ORDER BY started_at DESC");
