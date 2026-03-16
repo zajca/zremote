@@ -1,23 +1,59 @@
 # MyRemote
 
-Remote machine management platform with terminal sessions, agentic loop control, and real-time monitoring.
+Remote machine management platform with terminal sessions, agentic loop control, and real-time monitoring. Supports two operating modes: **Server mode** (multi-host via central server) and **Local mode** (single-host, serverless).
 
 ## Architecture
 
 ```
-Browser (React) <--HTTP/WS--> Server (Axum) <--WS--> Agent (on remote host)
+SERVER MODE:  Browser <--HTTP/WS--> Server (Axum) <--WS--> Agent (on remote host)
+
+LOCAL MODE:   Browser <--HTTP/WS--> Agent (Axum HTTP/WS server)
+                                    |-- Serves web UI (rust-embed)
+                                    |-- REST API (/api/*)
+                                    |-- Terminal WS (/ws/terminal/:id)
+                                    |-- Events WS (/ws/events)
+                                    |-- SQLite (~/.myremote/local.db)
+                                    |-- PTY sessions (direct)
+                                    |-- Agentic detection
+                                    |-- Projects / Knowledge
 ```
 
-- **Server** (`myremote-server`): Central hub. Axum web server with SQLite, manages agents and browser clients.
-- **Agent** (`myremote-agent`): Runs on each remote machine. Connects to server via WebSocket, spawns PTY sessions, detects agentic loops, scans projects.
-- **Protocol** (`myremote-protocol`): Shared message types for WebSocket communication.
-- **Web** (`web/`): React + TypeScript frontend with xterm.js terminal, zustand state, recharts analytics.
+- **Core** (`myremote-core`): Shared types, DB init, error handling, query functions, message processing. Used by both server and agent.
+- **Server** (`myremote-server`): Central hub for multi-host deployments. Axum web server with SQLite, manages multiple agents and browser clients.
+- **Agent** (`myremote-agent`): Runs on each machine. In server mode, connects to server via WebSocket. In local mode, serves the web UI and all APIs directly.
+- **Protocol** (`myremote-protocol`): Shared message types for WebSocket communication between server and agent.
+- **Web** (`web/`): React + TypeScript frontend with xterm.js terminal, zustand state, recharts analytics. Detects mode automatically via `/api/mode`.
 
 ## Quick Start
 
 ```bash
 nix develop                           # Enter dev shell (Rust, Bun, SQLite, etc.)
+```
 
+### Local Mode (single machine, no server needed)
+
+```bash
+# Build web UI first (embedded into agent binary)
+cd web && bun install && bun run build && cd ..
+
+# Run agent in local mode
+cargo run -p myremote-agent -- local --port 3000
+
+# Open browser at http://127.0.0.1:3000
+```
+
+For development with hot-reload:
+```bash
+# Terminal 1: Agent with filesystem-served UI
+cargo run -p myremote-agent -- local --port 3000 --web-dir ./web/dist/
+
+# Terminal 2: Vite dev server (proxies API to agent)
+cd web && bun run dev                 # :5173 proxies to :3000
+```
+
+### Server Mode (multi-host)
+
+```bash
 # Server
 MYREMOTE_TOKEN=secret cargo run -p myremote-server
 
@@ -28,7 +64,16 @@ MYREMOTE_SERVER_URL=ws://localhost:3000/ws/agent MYREMOTE_TOKEN=secret cargo run
 cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :3000
 ```
 
+### MCP Server Mode
+
+```bash
+# Run agent as MCP server on stdio (for Claude Code integration)
+cargo run -p myremote-agent -- mcp-serve --project /path/to/project
+```
+
 ## Environment Variables
+
+### Server Mode
 
 | Variable | Required | Used by | Default | Description |
 |---|---|---|---|---|
@@ -38,6 +83,14 @@ cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :30
 | `MYREMOTE_PORT` | No | Server | `3000` | HTTP/WS listen port |
 | `TELEGRAM_BOT_TOKEN` | No | Server | - | Enables Telegram bot integration |
 | `RUST_LOG` | No | Both | `info` | Tracing filter level |
+
+### Local Mode
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `RUST_LOG` | No | `info` | Tracing filter level |
+
+Local mode CLI flags: `--port` (3000), `--db` (~/.myremote/local.db), `--bind` (127.0.0.1), `--web-dir` (embedded)
 
 ## Crate Structure
 
@@ -49,77 +102,154 @@ crates/
       terminal.rs        Terminal session messages (Register, SessionCreate, TerminalInput/Output, etc.)
       agentic.rs         Agentic loop messages (LoopDetected, ToolCall, Transcript, Metrics, UserAction)
       project.rs         ProjectInfo, ProjectType
+      knowledge.rs       Knowledge integration protocol
+      claude.rs          Claude task protocol
 
-  myremote-server/       Axum HTTP/WS server
+  myremote-core/         Shared types, DB, queries, processing (used by server + agent)
+    src/
+      lib.rs             Module re-exports
+      error.rs           AppError enum + AppJson extractor with IntoResponse
+      db.rs              init_db() - SQLite pool with WAL, FK, auto-migrate
+      state.rs           SessionState, BrowserMessage, SessionStore, AgenticLoopState,
+                         AgenticLoopStore, ServerEvent, LoopInfo, ToolCallInfo, etc.
+      queries/           Standalone async DB functions parameterized by &SqlitePool
+        sessions.rs      10 functions (CRUD, resolve_project_id, purge, etc.)
+        loops.rs         6 functions (list with filters, get, tools, transcript)
+        hosts.rs         4 functions (list, get, update, delete)
+        projects.rs      8 functions (list, get, insert, delete, worktrees, etc.)
+        permissions.rs   3 functions (list, upsert, delete)
+        config.rs        4 functions (get/set global, get/set host)
+        analytics.rs     4 functions (tokens, cost, session_stats, loop_stats)
+        search.rs        FTS5 transcript search with filters
+        knowledge.rs     7 functions (KB status, memories CRUD, transcript fetch)
+        claude_sessions.rs  7 functions (task lifecycle, discovery)
+      processing/        Message processing extracted from server agents.rs
+        agentic.rs       AgenticProcessor - handles all 7 agentic message types
+        terminal.rs      TerminalProcessor - session created/closed handlers
+    migrations/          11 SQL migration files (single source of truth)
+
+  myremote-server/       Axum HTTP/WS server (multi-host mode)
     src/
       main.rs            Router setup (30+ routes), startup, graceful shutdown
-      state.rs           ConnectionManager, SessionStore (RwLock<HashMap>), AgenticLoopStore (DashMap), AppState
+      state.rs           ConnectionManager, AppState (re-exports shared types from core)
       auth.rs            SHA-256 token hashing, constant-time comparison (subtle crate)
-      db.rs              SQLite pool init (WAL mode, foreign keys, auto-migrate)
-      error.rs           AppError type with Into<Response>
+      db.rs              Re-exports init_db from core
+      error.rs           Re-exports AppError, AppJson from core
       routes/
-        agents.rs        Agent WebSocket handler, heartbeat monitor task
-        sessions.rs      Session CRUD (POST/GET/DELETE)
+        agents.rs        Agent WebSocket handler, heartbeat monitor, message routing
+        sessions.rs      Session CRUD - delegates to core::queries::sessions
         terminal.rs      Terminal WebSocket relay (browser <-> agent)
-        agentic.rs       Loop queries, tool calls, transcript, user actions
-        permissions.rs   Permission rule CRUD
-        projects.rs      Project discovery, add/remove/scan
-        analytics.rs     Token/cost/session/loop statistics
-        search.rs        Full-text transcript search (FTS5)
-        hosts.rs         Host CRUD
-        config.rs        Global and host-level config
-        health.rs        Health endpoint
-        events.rs        Server-sent events WebSocket (broadcast)
-      telegram/
-        mod.rs           Bot lifecycle (optional, starts if TELEGRAM_BOT_TOKEN set)
-        commands.rs      /list, /sessions, /select commands
-        callbacks.rs     Button interaction handlers
-        notifications.rs Event-driven notifications
-        format.rs        Message formatting
-    migrations/
-      001_initial.sql    hosts, sessions tables
-      002_agentic.sql    agentic_loops, tool_calls, transcript_entries, permission_rules
-      003_projects.sql   projects, config_global, config_host tables
-      004_analytics.sql  session_stats, transcript_fts (FTS5 virtual table)
+        agentic.rs       Loop queries - delegates to core::queries::loops
+        permissions.rs   Permission rules - delegates to core::queries::permissions
+        projects.rs      Project management - delegates to core::queries::projects
+        analytics.rs     Statistics - delegates to core::queries::analytics
+        search.rs        Transcript search - delegates to core::queries::search
+        hosts.rs         Host CRUD - delegates to core::queries::hosts
+        config.rs        Config - delegates to core::queries::config
+        knowledge.rs     Knowledge integration
+        claude_sessions.rs  Claude task lifecycle
+        health.rs        Health + /api/mode endpoint
+        events.rs        Server event broadcast WebSocket
+      telegram/          Optional Telegram bot (TELEGRAM_BOT_TOKEN)
+        mod.rs, commands.rs, callbacks.rs, notifications.rs, format.rs
 
-  myremote-agent/        Agent binary (runs on remote hosts)
+  myremote-agent/        Agent binary (runs on each host)
     src/
-      main.rs            Reconnection loop with exponential backoff (1s-300s, 25% jitter)
-      config.rs          AgentConfig::from_env(), detect_tmux() - fail-fast on missing vars
-      connection.rs      WebSocket lifecycle, message routing, sender task, heartbeat (30s)
+      main.rs            CLI: Run (server mode), Local, McpServe subcommands
+      config.rs          AgentConfig::from_env(), detect_tmux()
+      connection.rs      Server mode: WebSocket lifecycle, message routing, heartbeat (30s)
       pty.rs             PtySession wrapper (portable-pty), spawn_blocking for I/O
-      tmux.rs            TmuxSession backend - persistent sessions via tmux, FIFO-based I/O
+      tmux.rs            TmuxSession - persistent sessions via tmux, FIFO-based I/O
       session.rs         SessionManager - SessionBackend enum (Pty|Tmux), discover_existing()
-      agentic/           Loop detection & processing (claude-code stdout parsing)
-      project/           Project scanner (Cargo.toml, package.json, .claude/)
+      build.rs           Ensures web/dist/ exists for rust-embed
+      agentic/           Loop detection & processing
+        detector.rs      BFS process tree inspection for agentic tools
+        manager.rs       AgenticLoopManager - detection, output processing, user actions
+        claude_code.rs   Claude Code terminal output state machine
+        types.rs         Internal event types
+      project/           Project discovery
+        scanner.rs       Filesystem scanner (Cargo.toml, package.json, pyproject.toml)
+        git.rs           GitInspector - branch, commits, dirty state, worktree ops
+      hooks/             Claude Code hooks integration
+        server.rs        HTTP sidecar server (127.0.0.1:0) for hook events
+        handler.rs       Hook event processing (PreToolUse, PostToolUse, etc.)
+        permission.rs    PermissionManager - tool rules, async approval flow
+        mapper.rs        Session ID mapping (CC session <-> loop <-> terminal)
+        installer.rs     Hook script installation into Claude Code settings
+        metrics.rs       Tool call metrics tracking
+        transcript.rs    Incremental transcript parsing
+      knowledge/         OpenViking knowledge integration
+        mod.rs           KnowledgeManager - lifecycle, indexing, search, memory extraction
+        client.rs        HTTP client for OpenViking API
+        config.rs        OpenViking configuration
+        process.rs       OpenViking process spawning
+      claude/            Claude Code integration
+        mod.rs           CommandBuilder, PromptDetector, SessionScanner
+      mcp/               MCP server (JSON-RPC over stdio)
+        mod.rs           JSON-RPC 2.0 handler (initialize, tools/list, tools/call)
+        tools.rs         MCP tool definitions and execution
+      local/             Local mode (feature = "local")
+        mod.rs           run_local() - Axum server, PTY output loop, agentic detection,
+                         hooks server, graceful shutdown
+        state.rs         LocalAppState - DB, sessions, agentic, hooks, knowledge
+        static_files.rs  rust-embed web UI serving + filesystem dev mode, SPA fallback
+        routes/
+          health.rs      /health, /api/mode (returns "local")
+          hosts.rs       Synthetic single host
+          sessions.rs    Session CRUD + direct PTY spawning
+          terminal.rs    WebSocket terminal relay (browser <-> PTY, no server hop)
+          events.rs      ServerEvent broadcast WebSocket
+          agentic.rs     Loop queries, metrics, user actions
+          projects.rs    Project scan/git - calls ProjectScanner/GitInspector directly
+          permissions.rs Permission rule CRUD
+          config.rs      Global + host config
+          analytics.rs   Token/cost/session/loop statistics
+          search.rs      FTS5 transcript search
+          knowledge.rs   Full KB integration (11 endpoints)
+          claude_sessions.rs  Claude task lifecycle + discovery
 ```
 
 ## Web Structure
 
 ```
 web/src/
-  App.tsx               Main layout, routing, command palette (cmdk)
+  App.tsx               Main layout, routing, ModeProvider wrapper
   main.tsx              Entry point
   lib/
     api.ts              REST API client (namespace pattern: api.hosts, api.sessions, etc.)
+    connection.ts       Mode detection (detectMode -> /api/mode, cached)
   stores/
     agentic-store.ts    Zustand store for loops, tool calls, transcripts
+    knowledge-store.ts  Zustand store for knowledge base, memories, indexing
+    claude-task-store.ts  Zustand store for Claude tasks lifecycle
+  hooks/
+    useMode.ts          ModeProvider context + useMode() hook (mode, isLocal)
+    useHosts.ts         Fetch hosts list
+    useSessions.ts      Fetch sessions for host (listens to real-time events)
+    useProjects.ts      Fetch projects for host (listens to real-time events)
+    useAgenticLoops.ts  Fetch loops for session (15s fallback polling)
+    useRealtimeUpdates.ts  Master WebSocket listener for all ServerEvent types
+    useWebSocket.ts     Low-level WebSocket abstraction with auto-reconnect
   components/
     Terminal.tsx         xterm.js terminal wrapper
     agentic/            AgenticLoopPanel, TranscriptView, ToolCallQueue, CostTracker, ContextUsageBar
     sidebar/            HostItem, SessionItem, ProjectItem
-    layout/             Toast, ErrorBoundary
+    layout/             AppLayout, Sidebar, CommandPalette, ReconnectBanner, Toast, ErrorBoundary
+    settings/           SettingsPage (hides per-host overrides in local mode)
     ui/                 Button, Input, Badge, IconButton, StatusDot
-  pages/                Dashboard, Sessions, AgenticLoops, Projects, Settings
-  hooks/                Custom React hooks
-  types/                TypeScript type definitions
+  pages/                WelcomePage, HostPage, SessionPage, AgenticLoopPage, ProjectPage,
+                        AnalyticsDashboard (lazy), HistoryBrowser (lazy)
+  types/
+    agentic.ts          AgenticLoop, ToolCall, TranscriptEntry, PermissionRule
+    knowledge.ts        KnowledgeBase, KnowledgeMemory, SearchResult
+    claude-session.ts   ClaudeTask, CreateClaudeTaskRequest, DiscoveredClaudeSession
 ```
 
 Stack: React 19, TypeScript 5.8, Vite 6, Tailwind CSS 4, zustand 5, xterm.js 6, recharts 3, cmdk 1.1
 
 ## Database
 
-SQLite with WAL journal mode. Migrations auto-run at startup. 11 migration files define:
+SQLite with WAL journal mode. Migrations auto-run at startup. Migrations live in `crates/myremote-core/migrations/` (single source of truth, used by both server and local mode). 11 migration files define:
 
 - **hosts** - registered remote machines (id, hostname, status, agent_version, os, arch)
 - **sessions** - terminal sessions (host_id FK, shell, status: creating/active/closed/suspended, pid, suspended_at, tmux_name)
@@ -131,6 +261,9 @@ SQLite with WAL journal mode. Migrations auto-run at startup. 11 migration files
 - **projects** - discovered projects per host (path, type, has_claude_config)
 - **config_global** / **config_host** - key-value configuration
 - **session_stats** - aggregated session metrics
+- **knowledge_bases** - knowledge base per host (OpenViking status, version)
+- **knowledge_memories** - extracted memories per project (key, content, category, confidence)
+- **claude_sessions** - Claude task sessions (prompt, model, status, cost, linked loop)
 
 ## Key Patterns
 
@@ -144,6 +277,8 @@ SQLite with WAL journal mode. Migrations auto-run at startup. 11 migration files
 - **Reconnection**: Agent reconnects with exponential backoff (1s min, 300s max, 25% jitter).
 - **Event broadcast**: `tokio::sync::broadcast` channel (1024 capacity) for server events to browser WebSocket clients.
 - **Channels**: mpsc channels for outbound (256), PTY output (256), agentic messages (64). Sender task multiplexes onto WebSocket.
+- **Local mode direct PTY**: In local mode, browser connects directly to agent's PTY sessions (no server hop). PTY output loop reads output, appends to scrollback, sends to browser senders, and feeds to agentic manager.
+- **Mode detection**: Web UI calls `GET /api/mode` on load. Returns `{"mode":"server"}` or `{"mode":"local"}`. Cached for session lifetime. Drives conditional rendering (single host, no Telegram settings, etc.).
 
 ## Persistent Terminal Sessions (tmux)
 
@@ -219,13 +354,29 @@ Unchanged. `detector.rs` does BFS from shell PID. With tmux, shell PID is a chil
 ## Testing
 
 ```bash
-cargo test --workspace          # 443 Rust tests (215 agent + 94 protocol + 134 server)
+cargo test --workspace          # 549 Rust tests (312 agent + 55 core + 94 protocol + 88 server)
 cargo clippy --workspace        # Lint (all=deny, pedantic=warn)
-cd web && bun run test          # Vitest (2 tests)
+cd web && bun run test          # Vitest
 cd web && bun run typecheck     # tsc --noEmit
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.
+
+## Build
+
+```bash
+# Full workspace build
+cargo build --workspace
+
+# Agent with local mode (default feature, includes embedded web UI)
+cd web && bun run build           # Produces web/dist/ (required for rust-embed)
+cargo build -p myremote-agent     # Embeds web/dist/ into binary
+
+# Agent without local mode (smaller binary, server mode only)
+cargo build -p myremote-agent --no-default-features
+```
+
+The `local` cargo feature (default-on) enables: `rust-embed`, `mime_guess`, `tower-http`, `sqlx` as optional deps on the agent. The `build.rs` ensures `web/dist/` directory exists at compile time.
 
 ## Coding Conventions
 
