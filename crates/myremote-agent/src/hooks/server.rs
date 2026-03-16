@@ -201,4 +201,179 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
     }
+
+    #[tokio::test]
+    async fn server_handles_stop_event() {
+        let (agentic_tx, _agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        mapper.register_loop(session_id, loop_id).await;
+
+        let permission_manager = Arc::new(PermissionManager::new());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .json(&serde_json::json!({
+                "session_id": "cc-session",
+                "hook_event_name": "Stop",
+                "stop_reason": "end_turn"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_handles_post_tool_use() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        mapper.register_loop(session_id, loop_id).await;
+
+        let permission_manager = Arc::new(PermissionManager::new());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+
+        // Send PreToolUse first to register the tool_call_id
+        let _ = client
+            .post(format!("http://{addr}/hooks"))
+            .json(&serde_json::json!({
+                "session_id": "cc-session",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_use_id": "toolu_post_test"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        // Now send PostToolUse
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .json(&serde_json::json!({
+                "session_id": "cc-session",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_post_test",
+                "tool_result": "file1.txt\nfile2.txt"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        // Drain messages and verify we got something
+        let msg = agentic_rx.try_recv().unwrap();
+        assert!(matches!(msg, myremote_protocol::AgenticAgentMessage::LoopToolCall { .. }));
+
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_handles_notification_event() {
+        let (agentic_tx, _agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let permission_manager = Arc::new(PermissionManager::new());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .json(&serde_json::json!({
+                "session_id": "cc-session",
+                "hook_event_name": "Notification",
+                "message": "Task completed"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_handles_invalid_json() {
+        let (agentic_tx, _agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let permission_manager = Arc::new(PermissionManager::new());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .header("content-type", "application/json")
+            .body("{invalid json")
+            .send()
+            .await
+            .unwrap();
+
+        // Should return 422 (unprocessable entity) for invalid JSON
+        assert!(resp.status().is_client_error());
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_already_true() {
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        // Should return immediately when already true
+        wait_for_shutdown(rx).await;
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_becomes_true() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            wait_for_shutdown(rx).await;
+        });
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_sender_dropped() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            wait_for_shutdown(rx).await;
+        });
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn port_file_path_returns_valid_path() {
+        // This test depends on HOME being set, which it normally is
+        if std::env::var("HOME").is_ok() {
+            let path = port_file_path().unwrap();
+            assert!(path.ends_with("hooks-port"));
+            assert!(path.to_string_lossy().contains(".myremote"));
+        }
+    }
 }

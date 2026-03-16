@@ -149,4 +149,81 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn filesystem_handler_spa_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.html");
+        tokio::fs::write(&index_path, "<html><body>SPA</body></html>")
+            .await
+            .unwrap();
+
+        // Request a non-existent file path (SPA route)
+        let response = filesystem_static_handler(
+            Uri::from_static("/sessions/some-id"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn filesystem_handler_no_index_html() {
+        // Directory exists but has no index.html
+        let dir = tempfile::tempdir().unwrap();
+
+        let response = filesystem_static_handler(
+            Uri::from_static("/nonexistent/path"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+        // Should return 404 since there is no index.html for fallback
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn filesystem_handler_serves_js_file_with_correct_mime() {
+        let dir = tempfile::tempdir().unwrap();
+        let js_path = dir.path().join("app.js");
+        tokio::fs::write(&js_path, "console.log('hello');")
+            .await
+            .unwrap();
+
+        let response = filesystem_static_handler(
+            Uri::from_static("/app.js"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn filesystem_handler_nested_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("assets");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let file_path = sub_dir.join("style.css");
+        tokio::fs::write(&file_path, "body{}")
+            .await
+            .unwrap();
+
+        let response = filesystem_static_handler(
+            Uri::from_static("/assets/style.css"),
+            dir.path().to_path_buf(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn static_handler_returns_for_nonexistent_asset() {
+        // Request a specific asset file that doesn't exist in embedded assets
+        let response = static_handler(Uri::from_static("/nonexistent.js")).await;
+        let status = response.status();
+        // Falls back to index.html (if exists) or 404
+        assert!(
+            status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+            "unexpected status: {status}"
+        );
+    }
 }

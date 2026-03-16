@@ -164,3 +164,192 @@ pub async fn get_session_host_id(
     .await?;
     Ok(row.map(|(s,)| s))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    async fn setup_db() -> SqlitePool {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, started_at) \
+             VALUES ('l1', 's1', 'claude', 'opus', 'completed', '2026-03-10T10:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn list_loops_no_filter() {
+        let pool = setup_db().await;
+        let filter = ListLoopsFilter {
+            status: None,
+            host_id: None,
+            session_id: None,
+            project_id: None,
+        };
+        let loops = list_loops(&pool, &filter).await.unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].id, "l1");
+    }
+
+    #[tokio::test]
+    async fn list_loops_with_status_filter() {
+        let pool = setup_db().await;
+        let filter = ListLoopsFilter {
+            status: Some("completed".to_string()),
+            host_id: None,
+            session_id: None,
+            project_id: None,
+        };
+        let loops = list_loops(&pool, &filter).await.unwrap();
+        assert_eq!(loops.len(), 1);
+
+        let filter_miss = ListLoopsFilter {
+            status: Some("active".to_string()),
+            host_id: None,
+            session_id: None,
+            project_id: None,
+        };
+        let loops_miss = list_loops(&pool, &filter_miss).await.unwrap();
+        assert!(loops_miss.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_loops_with_session_filter() {
+        let pool = setup_db().await;
+        let filter = ListLoopsFilter {
+            status: None,
+            host_id: None,
+            session_id: Some("s1".to_string()),
+            project_id: None,
+        };
+        let loops = list_loops(&pool, &filter).await.unwrap();
+        assert_eq!(loops.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_loops_with_host_filter() {
+        let pool = setup_db().await;
+        let filter = ListLoopsFilter {
+            status: None,
+            host_id: Some("h1".to_string()),
+            session_id: None,
+            project_id: None,
+        };
+        let loops = list_loops(&pool, &filter).await.unwrap();
+        assert_eq!(loops.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_loop_found() {
+        let pool = setup_db().await;
+        let loop_row = get_loop(&pool, "l1").await.unwrap();
+        assert_eq!(loop_row.id, "l1");
+        assert_eq!(loop_row.tool_name, "claude");
+        assert_eq!(loop_row.model, Some("opus".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_loop_not_found() {
+        let pool = setup_db().await;
+        let result = get_loop(&pool, "nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_loop_tools_empty() {
+        let pool = setup_db().await;
+        let tools = get_loop_tools(&pool, "l1").await.unwrap();
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_loop_tools_with_data() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO tool_calls (id, loop_id, tool_name, status) VALUES ('tc1', 'l1', 'Bash', 'completed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tools = get_loop_tools(&pool, "l1").await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "Bash");
+    }
+
+    #[tokio::test]
+    async fn get_loop_transcript_empty() {
+        let pool = setup_db().await;
+        let transcript = get_loop_transcript(&pool, "l1").await.unwrap();
+        assert!(transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_loop_transcript_with_data() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) \
+             VALUES ('l1', 'assistant', 'Hello', '2026-03-10T10:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let transcript = get_loop_transcript(&pool, "l1").await.unwrap();
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].role, "assistant");
+        assert_eq!(transcript[0].content, "Hello");
+    }
+
+    #[tokio::test]
+    async fn get_loop_session_id_found() {
+        let pool = setup_db().await;
+        let session_id = get_loop_session_id(&pool, "l1").await.unwrap();
+        assert_eq!(session_id, Some("s1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_loop_session_id_not_found() {
+        let pool = setup_db().await;
+        let session_id = get_loop_session_id(&pool, "nonexistent").await.unwrap();
+        assert!(session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_session_host_id_found() {
+        let pool = setup_db().await;
+        let host_id = get_session_host_id(&pool, "s1").await.unwrap();
+        assert_eq!(host_id, Some("h1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_session_host_id_not_found() {
+        let pool = setup_db().await;
+        let host_id = get_session_host_id(&pool, "nonexistent").await.unwrap();
+        assert!(host_id.is_none());
+    }
+}

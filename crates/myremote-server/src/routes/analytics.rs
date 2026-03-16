@@ -188,6 +188,295 @@ mod tests {
         assert_eq!(stats.active_sessions, 1);
     }
 
+    use tower::ServiceExt;
+
+    // --- Route-level integration tests ---
+
+    async fn test_state() -> std::sync::Arc<crate::state::AppState> {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let connections =
+            std::sync::Arc::new(crate::state::ConnectionManager::new());
+        let sessions = std::sync::Arc::new(
+            tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        );
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        std::sync::Arc::new(crate::state::AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    async fn seed_analytics_data(pool: &sqlx::SqlitePool) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, created_at) VALUES ('s1', 'h1', 'active', '2026-03-10T09:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, total_tokens_in, total_tokens_out, estimated_cost_usd, started_at) \
+             VALUES ('l1', 's1', 'claude', 'opus', 'completed', 1000, 500, 0.05, '2026-03-10T10:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, total_tokens_in, total_tokens_out, estimated_cost_usd, started_at) \
+             VALUES ('l2', 's1', 'claude', 'sonnet', 'error', 2000, 1000, 0.10, '2026-03-11T11:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_tokens_route_returns_ok() {
+        let state = test_state().await;
+        seed_analytics_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/tokens")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let tokens: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tokens.len(), 2); // two different days
+    }
+
+    #[tokio::test]
+    async fn get_tokens_by_model() {
+        let state = test_state().await;
+        seed_analytics_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/tokens?by=model")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let tokens: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tokens.len(), 2); // opus + sonnet
+    }
+
+    #[tokio::test]
+    async fn get_tokens_with_date_filter() {
+        let state = test_state().await;
+        seed_analytics_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get(
+                    "/api/analytics/tokens?from=2026-03-11T00:00:00Z&to=2026-03-12T00:00:00Z",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let tokens: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tokens.len(), 1); // only the 2026-03-11 entry
+    }
+
+    #[tokio::test]
+    async fn get_cost_route_returns_ok() {
+        let state = test_state().await;
+        seed_analytics_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/cost")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let costs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(costs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_cost_by_month() {
+        let state = test_state().await;
+        seed_analytics_data(&state.db).await;
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/cost?granularity=month")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let costs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        // Both entries are in 2026-03, so grouped into one month
+        assert_eq!(costs.len(), 1);
+        let cost = costs[0]["cost"].as_f64().unwrap();
+        assert!((cost - 0.15).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn get_sessions_stats_route_returns_ok() {
+        let app_state = test_state().await;
+        seed_analytics_data(&app_state.db).await;
+
+        let app = crate::create_router(app_state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/sessions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_sessions"], 1);
+        assert_eq!(json["active_sessions"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_sessions_stats_with_date_range() {
+        let app_state = test_state().await;
+        seed_analytics_data(&app_state.db).await;
+
+        let app = crate::create_router(app_state);
+        // Filter to a date range that excludes the session
+        let response = app
+            .oneshot(
+                axum::http::Request::get(
+                    "/api/analytics/sessions?from=2027-01-01T00:00:00Z",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_sessions"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_loops_stats_route_returns_ok() {
+        let app_state = test_state().await;
+        seed_analytics_data(&app_state.db).await;
+
+        let app = crate::create_router(app_state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/api/analytics/loops")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_loops"], 2);
+        assert_eq!(json["completed"], 1);
+        assert_eq!(json["errored"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_loops_stats_with_date_range() {
+        let app_state = test_state().await;
+        seed_analytics_data(&app_state.db).await;
+
+        let app = crate::create_router(app_state);
+        let response = app
+            .oneshot(
+                axum::http::Request::get(
+                    "/api/analytics/loops?from=2026-03-11T00:00:00Z",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_loops"], 1);
+        assert_eq!(json["errored"], 1);
+    }
+
     #[tokio::test]
     async fn fts_search_returns_matching_transcript() {
         let pool = setup_db().await;

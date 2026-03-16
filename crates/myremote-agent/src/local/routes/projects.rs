@@ -1428,4 +1428,201 @@ mod tests {
         assert_eq!(json[0]["id"], worktree_id);
         assert_eq!(json[0]["parent_project_id"], project_id);
     }
+
+    #[tokio::test]
+    async fn add_project_empty_path_returns_bad_request() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": ""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_project_without_git() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        // Create a temp dir that is NOT a git repo
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({ "path": project_path }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["path"], project_path);
+        // No git info should be present
+        assert!(json["git_branch"].is_null());
+    }
+
+    #[tokio::test]
+    async fn delete_project_nonexistent() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_project_nonexistent() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_nonexistent_project() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/git/refresh"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_on_non_git_project() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        // Create a temp dir that is NOT a git repo
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/worktrees"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"branch": "feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should fail because dir is not a git repo
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn parse_host_id_valid() {
+        let id = Uuid::new_v4().to_string();
+        assert!(parse_host_id(&id).is_ok());
+    }
+
+    #[test]
+    fn parse_host_id_invalid() {
+        let result = parse_host_id("not-a-uuid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_project_id_valid() {
+        let id = Uuid::new_v4().to_string();
+        assert!(parse_project_id(&id).is_ok());
+    }
+
+    #[test]
+    fn parse_project_id_invalid() {
+        let result = parse_project_id("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_project_request_deserialize() {
+        let json = r#"{"path": "/home/user/project"}"#;
+        let req: AddProjectRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.path, "/home/user/project");
+    }
+
+    #[test]
+    fn create_worktree_request_deserialize_minimal() {
+        let json = r#"{"branch": "feature"}"#;
+        let req: CreateWorktreeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.branch, "feature");
+        assert!(req.path.is_none());
+        assert!(req.new_branch.is_none());
+    }
+
+    #[test]
+    fn create_worktree_request_deserialize_full() {
+        let json = r#"{"branch": "feature", "path": "/tmp/wt", "new_branch": true}"#;
+        let req: CreateWorktreeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.branch, "feature");
+        assert_eq!(req.path.as_deref(), Some("/tmp/wt"));
+        assert_eq!(req.new_branch, Some(true));
+    }
 }

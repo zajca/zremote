@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Install the myremote hook scripts and update Claude Code settings.
 ///
@@ -153,8 +153,11 @@ async fn update_claude_settings(
 #[allow(dead_code)]
 pub async fn uninstall_hooks() -> Result<(), InstallError> {
     let home = std::env::var("HOME").map_err(|_| InstallError::HomeNotSet)?;
-    let home = PathBuf::from(home);
+    uninstall_hooks_at(Path::new(&home)).await
+}
 
+/// Remove myremote hooks at a specific home directory path (testable).
+async fn uninstall_hooks_at(home: &Path) -> Result<(), InstallError> {
     let settings_path = home.join(".claude").join("settings.json");
     if !settings_path.exists() {
         return Ok(());
@@ -326,5 +329,207 @@ mod tests {
         assert!(InstallError::InvalidSettings
             .to_string()
             .contains("settings.json"));
+    }
+
+    #[test]
+    fn install_error_display_io() {
+        let err = InstallError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        ));
+        let msg = err.to_string();
+        assert!(msg.contains("I/O error"));
+        assert!(msg.contains("file not found"));
+    }
+
+    #[test]
+    fn install_error_is_error_trait() {
+        // Verify InstallError implements std::error::Error
+        let err: Box<dyn std::error::Error> = Box::new(InstallError::HomeNotSet);
+        assert!(err.to_string().contains("HOME"));
+    }
+
+    #[tokio::test]
+    async fn install_with_existing_non_object_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create existing settings where hooks value is an array (invalid)
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let settings = serde_json::json!({
+            "hooks": "not an object"
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Should fail because hooks is not an object
+        let result = install_hooks_at(home).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn install_with_invalid_json_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create existing settings with invalid JSON
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), "not json {{{")
+            .await
+            .unwrap();
+
+        // Should handle gracefully (falls back to empty object)
+        let result = install_hooks_at(home).await;
+        assert!(result.is_ok());
+
+        // Verify settings were written correctly
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(settings["hooks"].is_object());
+    }
+
+    #[tokio::test]
+    async fn uninstall_hooks_removes_myremote_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Install first
+        install_hooks_at(home).await.unwrap();
+
+        // Verify hooks exist
+        let settings_path = home.join(".claude/settings.json");
+        let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(!settings["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // Uninstall using the testable function
+        let result = uninstall_hooks_at(home).await;
+        assert!(result.is_ok());
+
+        // Verify hooks were removed
+        let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        for event in &[
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "PermissionRequest",
+            "Notification",
+        ] {
+            let arr = settings["hooks"][event].as_array().unwrap();
+            assert!(arr.is_empty(), "hook {event} should be empty after uninstall");
+        }
+
+        // Verify script was removed
+        let script = home.join(".myremote/hooks/myremote-hook.sh");
+        assert!(!script.exists());
+    }
+
+    #[tokio::test]
+    async fn uninstall_no_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Should succeed even if there's no settings file
+        let result = uninstall_hooks_at(home).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn uninstall_preserves_user_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create settings with both user and myremote hooks
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/my-hook.sh"}]},
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/home/user/.myremote/hooks/myremote-hook.sh"}]}
+                ]
+            }
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        uninstall_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let pre_tool = updated["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 1, "user hook should be preserved");
+        assert!(pre_tool[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("my-hook.sh"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn install_sets_executable_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        install_hooks_at(home).await.unwrap();
+
+        let script = home.join(".myremote/hooks/myremote-hook.sh");
+        let metadata = std::fs::metadata(&script).unwrap();
+        let mode = metadata.permissions().mode();
+        // Check that the executable bit is set
+        assert!(mode & 0o111 != 0, "script should be executable, mode: {mode:o}");
+    }
+
+    #[test]
+    fn hook_script_is_complete_shell_script() {
+        let script = generate_hook_script();
+        // Verify it's a complete shell script
+        assert!(script.starts_with("#!/bin/sh"));
+        assert!(script.contains("PORT="));
+        assert!(script.contains("INPUT="));
+        assert!(script.contains("RESPONSE="));
+        assert!(script.contains("exit 0"));
+        // Verify it reads from hooks-port file
+        assert!(script.contains("hooks-port"));
+        // Verify it POSTs to the sidecar
+        assert!(script.contains("POST"));
+        assert!(script.contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn install_with_root_level_non_object_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create settings that is not a JSON object (e.g., an array)
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        tokio::fs::write(claude_dir.join("settings.json"), "[]")
+            .await
+            .unwrap();
+
+        // Should fail since settings root is not an object
+        let result = install_hooks_at(home).await;
+        assert!(result.is_err());
     }
 }

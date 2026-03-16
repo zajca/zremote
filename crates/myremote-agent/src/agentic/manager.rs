@@ -1014,4 +1014,156 @@ mod tests {
         let (_, bytes) = result.unwrap();
         assert_eq!(bytes, b"\n");
     }
+
+    #[test]
+    fn handle_user_action_reject_nudges_adapter_state() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // Reject action should also nudge the adapter (same as approve)
+        let result = manager.handle_user_action(&loop_id, UserAction::Reject, None);
+        assert!(result.is_some());
+        let (sid, bytes) = result.unwrap();
+        assert_eq!(sid, session_id);
+        assert_eq!(bytes, b"n\n");
+    }
+
+    #[test]
+    fn check_sessions_with_stale_loop_process() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Insert a loop with a PID that doesn't exist (very high PID)
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: u32::MAX - 1,
+            },
+        );
+
+        assert!(manager.has_loop(&loop_id));
+
+        // Check sessions with the same session_id - the dead PID should cause LoopEnded
+        let messages = manager.check_sessions(std::iter::once((session_id, 1)));
+
+        // Should get a LoopEnded message since the process is dead
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                AgenticAgentMessage::LoopEnded {
+                    reason,
+                    ..
+                } if reason == "process_exited"
+            )),
+            "expected LoopEnded with process_exited reason, got: {messages:?}"
+        );
+
+        // Loop should be removed
+        assert!(!manager.has_loop(&loop_id));
+    }
+
+    #[test]
+    fn process_output_tool_use_pattern() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // Transition to working state first
+        let msgs = manager.process_output(&session_id, b">>> Working");
+        assert!(!msgs.is_empty());
+
+        // Send tool use pattern
+        let msgs = manager.process_output(&session_id, b"Read /src/main.rs\n");
+        // May or may not produce events depending on adapter parsing
+        // The important thing is it doesn't panic
+        let _ = msgs;
+    }
+
+    #[test]
+    fn handle_user_action_provide_input_with_empty_payload() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // ProvideInput with empty string payload
+        let result = manager.handle_user_action(&loop_id, UserAction::ProvideInput, Some(""));
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, b"\n");
+    }
+
+    #[test]
+    fn process_output_sequential_working_and_waiting() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // First: transition to working
+        let msgs = manager.process_output(&session_id, b">>> Working on it");
+        assert!(!msgs.is_empty());
+
+        // Then: approval prompt
+        let msgs = manager.process_output(&session_id, b"Allow Bash? (y/n)");
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            AgenticAgentMessage::LoopStateUpdate {
+                status: AgenticStatus::WaitingForInput,
+                ..
+            }
+        )));
+
+        // Then: back to working after approval
+        let msgs = manager.process_output(&session_id, b">>> Working after approval");
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            AgenticAgentMessage::LoopStateUpdate {
+                status: AgenticStatus::Working,
+                ..
+            }
+        )));
+    }
 }

@@ -216,4 +216,149 @@ mod tests {
         assert!(msg.contains("/sessions"));
         assert!(msg.contains("/preview"));
     }
+
+    #[test]
+    fn format_loop_status_message() {
+        let msg = format_loop_status("my-host", "claude-code", "working");
+        assert!(msg.contains("<b>Loop status: working</b>"));
+        assert!(msg.contains("my-host"));
+        assert!(msg.contains("claude-code"));
+    }
+
+    #[test]
+    fn format_batched_tool_calls_message() {
+        let msg = format_batched_tool_calls("my-host", 5);
+        assert!(msg.contains("5 tool calls pending"));
+        assert!(msg.contains("my-host"));
+    }
+
+    #[test]
+    fn format_hosts_list_single_online() {
+        let hosts = vec![(
+            "my-host".to_string(),
+            "online".to_string(),
+            "2026-03-10T10:00:00Z".to_string(),
+            Some("linux".to_string()),
+            Some("x86_64".to_string()),
+        )];
+        let msg = format_hosts_list(&hosts);
+        assert!(msg.contains("<b>Hosts</b>"));
+        assert!(msg.contains("[+]"));
+        assert!(msg.contains("my-host"));
+        assert!(msg.contains("(linux/x86_64)"));
+    }
+
+    #[test]
+    fn format_hosts_list_offline_host() {
+        let hosts = vec![(
+            "down-host".to_string(),
+            "offline".to_string(),
+            "2026-03-10T10:00:00Z".to_string(),
+            None,
+            None,
+        )];
+        let msg = format_hosts_list(&hosts);
+        assert!(msg.contains("[-]"));
+        assert!(msg.contains("down-host"));
+        // No platform info
+        assert!(!msg.contains('('));
+    }
+
+    #[test]
+    fn format_hosts_list_os_only() {
+        let hosts = vec![(
+            "host".to_string(),
+            "online".to_string(),
+            "2026-03-10T10:00:00Z".to_string(),
+            Some("macos".to_string()),
+            None,
+        )];
+        let msg = format_hosts_list(&hosts);
+        assert!(msg.contains("(macos)"));
+    }
+
+    #[test]
+    fn format_sessions_list_single() {
+        let sessions = vec![(
+            "abcdef12-3456-7890-abcd-ef1234567890".to_string(),
+            "my-host".to_string(),
+            Some("/bin/bash".to_string()),
+            "active".to_string(),
+            Some("claude-code".to_string()),
+        )];
+        let msg = format_sessions_list(&sessions);
+        assert!(msg.contains("<b>Sessions</b>"));
+        assert!(msg.contains("abcdef12"));
+        assert!(msg.contains("my-host"));
+        assert!(msg.contains("/bin/bash"));
+        assert!(msg.contains("(active)"));
+        assert!(msg.contains("[claude-code]"));
+    }
+
+    #[test]
+    fn format_sessions_list_no_shell_no_tool() {
+        let sessions = vec![(
+            "abcdef12-3456-7890-abcd-ef1234567890".to_string(),
+            "my-host".to_string(),
+            None,
+            "creating".to_string(),
+            None,
+        )];
+        let msg = format_sessions_list(&sessions);
+        assert!(msg.contains('?')); // shell fallback
+        assert!(!msg.contains('['));
+    }
+
+    #[test]
+    fn format_sessions_empty() {
+        assert_eq!(format_sessions_list(&[]), "No active sessions.");
+    }
+
+    #[test]
+    fn format_preview_message() {
+        let msg = format_preview(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            "$ ls\nfile.txt\n",
+        );
+        assert!(msg.contains("<b>Preview: abcdef12</b>"));
+        assert!(msg.contains("file.txt"));
+    }
+
+    #[test]
+    fn format_preview_short_session_id() {
+        let msg = format_preview("abc", "output");
+        assert!(msg.contains("abc"));
+    }
+
+    #[test]
+    fn escape_html_all_entities() {
+        assert_eq!(escape_html("a<b>c&d"), "a&lt;b&gt;c&amp;d");
+    }
+
+    #[test]
+    fn escape_html_no_entities() {
+        assert_eq!(escape_html("plain text"), "plain text");
+    }
+
+    #[test]
+    fn truncate_exactly_at_limit() {
+        let msg = "a".repeat(MAX_MESSAGE_LEN);
+        let result = truncate_message(&msg);
+        assert_eq!(result.len(), MAX_MESSAGE_LEN);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn format_host_disconnected_escapes_html() {
+        let msg = format_host_disconnected("<script>alert(1)</script>");
+        assert!(msg.contains("&lt;script&gt;"));
+        assert!(!msg.contains("<script>"));
+    }
+
+    #[test]
+    fn format_tool_call_pending_escapes_arguments() {
+        let msg = format_tool_call_pending("host", "Bash", r#"<img onerror="alert(1)">"#);
+        assert!(msg.contains("&lt;img"));
+        assert!(!msg.contains("<img"));
+    }
 }

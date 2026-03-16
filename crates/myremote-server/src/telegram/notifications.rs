@@ -248,4 +248,127 @@ mod tests {
         };
         assert!(format_event(&event).is_none());
     }
+
+    #[test]
+    fn loop_detected_produces_notification() {
+        let event = ServerEvent::LoopDetected {
+            loop_info: make_loop_info("working"),
+            host_id: "h1".to_string(),
+            hostname: "my-host".to_string(),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let (text, kb) = result.unwrap();
+        assert!(text.contains("Loop status: working"));
+        assert!(text.contains("my-host"));
+        assert!(kb.is_none());
+    }
+
+    #[test]
+    fn error_status_notifies() {
+        let event = ServerEvent::LoopStatusChanged {
+            loop_info: make_loop_info("error"),
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        assert!(format_event(&event).is_some());
+    }
+
+    #[test]
+    fn paused_status_notifies() {
+        let event = ServerEvent::LoopStatusChanged {
+            loop_info: make_loop_info("paused"),
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        assert!(format_event(&event).is_some());
+    }
+
+    #[test]
+    fn completed_status_does_not_notify() {
+        let event = ServerEvent::LoopStatusChanged {
+            loop_info: make_loop_info("completed"),
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        assert!(format_event(&event).is_none());
+    }
+
+    #[test]
+    fn loop_ended_without_summary_or_reason() {
+        let info = make_loop_info("completed");
+        let event = ServerEvent::LoopEnded {
+            loop_info: info,
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let (text, _) = result.unwrap();
+        assert!(text.contains("unknown")); // end_reason is None -> "unknown"
+        assert!(text.contains("0.0000")); // cost is 0
+    }
+
+    #[test]
+    fn loop_ended_with_summary_and_cost() {
+        let mut info = make_loop_info("completed");
+        info.end_reason = Some("user_abort".to_string());
+        info.summary = Some("Refactored the parser module".to_string());
+        info.estimated_cost_usd = 1.2345;
+        let event = ServerEvent::LoopEnded {
+            loop_info: info,
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let (text, _) = result.unwrap();
+        assert!(text.contains("user_abort"));
+        assert!(text.contains("Refactored the parser module"));
+        assert!(text.contains("1.2345"));
+    }
+
+    #[test]
+    fn tool_call_pending_no_arguments() {
+        let event = ServerEvent::ToolCallPending {
+            loop_id: "loop-1".to_string(),
+            tool_call: crate::state::ToolCallInfo {
+                id: "tc-1".to_string(),
+                loop_id: "loop-1".to_string(),
+                tool_name: "Read".to_string(),
+                arguments_json: None,
+                status: "pending".to_string(),
+                result_preview: None,
+                duration_ms: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                resolved_at: None,
+            },
+            host_id: "h-1".to_string(),
+            hostname: "my-host".to_string(),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let (text, kb) = result.unwrap();
+        assert!(text.contains("Read"));
+        assert!(text.contains("{}")); // fallback when arguments_json is None
+        assert!(kb.is_some());
+        // Verify keyboard has Approve and Reject buttons
+        let keyboard = kb.unwrap();
+        let buttons: Vec<&str> = keyboard
+            .inline_keyboard
+            .iter()
+            .flat_map(|row| row.iter().map(|b| b.text.as_str()))
+            .collect();
+        assert!(buttons.contains(&"Approve"));
+        assert!(buttons.contains(&"Reject"));
+    }
+
+    #[test]
+    fn session_closed_does_not_notify() {
+        let event = ServerEvent::SessionClosed {
+            session_id: "s1".to_string(),
+            exit_code: Some(0),
+        };
+        assert!(format_event(&event).is_none());
+    }
 }

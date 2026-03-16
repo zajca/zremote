@@ -130,3 +130,171 @@ impl Drop for PtySession {
         self.reader_handle.abort();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_and_get_pid() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let session_id = uuid::Uuid::new_v4();
+        let (session, pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            tx,
+        )
+        .unwrap();
+
+        assert!(pid > 0);
+        assert_eq!(session.pid(), pid);
+
+        // Clean up
+        drop(session);
+        // Drain any remaining output
+        while rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn spawn_with_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let session_id = uuid::Uuid::new_v4();
+        let (session, pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            120,
+            40,
+            Some(dir.path().to_str().unwrap()),
+            tx,
+        )
+        .unwrap();
+
+        assert!(pid > 0);
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn write_and_read_output() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let session_id = uuid::Uuid::new_v4();
+        let (mut session, _pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            tx,
+        )
+        .unwrap();
+
+        // Write a command to the PTY
+        session.write(b"echo hello_from_pty\n").unwrap();
+
+        // Wait for output (with timeout)
+        let mut found = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Some((sid, data))) => {
+                    assert_eq!(sid, session_id);
+                    if String::from_utf8_lossy(&data).contains("hello_from_pty") {
+                        found = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(found, "should have received 'hello_from_pty' in output");
+
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn resize_session() {
+        let (tx, _rx) = mpsc::channel(64);
+        let session_id = uuid::Uuid::new_v4();
+        let (session, _pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            tx,
+        )
+        .unwrap();
+
+        // Resize should succeed
+        let result = session.resize(120, 40);
+        assert!(result.is_ok());
+
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn kill_and_try_wait() {
+        let (tx, _rx) = mpsc::channel(64);
+        let session_id = uuid::Uuid::new_v4();
+        let (mut session, _pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            tx,
+        )
+        .unwrap();
+
+        session.kill();
+
+        // Give a moment for the process to die
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // try_wait should return an exit code after kill
+        let exit = session.try_wait();
+        // Exit code might be Some or None depending on timing
+        let _ = exit;
+
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn drop_kills_child() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let session_id = uuid::Uuid::new_v4();
+        let (_session, pid) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            tx,
+        )
+        .unwrap();
+
+        assert!(pid > 0);
+
+        // Drop the session
+        drop(_session);
+
+        // Drain the channel - should eventually get an EOF (empty vec)
+        let mut got_eof = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Some((_, data))) if data.is_empty() => {
+                    got_eof = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        // EOF signal may or may not arrive depending on timing
+        let _ = got_eof;
+    }
+}

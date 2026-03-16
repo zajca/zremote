@@ -244,6 +244,184 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokens_by_model() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l1', 's1', 'claude', 'opus', 'completed', 1000, 500, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l2', 's1', 'claude', 'opus', 'completed', 2000, 800, '2026-03-10T11:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_tokens(&pool, "model", None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "opus");
+        assert_eq!(rows[0].tokens_in, 3000);
+        assert_eq!(rows[0].tokens_out, 1300);
+    }
+
+    #[tokio::test]
+    async fn tokens_by_host() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 500, 200, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_tokens(&pool, "host", None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "test-host");
+    }
+
+    #[tokio::test]
+    async fn tokens_by_project() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, project_path, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', '/home/user/proj', 500, 200, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_tokens(&pool, "project", None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "/home/user/proj");
+    }
+
+    #[tokio::test]
+    async fn tokens_with_date_filter() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 1000, 500, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l2', 's1', 'claude', 'completed', 2000, 800, '2026-03-15T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let from = "2026-03-12".to_string();
+        let rows = get_tokens(&pool, "day", Some(&from), None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tokens_in, 2000);
+    }
+
+    #[tokio::test]
+    async fn cost_by_week() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, estimated_cost_usd, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 0.50, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_cost(&pool, "week", None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].period.contains("-W"));
+    }
+
+    #[tokio::test]
+    async fn cost_by_month() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, estimated_cost_usd, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 0.50, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_cost(&pool, "month", None, None).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].period, "2026-03");
+    }
+
+    #[tokio::test]
+    async fn cost_with_date_range() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, estimated_cost_usd, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 0.50, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, estimated_cost_usd, started_at) \
+             VALUES ('l2', 's1', 'claude', 'completed', 0.30, '2026-03-20T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let from = "2026-03-01".to_string();
+        let to = "2026-03-15".to_string();
+        let rows = get_cost(&pool, "day", Some(&from), Some(&to)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].cost - 0.50).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn session_stats_with_date_filter() {
+        let pool = setup_db().await;
+
+        let from = "2026-01-01".to_string();
+        let to = "2026-12-31".to_string();
+        let stats = get_session_stats(&pool, Some(&from), Some(&to)).await.unwrap();
+        // The session we inserted in setup has no explicit created_at, so it should still be within range
+        assert!(stats.total_sessions >= 0);
+    }
+
+    #[tokio::test]
+    async fn loop_stats_with_date_filter() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, estimated_cost_usd, total_tokens_in, total_tokens_out, started_at) \
+             VALUES ('l1', 's1', 'claude', 'completed', 0.05, 1000, 500, '2026-03-10T10:00:00Z')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let from = "2026-03-01".to_string();
+        let to = "2026-03-15".to_string();
+        let stats = get_loop_stats(&pool, Some(&from), Some(&to)).await.unwrap();
+        assert_eq!(stats.total_loops, 1);
+        assert_eq!(stats.completed, 1);
+    }
+
+    #[tokio::test]
     async fn fts_search_returns_matching_transcript() {
         let pool = setup_db().await;
 

@@ -261,4 +261,91 @@ mod tests {
         mgr.detach_all();
         assert_eq!(mgr.count(), 0);
     }
+
+    #[test]
+    fn session_pids_empty_manager() {
+        let mgr = make_manager();
+        let pids: Vec<_> = mgr.session_pids().collect();
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn multiple_operations_on_nonexistent_sessions() {
+        let mut mgr = make_manager();
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+
+        // Multiple writes to nonexistent sessions
+        assert!(mgr.write_to(&s1, b"data").is_err());
+        assert!(mgr.write_to(&s2, b"data").is_err());
+
+        // Multiple resizes on nonexistent sessions
+        assert!(mgr.resize(&s1, 80, 24).is_err());
+
+        // Multiple closes on nonexistent sessions
+        assert!(mgr.close(&s1).is_none());
+        assert!(mgr.close(&s2).is_none());
+
+        // Count should still be zero
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn close_all_on_empty_is_idempotent() {
+        let mut mgr = make_manager();
+        mgr.close_all();
+        mgr.close_all();
+        mgr.close_all();
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn detach_all_on_empty_is_idempotent() {
+        let mut mgr = make_manager();
+        mgr.detach_all();
+        mgr.detach_all();
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn discover_existing_with_tmux_false_always_empty() {
+        let mut mgr = make_manager();
+        assert!(!mgr.use_tmux());
+        let result1 = mgr.discover_existing();
+        assert!(result1.is_empty());
+        let result2 = mgr.discover_existing();
+        assert!(result2.is_empty());
+    }
+
+    #[test]
+    fn new_manager_with_tmux_true() {
+        let (tx, _rx) = mpsc::channel(64);
+        let mgr = SessionManager::new(tx, true);
+        assert!(mgr.use_tmux());
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn write_to_error_contains_session_id() {
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.write_to(&session_id, b"test");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(&session_id.to_string()),
+            "error should contain session id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resize_error_contains_session_id() {
+        let mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.resize(&session_id, 120, 40);
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(&session_id.to_string()),
+            "error should contain session id, got: {err}"
+        );
+    }
 }

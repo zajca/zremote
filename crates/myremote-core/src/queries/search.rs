@@ -151,6 +151,7 @@ async fn search_without_fts(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::db;
 
     async fn setup_db() -> sqlx::SqlitePool {
@@ -238,6 +239,182 @@ mod tests {
         .unwrap();
 
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_fts_query() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: Some("function".to_string()),
+            host: None,
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 1);
+        assert!(output.results[0].content.contains("function"));
+        assert_eq!(output.total, 1);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_without_query_returns_all() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: None,
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 2);
+        assert_eq!(output.total, 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_empty_query_returns_all() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: Some("  ".to_string()),
+            host: None,
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_host_filter() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: Some("test-host".to_string()),
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_project_filter() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: None,
+            project: Some("/home/user/project".to_string()),
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_with_date_filters() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: None,
+            project: None,
+            from: Some("2026-03-10T10:00:30Z".to_string()),
+            to: Some("2026-03-10T10:01:30Z".to_string()),
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        // Only the second entry (10:01:00Z) falls within range
+        assert_eq!(output.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_pagination() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: None,
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 1,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.total, 2);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_fts_with_filters() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: Some("function".to_string()),
+            host: Some("test-host".to_string()),
+            project: Some("/home/user/project".to_string()),
+            from: Some("2026-03-01T00:00:00Z".to_string()),
+            to: Some("2026-03-31T00:00:00Z".to_string()),
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert_eq!(output.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_fts_no_match() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: Some("nonexistent_xyz".to_string()),
+            host: None,
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert!(output.results.is_empty());
+        assert_eq!(output.total, 0);
+    }
+
+    #[tokio::test]
+    async fn search_transcripts_nonexistent_host_returns_empty() {
+        let pool = setup_db().await;
+
+        let filter = SearchFilter {
+            q: None,
+            host: Some("nonexistent-host".to_string()),
+            project: None,
+            from: None,
+            to: None,
+            page: 1,
+            per_page: 10,
+        };
+        let output = search_transcripts(&pool, &filter).await.unwrap();
+        assert!(output.results.is_empty());
     }
 
     #[tokio::test]
