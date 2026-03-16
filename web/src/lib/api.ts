@@ -100,8 +100,8 @@ export const api = {
   sessions: {
     list: (hostId: string) =>
       request<Session[]>(`/api/hosts/${hostId}/sessions`),
-    get: (hostId: string, sessionId: string) =>
-      request<Session>(`/api/hosts/${hostId}/sessions/${sessionId}`),
+    get: (sessionId: string) =>
+      request<Session>(`/api/sessions/${sessionId}`),
     create: (hostId: string, options?: {
       name?: string;
       shell?: string;
@@ -119,8 +119,12 @@ export const api = {
           working_dir: options?.workingDir,
         }),
       }),
-    close: (hostId: string, sessionId: string) =>
-      request<void>(`/api/hosts/${hostId}/sessions/${sessionId}`, {
+    close: (sessionId: string) =>
+      request<void>(`/api/sessions/${sessionId}`, {
+        method: "DELETE",
+      }),
+    purge: (sessionId: string) =>
+      request<void>(`/api/sessions/${sessionId}/purge`, {
         method: "DELETE",
       }),
     rename: (sessionId: string, name: string | null) =>

@@ -233,3 +233,50 @@ pub async fn close_session(
 
     Ok(StatusCode::ACCEPTED)
 }
+
+/// `DELETE /api/sessions/:session_id/purge` - permanently delete a closed session.
+pub async fn purge_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    // Only allow purging closed sessions
+    let status: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    match status {
+        None => return Err(AppError::NotFound(format!("session {session_id} not found"))),
+        Some((s,)) if s != "closed" => {
+            return Err(AppError::Conflict(format!(
+                "session {session_id} is not closed (status: {s}), cannot purge"
+            )));
+        }
+        _ => {}
+    }
+
+    // Nullify session_id on agentic_loops (preserve loop data)
+    sqlx::query("UPDATE agentic_loops SET session_id = NULL WHERE session_id = ?")
+        .bind(&session_id)
+        .execute(&state.db)
+        .await?;
+
+    // Delete session stats
+    sqlx::query("DELETE FROM session_stats WHERE session_id = ?")
+        .bind(&session_id)
+        .execute(&state.db)
+        .await?;
+
+    // Delete the session row
+    sqlx::query("DELETE FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}

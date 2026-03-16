@@ -43,6 +43,10 @@ fn create_router(state: Arc<AppState>) -> Router {
                 .delete(routes::sessions::close_session),
         )
         .route(
+            "/api/sessions/{session_id}/purge",
+            delete(routes::sessions::purge_session),
+        )
+        .route(
             "/ws/terminal/{session_id}",
             get(routes::terminal::ws_handler),
         )
