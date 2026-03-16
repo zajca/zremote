@@ -86,31 +86,31 @@ pub async fn add_project(
     q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
 
     // Update git info if detected
-    if let Some(ref info) = info {
-        if let Some(ref git) = info.git_info {
-            let remotes_json = serde_json::to_string(&git.remotes).unwrap_or_default();
-            let now = chrono::Utc::now().to_rfc3339();
-            sqlx::query(
-                "UPDATE projects SET project_type = ?, has_claude_config = ?, \
-                 git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
-                 git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
-                 WHERE id = ?",
-            )
-            .bind(&info.project_type)
-            .bind(info.has_claude_config)
-            .bind(&git.branch)
-            .bind(&git.commit_hash)
-            .bind(&git.commit_message)
-            .bind(git.is_dirty)
-            .bind(git.ahead)
-            .bind(git.behind)
-            .bind(&remotes_json)
-            .bind(&now)
-            .bind(&project_id)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::Database)?;
-        }
+    if let Some(ref info) = info
+        && let Some(ref git) = info.git_info
+    {
+        let remotes_json = serde_json::to_string(&git.remotes).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE projects SET project_type = ?, has_claude_config = ?, \
+             git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
+             git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&info.project_type)
+        .bind(info.has_claude_config)
+        .bind(&git.branch)
+        .bind(&git.commit_hash)
+        .bind(&git.commit_message)
+        .bind(git.is_dirty)
+        .bind(git.ahead)
+        .bind(git.behind)
+        .bind(&remotes_json)
+        .bind(&now)
+        .bind(&project_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
     }
 
     let project = q::get_project_by_host_and_path(&state.db, &host_id, &body.path).await?;
@@ -166,7 +166,7 @@ pub async fn trigger_scan(
         .bind(info.git_info.as_ref().and_then(|g| g.branch.as_deref()))
         .bind(info.git_info.as_ref().and_then(|g| g.commit_hash.as_deref()))
         .bind(info.git_info.as_ref().and_then(|g| g.commit_message.as_deref()))
-        .bind(info.git_info.as_ref().map_or(false, |g| g.is_dirty))
+        .bind(info.git_info.as_ref().is_some_and(|g| g.is_dirty))
         .bind(info.git_info.as_ref().map_or(0, |g| g.ahead))
         .bind(info.git_info.as_ref().map_or(0, |g| g.behind))
         .bind(&remotes_json)
