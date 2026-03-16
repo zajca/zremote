@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,8 +19,6 @@ const SESSION_PREFIX: &str = "myremote-";
 pub struct TmuxSession {
     session_id: SessionId,
     tmux_name: String,
-    tty_path: PathBuf,
-    tty_writer: fs::File,
     fifo_path: PathBuf,
     reader_handle: JoinHandle<()>,
     pid: u32,
@@ -101,9 +99,6 @@ impl TmuxSession {
 
         tracing::info!(session_id = %session_id, tmux_name = %tmux_name, "tmux session created");
 
-        // Get pane TTY path
-        let tty_path = get_pane_tty(&tmux_name)?;
-
         // Get shell PID
         let pid = get_pane_pid(&tmux_name)?;
 
@@ -114,17 +109,12 @@ impl TmuxSession {
         // Set up pipe-pane to redirect output into the FIFO
         setup_pipe_pane(&tmux_name, &fifo_path)?;
 
-        // Open TTY for direct writing
-        let tty_writer = fs::OpenOptions::new().write(true).open(&tty_path)?;
-
         // Spawn async reader task on FIFO
         let reader_handle = spawn_fifo_reader(session_id, fifo_path.clone(), output_tx);
 
         let session = Self {
             session_id,
             tmux_name,
-            tty_path,
-            tty_writer,
             fifo_path,
             reader_handle,
             pid,
@@ -148,9 +138,6 @@ impl TmuxSession {
 
         tracing::info!(session_id = %session_id, tmux_name = %tmux_name, "reattaching to tmux session");
 
-        // Get pane TTY path
-        let tty_path = get_pane_tty(&tmux_name)?;
-
         // Get shell PID
         let pid = get_pane_pid(&tmux_name)?;
 
@@ -169,17 +156,12 @@ impl TmuxSession {
             .output();
         setup_pipe_pane(&tmux_name, &fifo_path)?;
 
-        // Open TTY for direct writing
-        let tty_writer = fs::OpenOptions::new().write(true).open(&tty_path)?;
-
         // Spawn async reader task on FIFO
         let reader_handle = spawn_fifo_reader(session_id, fifo_path.clone(), output_tx);
 
         Ok(Self {
             session_id,
             tmux_name,
-            tty_path,
-            tty_writer,
             fifo_path,
             reader_handle,
             pid,
@@ -196,15 +178,31 @@ impl TmuxSession {
         self.session_id
     }
 
-    /// Return the PTY device path (e.g. `/dev/pts/5`).
-    pub fn tty_path(&self) -> &Path {
-        &self.tty_path
-    }
-
-    /// Write raw bytes directly to the PTY device, bypassing tmux send-keys.
+    /// Send raw bytes as input to the tmux pane via `send-keys -H` (hex mode).
+    ///
+    /// Writing directly to the PTY slave device injects data into the output
+    /// stream (it appears on screen but the shell never receives it as input).
+    /// `send-keys -H` feeds bytes through the PTY master, which is the correct
+    /// input path: line discipline processes them, shell reads them.
     pub fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.tty_writer.write_all(data)?;
-        self.tty_writer.flush()
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut cmd = tmux_cmd();
+        cmd.args(["send-keys", "-t", &self.tmux_name, "-H"]);
+        for byte in data {
+            cmd.arg(format!("{byte:02x}"));
+        }
+
+        let output = cmd.output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(std::io::Error::other(
+                format!("tmux send-keys failed: {stderr}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Resize the tmux window.
@@ -443,27 +441,6 @@ pub fn cleanup_stale() {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Get the pane TTY path for a tmux session.
-fn get_pane_tty(tmux_name: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let output = tmux_cmd()
-        .args(["display-message", "-t", tmux_name, "-p", "#{pane_tty}"])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("tmux display-message (pane_tty) failed: {stderr}").into());
-    }
-
-    let tty = String::from_utf8(output.stdout)?
-        .trim()
-        .to_owned();
-
-    if tty.is_empty() {
-        return Err("tmux returned empty pane_tty".into());
-    }
-
-    Ok(PathBuf::from(tty))
-}
 
 /// Get the shell PID for a tmux session's pane.
 fn get_pane_pid(tmux_name: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {

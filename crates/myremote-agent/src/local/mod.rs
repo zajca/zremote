@@ -518,9 +518,13 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                     if let Some(session_state) = sessions.get_mut(&session_id) {
                         session_state.status = "closed".to_string();
                         let msg = myremote_core::state::BrowserMessage::SessionClosed { exit_code };
-                        session_state
-                            .browser_senders
-                            .retain(|tx| tx.try_send(msg.clone()).is_ok());
+                        session_state.browser_senders.retain(|tx| {
+                            match tx.try_send(msg.clone()) {
+                                Ok(()) => true,
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                            }
+                        });
                     }
                 }
 
@@ -552,9 +556,13 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                 if let Some(session_state) = sessions.get_mut(&session_id) {
                     session_state.append_scrollback(data.clone());
                     let msg = myremote_core::state::BrowserMessage::Output { data };
-                    session_state
-                        .browser_senders
-                        .retain(|tx| tx.try_send(msg.clone()).is_ok());
+                    session_state.browser_senders.retain(|tx| {
+                        match tx.try_send(msg.clone()) {
+                            Ok(()) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        }
+                    });
                 }
             }
         }
