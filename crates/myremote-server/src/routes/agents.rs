@@ -385,7 +385,11 @@ async fn handle_agent_message(
                 session.append_scrollback(data);
                 // Forward to all browser senders, remove dead ones
                 session.browser_senders.retain(|sender| {
-                    sender.try_send(browser_msg.clone()).is_ok()
+                    match sender.try_send(browser_msg.clone()) {
+                        Ok(()) => true,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                    }
                 });
             }
         }
@@ -575,7 +579,11 @@ async fn handle_agent_message(
                     // Notify connected browsers
                     let resume_msg = crate::state::BrowserMessage::SessionResumed;
                     session.browser_senders.retain(|sender| {
-                        sender.try_send(resume_msg.clone()).is_ok()
+                        match sender.try_send(resume_msg.clone()) {
+                            Ok(()) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        }
                     });
                 } else {
                     // Session was not in memory (e.g., server restarted too). Create it.
@@ -2145,7 +2153,11 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
                     // Notify connected browsers about suspension
                     let browser_msg = crate::state::BrowserMessage::SessionSuspended;
                     session.browser_senders.retain(|sender| {
-                        sender.try_send(browser_msg.clone()).is_ok()
+                        match sender.try_send(browser_msg.clone()) {
+                            Ok(()) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        }
                     });
                 }
             }

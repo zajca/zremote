@@ -247,9 +247,13 @@ pub async fn close_session(
         let mut sessions = state.sessions.write().await;
         if let Some(session_state) = sessions.get_mut(&parsed_session_id) {
             let msg = myremote_core::state::BrowserMessage::SessionClosed { exit_code };
-            session_state
-                .browser_senders
-                .retain(|tx| tx.try_send(msg.clone()).is_ok());
+            session_state.browser_senders.retain(|tx| {
+                match tx.try_send(msg.clone()) {
+                    Ok(()) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                }
+            });
         }
         sessions.remove(&parsed_session_id);
     }
