@@ -34,7 +34,7 @@ pub async fn get_tokens(
     Query(query): Query<TokenQuery>,
 ) -> Result<Json<Vec<q::TokenBreakdown>>, AppError> {
     let by = query.by.as_deref().unwrap_or("day");
-    let rows = q::get_tokens(&state.db, by, &query.from, &query.to).await?;
+    let rows = q::get_tokens(&state.db, by, query.from.as_ref(), query.to.as_ref()).await?;
     Ok(Json(rows))
 }
 
@@ -44,7 +44,7 @@ pub async fn get_cost(
     Query(query): Query<CostQuery>,
 ) -> Result<Json<Vec<q::CostPoint>>, AppError> {
     let granularity = query.granularity.as_deref().unwrap_or("day");
-    let rows = q::get_cost(&state.db, granularity, &query.from, &query.to).await?;
+    let rows = q::get_cost(&state.db, granularity, query.from.as_ref(), query.to.as_ref()).await?;
     Ok(Json(rows))
 }
 
@@ -53,7 +53,7 @@ pub async fn get_sessions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Json<q::SessionStats>, AppError> {
-    let stats = q::get_session_stats(&state.db, &query.from, &query.to).await?;
+    let stats = q::get_session_stats(&state.db, query.from.as_ref(), query.to.as_ref()).await?;
     Ok(Json(stats))
 }
 
@@ -62,7 +62,7 @@ pub async fn get_loops(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Json<q::LoopStats>, AppError> {
-    let stats = q::get_loop_stats(&state.db, &query.from, &query.to).await?;
+    let stats = q::get_loop_stats(&state.db, query.from.as_ref(), query.to.as_ref()).await?;
     Ok(Json(stats))
 }
 

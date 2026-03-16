@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -34,13 +36,13 @@ pub struct LoopStats {
     pub total_tokens_out: i64,
 }
 
-fn date_filter(sql: &mut String, binds: &mut Vec<String>, from: &Option<String>, to: &Option<String>, date_col: &str) {
-    if let Some(ref f) = *from {
-        sql.push_str(&format!(" AND {date_col} >= ?"));
+fn date_filter(sql: &mut String, binds: &mut Vec<String>, from: Option<&String>, to: Option<&String>, date_col: &str) {
+    if let Some(f) = from {
+        write!(sql, " AND {date_col} >= ?").unwrap();
         binds.push(f.clone());
     }
-    if let Some(ref t) = *to {
-        sql.push_str(&format!(" AND {date_col} <= ?"));
+    if let Some(t) = to {
+        write!(sql, " AND {date_col} <= ?").unwrap();
         binds.push(t.clone());
     }
 }
@@ -48,8 +50,8 @@ fn date_filter(sql: &mut String, binds: &mut Vec<String>, from: &Option<String>,
 pub async fn get_tokens(
     pool: &SqlitePool,
     by: &str,
-    from: &Option<String>,
-    to: &Option<String>,
+    from: Option<&String>,
+    to: Option<&String>,
 ) -> Result<Vec<TokenBreakdown>, AppError> {
     let group_expr = match by {
         "model" => "COALESCE(model, 'unknown')".to_string(),
@@ -67,7 +69,7 @@ pub async fn get_tokens(
     );
     let mut binds: Vec<String> = Vec::new();
     date_filter(&mut sql, &mut binds, from, to, "started_at");
-    sql.push_str(&format!(" GROUP BY {group_expr} ORDER BY label"));
+    write!(sql, " GROUP BY {group_expr} ORDER BY label").unwrap();
 
     let mut q = sqlx::query_as::<_, TokenBreakdown>(&sql);
     for bind in &binds {
@@ -81,8 +83,8 @@ pub async fn get_tokens(
 pub async fn get_cost(
     pool: &SqlitePool,
     granularity: &str,
-    from: &Option<String>,
-    to: &Option<String>,
+    from: Option<&String>,
+    to: Option<&String>,
 ) -> Result<Vec<CostPoint>, AppError> {
     let date_expr = match granularity {
         "week" => "strftime('%Y-W%W', started_at)",
@@ -98,7 +100,7 @@ pub async fn get_cost(
     );
     let mut binds: Vec<String> = Vec::new();
     date_filter(&mut sql, &mut binds, from, to, "started_at");
-    sql.push_str(&format!(" GROUP BY {date_expr} ORDER BY period"));
+    write!(sql, " GROUP BY {date_expr} ORDER BY period").unwrap();
 
     let mut q = sqlx::query_as::<_, CostPoint>(&sql);
     for bind in &binds {
@@ -111,8 +113,8 @@ pub async fn get_cost(
 
 pub async fn get_session_stats(
     pool: &SqlitePool,
-    from: &Option<String>,
-    to: &Option<String>,
+    from: Option<&String>,
+    to: Option<&String>,
 ) -> Result<SessionStats, AppError> {
     let mut sql = String::from(
         "SELECT \
@@ -136,8 +138,8 @@ pub async fn get_session_stats(
 
 pub async fn get_loop_stats(
     pool: &SqlitePool,
-    from: &Option<String>,
-    to: &Option<String>,
+    from: Option<&String>,
+    to: Option<&String>,
 ) -> Result<LoopStats, AppError> {
     let mut sql = String::from(
         "SELECT \
@@ -192,14 +194,14 @@ mod tests {
     #[tokio::test]
     async fn tokens_empty_returns_empty_vec() {
         let pool = setup_db().await;
-        let rows = get_tokens(&pool, "day", &None, &None).await.unwrap();
+        let rows = get_tokens(&pool, "day", None, None).await.unwrap();
         assert!(rows.is_empty());
     }
 
     #[tokio::test]
     async fn loop_stats_empty() {
         let pool = setup_db().await;
-        let stats = get_loop_stats(&pool, &None, &None).await.unwrap();
+        let stats = get_loop_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.total_loops, 0);
         assert_eq!(stats.total_cost_usd, 0.0);
     }
@@ -224,7 +226,7 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = get_loop_stats(&pool, &None, &None).await.unwrap();
+        let stats = get_loop_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.total_loops, 2);
         assert_eq!(stats.completed, 1);
         assert_eq!(stats.errored, 1);
@@ -236,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn session_stats_empty() {
         let pool = setup_db().await;
-        let stats = get_session_stats(&pool, &None, &None).await.unwrap();
+        let stats = get_session_stats(&pool, None, None).await.unwrap();
         assert_eq!(stats.total_sessions, 1); // We inserted one session in setup
         assert_eq!(stats.active_sessions, 1);
     }
