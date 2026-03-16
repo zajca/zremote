@@ -5,15 +5,22 @@ mod static_files;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
+use myremote_protocol::{AgentMessage, AgenticAgentMessage};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use crate::hooks::server::HooksServer;
 use state::LocalAppState;
+
+/// Interval for periodic agentic tool detection (same as connection.rs).
+const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Expand `~` at the start of a path to the user's home directory.
 fn expand_tilde(path: &str) -> PathBuf {
@@ -30,7 +37,8 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// Start the local mode HTTP server.
 ///
 /// This runs an Axum server with embedded web UI, SQLite database,
-/// and all necessary endpoints for managing local terminal sessions.
+/// and all necessary endpoints for managing local terminal sessions
+/// and agentic loop monitoring.
 pub async fn run_local(
     port: u16,
     db_path: &str,
@@ -85,8 +93,14 @@ pub async fn run_local(
     // Create application state
     let state = LocalAppState::new(pool.clone(), hostname.clone(), host_id, shutdown.clone(), use_tmux);
 
-    // Spawn the PTY output routing loop
+    // Spawn the PTY output routing loop (includes agentic output processing)
     spawn_pty_output_loop(state.clone());
+
+    // Start hooks sidecar server for Claude Code integration
+    start_hooks_server(state.clone(), shutdown.clone()).await;
+
+    // Spawn periodic agentic tool detection loop
+    spawn_agentic_detection_loop(state.clone());
 
     // Upsert synthetic host row so queries against hosts table work
     upsert_local_host(&pool, &host_id, &hostname).await?;
@@ -146,6 +160,25 @@ fn build_router(
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
         )
+        // Agentic loop endpoints
+        .route("/api/loops", get(routes::agentic::list_loops))
+        .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
+        .route(
+            "/api/loops/{loop_id}/tools",
+            get(routes::agentic::get_loop_tools),
+        )
+        .route(
+            "/api/loops/{loop_id}/transcript",
+            get(routes::agentic::get_loop_transcript),
+        )
+        .route(
+            "/api/loops/{loop_id}/metrics",
+            get(routes::agentic::get_loop_metrics),
+        )
+        .route(
+            "/api/loops/{loop_id}/action",
+            post(routes::agentic::post_loop_action),
+        )
         // Terminal WebSocket
         .route("/ws/terminal/{session_id}", get(routes::terminal::ws_handler))
         // Events WebSocket
@@ -174,6 +207,137 @@ fn build_router(
     Ok(router)
 }
 
+/// Start the hooks HTTP sidecar server.
+///
+/// This reuses the same `HooksServer` from the agent's server mode. Hook events
+/// from Claude Code arrive via HTTP, are translated to `AgenticAgentMessage`,
+/// and dispatched to the `AgenticProcessor` for local DB writes and event
+/// broadcasting.
+async fn start_hooks_server(state: Arc<LocalAppState>, shutdown: CancellationToken) {
+    // Channel for agentic messages from hooks
+    let (agentic_tx, agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
+
+    // The hooks server needs an outbound_tx for AgentMessage (used for SessionIdCaptured).
+    // In local mode we don't need to send agent messages to a server, so we use a
+    // dummy channel that we drain and discard.
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<AgentMessage>(64);
+
+    let hooks_server = HooksServer::new(
+        agentic_tx,
+        state.session_mapper.clone(),
+        state.hooks_permission_manager.clone(),
+        outbound_tx,
+    );
+
+    // Convert CancellationToken to a watch channel for the hooks server
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown_for_hooks = shutdown.clone();
+    tokio::spawn(async move {
+        shutdown_for_hooks.cancelled().await;
+        let _ = shutdown_tx.send(true);
+    });
+
+    match hooks_server.start(shutdown_rx).await {
+        Ok(addr) => {
+            tracing::info!(port = addr.port(), "hooks sidecar started");
+            // Install hooks into Claude Code settings
+            if let Err(e) = crate::hooks::installer::install_hooks().await {
+                tracing::warn!(error = %e, "failed to install CC hooks (non-fatal)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to start hooks sidecar (non-fatal)");
+        }
+    }
+
+    // Spawn a task to consume agentic messages from hooks and dispatch to processor
+    spawn_hooks_message_consumer(state, agentic_rx);
+}
+
+/// Consume agentic messages from the hooks server channel and process them locally.
+fn spawn_hooks_message_consumer(
+    state: Arc<LocalAppState>,
+    mut agentic_rx: mpsc::Receiver<AgenticAgentMessage>,
+) {
+    tokio::spawn(async move {
+        while let Some(msg) = agentic_rx.recv().await {
+            // Register/unregister loop mappings
+            match &msg {
+                AgenticAgentMessage::LoopDetected {
+                    loop_id,
+                    session_id,
+                    ..
+                } => {
+                    state.session_mapper.register_loop(*session_id, *loop_id).await;
+                }
+                AgenticAgentMessage::LoopEnded { loop_id, .. } => {
+                    state.session_mapper.remove_loop(loop_id).await;
+                }
+                _ => {}
+            }
+
+            if let Err(e) = state.agentic_processor.handle_message(msg).await {
+                tracing::warn!(error = %e, "failed to process agentic hook message");
+            }
+        }
+    });
+}
+
+/// Spawn a periodic task that scans process trees for agentic tools.
+///
+/// Every 3 seconds, checks all active PTY sessions for known agentic tool
+/// processes (Claude Code, Codex, etc.) and emits detection/ended events.
+fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AGENTIC_CHECK_INTERVAL);
+        // Skip the first immediate tick
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Collect session PIDs
+                    let session_pids: Vec<_> = {
+                        let mgr = state.session_manager.lock().await;
+                        mgr.session_pids().collect()
+                    };
+
+                    // Check for agentic tools
+                    let messages = {
+                        let mut mgr = state.agentic_manager.lock().await;
+                        mgr.check_sessions(session_pids.into_iter())
+                    };
+
+                    // Register/unregister loop mappings and dispatch to processor
+                    for msg in messages {
+                        match &msg {
+                            AgenticAgentMessage::LoopDetected {
+                                loop_id,
+                                session_id,
+                                ..
+                            } => {
+                                state.session_mapper.register_loop(*session_id, *loop_id).await;
+                            }
+                            AgenticAgentMessage::LoopEnded { loop_id, .. } => {
+                                state.session_mapper.remove_loop(loop_id).await;
+                            }
+                            _ => {}
+                        }
+
+                        if let Err(e) = state.agentic_processor.handle_message(msg).await {
+                            tracing::warn!(error = %e, "failed to process agentic detection message");
+                        }
+                    }
+                }
+                () = state.shutdown.cancelled() => {
+                    tracing::debug!("agentic detection loop shutting down");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Spawn a background task that reads PTY output from all sessions and routes it
 /// to the in-memory `SessionState` scrollback buffer and all connected browser
 /// WebSocket clients.
@@ -181,12 +345,30 @@ fn build_router(
 /// This is the local-mode equivalent of the PTY output handling in `connection.rs`.
 /// Instead of sending output over a WebSocket to a remote server, we write directly
 /// to the session store and browser senders.
+///
+/// Additionally, output is fed to the `AgenticLoopManager` for agentic state
+/// detection (e.g., Claude Code approval prompts, completion patterns).
 fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
     tokio::spawn(async move {
         let mut pty_output_rx = state.pty_output_rx.lock().await;
         while let Some((session_id, data)) = pty_output_rx.recv().await {
             if data.is_empty() {
                 // EOF -- session ended
+
+                // Notify agentic manager that session closed
+                let loop_ended = {
+                    let mut mgr = state.agentic_manager.lock().await;
+                    mgr.on_session_closed(&session_id)
+                };
+                if let Some(msg) = loop_ended {
+                    if let AgenticAgentMessage::LoopEnded { ref loop_id, .. } = msg {
+                        state.session_mapper.remove_loop(loop_id).await;
+                    }
+                    if let Err(e) = state.agentic_processor.handle_message(msg).await {
+                        tracing::warn!(error = %e, "failed to process LoopEnded on session close");
+                    }
+                }
+
                 let exit_code = {
                     let mut mgr = state.session_manager.lock().await;
                     mgr.close(&session_id)
@@ -231,7 +413,18 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                     exit_code,
                 });
             } else {
-                // Normal output data
+                // Feed output to agentic manager for state detection
+                let agentic_msgs = {
+                    let mut mgr = state.agentic_manager.lock().await;
+                    mgr.process_output(&session_id, &data)
+                };
+                for msg in agentic_msgs {
+                    if let Err(e) = state.agentic_processor.handle_message(msg).await {
+                        tracing::warn!(error = %e, "failed to process agentic output message");
+                    }
+                }
+
+                // Normal output data -> scrollback + browser senders
                 let mut sessions = state.sessions.write().await;
                 if let Some(session_state) = sessions.get_mut(&session_id) {
                     session_state.append_scrollback(data.clone());
@@ -449,5 +642,34 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["mode"], "local");
         assert_eq!(json["hostname"], "test-host");
+    }
+
+    #[tokio::test]
+    async fn router_loops_endpoint() {
+        let pool = myremote_core::db::init_db("sqlite::memory:")
+            .await
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        let host_id = Uuid::new_v4();
+        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
+
+        let router = build_router(state, None).unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/loops")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
     }
 }
