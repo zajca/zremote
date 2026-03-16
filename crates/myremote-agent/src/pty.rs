@@ -38,6 +38,8 @@ impl PtySession {
         let pair = pty_system.openpty(size)?;
 
         let mut cmd = CommandBuilder::new(shell);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         if let Some(dir) = working_dir {
             cmd.cwd(dir);
         }
