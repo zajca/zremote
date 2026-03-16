@@ -103,6 +103,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await api.knowledge.triggerIndex(projectId, force);
     } catch (e) {
       console.error("Failed to trigger indexing:", e);
+      throw e;
     }
   },
 
@@ -111,6 +112,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await api.knowledge.extractMemories(projectId, loopId);
     } catch (e) {
       console.error("Failed to extract memories:", e);
+      throw e;
     }
   },
 
@@ -120,6 +122,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       get().fetchMemories(projectId);
     } catch (e) {
       console.error("Failed to delete memory:", e);
+      throw e;
     }
   },
 
@@ -140,6 +143,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       }));
     } catch (e) {
       console.error("Failed to update memory:", e);
+      throw e;
     }
   },
 
@@ -148,6 +152,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await api.knowledge.controlService(hostId, action);
     } catch (e) {
       console.error("Failed to control service:", e);
+      throw e;
     }
   },
 
@@ -156,6 +161,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await api.knowledge.generateInstructions(projectId);
     } catch (e) {
       console.error("Failed to generate instructions:", e);
+      throw e;
     }
   },
 
@@ -175,6 +181,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       set((state) => ({
         bootstrapStatus: { ...state.bootstrapStatus, [projectId]: "error" },
       }));
+      throw e;
     }
   },
 

@@ -8,6 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { StatusDot } from "../components/ui/StatusDot";
 import { NewSessionDialog } from "../components/NewSessionDialog";
+import { showToast } from "../components/layout/Toast";
 
 export function HostPage() {
   const { hostId } = useParams<{ hostId: string }>();
@@ -27,7 +28,7 @@ export function HostPage() {
         void navigate(`/hosts/${hostId}/sessions/${session.id}`);
       } catch (e) {
         console.error("failed to create session", e);
-        alert("Failed to create session. Check the console for details.");
+        showToast("Failed to create session", "error");
       }
     },
     [hostId, navigate],

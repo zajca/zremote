@@ -4,13 +4,13 @@ import { X } from "lucide-react";
 interface ToastMessage {
   id: number;
   message: string;
-  type: "error" | "info";
+  type: "error" | "info" | "success";
 }
 
 let nextId = 0;
 const listeners: Set<(msg: ToastMessage) => void> = new Set();
 
-export function showToast(message: string, type: "error" | "info" = "error") {
+export function showToast(message: string, type: "error" | "info" | "success" = "error") {
   const toast: ToastMessage = { id: nextId++, message, type };
   for (const listener of listeners) {
     listener(toast);
@@ -34,12 +34,13 @@ export function ToastContainer() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Auto-dismiss after 8s
+  // Auto-dismiss: 4s for success, 8s for others
   useEffect(() => {
     if (toasts.length === 0) return;
     const oldest = toasts[0];
     if (!oldest) return;
-    const timer = setTimeout(() => dismiss(oldest.id), 8000);
+    const delay = oldest.type === "success" ? 4000 : 8000;
+    const timer = setTimeout(() => dismiss(oldest.id), delay);
     return () => clearTimeout(timer);
   }, [toasts, dismiss]);
 
@@ -53,7 +54,9 @@ export function ToastContainer() {
           className={`flex items-start gap-3 rounded-lg border bg-bg-secondary p-3 shadow-lg ${
             toast.type === "error"
               ? "border-l-4 border-status-error/40 border-l-status-error"
-              : "border-border"
+              : toast.type === "success"
+                ? "border-l-4 border-status-online/40 border-l-status-online"
+                : "border-border"
           }`}
           style={{ minWidth: 280, maxWidth: 420 }}
         >

@@ -13,6 +13,7 @@ import { ContextUsageBar } from "./ContextUsageBar";
 import { CostTracker } from "./CostTracker";
 import { ToolCallQueue } from "./ToolCallQueue";
 import { TranscriptView } from "./TranscriptView";
+import { showToast } from "../layout/Toast";
 
 interface AgenticLoopPanelProps {
   loopId: string;
@@ -93,21 +94,30 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
 
   const handleAction = useCallback(
     (action: UserAction, payload?: string) => {
-      void useAgenticStore.getState().sendAction(loopId, action, payload);
+      useAgenticStore
+        .getState()
+        .sendAction(loopId, action, payload)
+        .catch(() => showToast("Failed to send action", "error"));
     },
     [loopId],
   );
 
   const handleToolApprove = useCallback(
     (_toolCallId: string) => {
-      void useAgenticStore.getState().sendAction(loopId, "approve");
+      useAgenticStore
+        .getState()
+        .sendAction(loopId, "approve")
+        .catch(() => showToast("Failed to approve tool", "error"));
     },
     [loopId],
   );
 
   const handleToolReject = useCallback(
     (_toolCallId: string) => {
-      void useAgenticStore.getState().sendAction(loopId, "reject");
+      useAgenticStore
+        .getState()
+        .sendAction(loopId, "reject")
+        .catch(() => showToast("Failed to reject tool", "error"));
     },
     [loopId],
   );

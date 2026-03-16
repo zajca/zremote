@@ -7,6 +7,7 @@ import { useAgenticLoops } from "../../hooks/useAgenticLoops";
 import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { Badge } from "../ui/Badge";
+import { showToast } from "../layout/Toast";
 
 interface SessionItemProps {
   session: Session;
@@ -73,9 +74,11 @@ export const SessionItem = memo(function SessionItem({
       if (!window.confirm("Close this session?")) return;
       try {
         await api.sessions.close(session.id);
+        showToast("Session closed", "success");
         window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
       } catch (err) {
         console.error("failed to close session", err);
+        showToast("Failed to close session", "error");
       }
     },
     [session.id],

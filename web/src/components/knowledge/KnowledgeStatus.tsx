@@ -3,6 +3,7 @@ import { api } from "../../lib/api";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
+import { showToast } from "../layout/Toast";
 
 function statusBadgeVariant(
   status: string,
@@ -39,8 +40,10 @@ export function KnowledgeStatus({
     setBootstrapping(true);
     try {
       await api.knowledge.bootstrapProject(projectId);
+      showToast("Knowledge bootstrap started", "success");
     } catch (e) {
       console.error("Failed to bootstrap:", e);
+      showToast("Failed to bootstrap knowledge", "error");
     } finally {
       setTimeout(() => {
         setBootstrapping(false);
@@ -91,7 +94,12 @@ export function KnowledgeStatus({
             variant="primary"
             size="sm"
             onClick={async () => {
-              await controlService(hostId, "start");
+              try {
+                await controlService(hostId, "start");
+                showToast("Service starting", "success");
+              } catch {
+                showToast("Failed to start service", "error");
+              }
               setTimeout(() => fetchStatus(projectId), 2000);
             }}
           >
@@ -104,7 +112,12 @@ export function KnowledgeStatus({
               variant="secondary"
               size="sm"
               onClick={async () => {
-                await controlService(hostId, "stop");
+                try {
+                  await controlService(hostId, "stop");
+                  showToast("Service stopping", "success");
+                } catch {
+                  showToast("Failed to stop service", "error");
+                }
                 setTimeout(() => fetchStatus(projectId), 1000);
               }}
             >
@@ -114,7 +127,12 @@ export function KnowledgeStatus({
               variant="secondary"
               size="sm"
               onClick={async () => {
-                await controlService(hostId, "restart");
+                try {
+                  await controlService(hostId, "restart");
+                  showToast("Service restarting", "success");
+                } catch {
+                  showToast("Failed to restart service", "error");
+                }
                 setTimeout(() => fetchStatus(projectId), 3000);
               }}
             >
@@ -123,14 +141,28 @@ export function KnowledgeStatus({
             <Button
               variant="primary"
               size="sm"
-              onClick={() => triggerIndex(projectId)}
+              onClick={async () => {
+                try {
+                  await triggerIndex(projectId);
+                  showToast("Indexing started", "success");
+                } catch {
+                  showToast("Failed to start indexing", "error");
+                }
+              }}
             >
               Index Project
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => triggerIndex(projectId, true)}
+              onClick={async () => {
+                try {
+                  await triggerIndex(projectId, true);
+                  showToast("Reindexing started", "success");
+                } catch {
+                  showToast("Failed to start reindexing", "error");
+                }
+              }}
             >
               Force Reindex
             </Button>
