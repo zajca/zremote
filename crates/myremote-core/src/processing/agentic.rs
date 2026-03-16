@@ -39,7 +39,7 @@ pub struct AgenticProcessor {
 
 impl AgenticProcessor {
     /// Fetch a full `LoopInfo` from the DB, supplementing with in-memory state
-    /// for fields not stored in the database (context_used, context_max, pending_tool_calls).
+    /// for fields not stored in the database (`context_used`, `context_max`, `pending_tool_calls`).
     async fn fetch_loop_info(&self, loop_id: &str) -> Option<LoopInfo> {
         let row: LoopRow = sqlx::query_as(
             "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
