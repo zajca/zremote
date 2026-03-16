@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
 import { api } from "../../lib/api";
+import { showToast } from "../layout/Toast";
 
 interface ConfigEntry {
   key: string;
@@ -80,6 +81,7 @@ export function SettingsPage() {
         setTimeout(() => setSaved(false), 1500);
       } catch (e) {
         console.error("failed to set config", e);
+        showToast("Failed to save setting", "error");
       }
     },
     [globalValues],
@@ -97,6 +99,7 @@ export function SettingsPage() {
         setTimeout(() => setSaved(false), 1500);
       } catch (e) {
         console.error("failed to set host config", e);
+        showToast("Failed to save host setting", "error");
       }
     },
     [selectedHostId, hostValues],

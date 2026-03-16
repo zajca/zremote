@@ -7,6 +7,7 @@ import type { ClaudeTask, ClaudeTaskStatus } from "../../types/claude-session";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { StatusDot } from "../ui/StatusDot";
+import { showToast } from "../layout/Toast";
 
 interface ProjectLoopsTabProps {
   projectId: string;
@@ -199,6 +200,7 @@ export function ProjectLoopsTab({ projectId, hostId }: ProjectLoopsTabProps) {
         void navigate(`/hosts/${hostId}/sessions/${newTask.session_id}`);
       } catch (err) {
         console.error("Failed to resume task:", err);
+        showToast("Failed to resume task", "error");
       } finally {
         setResumingId(null);
       }

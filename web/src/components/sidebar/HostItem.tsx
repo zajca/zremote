@@ -8,6 +8,7 @@ import { useSessions } from "../../hooks/useSessions";
 import { StatusDot } from "../ui/StatusDot";
 import { ProjectItem } from "./ProjectItem";
 import { SessionItem } from "./SessionItem";
+import { showToast } from "../layout/Toast";
 
 interface HostItemProps {
   host: Host;
@@ -30,9 +31,14 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
   const { projects } = useProjects(expanded ? host.id : undefined);
 
   const handleScanProjects = useCallback(
-    (e: React.MouseEvent) => {
+    async (e: React.MouseEvent) => {
       e.stopPropagation();
-      void api.projects.scan(host.id);
+      try {
+        await api.projects.scan(host.id);
+        showToast("Project scan started", "success");
+      } catch {
+        showToast("Failed to scan projects", "error");
+      }
     },
     [host.id],
   );

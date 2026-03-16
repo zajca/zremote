@@ -10,6 +10,7 @@ import { Badge } from "../components/ui/Badge";
 import { IconButton } from "../components/ui/IconButton";
 import { Terminal } from "../components/Terminal";
 import { AgenticLoopPanel } from "../components/agentic/AgenticLoopPanel";
+import { showToast } from "../components/layout/Toast";
 
 const MIN_PANEL_PCT = 20;
 const MAX_PANEL_PCT = 80;
@@ -102,8 +103,10 @@ export function SessionPage() {
     setClosing(true);
     try {
       await api.sessions.close(sessionId);
+      showToast("Session closed", "success");
       void navigate(`/hosts/${hostId}`);
     } catch {
+      showToast("Failed to close session", "error");
       setClosing(false);
     }
   }, [hostId, sessionId, closing, navigate]);
@@ -122,8 +125,10 @@ export function SessionPage() {
     try {
       await api.sessions.rename(sessionId, trimmed || null);
       void refetch();
+      showToast("Session renamed", "success");
     } catch (e) {
       console.error("failed to rename session", e);
+      showToast("Failed to rename session", "error");
     }
   }, [sessionId, nameValue, refetch]);
 

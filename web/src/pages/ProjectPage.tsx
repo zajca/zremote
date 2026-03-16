@@ -17,6 +17,7 @@ import { Input } from "../components/ui/Input";
 import { SessionItem } from "../components/sidebar/SessionItem";
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 import { ProjectLoopsTab } from "../components/agentic/ProjectLoopsTab";
+import { showToast } from "../components/layout/Toast";
 
 type Tab = "sessions" | "loops" | "knowledge" | "config" | "git";
 
@@ -80,8 +81,10 @@ export function ProjectPage() {
       const p = await api.projects.get(projectId);
       setProject(p);
       loadWorktrees();
+      showToast("Git status refreshed", "success");
     } catch (e) {
       console.error("failed to refresh git", e);
+      showToast("Failed to refresh git status", "error");
     } finally {
       setRefreshing(false);
     }
@@ -101,8 +104,10 @@ export function ProjectPage() {
       setIsNewBranch(false);
       setShowCreateWorktree(false);
       loadWorktrees();
+      showToast("Worktree created", "success");
     } catch (e) {
       console.error("failed to create worktree", e);
+      showToast("Failed to create worktree", "error");
     } finally {
       setCreating(false);
     }
@@ -115,8 +120,10 @@ export function ProjectPage() {
       try {
         await api.projects.deleteWorktree(projectId, worktreeId);
         loadWorktrees();
+        showToast("Worktree deleted", "success");
       } catch (e) {
         console.error("failed to delete worktree", e);
+        showToast("Failed to delete worktree", "error");
       }
     },
     [projectId, loadWorktrees],
@@ -132,6 +139,7 @@ export function ProjectPage() {
         void navigate(`/hosts/${project.host_id}/sessions/${session.id}`);
       } catch (e) {
         console.error("failed to create terminal session", e);
+        showToast("Failed to open terminal", "error");
       }
     },
     [project, navigate],
@@ -152,9 +160,11 @@ export function ProjectPage() {
       return;
     try {
       await api.projects.delete(projectId);
+      showToast("Project removed", "success");
       void navigate("/");
     } catch (e) {
       console.error("failed to delete project", e);
+      showToast("Failed to remove project", "error");
     }
   }, [projectId, project, navigate]);
 
@@ -167,6 +177,7 @@ export function ProjectPage() {
       void navigate(`/hosts/${project.host_id}/sessions/${session.id}`);
     } catch (e) {
       console.error("failed to create terminal session", e);
+      showToast("Failed to open terminal", "error");
     }
   }, [project, navigate]);
 
