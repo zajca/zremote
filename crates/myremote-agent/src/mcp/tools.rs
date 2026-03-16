@@ -91,10 +91,6 @@ async fn handle_search(
         return tool_error("query parameter is required");
     }
 
-    let tier = args
-        .get("tier")
-        .and_then(|t| t.as_str())
-        .unwrap_or("l1");
     let max_results = args
         .get("max_results")
         .and_then(serde_json::Value::as_u64)
@@ -102,7 +98,7 @@ async fn handle_search(
 
     match server
         .client
-        .search(&server.namespace, query, tier, max_results)
+        .search(&server.namespace, query, max_results)
         .await
     {
         Ok(results) => {

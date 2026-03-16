@@ -9,25 +9,35 @@ use myremote_protocol::AgenticLoopId;
 pub struct OvClient {
     client: reqwest::Client,
     base_url: String,
+    api_key: Option<String>,
 }
 
 impl OvClient {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, api_key: Option<String>) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),
             base_url: format!("http://localhost:{port}"),
+            api_key,
         }
+    }
+
+    /// Build a request with optional auth header.
+    fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
+        let mut builder = self.client.request(method, url);
+        if let Some(key) = &self.api_key {
+            builder = builder.header("X-API-Key", key);
+        }
+        builder
     }
 
     /// Check if `OpenViking` is healthy.
     #[allow(dead_code)]
     pub async fn health(&self) -> Result<bool, OvClientError> {
         let resp = self
-            .client
-            .get(format!("{}/health", self.base_url))
+            .request(reqwest::Method::GET, format!("{}/health", self.base_url))
             .send()
             .await
             .map_err(OvClientError::Request)?;
@@ -39,17 +49,18 @@ impl OvClient {
         &self,
         namespace: &str,
         path: &str,
-        force: bool,
     ) -> Result<(), OvClientError> {
         let body = serde_json::json!({
-            "namespace": namespace,
             "path": path,
-            "force": force,
+            "to": namespace,
+            "wait": true,
         });
 
         let resp = self
-            .client
-            .post(format!("{}/api/v1/resources/index", self.base_url))
+            .request(
+                reqwest::Method::POST,
+                format!("{}/api/v1/resources", self.base_url),
+            )
             .json(&body)
             .send()
             .await
@@ -69,19 +80,19 @@ impl OvClient {
         &self,
         namespace: &str,
         query: &str,
-        tier: &str,
         max_results: u32,
     ) -> Result<Vec<SearchResult>, OvClientError> {
         let body = serde_json::json!({
-            "namespace": namespace,
             "query": query,
-            "tier": tier,
-            "max_results": max_results,
+            "target_uri": namespace,
+            "limit": max_results,
         });
 
         let resp = self
-            .client
-            .post(format!("{}/api/v1/search/find", self.base_url))
+            .request(
+                reqwest::Method::POST,
+                format!("{}/api/v1/search/find", self.base_url),
+            )
             .json(&body)
             .send()
             .await
@@ -93,17 +104,11 @@ impl OvClient {
             return Err(OvClientError::Api(format!("{status}: {text}")));
         }
 
-        // Parse the OV response format and convert to our SearchResult
-        let ov_results: Vec<OvSearchResult> =
+        let ov_response: OvSearchResponse =
             resp.json().await.map_err(OvClientError::Request)?;
 
-        let tier_enum = match tier {
-            "l0" => SearchTier::L0,
-            "l2" => SearchTier::L2,
-            _ => SearchTier::L1,
-        };
-
-        Ok(ov_results
+        Ok(ov_response
+            .results
             .into_iter()
             .map(|r| SearchResult {
                 path: r.path,
@@ -111,27 +116,24 @@ impl OvClient {
                 snippet: r.snippet,
                 line_start: r.line_start,
                 line_end: r.line_end,
-                tier: tier_enum,
+                tier: SearchTier::L1,
             })
             .collect())
     }
 
-    /// Extract memories from a transcript.
+    /// Extract memories from a transcript using the session-based flow.
     pub async fn extract_memories(
         &self,
         namespace: &str,
         transcript: &[TranscriptFragment],
         loop_id: AgenticLoopId,
     ) -> Result<Vec<ExtractedMemory>, OvClientError> {
-        let body = serde_json::json!({
-            "namespace": namespace,
-            "session_transcript": transcript,
-        });
-
+        // Step 1: Create a session
         let resp = self
-            .client
-            .post(format!("{}/api/v1/memories/extract", self.base_url))
-            .json(&body)
+            .request(
+                reqwest::Method::POST,
+                format!("{}/api/v1/sessions", self.base_url),
+            )
             .send()
             .await
             .map_err(OvClientError::Request)?;
@@ -139,10 +141,67 @@ impl OvClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(OvClientError::Api(format!("{status}: {text}")));
+            return Err(OvClientError::Api(format!(
+                "session create {status}: {text}"
+            )));
+        }
+
+        let session: OvSessionResponse = resp.json().await.map_err(OvClientError::Request)?;
+        let session_id = session.id;
+
+        // Step 2: Send each transcript fragment as a message
+        for fragment in transcript {
+            let body = serde_json::json!({
+                "role": fragment.role,
+                "content": fragment.content,
+            });
+
+            let resp = self
+                .request(
+                    reqwest::Method::POST,
+                    format!(
+                        "{}/api/v1/sessions/{session_id}/messages",
+                        self.base_url
+                    ),
+                )
+                .json(&body)
+                .send()
+                .await
+                .map_err(OvClientError::Request)?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(OvClientError::Api(format!(
+                    "session message {status}: {text}"
+                )));
+            }
+        }
+
+        // Step 3: Extract memories from the session
+        let resp = self
+            .request(
+                reqwest::Method::POST,
+                format!(
+                    "{}/api/v1/sessions/{session_id}/extract",
+                    self.base_url
+                ),
+            )
+            .send()
+            .await
+            .map_err(OvClientError::Request)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(OvClientError::Api(format!(
+                "session extract {status}: {text}"
+            )));
         }
 
         let ov_memories: Vec<OvMemory> = resp.json().await.map_err(OvClientError::Request)?;
+
+        let _ = namespace; // namespace reserved for future use
 
         Ok(ov_memories
             .into_iter()
@@ -155,44 +214,14 @@ impl OvClient {
             })
             .collect())
     }
-
-    /// Synthesize knowledge into instructions.
-    pub async fn synthesize_knowledge(
-        &self,
-        namespace: &str,
-    ) -> Result<(String, u32), OvClientError> {
-        let body = serde_json::json!({
-            "namespace": namespace,
-        });
-
-        let resp = self
-            .client
-            .post(format!("{}/api/v1/knowledge/synthesize", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(OvClientError::Request)?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(OvClientError::Api(format!("{status}: {text}")));
-        }
-
-        let result: OvSynthesisResult = resp.json().await.map_err(OvClientError::Request)?;
-
-        if result.content.is_empty() {
-            return Ok((
-                "# Project Knowledge\n\nNo memories have been extracted yet.\n".to_string(),
-                0,
-            ));
-        }
-
-        Ok((result.content, result.memories_used))
-    }
 }
 
 /// OV API response types (internal, not exposed).
+#[derive(Debug, serde::Deserialize)]
+struct OvSearchResponse {
+    results: Vec<OvSearchResult>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct OvSearchResult {
     path: String,
@@ -203,17 +232,16 @@ struct OvSearchResult {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct OvSessionResponse {
+    id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct OvMemory {
     key: String,
     content: String,
     category: String,
     confidence: f64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct OvSynthesisResult {
-    content: String,
-    memories_used: u32,
 }
 
 fn parse_memory_category(s: &str) -> MemoryCategory {
