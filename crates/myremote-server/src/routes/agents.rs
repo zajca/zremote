@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::auth;
-use crate::state::{AgenticLoopState, AppState, HostInfo, PendingToolCall, ServerEvent, SessionInfo};
+use crate::state::{AgenticLoopState, AppState, HostInfo, LoopInfo, PendingToolCall, ServerEvent, SessionInfo, ToolCallInfo, TranscriptEntryInfo};
 
 /// Timeout for the first message (Register) after WebSocket upgrade.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -812,6 +812,64 @@ async fn upsert_worktree_children(
     }
 }
 
+/// DB row for an agentic loop, matching the `agentic_loops` table columns.
+#[derive(sqlx::FromRow)]
+struct LoopRow {
+    id: String,
+    session_id: String,
+    project_path: Option<String>,
+    tool_name: String,
+    model: Option<String>,
+    status: String,
+    started_at: String,
+    ended_at: Option<String>,
+    total_tokens_in: Option<i64>,
+    total_tokens_out: Option<i64>,
+    estimated_cost_usd: Option<f64>,
+    end_reason: Option<String>,
+    summary: Option<String>,
+}
+
+/// Fetch a full `LoopInfo` from the DB, supplementing with in-memory state
+/// for fields not stored in the database (context_used, context_max, pending_tool_calls).
+async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
+    let row: LoopRow = sqlx::query_as(
+        "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
+         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
+         FROM agentic_loops WHERE id = ?",
+    )
+    .bind(loop_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()??;
+
+    // Supplement with in-memory state for real-time fields
+    let loop_uuid: uuid::Uuid = row.id.parse().ok()?;
+    let pending_tool_calls = state
+        .agentic_loops
+        .get(&loop_uuid)
+        .map_or(0, |e| i64::try_from(e.pending_tool_calls.len()).unwrap_or(0));
+
+    Some(LoopInfo {
+        id: row.id,
+        session_id: row.session_id,
+        project_path: row.project_path,
+        tool_name: row.tool_name,
+        model: row.model,
+        status: row.status,
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        total_tokens_in: row.total_tokens_in.unwrap_or(0),
+        total_tokens_out: row.total_tokens_out.unwrap_or(0),
+        estimated_cost_usd: row.estimated_cost_usd.unwrap_or(0.0),
+        end_reason: row.end_reason,
+        summary: row.summary,
+        context_used: 0,
+        context_max: 0,
+        pending_tool_calls,
+    })
+}
+
 /// Handle an agentic agent message: update DB and in-memory state.
 #[allow(clippy::too_many_lines)]
 async fn handle_agentic_message(
@@ -861,6 +919,16 @@ async fn handle_agentic_message(
             );
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, tool_name = %tool_name, "agentic loop detected");
+
+            // Broadcast event to browser clients
+            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                let _ = state.events.send(ServerEvent::LoopDetected {
+                    loop_info,
+                    host_id: host_id.to_string(),
+                    hostname,
+                });
+            }
         }
         AgenticAgentMessage::LoopStateUpdate {
             loop_id,
@@ -868,7 +936,6 @@ async fn handle_agentic_message(
             ..
         } => {
             // Update in-memory state
-            let session_id_for_event = state.agentic_loops.get(&loop_id).map(|e| e.session_id);
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
                 entry.status = status;
                 entry.last_updated = Instant::now();
@@ -892,26 +959,15 @@ async fn handle_agentic_message(
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
             }
 
-            // Look up tool_name from DB for the event
-            let tool_name: String = sqlx::query_scalar(
-                "SELECT tool_name FROM agentic_loops WHERE id = ?",
-            )
-            .bind(&loop_id_str)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-
+            // Broadcast event with full loop info
             let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
-            let _ = state.events.send(ServerEvent::LoopStatusChanged {
-                loop_id: loop_id_str,
-                session_id: session_id_for_event.map_or_else(String::new, |s| s.to_string()),
-                host_id: host_id.to_string(),
-                hostname,
-                status: status_str,
-                tool_name,
-            });
+            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                let _ = state.events.send(ServerEvent::LoopStatusChanged {
+                    loop_info,
+                    host_id: host_id.to_string(),
+                    hostname,
+                });
+            }
         }
         AgenticAgentMessage::LoopToolCall {
             loop_id,
@@ -962,21 +1018,23 @@ async fn handle_agentic_message(
                     entry.last_updated = Instant::now();
                 }
 
-                // Truncate arguments preview for the event
-                let arguments_preview = if arguments_json.len() > 200 {
-                    format!("{}...", &arguments_json[..200])
-                } else {
-                    arguments_json
-                };
-
+                let now = chrono::Utc::now().to_rfc3339();
                 let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
                 let _ = state.events.send(ServerEvent::ToolCallPending {
                     loop_id: loop_id_str,
-                    tool_call_id: tool_call_id_str,
+                    tool_call: ToolCallInfo {
+                        id: tool_call_id_str,
+                        loop_id: loop_id.to_string(),
+                        tool_name,
+                        arguments_json: Some(arguments_json),
+                        status: status_str,
+                        result_preview: None,
+                        duration_ms: None,
+                        created_at: now,
+                        resolved_at: None,
+                    },
                     host_id: host_id.to_string(),
                     hostname,
-                    tool_name,
-                    arguments_preview,
                 });
             }
         }
@@ -1008,6 +1066,22 @@ async fn handle_agentic_message(
                 entry.pending_tool_calls.retain(|tc| tc.tool_call_id != tool_call_id);
                 entry.last_updated = Instant::now();
             }
+
+            // Broadcast tool result event
+            let _ = state.events.send(ServerEvent::ToolCallResult {
+                loop_id: loop_id.to_string(),
+                tool_call: ToolCallInfo {
+                    id: tool_call_id_str,
+                    loop_id: loop_id.to_string(),
+                    tool_name: String::new(),
+                    arguments_json: None,
+                    status: "completed".to_string(),
+                    result_preview: Some(result_preview.clone()),
+                    duration_ms: Some(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
+                    created_at: String::new(),
+                    resolved_at: Some(now),
+                },
+            });
         }
         AgenticAgentMessage::LoopTranscript {
             loop_id,
@@ -1038,6 +1112,19 @@ async fn handle_agentic_message(
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to insert transcript entry");
             }
+
+            // Broadcast transcript event
+            let _ = state.events.send(ServerEvent::LoopTranscript {
+                loop_id: loop_id_str,
+                transcript_entry: TranscriptEntryInfo {
+                    id: 0, // DB auto-increment, not critical for real-time
+                    loop_id: loop_id.to_string(),
+                    role: role_str,
+                    content,
+                    tool_call_id: tool_call_id_str,
+                    timestamp: timestamp_str,
+                },
+            });
         }
         AgenticAgentMessage::LoopMetrics {
             loop_id,
@@ -1069,6 +1156,11 @@ async fn handle_agentic_message(
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
             }
+
+            // Broadcast metrics event with full loop info
+            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                let _ = state.events.send(ServerEvent::LoopMetrics { loop_info });
+            }
         }
         AgenticAgentMessage::LoopEnded {
             loop_id,
@@ -1077,12 +1169,6 @@ async fn handle_agentic_message(
         } => {
             let loop_id_str = loop_id.to_string();
             let now = chrono::Utc::now().to_rfc3339();
-
-            // Grab cost before removing from in-memory state
-            let cost = state
-                .agentic_loops
-                .get(&loop_id)
-                .map_or(0.0, |e| e.estimated_cost_usd);
 
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET status = 'completed', ended_at = ?, \
@@ -1098,18 +1184,20 @@ async fn handle_agentic_message(
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop ended in DB");
             }
 
+            // Fetch full loop info before removing from in-memory state
+            let loop_info = fetch_loop_info(state, &loop_id_str).await;
+
             // Remove from in-memory state
             state.agentic_loops.remove(&loop_id);
 
             let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
-            let _ = state.events.send(ServerEvent::LoopEnded {
-                loop_id: loop_id_str.clone(),
-                host_id: host_id.to_string(),
-                hostname,
-                reason: reason.clone(),
-                summary: summary.clone(),
-                cost,
-            });
+            if let Some(loop_info) = loop_info {
+                let _ = state.events.send(ServerEvent::LoopEnded {
+                    loop_info,
+                    host_id: host_id.to_string(),
+                    hostname,
+                });
+            }
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
 

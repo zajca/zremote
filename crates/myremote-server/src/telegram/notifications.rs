@@ -80,47 +80,56 @@ fn format_event(event: &ServerEvent) -> Option<(String, Option<InlineKeyboardMar
             // host_id is the UUID string; we use it as-is since hostname isn't available here
             Some((format::format_host_disconnected(host_id), None))
         }
-        ServerEvent::LoopStatusChanged {
+        ServerEvent::LoopDetected {
+            loop_info,
             hostname,
-            tool_name,
-            status,
+            ..
+        } => Some((
+            format::format_loop_status(hostname, &loop_info.tool_name, &loop_info.status),
+            None,
+        )),
+        ServerEvent::LoopStatusChanged {
+            loop_info,
+            hostname,
             ..
         } => {
             // Only notify on notable status changes
-            match status.as_str() {
+            match loop_info.status.as_str() {
                 "waiting_for_input" | "error" | "paused" => {
-                    Some((format::format_loop_status(hostname, tool_name, status), None))
+                    Some((format::format_loop_status(hostname, &loop_info.tool_name, &loop_info.status), None))
                 }
                 _ => None,
             }
         }
         ServerEvent::LoopEnded {
+            loop_info,
             hostname,
-            reason,
-            summary,
-            cost,
             ..
         } => Some((
-            format::format_loop_ended(hostname, reason, summary.as_deref(), *cost),
+            format::format_loop_ended(
+                hostname,
+                loop_info.end_reason.as_deref().unwrap_or("unknown"),
+                loop_info.summary.as_deref(),
+                loop_info.estimated_cost_usd,
+            ),
             None,
         )),
         ServerEvent::ToolCallPending {
             loop_id,
-            tool_call_id,
+            tool_call,
             hostname,
-            tool_name,
-            arguments_preview,
             ..
         } => {
-            let text = format::format_tool_call_pending(hostname, tool_name, arguments_preview);
+            let arguments_preview = tool_call.arguments_json.as_deref().unwrap_or("{}");
+            let text = format::format_tool_call_pending(hostname, &tool_call.tool_name, arguments_preview);
             let keyboard = InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback(
                     "Approve",
-                    format!("approve:{loop_id}:{tool_call_id}"),
+                    format!("approve:{loop_id}:{}", tool_call.id),
                 ),
                 InlineKeyboardButton::callback(
                     "Reject",
-                    format!("reject:{loop_id}:{tool_call_id}"),
+                    format!("reject:{loop_id}:{}", tool_call.id),
                 ),
             ]]);
             Some((text, Some(keyboard)))
@@ -150,11 +159,19 @@ mod tests {
     fn tool_call_pending_has_keyboard() {
         let event = ServerEvent::ToolCallPending {
             loop_id: "loop-1".to_string(),
-            tool_call_id: "tc-1".to_string(),
+            tool_call: crate::state::ToolCallInfo {
+                id: "tc-1".to_string(),
+                loop_id: "loop-1".to_string(),
+                tool_name: "Bash".to_string(),
+                arguments_json: Some(r#"{"cmd":"ls"}"#.to_string()),
+                status: "pending".to_string(),
+                result_preview: None,
+                duration_ms: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                resolved_at: None,
+            },
             host_id: "h-1".to_string(),
             hostname: "my-host".to_string(),
-            tool_name: "Bash".to_string(),
-            arguments_preview: r#"{"cmd":"ls"}"#.to_string(),
         };
         let result = format_event(&event);
         assert!(result.is_some());
@@ -162,15 +179,33 @@ mod tests {
         assert!(kb.is_some());
     }
 
+    fn make_loop_info(status: &str) -> crate::state::LoopInfo {
+        crate::state::LoopInfo {
+            id: "l1".to_string(),
+            session_id: "s1".to_string(),
+            project_path: None,
+            tool_name: "claude-code".to_string(),
+            model: None,
+            status: status.to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            total_tokens_in: 0,
+            total_tokens_out: 0,
+            estimated_cost_usd: 0.0,
+            end_reason: None,
+            summary: None,
+            context_used: 0,
+            context_max: 0,
+            pending_tool_calls: 0,
+        }
+    }
+
     #[test]
     fn working_status_does_not_notify() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_id: "l1".to_string(),
-            session_id: "s1".to_string(),
+            loop_info: make_loop_info("working"),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
-            status: "working".to_string(),
-            tool_name: "claude".to_string(),
         };
         assert!(format_event(&event).is_none());
     }
@@ -178,25 +213,24 @@ mod tests {
     #[test]
     fn waiting_for_input_notifies() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_id: "l1".to_string(),
-            session_id: "s1".to_string(),
+            loop_info: make_loop_info("waiting_for_input"),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
-            status: "waiting_for_input".to_string(),
-            tool_name: "claude".to_string(),
         };
         assert!(format_event(&event).is_some());
     }
 
     #[test]
     fn loop_ended_produces_notification() {
+        let mut info = make_loop_info("completed");
+        info.ended_at = Some("2026-01-01T01:00:00Z".to_string());
+        info.end_reason = Some("completed".to_string());
+        info.summary = Some("done".to_string());
+        info.estimated_cost_usd = 0.5;
         let event = ServerEvent::LoopEnded {
-            loop_id: "l1".to_string(),
+            loop_info: info,
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
-            reason: "completed".to_string(),
-            summary: Some("done".to_string()),
-            cost: 0.5,
         };
         let result = format_event(&event);
         assert!(result.is_some());
