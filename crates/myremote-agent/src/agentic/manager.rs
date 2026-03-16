@@ -84,10 +84,17 @@ impl AgenticLoopManager {
                     },
                 );
 
+                let project_path = self
+                    .system
+                    .process(sysinfo::Pid::from_u32(detected.pid))
+                    .and_then(|p| p.cwd())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
                 messages.push(AgenticAgentMessage::LoopDetected {
                     loop_id,
                     session_id,
-                    project_path: String::new(),
+                    project_path,
                     tool_name: detected.tool_name,
                     model: String::new(),
                 });

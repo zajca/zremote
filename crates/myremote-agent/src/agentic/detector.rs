@@ -35,8 +35,15 @@ pub fn detect_agentic_tool(parent_pid: u32, system: &System) -> Option<DetectedT
         for (pid, process) in system.processes() {
             if process.parent() == Some(current_pid) {
                 let name = process.name().to_string_lossy().to_lowercase();
+                let cmd_line = process
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase();
                 for &(signature, tool_name) in KNOWN_TOOLS {
-                    if name.contains(signature) {
+                    if name.contains(signature) || cmd_line.contains(signature) {
                         return Some(DetectedTool {
                             tool_name: tool_name.to_string(),
                             pid: pid.as_u32(),

@@ -110,6 +110,11 @@ export const useAgenticStore = create<AgenticState>((set, get) => ({
   },
 
   sendAction: async (loopId, action, payload) => {
-    await api.loops.action(loopId, action, payload);
+    try {
+      await api.loops.action(loopId, action, payload);
+    } catch (e) {
+      console.error(`Failed to send action '${action}' for loop ${loopId}:`, e);
+      throw e;
+    }
   },
 }));
