@@ -14,7 +14,7 @@ export interface Session {
   host_id: string;
   name: string | null;
   shell: string | null;
-  status: "creating" | "active" | "closed" | "error";
+  status: "creating" | "active" | "closed" | "error" | "suspended";
   cols: number;
   rows: number;
   created_at: string;

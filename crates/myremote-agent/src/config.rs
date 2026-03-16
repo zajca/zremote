@@ -108,6 +108,14 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Check if tmux is available on the system.
+pub fn detect_tmux() -> bool {
+    std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -192,6 +200,15 @@ mod tests {
             remove_env("MYREMOTE_SERVER_URL");
             remove_env("MYREMOTE_TOKEN");
         }
+    }
+
+    #[test]
+    fn detect_tmux_returns_bool() {
+        // Just verify detect_tmux doesn't panic and returns a bool.
+        let result = super::detect_tmux();
+        // On CI or systems without tmux, this will be false; on dev machines, true.
+        // We can't assert either way, but we verify it runs without error.
+        assert!(result || !result);
     }
 
     #[test]

@@ -19,6 +19,7 @@ A self-hosted platform for managing remote machines through the browser. Connect
 ## Features
 
 - **Terminal sessions** -- Open interactive PTY sessions on remote machines directly from the browser (xterm.js)
+- **Persistent sessions** -- Sessions survive agent restarts via tmux. Kill the agent, restart it, and your terminal picks up where it left off
 - **Agentic loop monitoring** -- Track AI agent tool calls, transcripts, token usage, and costs in real-time
 - **Tool permissions** -- Approve, reject, or auto-approve agent tool calls with configurable permission rules
 - **Project discovery** -- Automatically scan and manage projects on remote hosts
@@ -78,6 +79,49 @@ Open `http://localhost:5173` in your browser. Connected hosts appear automatical
 | `TELEGRAM_BOT_TOKEN` | No | Server | -- | Telegram bot token for notifications |
 | `RUST_LOG` | No | Both | `info` | Log level filter (e.g. `debug`, `myremote_server=debug`) |
 
+## Persistent Sessions
+
+When [tmux](https://github.com/tmux/tmux) is installed on the remote host, terminal sessions automatically survive agent restarts. No configuration is needed -- the agent detects tmux at startup and uses it as the session backend.
+
+### How it works
+
+Without tmux, killing the agent kills all terminal sessions. With tmux enabled:
+
+1. Sessions spawn inside a dedicated tmux server (`tmux -L myremote`)
+2. When the agent stops (crash, update, restart), tmux keeps the shells alive
+3. The browser shows sessions as **suspended** with a yellow badge
+4. When the agent reconnects, it discovers the surviving tmux sessions and resumes them
+5. The browser terminal continues seamlessly -- scrollback is preserved
+
+This is especially useful for long-running Claude Code sessions that would otherwise be destroyed by agent updates.
+
+### Requirements
+
+- `tmux` installed on the remote host (any recent version)
+- That's it. No configuration, no environment variables.
+
+### Verification
+
+```bash
+# Check agent logs at startup for:
+# "tmux detected, persistent sessions enabled"
+
+# List active myremote sessions
+tmux -L myremote ls
+
+# Test it: open a session in the UI, then kill the agent
+kill -9 $(pgrep myremote-agent)
+
+# Sessions are still alive
+tmux -L myremote ls    # myremote-<uuid>: 1 windows ...
+
+# Restart the agent -- sessions resume automatically
+```
+
+### Fallback
+
+If tmux is not installed, the agent uses standard PTY sessions (the original behavior). Sessions will not survive agent restarts. The agent logs `"tmux not found, using standard PTY sessions"` in this case.
+
 ## Development
 
 ```bash
@@ -85,7 +129,7 @@ nix develop                          # Enter dev shell with all dependencies
 
 # Rust
 cargo build                          # Build all crates
-cargo test --workspace               # Run all 207 tests
+cargo test --workspace               # Run all 443 tests
 cargo clippy --workspace             # Lint
 
 # Web
@@ -106,8 +150,8 @@ myremote/
 ├── crates/
 │   ├── myremote-protocol/           # Shared WebSocket message types
 │   ├── myremote-server/             # Axum server (REST API + WebSocket + Telegram)
-│   │   └── migrations/              # SQLite migrations (4 files)
-│   └── myremote-agent/              # Agent binary (PTY, project scanning, loop detection)
+│   │   └── migrations/              # SQLite migrations (11 files)
+│   └── myremote-agent/              # Agent binary (PTY/tmux, project scanning, loop detection)
 ├── web/                             # React frontend (Vite + TypeScript + Tailwind)
 │   └── src/
 │       ├── components/              # UI components (terminal, agentic panels, sidebar)

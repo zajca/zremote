@@ -46,6 +46,7 @@ struct RegisteredAgent {
     agent_version: String,
     os: String,
     arch: String,
+    supports_persistent_sessions: bool,
 }
 
 /// Receive a raw `AgentMessage` during registration (before the main loop).
@@ -109,6 +110,7 @@ async fn register_agent(
         os,
         arch,
         token,
+        supports_persistent_sessions,
     } = register_msg
     else {
         tracing::warn!("agent sent non-Register message as first message");
@@ -156,7 +158,7 @@ async fn register_agent(
     // 5. Create outbound channel and register connection
     let (tx, rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_SIZE);
 
-    let (old_sender, generation) = state.connections.register(host_id, hostname.clone(), tx).await;
+    let (old_sender, generation) = state.connections.register(host_id, hostname.clone(), tx, supports_persistent_sessions).await;
     if let Some(old_sender) = old_sender {
         drop(old_sender);
         tracing::info!(host_id = %host_id, "replaced existing agent connection");
@@ -180,6 +182,7 @@ async fn register_agent(
         agent_version,
         os,
         arch,
+        supports_persistent_sessions,
     })
 }
 
@@ -194,6 +197,7 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
         agent_version,
         os,
         arch,
+        supports_persistent_sessions,
     }) = register_agent(&mut socket, &state).await
     else {
         return;
@@ -210,6 +214,10 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
             arch: Some(arch),
         },
     });
+
+    if supports_persistent_sessions {
+        tracing::info!(host_id = %host_id, "agent supports persistent sessions");
+    }
 
     // Bidirectional message loop
     loop {
@@ -265,6 +273,7 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
     "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
     "ProjectDiscovered", "ProjectList", "KnowledgeAction", "ClaudeAction",
     "GitStatusUpdate", "WorktreeCreated", "WorktreeDeleted", "WorktreeError",
+    "SessionsRecovered",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -518,6 +527,116 @@ async fn handle_agent_message(
                 exit_code = ?exit_code,
                 "session closed"
             );
+        }
+        AgentMessage::SessionsRecovered { sessions } => {
+            tracing::info!(
+                host_id = %host_id,
+                count = sessions.len(),
+                "agent reported recovered sessions"
+            );
+
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Get all currently suspended sessions for this host
+            let suspended_session_ids: Vec<uuid::Uuid> = {
+                let sessions_store = state.sessions.read().await;
+                sessions_store
+                    .iter()
+                    .filter(|(_, s)| s.host_id == host_id && s.status == "suspended")
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+
+            let recovered_ids: HashSet<uuid::Uuid> = sessions
+                .iter()
+                .map(|s| s.session_id)
+                .collect();
+
+            // Resume recovered sessions
+            for recovered in &sessions {
+                // Update DB: suspended -> active
+                if let Err(e) = sqlx::query(
+                    "UPDATE sessions SET status = 'active', suspended_at = NULL, pid = ?, shell = ? WHERE id = ?",
+                )
+                .bind(i64::from(recovered.pid))
+                .bind(&recovered.shell)
+                .bind(recovered.session_id.to_string())
+                .execute(&state.db)
+                .await
+                {
+                    tracing::error!(session_id = %recovered.session_id, error = %e, "failed to resume session in DB");
+                    continue;
+                }
+
+                // Update in-memory state
+                let mut sessions_store = state.sessions.write().await;
+                if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
+                    session.status = "active".to_string();
+                    // Notify connected browsers
+                    let resume_msg = crate::state::BrowserMessage::SessionResumed;
+                    session.browser_senders.retain(|sender| {
+                        sender.try_send(resume_msg.clone()).is_ok()
+                    });
+                } else {
+                    // Session was not in memory (e.g., server restarted too). Create it.
+                    sessions_store.insert(
+                        recovered.session_id,
+                        crate::state::SessionState::new(recovered.session_id, host_id),
+                    );
+                    if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
+                        session.status = "active".to_string();
+                    }
+                }
+
+                // Emit SessionResumed event
+                let _ = state.events.send(crate::state::ServerEvent::SessionResumed {
+                    session_id: recovered.session_id.to_string(),
+                });
+
+                tracing::info!(
+                    session_id = %recovered.session_id,
+                    pid = recovered.pid,
+                    "session resumed after agent reconnection"
+                );
+            }
+
+            // Close sessions that were suspended but NOT recovered
+            for sid in &suspended_session_ids {
+                if !recovered_ids.contains(sid) {
+                    let sid_str = sid.to_string();
+
+                    // Update DB
+                    if let Err(e) = sqlx::query(
+                        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE id = ?",
+                    )
+                    .bind(&now)
+                    .bind(&sid_str)
+                    .execute(&state.db)
+                    .await
+                    {
+                        tracing::error!(session_id = %sid, error = %e, "failed to close unrecovered session in DB");
+                    }
+
+                    // Remove from memory + notify browsers
+                    let mut sessions_store = state.sessions.write().await;
+                    if let Some(session) = sessions_store.remove(sid) {
+                        let close_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                        for sender in &session.browser_senders {
+                            let _ = sender.try_send(close_msg.clone());
+                        }
+                    }
+
+                    // Emit SessionClosed event
+                    let _ = state.events.send(crate::state::ServerEvent::SessionClosed {
+                        session_id: sid_str,
+                        exit_code: None,
+                    });
+
+                    tracing::info!(session_id = %sid, "closed unrecovered suspended session");
+                }
+            }
+
+            return Ok(());
         }
         AgentMessage::Error {
             session_id,
@@ -2004,68 +2123,131 @@ async fn upsert_host(
 /// Clean up after an agent disconnects: close sessions, clean agentic loops,
 /// remove from connection manager (only if generation matches), and mark as offline.
 async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
+    let supports_persistent = state.connections.supports_persistent_sessions(host_id).await;
     let removed = state.connections.unregister_if_generation(host_id, generation).await;
 
     let now = Utc::now().to_rfc3339();
     let host_id_str = host_id.to_string();
 
-    // Close all sessions belonging to this host
-    let closed_session_ids: Vec<_> = {
-        let mut sessions = state.sessions.write().await;
-        let session_ids: Vec<_> = sessions
-            .iter()
-            .filter(|(_, s)| s.host_id == *host_id)
-            .map(|(id, _)| *id)
-            .collect();
+    if supports_persistent {
+        // Suspend sessions (they may be recovered when the agent reconnects)
+        let suspended_session_ids: Vec<_> = {
+            let mut sessions = state.sessions.write().await;
+            let session_ids: Vec<_> = sessions
+                .iter()
+                .filter(|(_, s)| s.host_id == *host_id && s.status != "closed" && s.status != "suspended")
+                .map(|(id, _)| *id)
+                .collect();
 
-        for &sid in &session_ids {
-            if let Some(session) = sessions.remove(&sid) {
-                let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
-                for sender in &session.browser_senders {
-                    let _ = sender.try_send(browser_msg.clone());
+            for &sid in &session_ids {
+                if let Some(session) = sessions.get_mut(&sid) {
+                    session.status = "suspended".to_string();
+                    // Notify connected browsers about suspension
+                    let browser_msg = crate::state::BrowserMessage::SessionSuspended;
+                    session.browser_senders.retain(|sender| {
+                        sender.try_send(browser_msg.clone()).is_ok()
+                    });
                 }
             }
+
+            session_ids
+        };
+
+        // Update DB: mark as suspended
+        if let Err(e) = sqlx::query(
+            "UPDATE sessions SET status = 'suspended', suspended_at = ? WHERE host_id = ? AND status NOT IN ('closed', 'suspended')",
+        )
+        .bind(&now)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(host_id = %host_id, error = %e, "failed to suspend sessions in database");
         }
 
-        session_ids
-    };
+        // Emit SessionSuspended events (not SessionClosed)
+        for sid in &suspended_session_ids {
+            let _ = state.events.send(ServerEvent::SessionSuspended {
+                session_id: sid.to_string(),
+            });
+        }
 
-    // Batch update sessions in DB
-    if let Err(e) = sqlx::query(
-        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE host_id = ? AND status != 'closed'",
-    )
-    .bind(&now)
-    .bind(&host_id_str)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(host_id = %host_id, error = %e, "failed to close sessions in database");
-    }
+        if !suspended_session_ids.is_empty() {
+            tracing::info!(host_id = %host_id, count = suspended_session_ids.len(), "suspended sessions for disconnected agent (persistent)");
+        }
 
-    // Clean orphaned agentic loops from DashMap
-    let closed_set: HashSet<_> = closed_session_ids.iter().copied().collect();
-    let orphaned_loop_ids: Vec<AgenticLoopId> = state
-        .agentic_loops
-        .iter()
-        .filter(|entry| closed_set.contains(&entry.value().session_id))
-        .map(|entry| *entry.key())
-        .collect();
+        // Do NOT clean agentic loops or close sessions -- agent may reconnect
+    } else {
+        // Standard behavior: close all sessions
+        let closed_session_ids: Vec<_> = {
+            let mut sessions = state.sessions.write().await;
+            let session_ids: Vec<_> = sessions
+                .iter()
+                .filter(|(_, s)| s.host_id == *host_id)
+                .map(|(id, _)| *id)
+                .collect();
 
-    for loop_id in &orphaned_loop_ids {
-        state.agentic_loops.remove(loop_id);
-    }
+            for &sid in &session_ids {
+                if let Some(session) = sessions.remove(&sid) {
+                    let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                    for sender in &session.browser_senders {
+                        let _ = sender.try_send(browser_msg.clone());
+                    }
+                }
+            }
 
-    if let Err(e) = sqlx::query(
-        "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'agent_disconnected' \
-         WHERE session_id IN (SELECT id FROM sessions WHERE host_id = ?) \
-         AND status != 'completed' AND ended_at IS NULL",
-    )
-    .bind(&now)
-    .bind(&host_id_str)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(host_id = %host_id, error = %e, "failed to complete orphaned agentic loops in database");
+            session_ids
+        };
+
+        // Batch update sessions in DB
+        if let Err(e) = sqlx::query(
+            "UPDATE sessions SET status = 'closed', closed_at = ? WHERE host_id = ? AND status != 'closed'",
+        )
+        .bind(&now)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(host_id = %host_id, error = %e, "failed to close sessions in database");
+        }
+
+        // Clean orphaned agentic loops from DashMap
+        let closed_set: HashSet<_> = closed_session_ids.iter().copied().collect();
+        let orphaned_loop_ids: Vec<AgenticLoopId> = state
+            .agentic_loops
+            .iter()
+            .filter(|entry| closed_set.contains(&entry.value().session_id))
+            .map(|entry| *entry.key())
+            .collect();
+
+        for loop_id in &orphaned_loop_ids {
+            state.agentic_loops.remove(loop_id);
+        }
+
+        if let Err(e) = sqlx::query(
+            "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'agent_disconnected' \
+             WHERE session_id IN (SELECT id FROM sessions WHERE host_id = ?) \
+             AND status != 'completed' AND ended_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(host_id = %host_id, error = %e, "failed to complete orphaned agentic loops in database");
+        }
+
+        // Emit SessionClosed events
+        for sid in &closed_session_ids {
+            let _ = state.events.send(ServerEvent::SessionClosed {
+                session_id: sid.to_string(),
+                exit_code: None,
+            });
+        }
+
+        if !closed_session_ids.is_empty() {
+            tracing::info!(host_id = %host_id, count = closed_session_ids.len(), "closed sessions for disconnected agent");
+        }
     }
 
     // Mark starting/active claude_sessions for this host as error
@@ -2079,18 +2261,6 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
     .await
     {
         tracing::error!(host_id = %host_id, error = %e, "failed to mark claude sessions as error on disconnect");
-    }
-
-    // Emit SessionClosed events
-    for sid in &closed_session_ids {
-        let _ = state.events.send(ServerEvent::SessionClosed {
-            session_id: sid.to_string(),
-            exit_code: None,
-        });
-    }
-
-    if !closed_session_ids.is_empty() {
-        tracing::info!(host_id = %host_id, count = closed_session_ids.len(), "closed sessions for disconnected agent");
     }
 
     // Mark host offline in DB

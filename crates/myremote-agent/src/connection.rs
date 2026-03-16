@@ -127,7 +127,7 @@ async fn send_message(ws: &mut WsStream, msg: &AgentMessage) -> Result<(), Conne
 }
 
 /// Register with the server and return the assigned host ID.
-async fn register(ws: &mut WsStream, config: &AgentConfig) -> Result<HostId, ConnectionError> {
+async fn register(ws: &mut WsStream, config: &AgentConfig, use_tmux: bool) -> Result<HostId, ConnectionError> {
     let hostname = hostname::get()
         .map_err(ConnectionError::Hostname)?
         .to_string_lossy()
@@ -139,6 +139,7 @@ async fn register(ws: &mut WsStream, config: &AgentConfig) -> Result<HostId, Con
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         token: config.token.clone(),
+        supports_persistent_sessions: use_tmux,
     };
 
     send_message(ws, &register_msg).await?;
@@ -230,13 +231,14 @@ fn handle_session_create(
 pub async fn run_connection(
     config: &AgentConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
+    use_tmux: bool,
 ) -> Result<(), ConnectionError> {
     tracing::info!(server_url = %config.server_url, "connecting to server");
 
     let mut ws = connect(config).await?;
     tracing::info!("WebSocket connection established");
 
-    let host_id = register(&mut ws, config).await?;
+    let host_id = register(&mut ws, config, use_tmux).await?;
 
     // Split the WebSocket for concurrent read/write
     let (mut ws_sink, mut ws_stream) = ws.split();
@@ -248,7 +250,26 @@ pub async fn run_connection(
     let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<(SessionId, Vec<u8>)>(256);
 
     // Session manager
-    let mut session_manager = SessionManager::new(pty_output_tx);
+    let mut session_manager = SessionManager::new(pty_output_tx, use_tmux);
+
+    // Discover and report recovered tmux sessions
+    {
+        let recovered = session_manager.discover_existing();
+        if !recovered.is_empty() {
+            let sessions: Vec<myremote_protocol::RecoveredSession> = recovered
+                .iter()
+                .map(|(session_id, shell, pid)| myremote_protocol::RecoveredSession {
+                    session_id: *session_id,
+                    shell: shell.clone(),
+                    pid: *pid,
+                })
+                .collect();
+            tracing::info!(count = sessions.len(), "reporting recovered tmux sessions");
+            if outbound_tx.try_send(AgentMessage::SessionsRecovered { sessions }).is_err() {
+                tracing::warn!("outbound channel full, SessionsRecovered dropped");
+            }
+        }
+    }
 
     // Agentic loop manager
     let mut agentic_manager = AgenticLoopManager::new();
@@ -504,8 +525,12 @@ pub async fn run_connection(
         }
     };
 
-    // Clean up all PTY sessions
-    session_manager.close_all();
+    // Clean up sessions: detach tmux (they survive), kill PTY
+    if session_manager.use_tmux() {
+        session_manager.detach_all();
+    } else {
+        session_manager.close_all();
+    }
 
     // Wait for sender task to finish and close the WebSocket cleanly
     match sender_handle.await {
@@ -1023,7 +1048,7 @@ mod tests {
         SessionMapper,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let session_manager = SessionManager::new(pty_tx);
+        let session_manager = SessionManager::new(pty_tx, false);
         let agentic_manager = AgenticLoopManager::new();
         let project_scanner = ProjectScanner::new();
         let (outbound_tx, outbound_rx) = mpsc::channel(16);

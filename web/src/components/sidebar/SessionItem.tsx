@@ -1,4 +1,4 @@
-import { Bot, Terminal, X } from "lucide-react";
+import { Bot, Pause, Terminal, X } from "lucide-react";
 import { memo, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Session } from "../../lib/api";
@@ -25,6 +25,8 @@ function sessionStatusVariant(
       return "error";
     case "creating":
       return "creating";
+    case "suspended":
+      return "warning";
     default:
       return "offline";
   }
@@ -41,7 +43,7 @@ export const SessionItem = memo(function SessionItem({
     (s) => s.sessionTaskIndex.has(session.id),
   );
   const { loops } = useAgenticLoops(
-    session.status === "active" ? session.id : undefined,
+    session.status === "active" || session.status === "suspended" ? session.id : undefined,
   );
 
   const activeLoops = loops.filter(
@@ -88,7 +90,9 @@ export const SessionItem = memo(function SessionItem({
           onClick={handleClick}
           className="flex min-w-0 flex-1 items-center gap-2"
         >
-          {isClaudeTask ? (
+          {session.status === "suspended" ? (
+            <Pause size={13} className="shrink-0 text-status-warning" />
+          ) : isClaudeTask ? (
             <Bot size={13} className="shrink-0 text-accent" />
           ) : (
             <Terminal size={13} className="shrink-0 text-text-tertiary" />
@@ -110,7 +114,7 @@ export const SessionItem = memo(function SessionItem({
             </span>
           )}
         </button>
-        {session.status === "active" && (
+        {(session.status === "active" || session.status === "suspended") && (
           <button
             onClick={handleClose}
             className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-status-error group-hover/session:flex"

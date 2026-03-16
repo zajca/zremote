@@ -101,7 +101,7 @@ async fn handle_terminal_connection(
             return;
         };
 
-        if session.status != "active" && session.status != "creating" {
+        if session.status != "active" && session.status != "creating" && session.status != "suspended" {
             let error_msg = serde_json::json!({
                 "type": "error",
                 "message": format!("session is {}", session.status)
@@ -148,6 +148,21 @@ async fn handle_terminal_connection(
             && socket.send(Message::Text(json.into())).await.is_err()
         {
             return;
+        }
+    }
+
+    // If session is currently suspended, notify the browser immediately
+    {
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id)
+            && session.status == "suspended"
+        {
+            let suspended_msg = BrowserMessage::SessionSuspended;
+            if let Ok(json) = serde_json::to_string(&suspended_msg)
+                && socket.send(Message::Text(json.into())).await.is_err()
+            {
+                return;
+            }
         }
     }
 
