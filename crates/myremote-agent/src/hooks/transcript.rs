@@ -363,4 +363,460 @@ mod tests {
                 .unwrap();
         assert!(entries.is_empty());
     }
+
+    #[test]
+    fn parse_system_role() {
+        let jsonl = r#"{"role":"system","content":"You are an assistant."}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::System);
+        assert_eq!(entries[0].content, "You are an assistant.");
+    }
+
+    #[test]
+    fn parse_unknown_role_is_skipped() {
+        let jsonl = r#"{"role":"tool","content":"some output"}
+{"role":"unknown_role","content":"skip me"}
+{"role":"user","content":"keep me"}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "keep me");
+    }
+
+    #[test]
+    fn parse_empty_input() {
+        let (entries, token_data) = parse_transcript_str("");
+        assert!(entries.is_empty());
+        assert!(token_data.is_empty());
+    }
+
+    #[test]
+    fn parse_only_whitespace_lines() {
+        let jsonl = "   \n  \n\n   ";
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_content_array_with_tool_use() {
+        let jsonl = r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"/src/main.rs"}}]}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        // parse_transcript_str only extracts Text blocks from arrays, not tool_use
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_content_array_with_empty_text() {
+        let jsonl = r#"{"role":"assistant","content":[{"type":"text","text":""}]}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        // Empty text blocks should be skipped
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_content_array_mixed_blocks() {
+        let jsonl = r#"{"role":"assistant","content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}},{"type":"text","text":"World"}]}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        // parse_transcript_str extracts only Text blocks
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content, "Hello");
+        assert_eq!(entries[1].content, "World");
+    }
+
+    #[test]
+    fn parse_usage_with_no_model() {
+        let jsonl = r#"{"role":"assistant","content":"text","usage":{"input_tokens":50,"output_tokens":25,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        let (entries, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(token_data.len(), 1);
+        assert_eq!(token_data[0].input_tokens, 50);
+        assert!(token_data[0].model.is_none());
+    }
+
+    #[test]
+    fn parse_content_as_non_string_non_array() {
+        // Content is a number - should be skipped
+        let jsonl = r#"{"role":"user","content":42}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_line_without_content() {
+        let jsonl = r#"{"role":"user"}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_line_with_type_field() {
+        let jsonl = r#"{"type":"summary","role":"assistant","content":"Summary text"}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "Summary text");
+    }
+
+    #[tokio::test]
+    async fn parse_file_nonexistent_returns_error() {
+        let result = parse_transcript_file("/nonexistent/path/file.jsonl", 0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_file_offset_beyond_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.jsonl");
+        tokio::fs::write(&path, r#"{"role":"user","content":"hi"}"#)
+            .await
+            .unwrap();
+
+        let (entries, offset, token_data) =
+            parse_transcript_file(path.to_str().unwrap(), 99999)
+                .await
+                .unwrap();
+        assert!(entries.is_empty());
+        assert!(token_data.is_empty());
+        // offset should be total file length
+        assert!(offset <= 99999);
+    }
+
+    #[tokio::test]
+    async fn parse_file_incremental() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incremental.jsonl");
+
+        // Write initial content
+        let first = r#"{"role":"user","content":"first"}
+"#;
+        tokio::fs::write(&path, first).await.unwrap();
+
+        let (entries, offset1, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "first");
+
+        // Append more content
+        let second = r#"{"role":"assistant","content":"second"}
+"#;
+        let mut full = first.to_string();
+        full.push_str(second);
+        tokio::fs::write(&path, &full).await.unwrap();
+
+        // Parse from offset - should only get new entry
+        let (entries, offset2, _) =
+            parse_transcript_file(path.to_str().unwrap(), offset1)
+                .await
+                .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "second");
+        assert!(offset2 > offset1);
+    }
+
+    #[tokio::test]
+    async fn parse_file_with_tool_use_content_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_use.jsonl");
+        let content = r#"{"role":"assistant","content":[{"type":"text","text":"Let me read that."},{"type":"tool_use","id":"toolu_xyz","name":"Read","input":{"file_path":"/main.rs"}}]}
+{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_xyz","content":"fn main() {}"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        // Should have: text block, tool_use block, tool_result block
+        assert!(entries.len() >= 2);
+        // First entry should be the text
+        assert_eq!(entries[0].role, TranscriptRole::Assistant);
+        assert_eq!(entries[0].content, "Let me read that.");
+        // Second should be tool use
+        assert_eq!(entries[1].role, TranscriptRole::Tool);
+        assert!(entries[1].content.contains("Read"));
+        assert!(entries[1].tool_call_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn parse_file_tool_result_with_long_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long_result.jsonl");
+        let long_content = "x".repeat(1000);
+        let content = format!(
+            r#"{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_long","content":"{long_content}"}}]}}
+"#
+        );
+        tokio::fs::write(&path, &content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::Tool);
+        // Content should be truncated with "..."
+        assert!(entries[0].content.len() <= 510);
+        assert!(entries[0].content.ends_with("..."));
+    }
+
+    #[test]
+    fn token_usage_data_default() {
+        let data = TokenUsageData::default();
+        assert_eq!(data.input_tokens, 0);
+        assert_eq!(data.output_tokens, 0);
+        assert_eq!(data.cache_read_input_tokens, 0);
+        assert_eq!(data.cache_creation_input_tokens, 0);
+        assert!(data.model.is_none());
+    }
+
+    #[test]
+    fn parse_content_array_with_other_block_type() {
+        let jsonl = r#"{"role":"assistant","content":[{"type":"image","source":"base64data"},{"type":"text","text":"visible"}]}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "visible");
+    }
+
+    #[tokio::test]
+    async fn parse_file_with_tool_use_truncates_long_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long_input.jsonl");
+        let long_input = "y".repeat(500);
+        let content = format!(
+            r#"{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_trunc","name":"Write","input":{{"content":"{long_input}"}}}}]}}
+"#
+        );
+        tokio::fs::write(&path, &content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].content.contains("Write"));
+        // Input should be truncated if > 200 chars when serialized
+        if entries[0].content.len() > 220 {
+            assert!(entries[0].content.contains("..."));
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_file_tool_use_no_id_or_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_no_id.jsonl");
+        let content = r#"{"role":"assistant","content":[{"type":"tool_use","input":{"key":"value"}}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::Tool);
+        assert!(entries[0].content.contains("unknown"));
+        assert!(entries[0].tool_call_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_file_tool_result_no_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_result_empty.jsonl");
+        let content = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_empty"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::Tool);
+        assert!(entries[0].content.is_empty());
+        assert!(entries[0].tool_call_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn parse_file_tool_result_no_tool_use_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_result_no_id.jsonl");
+        let content = r#"{"role":"user","content":[{"type":"tool_result","content":"output data"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::Tool);
+        assert!(entries[0].tool_call_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_file_other_content_block_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other_block.jsonl");
+        let content = r#"{"role":"assistant","content":[{"type":"image","source":"data"},{"type":"text","text":"visible text"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        // "image" type is Other and ignored, only text block kept
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "visible text");
+    }
+
+    #[tokio::test]
+    async fn parse_file_empty_text_block_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_text.jsonl");
+        let content = r#"{"role":"assistant","content":[{"type":"text","text":""},{"type":"text","text":"real text"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "real text");
+    }
+
+    #[tokio::test]
+    async fn parse_file_content_as_non_string_non_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("non_string.jsonl");
+        let content = r#"{"role":"user","content":42}
+{"role":"user","content":true}
+{"role":"user","content":{"nested":"object"}}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        // None of these should produce entries
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_file_with_usage_extracts_token_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        let content = r#"{"role":"assistant","content":"response 1","usage":{"input_tokens":500,"output_tokens":200,"cache_read_input_tokens":100,"cache_creation_input_tokens":50},"model":"claude-sonnet-4-20250514"}
+{"role":"assistant","content":"response 2","usage":{"input_tokens":1000,"output_tokens":400,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, token_data) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(token_data.len(), 2);
+        assert_eq!(token_data[0].input_tokens, 500);
+        assert_eq!(token_data[0].output_tokens, 200);
+        assert_eq!(token_data[0].cache_read_input_tokens, 100);
+        assert_eq!(token_data[0].cache_creation_input_tokens, 50);
+        assert_eq!(token_data[1].input_tokens, 1000);
+    }
+
+    #[tokio::test]
+    async fn parse_file_mixed_valid_invalid_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.jsonl");
+        let content = r#"{"role":"user","content":"first"}
+not json at all
+{"invalid": "no role field"}
+
+{"role":"assistant","content":"second"}
+{broken json
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content, "first");
+        assert_eq!(entries[1].content, "second");
+    }
+
+    #[tokio::test]
+    async fn parse_file_tool_use_with_no_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool_no_input.jsonl");
+        let content = r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_noinput","name":"ListFiles"}]}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, _) =
+            parse_transcript_file(path.to_str().unwrap(), 0)
+                .await
+                .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, TranscriptRole::Tool);
+        assert!(entries[0].content.contains("ListFiles"));
+        assert!(entries[0].tool_call_id.is_some());
+    }
+
+    #[test]
+    fn parse_str_with_system_role() {
+        let jsonl = r#"{"role":"system","content":"System prompt here"}
+{"role":"user","content":"User message"}
+{"role":"assistant","content":"Response"}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].role, TranscriptRole::System);
+        assert_eq!(entries[1].role, TranscriptRole::User);
+        assert_eq!(entries[2].role, TranscriptRole::Assistant);
+    }
+
+    #[test]
+    fn parse_str_content_array_skips_non_text_blocks() {
+        // parse_transcript_str only extracts Text blocks from arrays
+        let jsonl = r#"{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}},{"type":"text","text":"explanation"},{"type":"tool_result","tool_use_id":"t1","content":"result"}]}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "explanation");
+    }
+
+    #[test]
+    fn parse_str_content_null_is_skipped() {
+        let jsonl = r#"{"role":"user","content":null}"#;
+        let (entries, _) = parse_transcript_str(jsonl);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn transcript_entry_clone() {
+        let entry = TranscriptEntry {
+            role: TranscriptRole::User,
+            content: "test content".to_string(),
+            tool_call_id: Some(Uuid::new_v4()),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.role, entry.role);
+        assert_eq!(cloned.content, entry.content);
+        assert_eq!(cloned.tool_call_id, entry.tool_call_id);
+    }
 }

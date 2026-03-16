@@ -308,4 +308,284 @@ mod tests {
         let resp = handle_jsonrpc_message(&server, msg).await;
         assert!(resp.is_none());
     }
+
+    #[tokio::test]
+    async fn handle_cancelled_notification_returns_none() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await;
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_parse_error() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = "not valid json at all {{{";
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32700);
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Parse error"));
+    }
+
+    #[tokio::test]
+    async fn handle_initialize_has_server_info() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":10,"method":"initialize","params":{}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["id"], 10);
+        assert!(resp["result"]["serverInfo"]["name"]
+            .as_str()
+            .unwrap()
+            .contains("myremote"));
+        assert!(resp["result"]["serverInfo"]["version"].is_string());
+        assert!(resp["result"]["capabilities"]["resources"].is_object());
+    }
+
+    #[tokio::test]
+    async fn handle_resources_list() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let resources = resp["result"]["resources"].as_array().unwrap();
+        assert!(resources.len() >= 6);
+        // First resource should be the context resource
+        assert_eq!(resources[0]["uri"], "myremote://context");
+        // Check that category resources exist
+        let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        assert!(uris.contains(&"myremote://memories/pattern"));
+        assert!(uris.contains(&"myremote://memories/decision"));
+        assert!(uris.contains(&"myremote://memories/pitfall"));
+        assert!(uris.contains(&"myremote://memories/architecture"));
+        assert!(uris.contains(&"myremote://memories/convention"));
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_context_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"myremote://context"}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let contents = resp["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["uri"], "myremote://context");
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_context_with_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        std::fs::write(
+            &claude_md,
+            "# Project\nSome content\n<!-- MyRemote Knowledge (auto-generated, do not edit below) -->\n## Knowledge\nExtracted knowledge here",
+        )
+        .unwrap();
+
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"myremote://context"}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let text = resp["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Knowledge"));
+        assert!(text.contains("Extracted knowledge here"));
+        // Should NOT contain content before the marker
+        assert!(!text.contains("Some content"));
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_unknown_uri() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"myremote://unknown"}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        assert_eq!(resp["result"]["contents"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_no_uri_param() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        // Empty string URI won't match any pattern, so returns error
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_with_missing_params() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":10,"method":"tools/call"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        // Missing params should return unknown tool error
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn handle_method_with_null_id() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert!(resp["result"].is_object());
+        assert!(resp["id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn handle_string_id() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":"req-1","method":"ping"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["id"], "req-1");
+    }
+
+    #[test]
+    fn resource_list_all_have_required_fields() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        for resource in resource_list(&server) {
+            assert!(resource["uri"].is_string());
+            assert!(resource["name"].is_string());
+            assert!(resource["description"].is_string());
+            assert!(resource["mimeType"].is_string());
+        }
+    }
+
+    #[test]
+    fn knowledge_mcp_server_namespace_format() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/home/user/my-project"), 8741);
+        assert!(server.namespace.starts_with("viking://resources/"));
+        assert!(server.namespace.ends_with('/'));
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_memories_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"myremote://memories/pattern"}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let text = resp["result"]["contents"][0]["text"].as_str().unwrap();
+        // With no cached memories, should say none found
+        assert!(text.contains("No pattern memories found"));
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_search_no_query() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"knowledge_search","arguments":{}}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("query parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"knowledge_context","arguments":{}}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        // Should return a result (no error), with some text
+        assert!(resp["result"]["content"][0]["text"].is_string());
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"knowledge_memories","arguments":{"category":"pattern"}}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No memories found"));
+    }
+
+    #[tokio::test]
+    async fn handle_resources_read_multiple_categories() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+
+        for category in &["decision", "pitfall", "architecture", "convention"] {
+            let msg = format!(
+                r#"{{"jsonrpc":"2.0","id":20,"method":"resources/read","params":{{"uri":"myremote://memories/{category}"}}}}"#
+            );
+            let resp = handle_jsonrpc_message(&server, &msg).await.unwrap();
+            let text = resp["result"]["contents"][0]["text"].as_str().unwrap();
+            assert!(text.contains(&format!("No {category} memories found")));
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_context_with_claude_md_no_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        std::fs::write(&claude_md, "# My Project\nContent without marker").unwrap();
+
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":21,"method":"resources/read","params":{"uri":"myremote://context"}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        let text = resp["result"]["contents"][0]["text"].as_str().unwrap();
+        // Without marker, returns entire file
+        assert!(text.contains("My Project"));
+        assert!(text.contains("Content without marker"));
+    }
+
+    #[tokio::test]
+    async fn handle_jsonrpc_preserves_integer_id() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":42,"method":"ping"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["id"], 42);
+        assert_eq!(resp["jsonrpc"], "2.0");
+    }
+
+    #[tokio::test]
+    async fn handle_method_without_id_and_not_notification() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        // Method with no id that is NOT a notification - should get null id
+        let msg = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert!(resp["id"].is_null());
+        assert!(resp["result"].is_object());
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_unknown_tool() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"nonexistent_tool","arguments":{}}}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn handle_tools_call_null_params() {
+        let server = KnowledgeMcpServer::new(PathBuf::from("/tmp/test"), 8741);
+        let msg = r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":null}"#;
+        let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
+        // null params -> name is "", treated as unknown tool
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn jsonrpc_ok_with_complex_result() {
+        let result = jsonrpc_ok(
+            serde_json::json!("id-str"),
+            serde_json::json!({"tools": [{"name": "test"}]}),
+        );
+        assert_eq!(result["id"], "id-str");
+        assert!(result["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn jsonrpc_error_with_null_id() {
+        let result = jsonrpc_error(serde_json::Value::Null, -32700, "Parse error");
+        assert!(result["id"].is_null());
+        assert_eq!(result["error"]["code"], -32700);
+    }
 }

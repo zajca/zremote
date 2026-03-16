@@ -592,4 +592,697 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["name"], "my session");
     }
+
+    #[tokio::test]
+    async fn create_session_invalid_host_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts/not-a-uuid/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn close_session_invalid_uuid() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/sessions/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_session_invalid_uuid() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/sessions/not-a-uuid")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn purge_invalid_uuid() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/sessions/not-a-uuid/purge")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_data() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        // Insert sessions directly
+        for i in 0..3 {
+            let session_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO sessions (id, host_id, status, name) VALUES (?, ?, 'active', ?)",
+            )
+            .bind(&session_id)
+            .bind(&host_id)
+            .bind(format!("session-{i}"))
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_session_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4();
+        let session_id_str = session_id.to_string();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, name) VALUES (?, ?, 'active', 'my-session')",
+        )
+        .bind(&session_id_str)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], session_id_str);
+        assert_eq!(json["name"], "my-session");
+        assert_eq!(json["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn update_session_clear_name() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4();
+        let session_id_str = session_id.to_string();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, name) VALUES (?, ?, 'active', 'old-name')",
+        )
+        .bind(&session_id_str)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        // Set name to null
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["name"].is_null());
+    }
+
+    #[tokio::test]
+    async fn close_already_closed_session_returns_404() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4();
+        let session_id_str = session_id.to_string();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')",
+        )
+        .bind(&session_id_str)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // find_session_for_close excludes status='closed'
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn purge_creating_session_returns_conflict() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4();
+        let session_id_str = session_id.to_string();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')",
+        )
+        .bind(&session_id_str)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_session_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "cols": 80,
+                            "rows": 24,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "active");
+        assert!(!json["id"].as_str().unwrap().is_empty());
+        assert!(json["pid"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn create_session_with_custom_shell() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "shell": "/bin/sh",
+                            "cols": 120,
+                            "rows": 40,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["shell"], "/bin/sh");
+    }
+
+    #[tokio::test]
+    async fn create_session_with_working_dir() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_str().unwrap().to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "cols": 80,
+                            "rows": 24,
+                            "working_dir": wd,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_session_with_name() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "cols": 80,
+                            "rows": 24,
+                            "name": "my-dev-session",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_session_default_cols_rows() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        // Omit cols and rows - should use defaults (80x24)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_and_close_session() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        // Create session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "cols": 80,
+                            "rows": 24,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap().to_string();
+
+        // Close session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Verify session is closed
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "closed");
+    }
+
+    #[tokio::test]
+    async fn create_and_list_sessions() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        // Create two sessions
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/hosts/{host_id}/sessions"))
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        // List sessions
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn create_close_and_purge_session() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        // Create session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap().to_string();
+
+        // Close session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Purge session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify session is gone
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_session_and_get_detail() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "cols": 80,
+                            "rows": 24,
+                            "name": "test-session",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = json["id"].as_str().unwrap().to_string();
+
+        // Get session detail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], session_id);
+        assert_eq!(json["status"], "active");
+        assert_eq!(json["name"], "test-session");
+        assert_eq!(json["host_id"], host_id);
+    }
+
+    #[tokio::test]
+    async fn update_session_nonexistent() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/sessions/{session_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name": "test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn purge_suspended_session_returns_conflict() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4();
+        let session_id_str = session_id.to_string();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'suspended')",
+        )
+        .bind(&session_id_str)
+        .bind(&host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/sessions/{session_id}/purge"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }
