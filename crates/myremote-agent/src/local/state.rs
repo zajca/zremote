@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use myremote_core::state::{AgenticLoopStore, ServerEvent, SessionStore};
+use myremote_protocol::SessionId;
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::session::SessionManager;
 
 /// Application state for local mode.
 ///
@@ -18,6 +21,8 @@ pub struct LocalAppState {
     pub shutdown: CancellationToken,
     pub hostname: String,
     pub host_id: Uuid,
+    pub session_manager: Mutex<SessionManager>,
+    pub pty_output_rx: Mutex<mpsc::Receiver<(SessionId, Vec<u8>)>>,
 }
 
 impl LocalAppState {
@@ -27,10 +32,14 @@ impl LocalAppState {
         hostname: String,
         host_id: Uuid,
         shutdown: CancellationToken,
+        use_tmux: bool,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
         let agentic_loops = AgenticLoopStore::default();
+
+        let (pty_output_tx, pty_output_rx) = mpsc::channel(256);
+        let session_manager = SessionManager::new(pty_output_tx, use_tmux);
 
         Arc::new(Self {
             db,
@@ -40,6 +49,8 @@ impl LocalAppState {
             shutdown,
             hostname,
             host_id,
+            session_manager: Mutex::new(session_manager),
+            pty_output_rx: Mutex::new(pty_output_rx),
         })
     }
 }
@@ -55,7 +66,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
-        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
 
         assert_eq!(state.hostname, "test-host");
         assert_eq!(state.host_id, host_id);
@@ -68,7 +79,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
 
         // Session store should be empty
         let sessions = state.sessions.read().await;
@@ -85,7 +96,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
 
         let mut rx = state.events.subscribe();
         let event = ServerEvent::HostStatusChanged {
