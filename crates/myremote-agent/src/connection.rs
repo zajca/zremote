@@ -278,7 +278,8 @@ pub async fn run_connection(
         Some(KnowledgeManager::new(
             config.openviking_binary.clone(),
             config.openviking_port,
-            config.openviking_data_dir.clone(),
+            config.openviking_config_dir.clone(),
+            config.openviking_api_key.clone(),
             outbound_tx.clone(),
         ))
     } else {
@@ -733,6 +734,16 @@ fn handle_server_message(
                 }
             } else {
                 tracing::warn!("received knowledge message but OpenViking is not configured");
+                // Send error status back so the UI can display setup instructions
+                if outbound_tx.try_send(AgentMessage::KnowledgeAction(
+                    myremote_protocol::knowledge::KnowledgeAgentMessage::ServiceStatus {
+                        status: myremote_protocol::knowledge::KnowledgeServiceStatus::Error,
+                        version: None,
+                        error: Some("OpenViking not enabled. Set OPENVIKING_ENABLED=true and restart agent.".to_string()),
+                    },
+                )).is_err() {
+                    tracing::warn!("outbound channel full, knowledge error dropped");
+                }
             }
         }
     }
@@ -1011,7 +1022,8 @@ mod tests {
             openviking_enabled: false,
             openviking_binary: "openviking".to_string(),
             openviking_port: 1933,
-            openviking_data_dir: std::path::PathBuf::from("/tmp/ov"),
+            openviking_config_dir: std::path::PathBuf::from("/tmp/ov"),
+            openviking_api_key: None,
         };
         let result = connect(&config).await;
         assert!(result.is_err());

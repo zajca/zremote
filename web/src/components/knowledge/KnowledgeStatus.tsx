@@ -71,6 +71,18 @@ export function KnowledgeStatus({
         </div>
       )}
 
+      {(!status || status.last_error?.includes("not enabled")) && (
+        <div className="rounded border border-border-secondary bg-bg-secondary p-3 text-sm text-text-secondary">
+          <p className="font-medium text-text-primary">OpenViking is not configured on this host.</p>
+          <ol className="mt-2 list-inside list-decimal space-y-1">
+            <li><code className="text-xs bg-bg-tertiary px-1 rounded">pip install openviking</code></li>
+            <li>Set <code className="text-xs bg-bg-tertiary px-1 rounded">OPENVIKING_ENABLED=true</code></li>
+            <li>Set <code className="text-xs bg-bg-tertiary px-1 rounded">OPENROUTER_API_KEY=sk-or-...</code></li>
+            <li>Restart agent</li>
+          </ol>
+        </div>
+      )}
+
       <div className="flex gap-2">
         {(!status ||
           status.status === "stopped" ||

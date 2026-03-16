@@ -6,16 +6,23 @@ pub struct OvProcess {
     child: Option<tokio::process::Child>,
     binary: String,
     port: u16,
-    data_dir: PathBuf,
+    config_path: PathBuf,
+    env_vars: Vec<(String, String)>,
 }
 
 impl OvProcess {
-    pub fn new(binary: String, port: u16, data_dir: PathBuf) -> Self {
+    pub fn new(
+        binary: String,
+        port: u16,
+        config_path: PathBuf,
+        env_vars: Vec<(String, String)>,
+    ) -> Self {
         Self {
             child: None,
             binary,
             port,
-            data_dir,
+            config_path,
+            env_vars,
         }
     }
 
@@ -25,17 +32,12 @@ impl OvProcess {
             return Err(OvProcessError::AlreadyRunning);
         }
 
-        // Ensure data dir exists
-        tokio::fs::create_dir_all(&self.data_dir)
-            .await
-            .map_err(OvProcessError::Io)?;
-
         let child = tokio::process::Command::new(&self.binary)
-            .arg("serve")
             .arg("--port")
             .arg(self.port.to_string())
-            .arg("--data-dir")
-            .arg(&self.data_dir)
+            .arg("--config")
+            .arg(&self.config_path)
+            .envs(self.env_vars.iter().map(|(k, v)| (k, v)))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -152,7 +154,12 @@ mod tests {
 
     #[test]
     fn new_process_is_not_running() {
-        let proc = OvProcess::new("openviking".to_string(), 1933, PathBuf::from("/tmp/ov"));
+        let proc = OvProcess::new(
+            "openviking".to_string(),
+            1933,
+            PathBuf::from("/etc/ov/config.toml"),
+            vec![],
+        );
         assert!(!proc.is_running());
     }
 

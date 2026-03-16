@@ -28,6 +28,7 @@
             pkgs.cargo-audit
             pkgs.bun
             pkgs.nodejs_22
+            pkgs.python312
             pkgs.sqlite
             pkgs.pkg-config
             pkgs.openssl

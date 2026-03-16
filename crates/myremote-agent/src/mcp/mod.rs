@@ -19,7 +19,7 @@ impl KnowledgeMcpServer {
         let name = project_name_from_path(project_path.to_str().unwrap_or("project"));
         let namespace = format!("viking://resources/{name}/");
         Self {
-            client: OvClient::new(ov_port),
+            client: OvClient::new(ov_port, None),
             project_path,
             namespace,
         }

@@ -31,6 +31,9 @@ pub struct KnowledgeManager {
     process: OvProcess,
     client: OvClient,
     outbound_tx: mpsc::Sender<AgentMessage>,
+    config_dir: PathBuf,
+    api_key: Option<String>,
+    port: u16,
     enabled: bool,
 }
 
@@ -38,12 +41,21 @@ impl KnowledgeManager {
     pub fn new(
         binary: String,
         port: u16,
-        data_dir: std::path::PathBuf,
+        config_dir: std::path::PathBuf,
+        api_key: Option<String>,
         outbound_tx: mpsc::Sender<AgentMessage>,
     ) -> Self {
+        let config_path = config_dir.join("ov.conf");
+        let env_vars: Vec<(String, String)> = api_key
+            .as_ref()
+            .map(|k| vec![("OPENROUTER_API_KEY".to_string(), k.clone())])
+            .unwrap_or_default();
         Self {
-            process: OvProcess::new(binary, port, data_dir),
-            client: OvClient::new(port),
+            process: OvProcess::new(binary, port, config_path, env_vars),
+            client: OvClient::new(port, api_key.clone()),
+            config_dir,
+            api_key,
+            port,
             outbound_tx,
             enabled: false,
         }
@@ -124,6 +136,35 @@ impl KnowledgeManager {
             error: None,
         });
 
+        // Write config file before starting OV process
+        if let Some(ref key) = self.api_key {
+            let conf = config::generate_ov_conf(
+                "openrouter",
+                key,
+                "openai/text-embedding-3-small",
+                "google/gemini-2.0-flash-001",
+                self.port,
+            );
+            if let Err(e) = tokio::fs::create_dir_all(&self.config_dir).await {
+                self.send_knowledge_msg(KnowledgeAgentMessage::ServiceStatus {
+                    status: myremote_protocol::knowledge::KnowledgeServiceStatus::Error,
+                    version: None,
+                    error: Some(format!("failed to create config dir: {e}")),
+                });
+                return;
+            }
+            let conf_path = self.config_dir.join("ov.conf");
+            if let Err(e) = tokio::fs::write(&conf_path, &conf).await {
+                self.send_knowledge_msg(KnowledgeAgentMessage::ServiceStatus {
+                    status: myremote_protocol::knowledge::KnowledgeServiceStatus::Error,
+                    version: None,
+                    error: Some(format!("failed to write ov.conf: {e}")),
+                });
+                return;
+            }
+            tracing::info!(path = %conf_path.display(), "wrote OpenViking config");
+        }
+
         match self.process.start().await {
             Ok(()) => {
                 self.enabled = true;
@@ -157,7 +198,7 @@ impl KnowledgeManager {
         });
     }
 
-    async fn index_project(&self, project_path: &str, force_reindex: bool) {
+    async fn index_project(&self, project_path: &str, _force_reindex: bool) {
         if !self.enabled {
             tracing::warn!("OpenViking not running, cannot index");
             return;
@@ -168,7 +209,7 @@ impl KnowledgeManager {
         );
         match self
             .client
-            .index_project(&namespace, project_path, force_reindex)
+            .index_project(&namespace, project_path)
             .await
         {
             Ok(()) => {
@@ -193,7 +234,7 @@ impl KnowledgeManager {
         project_path: &str,
         request_id: uuid::Uuid,
         query: &str,
-        tier: myremote_protocol::knowledge::SearchTier,
+        _tier: myremote_protocol::knowledge::SearchTier,
         max_results: Option<u32>,
     ) {
         if !self.enabled {
@@ -209,14 +250,10 @@ impl KnowledgeManager {
             "viking://resources/{}/",
             project_name_from_path(project_path)
         );
-        let tier_str = serde_json::to_value(tier)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_else(|| "l1".to_string());
         let start = std::time::Instant::now();
         match self
             .client
-            .search(&namespace, query, &tier_str, max_results.unwrap_or(20))
+            .search(&namespace, query, max_results.unwrap_or(20))
             .await
         {
             Ok(results) => {
@@ -284,27 +321,12 @@ impl KnowledgeManager {
             });
             return;
         }
-        let namespace = format!(
-            "viking://resources/{}/",
-            project_name_from_path(project_path)
-        );
-        match self.client.synthesize_knowledge(&namespace).await {
-            Ok((content, memories_used)) => {
-                self.send_knowledge_msg(KnowledgeAgentMessage::InstructionsGenerated {
-                    project_path: project_path.to_string(),
-                    content,
-                    memories_used,
-                });
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "instruction generation failed");
-                self.send_knowledge_msg(KnowledgeAgentMessage::InstructionsGenerated {
-                    project_path: project_path.to_string(),
-                    content: format!("# Error\n\nFailed to generate instructions: {e}\n"),
-                    memories_used: 0,
-                });
-            }
-        }
+        let (content, memories_used) = synthesize_from_cache(project_path).await;
+        self.send_knowledge_msg(KnowledgeAgentMessage::InstructionsGenerated {
+            project_path: project_path.to_string(),
+            content,
+            memories_used,
+        });
     }
 
     // --- Phase 1: Write-to-Disk Pipeline ---
@@ -316,25 +338,9 @@ impl KnowledgeManager {
     async fn write_claude_md(&self, project_path: &str, content: &str, mode: WriteMdMode) {
         let generated;
         let actual_content = if content.is_empty() && self.enabled {
-            let namespace = format!(
-                "viking://resources/{}/",
-                project_name_from_path(project_path)
-            );
-            match self.client.synthesize_knowledge(&namespace).await {
-                Ok((c, _)) => {
-                    generated = format_claude_md_section(&c);
-                    &generated
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "auto-regen: failed to generate instructions for CLAUDE.md");
-                    self.send_knowledge_msg(KnowledgeAgentMessage::ClaudeMdWritten {
-                        project_path: project_path.to_string(),
-                        bytes_written: 0,
-                        error: Some(format!("failed to generate instructions: {e}")),
-                    });
-                    return;
-                }
-            }
+            let (c, _) = synthesize_from_cache(project_path).await;
+            generated = format_claude_md_section(&c);
+            &generated
         } else {
             content
         };
@@ -382,7 +388,7 @@ impl KnowledgeManager {
         // Step 1: Index project files
         if let Err(e) = self
             .client
-            .index_project(&namespace, project_path, false)
+            .index_project(&namespace, project_path)
             .await
         {
             tracing::error!(project_path, error = %e, "bootstrap: failed to index");
@@ -464,18 +470,12 @@ impl KnowledgeManager {
         }
 
         // Step 4: Generate initial CLAUDE.md section
-        match self.client.synthesize_knowledge(&namespace).await {
-            Ok((content, _)) => {
-                let formatted = format_claude_md_section(&content);
-                if let Err(e) =
-                    write_claude_md_to_disk(project_path, &formatted, WriteMdMode::Section).await
-                {
-                    tracing::warn!(error = %e, "bootstrap: failed to write initial CLAUDE.md");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "bootstrap: failed to synthesize knowledge");
-            }
+        let (content, _) = synthesize_from_cache(project_path).await;
+        let formatted = format_claude_md_section(&content);
+        if let Err(e) =
+            write_claude_md_to_disk(project_path, &formatted, WriteMdMode::Section).await
+        {
+            tracing::warn!(error = %e, "bootstrap: failed to write initial CLAUDE.md");
         }
 
         // Step 5: Write .mcp.json
@@ -502,6 +502,54 @@ impl KnowledgeManager {
         });
     }
 
+}
+
+/// Synthesize knowledge locally from the memory cache.
+///
+/// Returns `(content, memories_used)`. This replaces the old OV-side synthesis.
+#[allow(clippy::cast_possible_truncation)]
+async fn synthesize_from_cache(project_path: &str) -> (String, u32) {
+    let cache = read_memory_cache(project_path).await;
+    let high_confidence: Vec<_> = cache
+        .iter()
+        .filter(|m| m.confidence >= MIN_CONFIDENCE)
+        .collect();
+
+    if high_confidence.is_empty() {
+        return (
+            "# Project Knowledge\n\nNo memories have been extracted yet.\n".to_string(),
+            0,
+        );
+    }
+
+    let mut output = String::from("# Project Knowledge\n\n");
+
+    // Group by category
+    let categories: &[(MemoryCategory, &str)] = &[
+        (MemoryCategory::Architecture, "Architecture"),
+        (MemoryCategory::Convention, "Conventions"),
+        (MemoryCategory::Pattern, "Patterns"),
+        (MemoryCategory::Decision, "Decisions"),
+        (MemoryCategory::Pitfall, "Pitfalls"),
+        (MemoryCategory::Preference, "Preferences"),
+    ];
+
+    for (cat, label) in categories {
+        let cat_memories: Vec<_> = high_confidence
+            .iter()
+            .filter(|m| m.category == *cat)
+            .collect();
+        if !cat_memories.is_empty() {
+            let _ = write!(output, "## {label}\n\n");
+            for mem in &cat_memories {
+                let _ = writeln!(output, "- **{}**: {}", mem.key, mem.content);
+            }
+            output.push('\n');
+        }
+    }
+
+    let count = u32::try_from(high_confidence.len()).unwrap_or(u32::MAX);
+    (output, count)
 }
 
 /// Extract project name from path (last component).

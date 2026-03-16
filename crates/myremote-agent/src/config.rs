@@ -13,8 +13,10 @@ pub struct AgentConfig {
     pub openviking_binary: String,
     /// Port for the `OpenViking` HTTP API.
     pub openviking_port: u16,
-    /// Data directory for `OpenViking` storage.
-    pub openviking_data_dir: std::path::PathBuf,
+    /// Config directory for `OpenViking` storage.
+    pub openviking_config_dir: std::path::PathBuf,
+    /// API key for OpenViking (passed from OPENROUTER_API_KEY).
+    pub openviking_api_key: Option<String>,
 }
 
 impl AgentConfig {
@@ -49,18 +51,20 @@ impl AgentConfig {
             .unwrap_or(false);
 
         let openviking_binary = std::env::var("OPENVIKING_BINARY")
-            .unwrap_or_else(|_| "openviking".to_string());
+            .unwrap_or_else(|_| "openviking-server".to_string());
 
         let openviking_port = std::env::var("OPENVIKING_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1933);
 
-        let openviking_data_dir = std::env::var("OPENVIKING_DATA_DIR")
+        let openviking_config_dir = std::env::var("OPENVIKING_CONFIG_DIR")
             .map_or_else(
-                |_| std::path::PathBuf::from("/var/lib/openviking"),
+                |_| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp")).join(".openviking"),
                 std::path::PathBuf::from,
             );
+
+        let openviking_api_key = std::env::var("OPENROUTER_API_KEY").ok();
 
         Ok(Self {
             server_url,
@@ -68,7 +72,8 @@ impl AgentConfig {
             openviking_enabled,
             openviking_binary,
             openviking_port,
-            openviking_data_dir,
+            openviking_config_dir,
+            openviking_api_key,
         })
     }
 }
