@@ -731,4 +731,701 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn delete_project_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, "/tmp/test", "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_project_invalid_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/projects/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_project_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, "/tmp/myproject", "myproject")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], project_id);
+        assert_eq!(json["path"], "/tmp/myproject");
+        assert_eq!(json["name"], "myproject");
+    }
+
+    #[tokio::test]
+    async fn list_projects_with_data() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        q::insert_project(
+            &state.db,
+            &Uuid::new_v4().to_string(),
+            &host_id,
+            "/tmp/proj1",
+            "proj1",
+        )
+        .await
+        .unwrap();
+        q::insert_project(
+            &state.db,
+            &Uuid::new_v4().to_string(),
+            &host_id,
+            "/tmp/proj2",
+            "proj2",
+        )
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_project_host_not_found() {
+        let state = test_state().await;
+        let fake_host = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{fake_host}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": "/tmp/test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn add_project_invalid_host_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts/not-a-uuid/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": "/tmp/test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_project_sessions_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/not-a-uuid/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/not-a-uuid/git/refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_on_non_git_dir() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        // Create a temp dir (not a git repo)
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/git/refresh"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Non-git dir returns the project without git info (still OK)
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], project_id);
+        assert!(json["git_branch"].is_null());
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/not-a-uuid/worktrees")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/worktrees"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"branch": "feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/not-a-uuid/worktrees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"branch": "feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_worktree_invalid_project_id() {
+        let state = test_state().await;
+        let worktree_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/projects/not-a-uuid/worktrees/{worktree_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_worktree_invalid_worktree_id() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/projects/{project_id}/worktrees/not-a-uuid"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_project_invalid_body() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Missing required field 'path'
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_project_with_git_repo() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+
+        // Create a temp dir and init a git repo
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        std::process::Command::new("git")
+            .args(["init", &project_path])
+            .output()
+            .unwrap();
+
+        // Configure git for the test repo
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "config", "user.email", "test@test.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "config", "user.name", "Test"])
+            .output()
+            .unwrap();
+
+        // Create a commit so git has state
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "commit", "-m", "init"])
+            .output()
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({ "path": project_path }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["path"], project_path);
+        // Should have git info populated
+        assert!(!json["git_branch"].is_null());
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_on_git_repo() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        // Create a temp dir and init a git repo
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        std::process::Command::new("git")
+            .args(["init", &project_path])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "config", "user.email", "test@test.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "config", "user.name", "Test"])
+            .output()
+            .unwrap();
+
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C", &project_path, "commit", "-m", "initial commit"])
+            .output()
+            .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/git/refresh"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], project_id);
+        // Should have git info
+        assert!(!json["git_branch"].is_null());
+        assert!(!json["git_commit_hash"].is_null());
+        assert!(!json["git_commit_message"].is_null());
+    }
+
+    #[tokio::test]
+    async fn trigger_scan_valid_host() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/projects/scan"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn delete_project_and_verify_gone() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, "/tmp/to-delete", "del")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        // Delete
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/projects/{project_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // List should be empty
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/hosts/{host_id}/projects"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_worktree_invalid_body() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/worktrees"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Missing required field 'branch'
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn trigger_scan_invalid_host_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts/not-a-uuid/projects/scan")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_project_sessions_with_data() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, "/tmp/test", "test")
+            .await
+            .unwrap();
+
+        // Insert a session linked to this project
+        let session_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&session_id)
+        .bind(&host_id)
+        .bind(&project_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["id"], session_id);
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_with_data() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+        let worktree_id = Uuid::new_v4().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, "/tmp/main", "main")
+            .await
+            .unwrap();
+
+        // Insert a worktree child project
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+             VALUES (?, ?, ?, ?, ?, 'worktree')",
+        )
+        .bind(&worktree_id)
+        .bind(&host_id)
+        .bind("/tmp/main-wt")
+        .bind("main-wt")
+        .bind(&project_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/worktrees"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["id"], worktree_id);
+        assert_eq!(json[0]["parent_project_id"], project_id);
+    }
 }

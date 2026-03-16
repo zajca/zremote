@@ -486,3 +486,769 @@ pub async fn bootstrap_project(
 
     Ok(StatusCode::ACCEPTED)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{delete, get, post};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn test_state() -> Arc<AppState> {
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(crate::state::ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    fn build_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/projects/{project_id}/knowledge/status", get(get_status))
+            .route("/api/projects/{project_id}/knowledge/index", post(trigger_index))
+            .route("/api/projects/{project_id}/knowledge/search", post(search))
+            .route("/api/projects/{project_id}/knowledge/memories", get(list_memories))
+            .route(
+                "/api/projects/{project_id}/knowledge/memories/{memory_id}",
+                delete(delete_memory).put(update_memory),
+            )
+            .route("/api/projects/{project_id}/knowledge/extract", post(extract_memories))
+            .route("/api/projects/{project_id}/knowledge/generate-instructions", post(generate_instructions))
+            .route("/api/projects/{project_id}/knowledge/write-claude-md", post(write_claude_md))
+            .route("/api/projects/{project_id}/knowledge/bootstrap", post(bootstrap_project))
+            .route("/api/hosts/{host_id}/knowledge/service", post(control_service))
+            .with_state(state)
+    }
+
+    async fn insert_host(state: &AppState, host_id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES (?, 'test', 'test-host', 'hash', 'online')",
+        )
+        .bind(host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_project(state: &AppState, project_id: &str, host_id: &str, path: &str) {
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name) VALUES (?, ?, ?, 'test-project')",
+        )
+        .bind(project_id)
+        .bind(host_id)
+        .bind(path)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_memory(
+        state: &AppState,
+        memory_id: &str,
+        project_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO knowledge_memories (id, project_id, key, content, category, confidence, created_at, updated_at) \
+             VALUES (?, ?, 'test-key', 'test content', 'pattern', 0.9, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(memory_id)
+        .bind(project_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    /// Register a host connection so that `get_sender` returns a sender.
+    async fn register_host_connection(
+        state: &AppState,
+        host_id: Uuid,
+    ) -> tokio::sync::mpsc::Receiver<ServerMessage> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "test-host".to_string(), tx, false)
+            .await;
+        rx
+    }
+
+    // --- get_status tests ---
+
+    #[tokio::test]
+    async fn get_status_no_kb() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/home/user/proj").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/projects/{project_id}/knowledge/status"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_null());
+    }
+
+    #[tokio::test]
+    async fn get_status_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/projects/not-a-uuid/knowledge/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_status_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/projects/{project_id}/knowledge/status"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- list_memories tests ---
+
+    #[tokio::test]
+    async fn list_memories_empty() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/projects/{project_id}/knowledge/memories"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_memories_with_data() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+        insert_memory(&state, &Uuid::new_v4().to_string(), &project_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/projects/{project_id}/knowledge/memories"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["category"], "pattern");
+    }
+
+    #[tokio::test]
+    async fn list_memories_with_category_filter() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+        insert_memory(&state, &Uuid::new_v4().to_string(), &project_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/projects/{project_id}/knowledge/memories?category=nonexistent"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_memories_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/projects/not-uuid/knowledge/memories")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- delete_memory tests ---
+
+    #[tokio::test]
+    async fn delete_memory_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        let memory_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+        insert_memory(&state, &memory_id, &project_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/memories/{memory_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_memory_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4().to_string();
+        let memory_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/memories/{memory_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_memory_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/projects/not-uuid/knowledge/memories/some-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- update_memory tests ---
+
+    #[tokio::test]
+    async fn update_memory_content() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        let memory_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+        insert_memory(&state, &memory_id, &project_id).await;
+
+        let body = serde_json::json!({ "content": "updated content" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/memories/{memory_id}"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["content"], "updated content");
+    }
+
+    #[tokio::test]
+    async fn update_memory_category() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        let memory_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+        insert_memory(&state, &memory_id, &project_id).await;
+
+        let body = serde_json::json!({ "category": "convention" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/memories/{memory_id}"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["category"], "convention");
+    }
+
+    #[tokio::test]
+    async fn update_memory_invalid_project_id() {
+        let state = test_state().await;
+        let body = serde_json::json!({ "content": "x" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/projects/not-uuid/knowledge/memories/mem-id")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- trigger_index tests ---
+
+    #[tokio::test]
+    async fn trigger_index_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let body = serde_json::json!({ "force_reindex": false });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/index"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn trigger_index_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id.to_string()).await;
+        insert_project(&state, &project_id, &host_id.to_string(), "/proj").await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let body = serde_json::json!({ "force_reindex": true });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/index"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn trigger_index_invalid_project_id() {
+        let state = test_state().await;
+        let body = serde_json::json!({ "force_reindex": false });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/not-uuid/knowledge/index")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- control_service tests ---
+
+    #[tokio::test]
+    async fn control_service_invalid_action() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let body = serde_json::json!({ "action": "invalid" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/knowledge/service"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn control_service_invalid_host_id() {
+        let state = test_state().await;
+        let body = serde_json::json!({ "action": "start" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/hosts/not-uuid/knowledge/service")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn control_service_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+
+        let body = serde_json::json!({ "action": "start" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id}/knowledge/service"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn control_service_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        for action in &["start", "stop", "restart"] {
+            let body = serde_json::json!({ "action": action });
+            let app = build_router(Arc::clone(&state));
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/hosts/{host_id}/knowledge/service"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED, "failed for action: {action}");
+        }
+    }
+
+    // --- bootstrap_project tests ---
+
+    #[tokio::test]
+    async fn bootstrap_project_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/bootstrap"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_project_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id.to_string()).await;
+        insert_project(&state, &project_id, &host_id.to_string(), "/proj").await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/bootstrap"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/bootstrap"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- extract_memories tests ---
+
+    #[tokio::test]
+    async fn extract_memories_invalid_project() {
+        let state = test_state().await;
+        let body = serde_json::json!({ "loop_id": Uuid::new_v4().to_string() });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/not-uuid/knowledge/extract")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn extract_memories_invalid_loop_id() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let body = serde_json::json!({ "loop_id": "not-a-uuid" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/extract"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn extract_memories_no_transcript() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        let loop_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let body = serde_json::json!({ "loop_id": loop_id });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/extract"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- search tests ---
+
+    #[tokio::test]
+    async fn search_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let body = serde_json::json!({ "query": "test query" });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/knowledge/search"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // --- generate_instructions tests ---
+
+    #[tokio::test]
+    async fn generate_instructions_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/generate-instructions"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // --- write_claude_md tests ---
+
+    #[tokio::test]
+    async fn write_claude_md_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let project_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &project_id, &host_id, "/proj").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/knowledge/write-claude-md"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+}

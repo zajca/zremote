@@ -340,3 +340,468 @@ pub async fn discover_claude_sessions(
 pub struct DiscoverQuery {
     pub project_path: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use http_body_util::BodyExt;
+    use myremote_protocol::ServerMessage;
+    use tower::ServiceExt;
+
+    async fn test_state() -> Arc<AppState> {
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(crate::state::ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    fn build_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route(
+                "/api/claude-tasks",
+                get(list_claude_tasks).post(create_claude_task),
+            )
+            .route("/api/claude-tasks/{task_id}", get(get_claude_task))
+            .route("/api/claude-tasks/{task_id}/resume", post(resume_claude_task))
+            .route(
+                "/api/hosts/{host_id}/claude-tasks/discover",
+                get(discover_claude_sessions),
+            )
+            .with_state(state)
+    }
+
+    async fn insert_host(state: &AppState, host_id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES (?, 'test', 'test-host', 'hash', 'online')",
+        )
+        .bind(host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn register_host_connection(
+        state: &AppState,
+        host_id: Uuid,
+    ) -> tokio::sync::mpsc::Receiver<ServerMessage> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "test-host".to_string(), tx, false)
+            .await;
+        rx
+    }
+
+    // --- list_claude_tasks tests ---
+
+    #[tokio::test]
+    async fn list_claude_tasks_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/claude-tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_claude_tasks_with_filters() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/claude-tasks?status=completed&host_id=abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    // --- get_claude_task tests ---
+
+    #[tokio::test]
+    async fn get_claude_task_not_found() {
+        let state = test_state().await;
+        let task_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/claude-tasks/{task_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- create_claude_task tests ---
+
+    #[tokio::test]
+    async fn create_claude_task_invalid_host_id() {
+        let state = test_state().await;
+        let body = serde_json::json!({
+            "host_id": "not-a-uuid",
+            "project_path": "/proj",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_host_not_found() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let body = serde_json::json!({
+            "host_id": host_id,
+            "project_path": "/proj",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let body = serde_json::json!({
+            "host_id": host_id,
+            "project_path": "/proj",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/home/user/project",
+            "model": "sonnet",
+            "initial_prompt": "Fix the bug",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["host_id"], host_id.to_string());
+        assert_eq!(json["project_path"], "/home/user/project");
+        assert_eq!(json["model"], "sonnet");
+        assert_eq!(json["initial_prompt"], "Fix the bug");
+        assert_eq!(json["status"], "starting");
+    }
+
+    #[tokio::test]
+    async fn create_claude_task_with_options() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/proj",
+            "allowed_tools": ["Bash", "Read"],
+            "skip_permissions": true,
+            "output_format": "json",
+            "custom_flags": "--verbose",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert!(json["options_json"].is_string());
+    }
+
+    // --- list after create ---
+
+    #[tokio::test]
+    async fn list_claude_tasks_after_create() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/proj",
+        });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let app2 = build_router(Arc::clone(&state));
+        let resp2 = app2
+            .oneshot(
+                Request::get("/api/claude-tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = resp2.into_body().collect().await.unwrap().to_bytes();
+        let tasks: Vec<serde_json::Value> = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(tasks.len(), 1);
+    }
+
+    // --- resume_claude_task tests ---
+
+    #[tokio::test]
+    async fn resume_claude_task_not_found() {
+        let state = test_state().await;
+        let task_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_still_active() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        // Create a task
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/proj",
+        });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let task: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        let task_id = task["id"].as_str().unwrap();
+
+        // Try to resume while status is "starting"
+        let app2 = build_router(Arc::clone(&state));
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_completed_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        // Create a task
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/proj",
+            "model": "opus",
+        });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let create_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let task: serde_json::Value = serde_json::from_slice(&create_bytes).unwrap();
+        let task_id = task["id"].as_str().unwrap();
+
+        // Mark it completed in DB
+        sqlx::query("UPDATE claude_sessions SET status = 'completed' WHERE id = ?")
+            .bind(task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        // Resume it
+        let resume_body = serde_json::json!({ "initial_prompt": "Continue please" });
+        let app2 = build_router(Arc::clone(&state));
+        let resume_resp = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&resume_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resume_resp.status(), StatusCode::CREATED);
+        let resume_bytes = resume_resp.into_body().collect().await.unwrap().to_bytes();
+        let new_task: serde_json::Value = serde_json::from_slice(&resume_bytes).unwrap();
+        assert_eq!(new_task["status"], "starting");
+        assert_eq!(new_task["resume_from"], task_id);
+        assert_eq!(new_task["model"], "opus");
+    }
+
+    // --- discover_claude_sessions tests ---
+
+    #[tokio::test]
+    async fn discover_invalid_host_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/hosts/not-uuid/claude-tasks/discover?project_path=/proj")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn discover_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/hosts/{host_id}/claude-tasks/discover?project_path=/proj"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+}

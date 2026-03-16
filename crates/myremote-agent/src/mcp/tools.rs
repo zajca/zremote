@@ -320,4 +320,265 @@ mod tests {
             .unwrap()
             .contains("No memories found"));
     }
+
+    #[tokio::test]
+    async fn handle_search_empty_query_string() {
+        let server = KnowledgeMcpServer::new(std::path::PathBuf::from("/tmp/test"), 8741);
+        let params = serde_json::json!({"name": "knowledge_search", "arguments": {"query": ""}});
+        let result = handle_tool_call(&server, &params).await;
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("query parameter is required"));
+    }
+
+    #[tokio::test]
+    async fn handle_tool_call_missing_name() {
+        let server = KnowledgeMcpServer::new(std::path::PathBuf::from("/tmp/test"), 8741);
+        let params = serde_json::json!({"arguments": {}});
+        let result = handle_tool_call(&server, &params).await;
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn handle_tool_call_missing_arguments() {
+        let server = KnowledgeMcpServer::new(std::path::PathBuf::from("/tmp/test"), 8741);
+        // No arguments field at all - should default to empty object
+        let params = serde_json::json!({"name": "knowledge_context"});
+        let result = handle_tool_call(&server, &params).await;
+        // Should not error since knowledge_context doesn't need args
+        assert!(result.get("isError").is_none() || result["isError"] == false);
+    }
+
+    #[tokio::test]
+    async fn handle_context_with_claude_md_no_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        std::fs::write(&claude_md, "# My Project\nSome documentation without marker").unwrap();
+
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let params = serde_json::json!({"name": "knowledge_context", "arguments": {}});
+        let result = handle_tool_call(&server, &params).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        // Without marker, entire file content is returned
+        assert!(text.contains("My Project"));
+        assert!(text.contains("Some documentation without marker"));
+    }
+
+    #[tokio::test]
+    async fn handle_context_with_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        std::fs::write(
+            &claude_md,
+            "Before marker\n<!-- MyRemote Knowledge (auto-generated, do not edit below) -->\nAfter marker content",
+        ).unwrap();
+
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let params = serde_json::json!({"name": "knowledge_context", "arguments": {}});
+        let result = handle_tool_call(&server, &params).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("After marker content"));
+        assert!(!text.contains("Before marker"));
+    }
+
+    #[test]
+    fn tool_list_search_has_required_query() {
+        let tools = tool_list();
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_search")
+            .unwrap();
+        let required = search["inputSchema"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|r| r == "query"));
+    }
+
+    #[test]
+    fn tool_list_search_has_tier_enum() {
+        let tools = tool_list();
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_search")
+            .unwrap();
+        let tier = &search["inputSchema"]["properties"]["tier"];
+        let tier_enum = tier["enum"].as_array().unwrap();
+        assert_eq!(tier_enum.len(), 3);
+        assert!(tier_enum.iter().any(|v| v == "l0"));
+        assert!(tier_enum.iter().any(|v| v == "l1"));
+        assert!(tier_enum.iter().any(|v| v == "l2"));
+    }
+
+    #[test]
+    fn tool_list_memories_has_category_enum() {
+        let tools = tool_list();
+        let memories = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_memories")
+            .unwrap();
+        let category = &memories["inputSchema"]["properties"]["category"];
+        let cat_enum = category["enum"].as_array().unwrap();
+        assert!(cat_enum.len() >= 5);
+    }
+
+    #[test]
+    fn tool_list_context_has_no_required() {
+        let tools = tool_list();
+        let context = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_context")
+            .unwrap();
+        // knowledge_context has no required fields
+        assert!(context["inputSchema"].get("required").is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_memories_with_category_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let params = serde_json::json!({
+            "name": "knowledge_memories",
+            "arguments": {"category": "pattern"}
+        });
+        let result = handle_tool_call(&server, &params).await;
+        // With no cached memories, should still return "no memories found"
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No memories found"));
+    }
+
+    #[tokio::test]
+    async fn handle_memories_with_query_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let params = serde_json::json!({
+            "name": "knowledge_memories",
+            "arguments": {"query": "something"}
+        });
+        let result = handle_tool_call(&server, &params).await;
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No memories found"));
+    }
+
+    #[tokio::test]
+    async fn handle_memories_with_both_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let params = serde_json::json!({
+            "name": "knowledge_memories",
+            "arguments": {"category": "decision", "query": "api"}
+        });
+        let result = handle_tool_call(&server, &params).await;
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No memories found"));
+    }
+
+    #[tokio::test]
+    async fn handle_search_with_max_results() {
+        let server = KnowledgeMcpServer::new(std::path::PathBuf::from("/tmp/test"), 8741);
+        let params = serde_json::json!({
+            "name": "knowledge_search",
+            "arguments": {"query": "test", "max_results": 5}
+        });
+        // This will fail to connect to OV, which is expected
+        let result = handle_tool_call(&server, &params).await;
+        // Should either get results or an error about connection
+        assert!(result["content"][0]["text"].is_string());
+    }
+
+    #[tokio::test]
+    async fn handle_search_max_results_capped_at_20() {
+        let server = KnowledgeMcpServer::new(std::path::PathBuf::from("/tmp/test"), 8741);
+        let params = serde_json::json!({
+            "name": "knowledge_search",
+            "arguments": {"query": "test", "max_results": 100}
+        });
+        // max_results is capped at 20 internally - just verify it doesn't panic
+        let result = handle_tool_call(&server, &params).await;
+        assert!(result["content"][0]["text"].is_string());
+    }
+
+    #[tokio::test]
+    async fn handle_context_with_claude_md_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        std::fs::write(
+            &claude_md,
+            "Before\n<!-- MyRemote Knowledge (auto-generated, do not edit below) -->\nKnowledge Section",
+        )
+        .unwrap();
+
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let result = handle_context(&server).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Knowledge Section"));
+        assert!(!text.contains("Before"));
+    }
+
+    #[tokio::test]
+    async fn handle_context_no_file_no_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
+        let result = handle_context(&server).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No project knowledge"));
+    }
+
+    #[test]
+    fn tool_text_wraps_in_content_array() {
+        let result = tool_text("some text");
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "some text");
+        // tool_text should not have isError
+        assert!(result.get("isError").is_none());
+    }
+
+    #[test]
+    fn tool_error_has_is_error_flag() {
+        let result = tool_error("something went wrong");
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "something went wrong");
+    }
+
+    #[test]
+    fn tool_list_search_max_results_schema() {
+        let tools = tool_list();
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_search")
+            .unwrap();
+        let max_results = &search["inputSchema"]["properties"]["max_results"];
+        assert_eq!(max_results["type"], "integer");
+    }
+
+    #[test]
+    fn tool_list_memories_query_is_optional() {
+        let tools = tool_list();
+        let memories = tools
+            .iter()
+            .find(|t| t["name"] == "knowledge_memories")
+            .unwrap();
+        // No required field means both category and query are optional
+        assert!(memories["inputSchema"].get("required").is_none());
+    }
 }

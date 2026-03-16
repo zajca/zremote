@@ -347,4 +347,671 @@ mod tests {
         let messages = manager.check_sessions(std::iter::empty());
         assert!(messages.is_empty());
     }
+
+    #[test]
+    fn translate_tool_call_detected_event() {
+        let loop_id = Uuid::new_v4();
+        let tool_call_id = Uuid::new_v4();
+        let event = AgenticEvent::ToolCallDetected {
+            tool_call_id,
+            tool_name: "Read".to_string(),
+            arguments_json: r#"{"file_path":"/main.rs"}"#.to_string(),
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopToolCall {
+                loop_id: lid,
+                tool_call_id: tid,
+                tool_name,
+                arguments_json,
+                status,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(tid, tool_call_id);
+                assert_eq!(tool_name, "Read");
+                assert_eq!(arguments_json, r#"{"file_path":"/main.rs"}"#);
+                assert_eq!(status, myremote_protocol::ToolCallStatus::Pending);
+            }
+            _ => panic!("expected LoopToolCall"),
+        }
+    }
+
+    #[test]
+    fn translate_tool_call_resolved_event() {
+        let loop_id = Uuid::new_v4();
+        let tool_call_id = Uuid::new_v4();
+        let event = AgenticEvent::ToolCallResolved {
+            tool_call_id,
+            result_preview: "fn main() {}".to_string(),
+            duration_ms: 150,
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopToolResult {
+                loop_id: lid,
+                tool_call_id: tid,
+                result_preview,
+                duration_ms,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(tid, tool_call_id);
+                assert_eq!(result_preview, "fn main() {}");
+                assert_eq!(duration_ms, 150);
+            }
+            _ => panic!("expected LoopToolResult"),
+        }
+    }
+
+    #[test]
+    fn translate_transcript_entry_event() {
+        let loop_id = Uuid::new_v4();
+        let event = AgenticEvent::TranscriptEntry {
+            role: myremote_protocol::TranscriptRole::User,
+            content: "Hello".to_string(),
+            tool_call_id: None,
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopTranscript {
+                loop_id: lid,
+                role,
+                content,
+                tool_call_id,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(role, myremote_protocol::TranscriptRole::User);
+                assert_eq!(content, "Hello");
+                assert!(tool_call_id.is_none());
+            }
+            _ => panic!("expected LoopTranscript"),
+        }
+    }
+
+    #[test]
+    fn translate_transcript_entry_with_tool_call_id() {
+        let loop_id = Uuid::new_v4();
+        let tc_id = Uuid::new_v4();
+        let event = AgenticEvent::TranscriptEntry {
+            role: myremote_protocol::TranscriptRole::Tool,
+            content: "tool output".to_string(),
+            tool_call_id: Some(tc_id),
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopTranscript {
+                tool_call_id, ..
+            } => {
+                assert_eq!(tool_call_id, Some(tc_id));
+            }
+            _ => panic!("expected LoopTranscript"),
+        }
+    }
+
+    #[test]
+    fn translate_metrics_update_event() {
+        let loop_id = Uuid::new_v4();
+        let event = AgenticEvent::MetricsUpdate {
+            tokens_in: 1000,
+            tokens_out: 500,
+            model: "claude-sonnet-4".to_string(),
+            context_used: 5000,
+            context_max: 200_000,
+            estimated_cost: 0.05,
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopMetrics {
+                loop_id: lid,
+                tokens_in,
+                tokens_out,
+                model,
+                context_used,
+                context_max,
+                estimated_cost_usd,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(tokens_in, 1000);
+                assert_eq!(tokens_out, 500);
+                assert_eq!(model, "claude-sonnet-4");
+                assert_eq!(context_used, 5000);
+                assert_eq!(context_max, 200_000);
+                assert!((estimated_cost_usd - 0.05).abs() < f64::EPSILON);
+            }
+            _ => panic!("expected LoopMetrics"),
+        }
+    }
+
+    #[test]
+    fn translate_status_changed_with_no_step() {
+        let loop_id = Uuid::new_v4();
+        let event = AgenticEvent::StatusChanged {
+            status: AgenticStatus::Working,
+            current_step: None,
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                current_step,
+                context_usage_pct,
+                total_tokens,
+                estimated_cost_usd,
+                pending_tool_calls,
+                ..
+            } => {
+                assert!(current_step.is_none());
+                assert!(context_usage_pct.abs() < f32::EPSILON);
+                assert_eq!(total_tokens, 0);
+                assert!(estimated_cost_usd.abs() < f64::EPSILON);
+                assert_eq!(pending_tool_calls, 0);
+            }
+            _ => panic!("expected LoopStateUpdate"),
+        }
+    }
+
+    #[test]
+    fn translate_ended_without_summary() {
+        let loop_id = Uuid::new_v4();
+        let event = AgenticEvent::Ended {
+            reason: "error".to_string(),
+            summary: None,
+        };
+        let msg = translate_event(loop_id, event).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopEnded {
+                reason, summary, ..
+            } => {
+                assert_eq!(reason, "error");
+                assert!(summary.is_none());
+            }
+            _ => panic!("expected LoopEnded"),
+        }
+    }
+
+    #[test]
+    fn on_session_closed_returns_loop_ended() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Manually insert a loop
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        assert!(manager.has_loop(&loop_id));
+
+        let msg = manager.on_session_closed(&session_id).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopEnded {
+                loop_id: lid,
+                reason,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(reason, "session_closed");
+            }
+            _ => panic!("expected LoopEnded"),
+        }
+
+        // Loop should be removed
+        assert!(!manager.has_loop(&loop_id));
+    }
+
+    #[test]
+    fn process_output_with_active_loop() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Insert an active loop in idle state
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // Send output that triggers a state transition
+        let messages = manager.process_output(&session_id, b">>> Thinking about the task");
+        assert!(!messages.is_empty());
+        // Should get a LoopStateUpdate with Working status
+        match &messages[0] {
+            AgenticAgentMessage::LoopStateUpdate {
+                status,
+                loop_id: lid,
+                ..
+            } => {
+                assert_eq!(*lid, loop_id);
+                assert_eq!(*status, AgenticStatus::Working);
+            }
+            _ => panic!("expected LoopStateUpdate"),
+        }
+    }
+
+    #[test]
+    fn process_output_completion_generates_ended() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // First transition to working
+        manager.process_output(&session_id, b">>> Working on it");
+
+        // Then complete
+        let messages = manager.process_output(&session_id, b"Task completed successfully");
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, AgenticAgentMessage::LoopEnded { .. })));
+    }
+
+    #[test]
+    fn handle_user_action_with_active_loop() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result = manager.handle_user_action(&loop_id, UserAction::Approve, None);
+        assert!(result.is_some());
+        let (sid, bytes) = result.unwrap();
+        assert_eq!(sid, session_id);
+        assert_eq!(bytes, b"y\n");
+    }
+
+    #[test]
+    fn handle_user_action_reject() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result = manager.handle_user_action(&loop_id, UserAction::Reject, None);
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, b"n\n");
+    }
+
+    #[test]
+    fn handle_user_action_provide_input() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result =
+            manager.handle_user_action(&loop_id, UserAction::ProvideInput, Some("fix the bug"));
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, b"fix the bug\n");
+    }
+
+    #[test]
+    fn handle_user_action_stop() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result = manager.handle_user_action(&loop_id, UserAction::Stop, None);
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, vec![0x03]); // Ctrl+C
+    }
+
+    #[test]
+    fn check_sessions_with_non_existent_pid() {
+        let mut manager = AgenticLoopManager::new();
+        // Use a very high PID that doesn't exist
+        let session_id = Uuid::new_v4();
+        let messages = manager.check_sessions(std::iter::once((session_id, u32::MAX)));
+        // Should not detect anything for non-existent process
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn multiple_sessions_independent() {
+        let mut manager = AgenticLoopManager::new();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+        let loop_a = Uuid::new_v4();
+        let loop_b = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_a,
+            ActiveLoop {
+                loop_id: loop_a,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 11111,
+            },
+        );
+        manager.loops.insert(
+            session_b,
+            ActiveLoop {
+                loop_id: loop_b,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 22222,
+            },
+        );
+
+        assert!(manager.has_loop(&loop_a));
+        assert!(manager.has_loop(&loop_b));
+
+        // Close session A
+        let msg = manager.on_session_closed(&session_a).unwrap();
+        match msg {
+            AgenticAgentMessage::LoopEnded { loop_id, .. } => {
+                assert_eq!(loop_id, loop_a);
+            }
+            _ => panic!("expected LoopEnded"),
+        }
+
+        // Session B should still be active
+        assert!(!manager.has_loop(&loop_a));
+        assert!(manager.has_loop(&loop_b));
+
+        // Process output for session B should still work
+        let messages = manager.process_output(&session_b, b">>> Working");
+        assert!(!messages.is_empty());
+    }
+
+    #[test]
+    fn handle_user_action_pause() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result = manager.handle_user_action(&loop_id, UserAction::Pause, None);
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, vec![0x03]); // Ctrl+C
+    }
+
+    #[test]
+    fn handle_user_action_resume() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let result = manager.handle_user_action(&loop_id, UserAction::Resume, None);
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, b"\n");
+    }
+
+    #[test]
+    fn handle_user_action_approve_nudges_adapter_state() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // Approve action should nudge the adapter with ">>> Working"
+        let result = manager.handle_user_action(&loop_id, UserAction::Approve, None);
+        assert!(result.is_some());
+        let (sid, bytes) = result.unwrap();
+        assert_eq!(sid, session_id);
+        assert_eq!(bytes, b"y\n");
+    }
+
+    #[test]
+    fn process_output_approval_prompt_detected() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // First transition to working
+        let messages = manager.process_output(&session_id, b">>> Working on it");
+        assert!(!messages.is_empty());
+
+        // Then see approval prompt
+        let messages = manager.process_output(&session_id, b"Allow Bash? (y/n)");
+        assert!(!messages.is_empty());
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            AgenticAgentMessage::LoopStateUpdate {
+                status: AgenticStatus::WaitingForInput,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn process_output_invalid_utf8_no_events() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        let messages = manager.process_output(&session_id, &[0xFF, 0xFE, 0xFD]);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn on_session_closed_multiple_times() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // First close returns LoopEnded
+        let msg = manager.on_session_closed(&session_id);
+        assert!(msg.is_some());
+
+        // Second close returns None (already removed)
+        let msg = manager.on_session_closed(&session_id);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn translate_all_event_variants() {
+        let loop_id = Uuid::new_v4();
+
+        // All non-Detected variants should produce Some
+        let status_event = AgenticEvent::StatusChanged {
+            status: AgenticStatus::WaitingForInput,
+            current_step: Some("Approval needed".to_string()),
+        };
+        assert!(translate_event(loop_id, status_event).is_some());
+
+        let tool_detected = AgenticEvent::ToolCallDetected {
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "Write".to_string(),
+            arguments_json: "{}".to_string(),
+        };
+        assert!(translate_event(loop_id, tool_detected).is_some());
+
+        let tool_resolved = AgenticEvent::ToolCallResolved {
+            tool_call_id: Uuid::new_v4(),
+            result_preview: "ok".to_string(),
+            duration_ms: 50,
+        };
+        assert!(translate_event(loop_id, tool_resolved).is_some());
+
+        let transcript = AgenticEvent::TranscriptEntry {
+            role: myremote_protocol::TranscriptRole::Assistant,
+            content: "response".to_string(),
+            tool_call_id: None,
+        };
+        assert!(translate_event(loop_id, transcript).is_some());
+
+        let metrics = AgenticEvent::MetricsUpdate {
+            tokens_in: 100,
+            tokens_out: 50,
+            model: "test".to_string(),
+            context_used: 100,
+            context_max: 200_000,
+            estimated_cost: 0.01,
+        };
+        assert!(translate_event(loop_id, metrics).is_some());
+
+        let ended = AgenticEvent::Ended {
+            reason: "done".to_string(),
+            summary: Some("All good".to_string()),
+        };
+        assert!(translate_event(loop_id, ended).is_some());
+
+        // Detected variant returns None
+        let detected = AgenticEvent::Detected {
+            tool_name: "cc".to_string(),
+            model: "s".to_string(),
+            project_path: "/tmp".to_string(),
+        };
+        assert!(translate_event(loop_id, detected).is_none());
+    }
+
+    #[test]
+    fn process_output_unrelated_text_no_events() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // First get to working state
+        manager.process_output(&session_id, b">>> Working");
+
+        // Unrelated output should produce no events
+        let messages = manager.process_output(&session_id, b"some random text output");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn handle_user_action_provide_input_no_payload() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+            },
+        );
+
+        // ProvideInput with None payload should just send newline
+        let result = manager.handle_user_action(&loop_id, UserAction::ProvideInput, None);
+        let (_, bytes) = result.unwrap();
+        assert_eq!(bytes, b"\n");
+    }
 }

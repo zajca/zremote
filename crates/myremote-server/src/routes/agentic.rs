@@ -175,3 +175,563 @@ pub async fn get_loop_metrics(
         pending_tool_calls: 0,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use http_body_util::BodyExt;
+    use myremote_core::state::AgenticLoopState;
+    use myremote_protocol::agentic::AgenticStatus;
+    use tower::ServiceExt;
+
+    async fn test_state() -> Arc<AppState> {
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(crate::state::ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    fn build_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/loops", get(list_loops))
+            .route("/api/loops/{loop_id}", get(get_loop))
+            .route("/api/loops/{loop_id}/tools", get(get_loop_tools))
+            .route("/api/loops/{loop_id}/transcript", get(get_loop_transcript))
+            .route("/api/loops/{loop_id}/action", post(post_loop_action))
+            .route("/api/loops/{loop_id}/metrics", get(get_loop_metrics))
+            .with_state(state)
+    }
+
+    async fn insert_host(state: &AppState, host_id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES (?, 'test', 'test-host', 'hash', 'online')",
+        )
+        .bind(host_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_session(state: &AppState, session_id: &str, host_id: &str) {
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(session_id)
+            .bind(host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_loop(state: &AppState, loop_id: &str, session_id: &str) {
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, tool_name, status, started_at) VALUES (?, ?, 'claude-code', 'working', '2026-01-01T00:00:00Z')",
+        )
+        .bind(loop_id)
+        .bind(session_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_tool_call(state: &AppState, tool_id: &str, loop_id: &str) {
+        sqlx::query(
+            "INSERT INTO tool_calls (id, loop_id, tool_name, status, created_at) VALUES (?, ?, 'Bash', 'completed', '2026-01-01T00:00:01Z')",
+        )
+        .bind(tool_id)
+        .bind(loop_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_transcript(state: &AppState, loop_id: &str) {
+        sqlx::query(
+            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES (?, 'assistant', 'Hello world', '2026-01-01T00:00:00Z')",
+        )
+        .bind(loop_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_loops_empty() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get("/api/loops").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_loops_with_data() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get("/api/loops").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["id"], loop_id);
+    }
+
+    #[tokio::test]
+    async fn list_loops_with_status_filter() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::get("/api/loops?status=completed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty()); // loop is "working", not "completed"
+    }
+
+    #[tokio::test]
+    async fn get_loop_found() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["id"], loop_id);
+        assert_eq!(json["status"], "working");
+    }
+
+    #[tokio::test]
+    async fn get_loop_not_found() {
+        let state = test_state().await;
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_loop_invalid_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/loops/not-a-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_loop_tools_empty() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/tools"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_loop_tools_with_data() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        let tool_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+        insert_tool_call(&state, &tool_id, &loop_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/tools"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["tool_name"], "Bash");
+    }
+
+    #[tokio::test]
+    async fn get_loop_tools_invalid_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/loops/bad-id/tools")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_loop_transcript_empty() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/transcript"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_loop_transcript_with_data() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+        insert_transcript(&state, &loop_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/transcript"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["role"], "assistant");
+        assert_eq!(json[0]["content"], "Hello world");
+    }
+
+    #[tokio::test]
+    async fn get_loop_transcript_invalid_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/loops/bad-id/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_loop_metrics_from_db() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/metrics"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["loop_id"], loop_id);
+        assert_eq!(json["status"], "working");
+        assert_eq!(json["pending_tool_calls"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_loop_metrics_from_memory() {
+        let state = test_state().await;
+        let loop_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+
+        // Insert into in-memory store
+        state.agentic_loops.insert(
+            loop_id,
+            AgenticLoopState {
+                loop_id,
+                session_id,
+                status: AgenticStatus::Working,
+                pending_tool_calls: std::collections::VecDeque::new(),
+                tokens_in: 500,
+                tokens_out: 1000,
+                estimated_cost_usd: 0.05,
+                last_updated: tokio::time::Instant::now(),
+            },
+        );
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/metrics"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_tokens_in"], 500);
+        assert_eq!(json["total_tokens_out"], 1000);
+    }
+
+    #[tokio::test]
+    async fn get_loop_metrics_invalid_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/loops/bad-id/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_loop_metrics_not_found() {
+        let state = test_state().await;
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/loops/{loop_id}/metrics"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn post_loop_action_invalid_loop_id() {
+        let state = test_state().await;
+        let body = serde_json::json!({
+            "action": "stop",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/loops/bad-id/action")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_loop_action_loop_not_found() {
+        let state = test_state().await;
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        let body = serde_json::json!({
+            "action": "stop",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/loops/{loop_id}/action"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn post_loop_action_host_offline() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let loop_id = uuid::Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_session(&state, &session_id, &host_id).await;
+        insert_loop(&state, &loop_id, &session_id).await;
+
+        let body = serde_json::json!({
+            "action": "stop",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/loops/{loop_id}/action"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Host is not in connections manager -> conflict (offline)
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn post_loop_action_non_actionable_state() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let loop_id = uuid::Uuid::new_v4();
+
+        insert_host(&state, &host_id.to_string()).await;
+        insert_session(&state, &session_id.to_string(), &host_id.to_string()).await;
+        insert_loop(&state, &loop_id.to_string(), &session_id.to_string()).await;
+
+        // Insert loop into memory with "completed" status
+        state.agentic_loops.insert(
+            loop_id,
+            AgenticLoopState {
+                loop_id,
+                session_id,
+                status: AgenticStatus::Completed,
+                pending_tool_calls: std::collections::VecDeque::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                estimated_cost_usd: 0.0,
+                last_updated: tokio::time::Instant::now(),
+            },
+        );
+
+        let body = serde_json::json!({
+            "action": "stop",
+        });
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/loops/{loop_id}/action"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+}

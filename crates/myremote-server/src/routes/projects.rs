@@ -267,3 +267,364 @@ pub async fn delete_worktree(
 
     Ok(StatusCode::ACCEPTED)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::{delete, get, post};
+    use axum::Router;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn test_state() -> Arc<AppState> {
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        let connections = Arc::new(crate::state::ConnectionManager::new());
+        let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        Arc::new(AppState {
+            db: pool,
+            connections,
+            sessions,
+            agentic_loops,
+            agent_token_hash: crate::auth::hash_token("test-token"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        })
+    }
+
+    async fn insert_host(state: &AppState, id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, agent_version, os, arch, \
+             status, last_seen_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 'h', '0.1', 'linux', 'x86_64', 'online', \
+             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_project(state: &AppState, id: &str, host_id: &str, path: &str, name: &str) {
+        sqlx::query("INSERT INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(host_id)
+            .bind(path)
+            .bind(name)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    fn build_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/hosts/{host_id}/projects", get(list_projects).post(add_project))
+            .route("/api/hosts/{host_id}/projects/scan", post(trigger_scan))
+            .route("/api/projects/{project_id}", get(get_project).delete(delete_project))
+            .route("/api/projects/{project_id}/sessions", get(list_project_sessions))
+            .route("/api/projects/{project_id}/git/refresh", post(trigger_git_refresh))
+            .route("/api/projects/{project_id}/worktrees", get(list_worktrees).post(create_worktree))
+            .route(
+                "/api/projects/{project_id}/worktrees/{worktree_id}",
+                delete(delete_worktree),
+            )
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn list_projects_empty() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get(&format!("/api/hosts/{host_id}/projects")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_projects_with_data() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get(&format!("/api/hosts/{host_id}/projects")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["name"], "test");
+    }
+
+    #[tokio::test]
+    async fn list_projects_invalid_host_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get("/api/hosts/bad-id/projects").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_project_found() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/myapp", "myapp").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "myapp");
+        assert_eq!(json["path"], "/home/myapp");
+    }
+
+    #[tokio::test]
+    async fn get_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_project_invalid_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::get("/api/projects/not-uuid").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_project_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::delete(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(Request::delete(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_empty() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(&format!("/api/projects/{proj_id}/worktrees"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_scan_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/hosts/{host_id}/projects/scan"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn add_project_empty_path() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": ""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_project_host_not_found() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": "/home/test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn add_project_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/hosts/{host_id}/projects"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path": "/home/user/myproject"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "myproject");
+        assert_eq!(json["path"], "/home/user/myproject");
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/projects/{proj_id}/git/refresh"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn trigger_git_refresh_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/projects/{proj_id}/git/refresh"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(&format!("/api/projects/{proj_id}/worktrees"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"branch": "feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_worktree_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let wt_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::delete(&format!("/api/projects/{proj_id}/worktrees/{wt_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}

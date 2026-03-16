@@ -635,3 +635,1004 @@ impl AgenticProcessor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use myremote_protocol::agentic::{AgenticStatus, ToolCallStatus, TranscriptRole};
+    use tokio::sync::broadcast;
+
+    async fn test_db() -> SqlitePool {
+        crate::db::init_db("sqlite::memory:").await.unwrap()
+    }
+
+    fn make_processor(db: SqlitePool) -> AgenticProcessor {
+        let (tx, _rx) = broadcast::channel(64);
+        AgenticProcessor {
+            db,
+            agentic_loops: Arc::new(DashMap::new()),
+            events: tx,
+            host_id: Uuid::new_v4(),
+            hostname: "test-host".to_string(),
+        }
+    }
+
+    /// Insert a host into the database for FK constraints.
+    async fn insert_host(db: &SqlitePool, host_id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) VALUES (?, 'test', 'test-host', 'hash', 'online')",
+        )
+        .bind(host_id)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    /// Insert a session into the database for FK constraints.
+    async fn insert_session(db: &SqlitePool, session_id: &str, host_id: &str) {
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(session_id)
+            .bind(host_id)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_loop_detected_inserts_db_and_memory() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        let msg = AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/home/user/project".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "claude-sonnet-4".to_string(),
+        };
+        proc.handle_message(msg).await.unwrap();
+
+        // Verify DB insert
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT id, session_id, tool_name FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0, loop_id.to_string());
+        assert_eq!(row.1, session_id.to_string());
+        assert_eq!(row.2, "claude-code");
+
+        // Verify in-memory state
+        assert!(proc.agentic_loops.contains_key(&loop_id));
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.status, AgenticStatus::Working);
+        assert_eq!(entry.session_id, session_id);
+    }
+
+    #[tokio::test]
+    async fn handle_loop_detected_empty_project_and_model() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        let msg = AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: String::new(),
+            tool_name: "claude-code".to_string(),
+            model: String::new(),
+        };
+        proc.handle_message(msg).await.unwrap();
+
+        // project_path and model should be NULL when empty
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT project_path, model FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(row.0.is_none());
+        assert!(row.1.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_changes_status() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // First detect the loop
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Update status
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::WaitingForInput,
+            current_step: None,
+            context_usage_pct: 0.0,
+            total_tokens: 0,
+            estimated_cost_usd: 0.0,
+            pending_tool_calls: 0,
+        })
+        .await
+        .unwrap();
+
+        // Verify in-memory state changed
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
+
+        // Verify DB changed
+        let (status_str,): (String,) = sqlx::query_as(
+            "SELECT status FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(status_str, "waiting_for_input");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_tool_call_pending_inserts_and_tracks() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let tool_call_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop first
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Send pending tool call
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id,
+            tool_name: "Bash".to_string(),
+            arguments_json: r#"{"command":"ls"}"#.to_string(),
+            status: ToolCallStatus::Pending,
+        })
+        .await
+        .unwrap();
+
+        // Verify DB insert
+        let (name, status): (String, String) = sqlx::query_as(
+            "SELECT tool_name, status FROM tool_calls WHERE id = ?",
+        )
+        .bind(tool_call_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(name, "Bash");
+        assert_eq!(status, "pending");
+
+        // Verify in-memory pending
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.pending_tool_calls.len(), 1);
+        assert_eq!(entry.pending_tool_calls[0].tool_name, "Bash");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_tool_call_invalid_json_replaced() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let tool_call_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Send tool call with invalid JSON
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id,
+            tool_name: "Read".to_string(),
+            arguments_json: "not valid json {{{".to_string(),
+            status: ToolCallStatus::Running,
+        })
+        .await
+        .unwrap();
+
+        // Verify the arguments_json was replaced with "{}"
+        let (args,): (Option<String>,) = sqlx::query_as(
+            "SELECT arguments_json FROM tool_calls WHERE id = ?",
+        )
+        .bind(tool_call_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(args.unwrap(), "{}");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_tool_result_completes_and_removes_pending() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let tool_call_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Add pending tool call
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id,
+            tool_name: "Bash".to_string(),
+            arguments_json: "{}".to_string(),
+            status: ToolCallStatus::Pending,
+        })
+        .await
+        .unwrap();
+        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 1);
+
+        // Send result
+        proc.handle_message(AgenticAgentMessage::LoopToolResult {
+            loop_id,
+            tool_call_id,
+            result_preview: "file.txt".to_string(),
+            duration_ms: 150,
+        })
+        .await
+        .unwrap();
+
+        // Verify pending removed
+        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 0);
+
+        // Verify DB updated
+        let (status, preview, dur): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT status, result_preview, duration_ms FROM tool_calls WHERE id = ?",
+        )
+        .bind(tool_call_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(preview.unwrap(), "file.txt");
+        assert_eq!(dur.unwrap(), 150);
+    }
+
+    #[tokio::test]
+    async fn handle_loop_transcript_inserts_entry() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let ts = chrono::Utc::now();
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::Assistant,
+            content: "Hello, I will help you.".to_string(),
+            tool_call_id: None,
+            timestamp: ts,
+        })
+        .await
+        .unwrap();
+
+        let (role, content): (String, String) = sqlx::query_as(
+            "SELECT role, content FROM transcript_entries WHERE loop_id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(role, "assistant");
+        assert_eq!(content, "Hello, I will help you.");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_transcript_with_tool_call_id() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let tc_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::Tool,
+            content: "tool output".to_string(),
+            tool_call_id: Some(tc_id),
+            timestamp: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        let (role, tc): (String, Option<String>) = sqlx::query_as(
+            "SELECT role, tool_call_id FROM transcript_entries WHERE loop_id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(role, "tool");
+        assert_eq!(tc.unwrap(), tc_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_metrics_updates_db_and_memory() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 5000,
+            tokens_out: 1500,
+            model: "sonnet".to_string(),
+            context_used: 5000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.42,
+        })
+        .await
+        .unwrap();
+
+        // Verify in-memory
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.tokens_in, 5000);
+        assert_eq!(entry.tokens_out, 1500);
+        assert!((entry.estimated_cost_usd - 0.42).abs() < f64::EPSILON);
+
+        // Verify DB
+        let (tin, tout, cost): (Option<i64>, Option<i64>, Option<f64>) = sqlx::query_as(
+            "SELECT total_tokens_in, total_tokens_out, estimated_cost_usd FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(tin.unwrap(), 5000);
+        assert_eq!(tout.unwrap(), 1500);
+        assert!((cost.unwrap() - 0.42).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_completes_and_removes_from_memory() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+        assert!(proc.agentic_loops.contains_key(&loop_id));
+
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "completed".to_string(),
+            summary: Some("Fixed the bug".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Removed from in-memory store
+        assert!(!proc.agentic_loops.contains_key(&loop_id));
+
+        // Verify DB update
+        let (status, reason, summary): (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, end_reason, summary FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(reason.unwrap(), "completed");
+        assert_eq!(summary.unwrap(), "Fixed the bug");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_without_summary() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: String::new(),
+            tool_name: "claude-code".to_string(),
+            model: String::new(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "error".to_string(),
+            summary: None,
+        })
+        .await
+        .unwrap();
+
+        let (status, summary): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, summary FROM agentic_loops WHERE id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed");
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_links_claude_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop (auto-creates a claude_session)
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Update metrics so we have cost data
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 1000,
+            tokens_out: 500,
+            model: "sonnet".to_string(),
+            context_used: 1000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.10,
+        })
+        .await
+        .unwrap();
+
+        // End the loop
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "completed".to_string(),
+            summary: Some("Done".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Verify claude_session was completed
+        let (cs_status,): (String,) = sqlx::query_as(
+            "SELECT status FROM claude_sessions WHERE loop_id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(cs_status, "completed");
+    }
+
+    #[tokio::test]
+    async fn fetch_loop_info_returns_none_for_missing_loop() {
+        let db = test_db().await;
+        let proc = make_processor(db);
+        let result = proc.fetch_loop_info("nonexistent-id").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_loop_info_returns_data_with_pending_count() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Add a pending tool call to memory
+        proc.agentic_loops.get_mut(&loop_id).unwrap().pending_tool_calls.push_back(
+            PendingToolCall {
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "Bash".to_string(),
+                arguments_json: "{}".to_string(),
+            },
+        );
+
+        let info = proc.fetch_loop_info(&loop_id.to_string()).await.unwrap();
+        assert_eq!(info.id, loop_id.to_string());
+        assert_eq!(info.tool_name, "claude-code");
+        assert_eq!(info.pending_tool_calls, 1);
+        assert_eq!(info.model, Some("sonnet".to_string()));
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_nonexistent_loop_still_ok() {
+        let db = test_db().await;
+        let proc = make_processor(db);
+
+        // State update for a loop that's not in memory should still succeed
+        let result = proc
+            .handle_message(AgenticAgentMessage::LoopStateUpdate {
+                loop_id: Uuid::new_v4(),
+                status: AgenticStatus::Working,
+                current_step: None,
+                context_usage_pct: 0.0,
+                total_tokens: 0,
+                estimated_cost_usd: 0.0,
+                pending_tool_calls: 0,
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn events_are_broadcast_on_loop_detected() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let mut rx = proc.events.subscribe();
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Should have received events (ClaudeTaskStarted + ClaudeTaskUpdated + LoopDetected)
+        let mut got_loop_detected = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::LoopDetected { .. }) {
+                got_loop_detected = true;
+            }
+        }
+        assert!(got_loop_detected);
+    }
+
+    #[tokio::test]
+    async fn events_are_broadcast_on_tool_call_pending() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut rx = proc.events.subscribe();
+
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "Bash".to_string(),
+            arguments_json: "{}".to_string(),
+            status: ToolCallStatus::Pending,
+        })
+        .await
+        .unwrap();
+
+        let mut got_pending = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::ToolCallPending { .. }) {
+                got_pending = true;
+            }
+        }
+        assert!(got_pending);
+    }
+
+    #[tokio::test]
+    async fn events_are_broadcast_on_loop_ended() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut rx = proc.events.subscribe();
+
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "done".to_string(),
+            summary: None,
+        })
+        .await
+        .unwrap();
+
+        let mut got_ended = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::LoopEnded { .. }) {
+                got_ended = true;
+            }
+        }
+        assert!(got_ended);
+    }
+
+    #[tokio::test]
+    async fn handle_loop_detected_links_existing_starting_claude_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4().to_string();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Pre-create a claude_session in "starting" status
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status) VALUES (?, ?, ?, '/proj', 'starting')",
+        )
+        .bind(&task_id)
+        .bind(session_id.to_string())
+        .bind(&host_id_str)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // The existing claude_session should have been linked
+        let (cs_status, cs_loop_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, loop_id FROM claude_sessions WHERE id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(cs_status, "active");
+        assert_eq!(cs_loop_id.unwrap(), loop_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_auto_extract_disabled() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        // Disable auto-extract
+        sqlx::query("INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', 'false')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Should complete without error even when auto_extract is disabled
+        let result = proc
+            .handle_message(AgenticAgentMessage::LoopEnded {
+                loop_id,
+                reason: "done".to_string(),
+                summary: None,
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn full_lifecycle_detect_tools_metrics_end() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let tc1 = Uuid::new_v4();
+        let tc2 = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // 1. Detect
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // 2. Transcript
+        proc.handle_message(AgenticAgentMessage::LoopTranscript {
+            loop_id,
+            role: TranscriptRole::User,
+            content: "Fix the bug".to_string(),
+            tool_call_id: None,
+            timestamp: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        // 3. Tool call 1 pending
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id: tc1,
+            tool_name: "Read".to_string(),
+            arguments_json: r#"{"path":"src/main.rs"}"#.to_string(),
+            status: ToolCallStatus::Pending,
+        })
+        .await
+        .unwrap();
+
+        // 4. Tool call 2 pending
+        proc.handle_message(AgenticAgentMessage::LoopToolCall {
+            loop_id,
+            tool_call_id: tc2,
+            tool_name: "Edit".to_string(),
+            arguments_json: "{}".to_string(),
+            status: ToolCallStatus::Pending,
+        })
+        .await
+        .unwrap();
+        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 2);
+
+        // 5. Tool call 1 result
+        proc.handle_message(AgenticAgentMessage::LoopToolResult {
+            loop_id,
+            tool_call_id: tc1,
+            result_preview: "file contents".to_string(),
+            duration_ms: 50,
+        })
+        .await
+        .unwrap();
+        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 1);
+
+        // 6. Tool call 2 result
+        proc.handle_message(AgenticAgentMessage::LoopToolResult {
+            loop_id,
+            tool_call_id: tc2,
+            result_preview: "edited".to_string(),
+            duration_ms: 100,
+        })
+        .await
+        .unwrap();
+        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 0);
+
+        // 7. Metrics
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 10_000,
+            tokens_out: 3_000,
+            model: "sonnet".to_string(),
+            context_used: 10_000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.50,
+        })
+        .await
+        .unwrap();
+
+        // 8. End
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "completed".to_string(),
+            summary: Some("Bug fixed".to_string()),
+        })
+        .await
+        .unwrap();
+
+        assert!(!proc.agentic_loops.contains_key(&loop_id));
+
+        // Verify final DB state
+        let (status, end_reason, tokens_in): (String, Option<String>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT status, end_reason, total_tokens_in FROM agentic_loops WHERE id = ?",
+            )
+            .bind(loop_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(end_reason.unwrap(), "completed");
+        assert_eq!(tokens_in.unwrap(), 10_000);
+
+        // Verify transcript entry count
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM transcript_entries WHERE loop_id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify tool calls count
+        let (tc_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tool_calls WHERE loop_id = ?",
+        )
+        .bind(loop_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(tc_count, 2);
+    }
+}
