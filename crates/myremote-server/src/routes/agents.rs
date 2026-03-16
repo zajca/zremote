@@ -978,29 +978,78 @@ async fn handle_agentic_message(
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, tool_name = %tool_name, "agentic loop detected");
 
-            // Link loop to claude_session if one exists for this terminal session
-            if let Err(e) = sqlx::query(
+            // Link loop to claude_session if one exists, or auto-create one for manually-started sessions
+            let link_result = sqlx::query(
                 "UPDATE claude_sessions SET loop_id = ?, status = 'active' WHERE session_id = ? AND status = 'starting'",
             )
             .bind(&loop_id_str)
             .bind(&session_id_str)
             .execute(&state.db)
-            .await
-            {
-                tracing::warn!(loop_id = %loop_id, session_id = %session_id, error = %e, "failed to link loop to claude session");
-            }
-            // Check if we linked a task and emit event
-            let linked_task: Option<(String,)> = sqlx::query_as(
-                "SELECT id FROM claude_sessions WHERE loop_id = ?",
-            )
-            .bind(&loop_id_str)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-            if let Some((task_id,)) = linked_task {
+            .await;
+
+            let linked_task_id = match link_result {
+                Ok(result) if result.rows_affected() > 0 => {
+                    // Successfully linked to an existing dialog-started task
+                    let row: Option<(String,)> = sqlx::query_as(
+                        "SELECT id FROM claude_sessions WHERE loop_id = ?",
+                    )
+                    .bind(&loop_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+                    row.map(|(id,)| id)
+                }
+                _ => {
+                    // No dialog-started task exists — auto-create one for this manually-started Claude session
+                    let auto_task_id = Uuid::new_v4().to_string();
+                    let host_id_str = host_id.to_string();
+
+                    // Resolve project_id from project_path
+                    let project_id: Option<String> = sqlx::query_scalar(
+                        "SELECT id FROM projects WHERE host_id = ? AND path = ? LIMIT 1",
+                    )
+                    .bind(&host_id_str)
+                    .bind(&project_path)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO claude_sessions (id, session_id, host_id, project_path, project_id, model, status, loop_id) \
+                         VALUES (?, ?, ?, ?, ?, ?, 'active', ?) \
+                         ON CONFLICT(session_id) DO UPDATE SET loop_id = excluded.loop_id, status = 'active'",
+                    )
+                    .bind(&auto_task_id)
+                    .bind(&session_id_str)
+                    .bind(&host_id_str)
+                    .bind(&project_path)
+                    .bind(&project_id)
+                    .bind(&model)
+                    .bind(&loop_id_str)
+                    .execute(&state.db)
+                    .await
+                    {
+                        tracing::warn!(loop_id = %loop_id, error = %e, "failed to auto-create claude session for detected loop");
+                        None
+                    } else {
+                        tracing::info!(loop_id = %loop_id, task_id = %auto_task_id, "auto-created claude task for manually-started session");
+                        Some(auto_task_id)
+                    }
+                }
+            };
+
+            // Emit task event if we have a linked/created task
+            if let Some(ref task_id) = linked_task_id {
+                let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
+                    task_id: task_id.clone(),
+                    session_id: session_id_str.clone(),
+                    host_id: host_id.to_string(),
+                    project_path: project_path.clone(),
+                });
                 let _ = state.events.send(ServerEvent::ClaudeTaskUpdated {
-                    task_id,
+                    task_id: task_id.clone(),
                     status: "active".to_string(),
                     loop_id: Some(loop_id_str.clone()),
                 });
