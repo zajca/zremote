@@ -60,12 +60,15 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(options?.headers as Record<string, string>),
+  };
+  if (options?.body) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers,
   });
 
   if (!response.ok) {
@@ -397,8 +400,11 @@ export const api = {
       return request<ClaudeTask[]>(`/api/claude-tasks${qs ? `?${qs}` : ""}`);
     },
     get: (id: string) => request<ClaudeTask>(`/api/claude-tasks/${id}`),
-    resume: (id: string) =>
-      request<ClaudeTask>(`/api/claude-tasks/${id}/resume`, { method: "POST" }),
+    resume: (id: string, initialPrompt?: string) =>
+      request<ClaudeTask>(`/api/claude-tasks/${id}/resume`, {
+        method: "POST",
+        ...(initialPrompt ? { body: JSON.stringify({ initial_prompt: initialPrompt }) } : {}),
+      }),
     discover: (hostId: string, projectPath: string) => {
       const params = new URLSearchParams({ project_path: projectPath });
       return request<DiscoveredClaudeSession[]>(
