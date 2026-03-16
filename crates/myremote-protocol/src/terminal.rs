@@ -491,6 +491,7 @@ mod tests {
                 skip_permissions: false,
                 output_format: None,
                 custom_flags: None,
+                continue_last: false,
             },
         ));
     }

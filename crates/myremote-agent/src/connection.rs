@@ -280,6 +280,7 @@ pub async fn run_connection(
         agentic_tx.clone(),
         session_mapper.clone(),
         permission_manager.clone(),
+        outbound_tx.clone(),
     );
     match hooks_server.start(shutdown.clone()).await {
         Ok(addr) => {
@@ -398,6 +399,7 @@ pub async fn run_connection(
                                     &agentic_tx,
                                     knowledge_sender.as_ref(),
                                     &permission_manager,
+                                    &session_mapper,
                                 );
                             }
                             Err(e) => {
@@ -531,6 +533,7 @@ fn handle_server_message(
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
     knowledge_tx: Option<&mpsc::Sender<KnowledgeServerMessage>>,
     permission_manager: &Arc<PermissionManager>,
+    session_mapper: &SessionMapper,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -757,7 +760,12 @@ fn handle_server_message(
             });
         }
         ServerMessage::ClaudeAction(claude_msg) => {
-            handle_claude_server_message(claude_msg, session_manager, outbound_tx);
+            handle_claude_server_message(
+                claude_msg,
+                session_manager,
+                outbound_tx,
+                session_mapper,
+            );
         }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {
@@ -782,10 +790,12 @@ fn handle_server_message(
 }
 
 /// Handle a Claude server message: start sessions, discover sessions, etc.
+#[allow(clippy::too_many_lines)]
 fn handle_claude_server_message(
     msg: &ClaudeServerMessage,
     session_manager: &mut SessionManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
+    session_mapper: &SessionMapper,
 ) {
     match msg {
         ClaudeServerMessage::StartSession {
@@ -799,6 +809,7 @@ fn handle_claude_server_message(
             skip_permissions,
             output_format,
             custom_flags,
+            continue_last,
         } => {
             // Build the claude CLI command
             let opts = crate::claude::CommandOptions {
@@ -806,6 +817,7 @@ fn handle_claude_server_message(
                 model: model.as_deref(),
                 initial_prompt: initial_prompt.as_deref(),
                 resume_cc_session_id: resume_cc_session_id.as_deref(),
+                continue_last: *continue_last,
                 allowed_tools,
                 skip_permissions: *skip_permissions,
                 output_format: output_format.as_deref(),
@@ -847,6 +859,17 @@ fn handle_claude_server_message(
                         .is_err()
                     {
                         tracing::warn!("outbound channel full, SessionCreated dropped");
+                    }
+
+                    // Register this PTY session as a Claude task so hooks can
+                    // capture the CC session ID and send SessionIdCaptured.
+                    {
+                        let mapper = session_mapper.clone();
+                        let sid = *session_id;
+                        let ctid = *claude_task_id;
+                        tokio::spawn(async move {
+                            mapper.register_claude_task(sid, ctid).await;
+                        });
                     }
 
                     // Write the claude command directly to the PTY stdin.
@@ -997,6 +1020,7 @@ mod tests {
         mpsc::Receiver<AgenticAgentMessage>,
         Option<mpsc::Sender<KnowledgeServerMessage>>,
         Arc<PermissionManager>,
+        SessionMapper,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx);
@@ -1005,6 +1029,7 @@ mod tests {
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
         let (agentic_tx, agentic_rx) = mpsc::channel(16);
         let permission_manager = Arc::new(PermissionManager::new());
+        let session_mapper = SessionMapper::new();
         (
             session_manager,
             agentic_manager,
@@ -1015,6 +1040,7 @@ mod tests {
             agentic_rx,
             None,
             permission_manager,
+            session_mapper,
         )
     }
 
@@ -1061,40 +1087,40 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
     }
 
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
     }
 
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
     }
 
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
 
         // Should send SessionClosed with exit_code = None
         let sent = orx.try_recv().unwrap();
@@ -1113,29 +1139,29 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
     }
 
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, pm, mapper) = make_test_context();
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
             rows: 40,
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm);
+        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
     }
 
     #[tokio::test]
     async fn handle_agentic_user_action_unknown_loop() {
-        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm, _mapper) = make_test_context();
         let msg = AgenticServerMessage::UserAction {
             loop_id: Uuid::new_v4(),
             action: myremote_protocol::UserAction::Approve,
@@ -1147,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agentic_permission_rules_update() {
-        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm) = make_test_context();
+        let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm, _mapper) = make_test_context();
         let msg = AgenticServerMessage::PermissionRulesUpdate {
             rules: vec![],
         };

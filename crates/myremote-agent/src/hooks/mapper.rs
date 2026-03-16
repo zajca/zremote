@@ -17,6 +17,8 @@ pub struct SessionMapper {
     loop_to_cc: Arc<RwLock<HashMap<AgenticLoopId, String>>>,
     /// session_id -> loop_id (for PTY-based lookup)
     session_to_loop: Arc<RwLock<HashMap<SessionId, AgenticLoopId>>>,
+    /// `session_id` -> `claude_task_id` (tracks which PTY sessions are Claude tasks)
+    claude_task_ids: Arc<RwLock<HashMap<SessionId, uuid::Uuid>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,7 @@ impl SessionMapper {
             cc_to_loop: Arc::new(RwLock::new(HashMap::new())),
             loop_to_cc: Arc::new(RwLock::new(HashMap::new())),
             session_to_loop: Arc::new(RwLock::new(HashMap::new())),
+            claude_task_ids: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -43,6 +46,19 @@ impl SessionMapper {
             .write()
             .await
             .insert(session_id, loop_id);
+    }
+
+    /// Register a PTY session as a Claude task (started via UI).
+    pub async fn register_claude_task(&self, session_id: SessionId, claude_task_id: uuid::Uuid) {
+        self.claude_task_ids
+            .write()
+            .await
+            .insert(session_id, claude_task_id);
+    }
+
+    /// Get the `claude_task_id` for a PTY session, if it is a Claude task.
+    pub async fn get_claude_task_id(&self, session_id: &SessionId) -> Option<uuid::Uuid> {
+        self.claude_task_ids.read().await.get(session_id).copied()
     }
 
     /// Register a CC session_id mapping (called when we learn the CC session ID from a hook).

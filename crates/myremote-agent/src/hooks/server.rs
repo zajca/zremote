@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::routing::post;
 use axum::Router;
-use myremote_protocol::AgenticAgentMessage;
+use myremote_protocol::{AgentMessage, AgenticAgentMessage};
 use tokio::sync::mpsc;
 
 use super::handler::{self, HooksState};
@@ -25,6 +25,7 @@ impl HooksServer {
         agentic_tx: mpsc::Sender<AgenticAgentMessage>,
         mapper: SessionMapper,
         permission_manager: Arc<PermissionManager>,
+        outbound_tx: mpsc::Sender<AgentMessage>,
     ) -> Self {
         Self {
             state: HooksState {
@@ -33,6 +34,10 @@ impl HooksServer {
                 permission_manager,
                 tool_call_starts: Arc::new(tokio::sync::RwLock::new(
                     std::collections::HashMap::new(),
+                )),
+                outbound_tx,
+                sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashSet::new(),
                 )),
             },
         }
@@ -119,6 +124,7 @@ mod tests {
     #[tokio::test]
     async fn server_binds_and_responds() {
         let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
         let permission_manager = Arc::new(PermissionManager::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -128,7 +134,7 @@ mod tests {
         let loop_id = Uuid::new_v4();
         mapper.register_loop(session_id, loop_id).await;
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager);
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         // Send a PreToolUse hook
@@ -169,11 +175,12 @@ mod tests {
     #[tokio::test]
     async fn server_handles_unknown_session() {
         let (agentic_tx, _agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
         let permission_manager = Arc::new(PermissionManager::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager);
+        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();

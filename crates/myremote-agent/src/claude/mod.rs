@@ -8,6 +8,7 @@ pub struct CommandOptions<'a> {
     pub model: Option<&'a str>,
     pub initial_prompt: Option<&'a str>,
     pub resume_cc_session_id: Option<&'a str>,
+    pub continue_last: bool,
     pub allowed_tools: &'a [String],
     pub skip_permissions: bool,
     pub output_format: Option<&'a str>,
@@ -28,6 +29,7 @@ impl CommandBuilder {
             model,
             initial_prompt,
             resume_cc_session_id,
+            continue_last,
             allowed_tools,
             skip_permissions,
             output_format,
@@ -71,6 +73,8 @@ impl CommandBuilder {
         if let Some(session_id) = resume_cc_session_id {
             parts.push("--resume".to_string());
             parts.push(shell_quote(session_id));
+        } else if *continue_last {
+            parts.push("--continue".to_string());
         }
 
         for tool in *allowed_tools {
@@ -306,6 +310,7 @@ mod tests {
             model: None,
             initial_prompt: None,
             resume_cc_session_id: None,
+            continue_last: false,
             allowed_tools: &[],
             skip_permissions: false,
             output_format: None,
@@ -401,6 +406,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514"),
             initial_prompt: Some("Fix all tests"),
             resume_cc_session_id: None,
+            continue_last: false,
             allowed_tools: &tools,
             skip_permissions: true,
             output_format: Some("stream-json"),
@@ -428,6 +434,29 @@ mod tests {
         assert!(cmd.contains("--resume 'session-abc-123'"));
         // No --print when resuming without a prompt
         assert!(!cmd.contains("--print"));
+    }
+
+    #[test]
+    fn build_with_continue_last() {
+        let opts = CommandOptions {
+            continue_last: true,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("--continue"));
+        assert!(!cmd.contains("--resume"));
+    }
+
+    #[test]
+    fn build_resume_takes_precedence_over_continue() {
+        let opts = CommandOptions {
+            resume_cc_session_id: Some("abc-123"),
+            continue_last: true,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("--resume"));
+        assert!(!cmd.contains("--continue"));
     }
 
     #[test]
