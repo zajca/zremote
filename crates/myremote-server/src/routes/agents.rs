@@ -263,7 +263,7 @@ enum InboundMessage {
 /// Known `AgentMessage` type tags.
 const TERMINAL_MSG_TYPES: &[&str] = &[
     "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
-    "ProjectDiscovered", "ProjectList", "KnowledgeAction",
+    "ProjectDiscovered", "ProjectList", "KnowledgeAction", "ClaudeAction",
     "GitStatusUpdate", "WorktreeCreated", "WorktreeDeleted", "WorktreeError",
 ];
 
@@ -719,6 +719,11 @@ async fn handle_agent_message(
                 host_id: host_id.to_string(),
             });
         }
+        AgentMessage::ClaudeAction(claude_msg) => {
+            if let Err(e) = handle_claude_message(state, host_id, claude_msg).await {
+                tracing::error!(host_id = %host_id, error = %e, "error handling claude message");
+            }
+        }
     }
     Ok(())
 }
@@ -919,6 +924,34 @@ async fn handle_agentic_message(
             );
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, tool_name = %tool_name, "agentic loop detected");
+
+            // Link loop to claude_session if one exists for this terminal session
+            if let Err(e) = sqlx::query(
+                "UPDATE claude_sessions SET loop_id = ?, status = 'active' WHERE session_id = ? AND status = 'starting'",
+            )
+            .bind(&loop_id_str)
+            .bind(&session_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, session_id = %session_id, error = %e, "failed to link loop to claude session");
+            }
+            // Check if we linked a task and emit event
+            let linked_task: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM claude_sessions WHERE loop_id = ?",
+            )
+            .bind(&loop_id_str)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            if let Some((task_id,)) = linked_task {
+                let _ = state.events.send(ServerEvent::ClaudeTaskUpdated {
+                    task_id,
+                    status: "active".to_string(),
+                    loop_id: Some(loop_id_str.clone()),
+                });
+            }
 
             // Broadcast event to browser clients
             let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
@@ -1184,6 +1217,48 @@ async fn handle_agentic_message(
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop ended in DB");
             }
 
+            // Update linked claude_session if any
+            if let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
+                "SELECT id FROM claude_sessions WHERE loop_id = ?",
+            )
+            .bind(&loop_id_str)
+            .fetch_optional(&state.db)
+            .await
+            {
+                let now_str = chrono::Utc::now().to_rfc3339();
+                let _ = sqlx::query(
+                    "UPDATE claude_sessions SET status = 'completed', ended_at = ?, summary = ?, \
+                     total_cost_usd = (SELECT COALESCE(estimated_cost_usd, 0) FROM agentic_loops WHERE id = ?), \
+                     total_tokens_in = (SELECT COALESCE(total_tokens_in, 0) FROM agentic_loops WHERE id = ?), \
+                     total_tokens_out = (SELECT COALESCE(total_tokens_out, 0) FROM agentic_loops WHERE id = ?) \
+                     WHERE id = ?",
+                )
+                .bind(&now_str)
+                .bind(&summary)
+                .bind(&loop_id_str)
+                .bind(&loop_id_str)
+                .bind(&loop_id_str)
+                .bind(&task_id)
+                .execute(&state.db)
+                .await;
+
+                // Fetch updated values for event
+                if let Ok(Some((cost,))) = sqlx::query_as::<_, (f64,)>(
+                    "SELECT COALESCE(total_cost_usd, 0.0) FROM claude_sessions WHERE id = ?",
+                )
+                .bind(&task_id)
+                .fetch_optional(&state.db)
+                .await
+                {
+                    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                        task_id,
+                        status: "completed".to_string(),
+                        summary: summary.clone(),
+                        total_cost_usd: cost,
+                    });
+                }
+            }
+
             // Fetch full loop info before removing from in-memory state
             let loop_info = fetch_loop_info(state, &loop_id_str).await;
 
@@ -1259,6 +1334,66 @@ async fn handle_agentic_message(
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Handle a Claude agent message: update DB state and emit events.
+async fn handle_claude_message(
+    state: &AppState,
+    host_id: HostId,
+    msg: myremote_protocol::claude::ClaudeAgentMessage,
+) -> Result<(), String> {
+    use myremote_protocol::claude::ClaudeAgentMessage;
+
+    match msg {
+        ClaudeAgentMessage::SessionStarted {
+            claude_task_id,
+            session_id: _,
+        } => {
+            let task_id_str = claude_task_id.to_string();
+            tracing::info!(host_id = %host_id, task_id = %task_id_str, "claude session started");
+            // Status stays 'starting' until LoopDetected links it
+        }
+        ClaudeAgentMessage::SessionStartFailed {
+            claude_task_id,
+            session_id: _,
+            error,
+        } => {
+            let task_id_str = claude_task_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            tracing::warn!(host_id = %host_id, task_id = %task_id_str, error = %error, "claude session start failed");
+
+            if let Err(e) = sqlx::query(
+                "UPDATE claude_sessions SET status = 'error', ended_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&task_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(task_id = %task_id_str, error = %e, "failed to update claude task status");
+            }
+
+            let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                task_id: task_id_str,
+                status: "error".to_string(),
+                summary: Some(error),
+                total_cost_usd: 0.0,
+            });
+        }
+        ClaudeAgentMessage::SessionsDiscovered {
+            project_path,
+            sessions,
+        } => {
+            tracing::info!(
+                host_id = %host_id,
+                project_path = %project_path,
+                count = sessions.len(),
+                "claude sessions discovered"
+            );
+            // TODO: Phase 2 - store/relay discovered sessions
         }
     }
     Ok(())

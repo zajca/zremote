@@ -354,6 +354,26 @@ pub enum ServerEvent {
         project_path: String,
         message: String,
     },
+    #[serde(rename = "claude_task_started")]
+    ClaudeTaskStarted {
+        task_id: String,
+        session_id: String,
+        host_id: String,
+        project_path: String,
+    },
+    #[serde(rename = "claude_task_updated")]
+    ClaudeTaskUpdated {
+        task_id: String,
+        status: String,
+        loop_id: Option<String>,
+    },
+    #[serde(rename = "claude_task_ended")]
+    ClaudeTaskEnded {
+        task_id: String,
+        status: String,
+        summary: Option<String>,
+        total_cost_usd: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -874,6 +894,78 @@ mod tests {
     }
 
     #[test]
+    fn server_event_claude_task_started_serialization() {
+        let event = ServerEvent::ClaudeTaskStarted {
+            task_id: "task-1".to_string(),
+            session_id: "sess-1".to_string(),
+            host_id: "host-1".to_string(),
+            project_path: "/home/user/project".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "claude_task_started");
+        assert_eq!(json["task_id"], "task-1");
+        assert_eq!(json["session_id"], "sess-1");
+        assert_eq!(json["host_id"], "host-1");
+        assert_eq!(json["project_path"], "/home/user/project");
+    }
+
+    #[test]
+    fn server_event_claude_task_updated_serialization() {
+        let event = ServerEvent::ClaudeTaskUpdated {
+            task_id: "task-1".to_string(),
+            status: "active".to_string(),
+            loop_id: Some("loop-1".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "claude_task_updated");
+        assert_eq!(json["task_id"], "task-1");
+        assert_eq!(json["status"], "active");
+        assert_eq!(json["loop_id"], "loop-1");
+    }
+
+    #[test]
+    fn server_event_claude_task_updated_no_loop_serialization() {
+        let event = ServerEvent::ClaudeTaskUpdated {
+            task_id: "task-1".to_string(),
+            status: "starting".to_string(),
+            loop_id: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "claude_task_updated");
+        assert!(json["loop_id"].is_null());
+    }
+
+    #[test]
+    fn server_event_claude_task_ended_serialization() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "task-1".to_string(),
+            status: "completed".to_string(),
+            summary: Some("Fixed the bug".to_string()),
+            total_cost_usd: 0.42,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "claude_task_ended");
+        assert_eq!(json["task_id"], "task-1");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["summary"], "Fixed the bug");
+        assert_eq!(json["total_cost_usd"], 0.42);
+    }
+
+    #[test]
+    fn server_event_claude_task_ended_error_serialization() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "task-1".to_string(),
+            status: "error".to_string(),
+            summary: Some("PTY spawn failed".to_string()),
+            total_cost_usd: 0.0,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "claude_task_ended");
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["total_cost_usd"], 0.0);
+    }
+
+    #[test]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {
@@ -1056,6 +1148,23 @@ mod tests {
                 host_id: "h1".to_string(),
                 project_path: "/home/user/repo".to_string(),
                 message: "error message".to_string(),
+            },
+            ServerEvent::ClaudeTaskStarted {
+                task_id: "t1".to_string(),
+                session_id: "s1".to_string(),
+                host_id: "h1".to_string(),
+                project_path: "/home/user/project".to_string(),
+            },
+            ServerEvent::ClaudeTaskUpdated {
+                task_id: "t1".to_string(),
+                status: "active".to_string(),
+                loop_id: Some("l1".to_string()),
+            },
+            ServerEvent::ClaudeTaskEnded {
+                task_id: "t1".to_string(),
+                status: "completed".to_string(),
+                summary: Some("done".to_string()),
+                total_cost_usd: 1.23,
             },
         ];
         for event in &events {

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agentic::AgenticServerMessage;
+use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::{GitInfo, ProjectInfo, WorktreeInfo};
 use crate::{HostId, SessionId};
@@ -64,6 +65,7 @@ pub enum AgentMessage {
         message: String,
     },
     KnowledgeAction(KnowledgeAgentMessage),
+    ClaudeAction(ClaudeAgentMessage),
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -100,6 +102,7 @@ pub enum ServerMessage {
     },
     AgenticAction(AgenticServerMessage),
     KnowledgeAction(KnowledgeServerMessage),
+    ClaudeAction(ClaudeServerMessage),
     ProjectScan,
     ProjectRegister {
         path: String,
@@ -417,6 +420,76 @@ mod tests {
         roundtrip_server(&ServerMessage::KnowledgeAction(
             KnowledgeServerMessage::ServiceControl {
                 action: ServiceAction::Start,
+            },
+        ));
+    }
+
+    #[test]
+    fn claude_agent_action_roundtrip() {
+        use crate::claude::ClaudeAgentMessage;
+        roundtrip_agent(&AgentMessage::ClaudeAction(
+            ClaudeAgentMessage::SessionStarted {
+                claude_task_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+            },
+        ));
+    }
+
+    #[test]
+    fn claude_agent_action_failed_roundtrip() {
+        use crate::claude::ClaudeAgentMessage;
+        roundtrip_agent(&AgentMessage::ClaudeAction(
+            ClaudeAgentMessage::SessionStartFailed {
+                claude_task_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                error: "spawn failed".to_string(),
+            },
+        ));
+    }
+
+    #[test]
+    fn claude_agent_action_discovered_roundtrip() {
+        use crate::claude::{ClaudeAgentMessage, ClaudeSessionInfo};
+        roundtrip_agent(&AgentMessage::ClaudeAction(
+            ClaudeAgentMessage::SessionsDiscovered {
+                project_path: "/home/user/project".to_string(),
+                sessions: vec![ClaudeSessionInfo {
+                    session_id: "sess-1".to_string(),
+                    project_path: "/home/user/project".to_string(),
+                    model: Some("claude-sonnet-4-20250514".to_string()),
+                    last_active: None,
+                    message_count: None,
+                    summary: None,
+                }],
+            },
+        ));
+    }
+
+    #[test]
+    fn claude_server_action_start_roundtrip() {
+        use crate::claude::ClaudeServerMessage;
+        roundtrip_server(&ServerMessage::ClaudeAction(
+            ClaudeServerMessage::StartSession {
+                session_id: Uuid::new_v4(),
+                claude_task_id: Uuid::new_v4(),
+                working_dir: "/home/user/project".to_string(),
+                model: Some("claude-sonnet-4-20250514".to_string()),
+                initial_prompt: Some("Fix the tests".to_string()),
+                resume_cc_session_id: None,
+                allowed_tools: vec!["Read".to_string()],
+                skip_permissions: false,
+                output_format: None,
+                custom_flags: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn claude_server_action_discover_roundtrip() {
+        use crate::claude::ClaudeServerMessage;
+        roundtrip_server(&ServerMessage::ClaudeAction(
+            ClaudeServerMessage::DiscoverSessions {
+                project_path: "/home/user/project".to_string(),
             },
         ));
     }

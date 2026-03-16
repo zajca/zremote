@@ -1,4 +1,5 @@
 mod agentic;
+mod claude;
 mod config;
 mod connection;
 mod hooks;

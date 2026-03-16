@@ -183,6 +183,16 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/hosts/{host_id}/knowledge/service",
             post(routes::knowledge::control_service),
         )
+        // Claude task routes
+        .route(
+            "/api/claude-tasks",
+            get(routes::claude_sessions::list_claude_tasks)
+                .post(routes::claude_sessions::create_claude_task),
+        )
+        .route(
+            "/api/claude-tasks/{task_id}",
+            get(routes::claude_sessions::get_claude_task),
+        )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())

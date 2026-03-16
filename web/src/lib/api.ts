@@ -85,6 +85,10 @@ import type {
   UserAction,
 } from "../types/agentic";
 import type {
+  ClaudeTask,
+  CreateClaudeTaskRequest,
+} from "../types/claude-session";
+import type {
   KnowledgeBase,
   KnowledgeMemory,
   MemoryCategory,
@@ -376,5 +380,21 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ action }),
       }),
+  },
+  claudeTasks: {
+    create: (body: CreateClaudeTaskRequest) =>
+      request<ClaudeTask>("/api/claude-tasks", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    list: (filters?: { host_id?: string; status?: string; project_id?: string }) => {
+      const params = new URLSearchParams();
+      if (filters?.host_id) params.set("host_id", filters.host_id);
+      if (filters?.status) params.set("status", filters.status);
+      if (filters?.project_id) params.set("project_id", filters.project_id);
+      const qs = params.toString();
+      return request<ClaudeTask[]>(`/api/claude-tasks${qs ? `?${qs}` : ""}`);
+    },
+    get: (id: string) => request<ClaudeTask>(`/api/claude-tasks/${id}`),
   },
 };

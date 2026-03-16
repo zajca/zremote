@@ -1,9 +1,10 @@
-import { Brain, ChevronRight, FolderGit2, GitBranch, Plus } from "lucide-react";
+import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus } from "lucide-react";
 import { memo, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
 import { api } from "../../lib/api";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
+import { StartClaudeDialog } from "../StartClaudeDialog";
 import { SessionItem } from "./SessionItem";
 
 interface ProjectItemProps {
@@ -30,6 +31,7 @@ export const ProjectItem = memo(function ProjectItem({
   const [expanded, setExpanded] = useState(
     sessions.length > 0 || worktreeChildren.some((wt) => (projectSessionsMap?.get(wt.id) ?? []).length > 0),
   );
+  const [showClaudeDialog, setShowClaudeDialog] = useState(false);
 
   const totalSessions = sessions.length + worktreeChildren.reduce(
     (acc, wt) => acc + (projectSessionsMap?.get(wt.id) ?? []).length,
@@ -133,6 +135,16 @@ export const ProjectItem = memo(function ProjectItem({
           </span>
         )}
         <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowClaudeDialog(true);
+          }}
+          className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-accent group-hover:flex"
+          aria-label="Start Claude in project"
+        >
+          <Bot size={11} />
+        </button>
+        <button
           onClick={(e) => void handleNewSession(e)}
           className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-text-primary group-hover:flex"
           aria-label="New session in project"
@@ -158,6 +170,15 @@ export const ProjectItem = memo(function ProjectItem({
             />
           ))}
         </div>
+      )}
+      {showClaudeDialog && (
+        <StartClaudeDialog
+          projectName={project.name}
+          projectPath={project.path}
+          hostId={hostId}
+          projectId={project.id}
+          onClose={() => setShowClaudeDialog(false)}
+        />
       )}
     </div>
   );
