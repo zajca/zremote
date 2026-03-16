@@ -711,7 +711,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(uuid::Uuid::new_v4(), "test-host".to_string(), tx)
+            .register(uuid::Uuid::new_v4(), "test-host".to_string(), tx, false)
             .await;
 
         let app = create_router(state);
@@ -751,7 +751,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx)
+            .register(host_id, "host".to_string(), tx, false)
             .await;
 
         let app = create_router(state);
@@ -947,7 +947,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx)
+            .register(host_id, "host".to_string(), tx, false)
             .await;
 
         let app = create_router(state);
@@ -1021,7 +1021,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "connected-host".to_string(), tx)
+            .register(host_id, "connected-host".to_string(), tx, false)
             .await;
 
         let app = create_router(state.clone());
@@ -1073,7 +1073,7 @@ mod tests {
 
         // Register connection
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx).await;
+        state.connections.register(host_id, "host".to_string(), tx, false).await;
 
         let app = create_router(state.clone());
         let response = app
@@ -1120,7 +1120,7 @@ mod tests {
         insert_test_project(&state, &project_id, &host_id_str, "/home/user/project", "project").await;
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx).await;
+        state.connections.register(host_id, "host".to_string(), tx, false).await;
 
         let app = create_router(state.clone());
         let response = app
@@ -1164,7 +1164,7 @@ mod tests {
         insert_test_host(&state, &host_id_str, "host", "host").await;
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx).await;
+        state.connections.register(host_id, "host".to_string(), tx, false).await;
 
         let app = create_router(state.clone());
         let response = app

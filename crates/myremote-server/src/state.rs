@@ -18,6 +18,7 @@ pub struct AgentConnection {
     pub sender: mpsc::Sender<ServerMessage>,
     pub last_heartbeat: Instant,
     pub generation: u64,
+    pub supports_persistent_sessions: bool,
 }
 
 /// Manages all active agent WebSocket connections.
@@ -41,6 +42,7 @@ impl ConnectionManager {
         host_id: HostId,
         hostname: String,
         sender: mpsc::Sender<ServerMessage>,
+        supports_persistent_sessions: bool,
     ) -> (Option<mpsc::Sender<ServerMessage>>, u64) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let mut conns = self.connections.write().await;
@@ -55,9 +57,19 @@ impl ConnectionManager {
                 sender,
                 last_heartbeat: Instant::now(),
                 generation,
+                supports_persistent_sessions,
             },
         );
         (previous, generation)
+    }
+
+    /// Check if a host's agent supports persistent sessions.
+    pub async fn supports_persistent_sessions(&self, host_id: &HostId) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(host_id)
+            .is_some_and(|conn| conn.supports_persistent_sessions)
     }
 
     /// Remove an agent connection. Returns true if the connection was present.
@@ -185,6 +197,10 @@ pub enum BrowserMessage {
     },
     #[serde(rename = "session_closed")]
     SessionClosed { exit_code: Option<i32> },
+    #[serde(rename = "session_suspended")]
+    SessionSuspended,
+    #[serde(rename = "session_resumed")]
+    SessionResumed,
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "scrollback_start")]
@@ -282,6 +298,14 @@ pub enum ServerEvent {
     SessionClosed {
         session_id: String,
         exit_code: Option<i32>,
+    },
+    #[serde(rename = "session_suspended")]
+    SessionSuspended {
+        session_id: String,
+    },
+    #[serde(rename = "session_resumed")]
+    SessionResumed {
+        session_id: String,
     },
     #[serde(rename = "agentic_loop_detected")]
     LoopDetected {
@@ -427,7 +451,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let (tx, _rx) = make_sender();
         let host_id = Uuid::new_v4();
-        let (prev, generation) = mgr.register(host_id, "host-a".to_string(), tx).await;
+        let (prev, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
         assert!(prev.is_none());
         assert!(generation > 0);
         assert_eq!(mgr.connected_count().await, 1);
@@ -439,11 +463,11 @@ mod tests {
         let host_id = Uuid::new_v4();
 
         let (tx1, _rx1) = make_sender();
-        let (prev, _generation1) = mgr.register(host_id, "host-a".to_string(), tx1).await;
+        let (prev, _generation1) = mgr.register(host_id, "host-a".to_string(), tx1, false).await;
         assert!(prev.is_none());
 
         let (tx2, _rx2) = make_sender();
-        let (prev, _generation2) = mgr.register(host_id, "host-a".to_string(), tx2).await;
+        let (prev, _generation2) = mgr.register(host_id, "host-a".to_string(), tx2, false).await;
         assert!(prev.is_some(), "should return old sender on re-register");
         assert_eq!(mgr.connected_count().await, 1, "count should stay at 1");
     }
@@ -453,8 +477,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         let (tx1, _rx1) = make_sender();
         let (tx2, _rx2) = make_sender();
-        let (_, generation1) = mgr.register(Uuid::new_v4(), "a".to_string(), tx1).await;
-        let (_, generation2) = mgr.register(Uuid::new_v4(), "b".to_string(), tx2).await;
+        let (_, generation1) = mgr.register(Uuid::new_v4(), "a".to_string(), tx1, false).await;
+        let (_, generation2) = mgr.register(Uuid::new_v4(), "b".to_string(), tx2, false).await;
         assert!(generation2 > generation1);
     }
 
@@ -463,7 +487,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         assert!(mgr.unregister(&host_id).await);
         assert_eq!(mgr.connected_count().await, 0);
@@ -480,7 +504,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx).await;
+        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         assert!(mgr.unregister_if_generation(&host_id, generation).await);
         assert_eq!(mgr.connected_count().await, 0);
@@ -491,7 +515,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx).await;
+        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         assert!(!mgr.unregister_if_generation(&host_id, generation + 1).await);
         assert_eq!(mgr.connected_count().await, 1);
@@ -502,7 +526,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         let sender = mgr.get_sender(&host_id).await;
         assert!(sender.is_some());
@@ -519,7 +543,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         // Should not panic even if called multiple times
         mgr.update_heartbeat(&host_id).await;
@@ -545,7 +569,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx).await;
+        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         // With zero max_age, everything is immediately stale
         let stale = mgr.check_stale(std::time::Duration::ZERO).await;
@@ -558,7 +582,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false).await;
 
         // With a large max_age, nothing should be stale
         let stale = mgr.check_stale(std::time::Duration::from_secs(3600)).await;
@@ -570,7 +594,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         for _ in 0..5 {
             let (tx, _rx) = make_sender();
-            mgr.register(Uuid::new_v4(), "host".to_string(), tx).await;
+            mgr.register(Uuid::new_v4(), "host".to_string(), tx, false).await;
         }
         assert_eq!(mgr.connected_count().await, 5);
     }
@@ -678,6 +702,20 @@ mod tests {
     }
 
     #[test]
+    fn browser_message_session_suspended_serialization() {
+        let msg = BrowserMessage::SessionSuspended;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_suspended");
+    }
+
+    #[test]
+    fn browser_message_session_resumed_serialization() {
+        let msg = BrowserMessage::SessionResumed;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_resumed");
+    }
+
+    #[test]
     fn browser_message_roundtrip() {
         let messages = vec![
             BrowserMessage::Output {
@@ -686,6 +724,8 @@ mod tests {
             BrowserMessage::SessionClosed {
                 exit_code: Some(42),
             },
+            BrowserMessage::SessionSuspended,
+            BrowserMessage::SessionResumed,
             BrowserMessage::Error {
                 message: "fail".to_string(),
             },
@@ -997,6 +1037,12 @@ mod tests {
             ServerEvent::SessionClosed {
                 session_id: "s1".to_string(),
                 exit_code: Some(1),
+            },
+            ServerEvent::SessionSuspended {
+                session_id: "s1".to_string(),
+            },
+            ServerEvent::SessionResumed {
+                session_id: "s1".to_string(),
             },
             ServerEvent::LoopDetected {
                 loop_info: LoopInfo {

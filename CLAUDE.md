@@ -85,10 +85,11 @@ crates/
   myremote-agent/        Agent binary (runs on remote hosts)
     src/
       main.rs            Reconnection loop with exponential backoff (1s-300s, 25% jitter)
-      config.rs          AgentConfig::from_env() - fail-fast on missing vars
+      config.rs          AgentConfig::from_env(), detect_tmux() - fail-fast on missing vars
       connection.rs      WebSocket lifecycle, message routing, sender task, heartbeat (30s)
       pty.rs             PtySession wrapper (portable-pty), spawn_blocking for I/O
-      session.rs         SessionManager - HashMap<SessionId, PtySession>
+      tmux.rs            TmuxSession backend - persistent sessions via tmux, FIFO-based I/O
+      session.rs         SessionManager - SessionBackend enum (Pty|Tmux), discover_existing()
       agentic/           Loop detection & processing (claude-code stdout parsing)
       project/           Project scanner (Cargo.toml, package.json, .claude/)
 ```
@@ -118,10 +119,10 @@ Stack: React 19, TypeScript 5.8, Vite 6, Tailwind CSS 4, zustand 5, xterm.js 6, 
 
 ## Database
 
-SQLite with WAL journal mode. Migrations auto-run at startup. 4 migration files define:
+SQLite with WAL journal mode. Migrations auto-run at startup. 11 migration files define:
 
 - **hosts** - registered remote machines (id, hostname, status, agent_version, os, arch)
-- **sessions** - terminal sessions (host_id FK, shell, status: creating/active/closed, pid)
+- **sessions** - terminal sessions (host_id FK, shell, status: creating/active/closed/suspended, pid, suspended_at, tmux_name)
 - **agentic_loops** - AI agent loop tracking (session_id FK, model, tokens, cost, status)
 - **tool_calls** - individual tool invocations within loops (loop_id FK, status, duration)
 - **transcript_entries** - conversation log (loop_id FK, role, content)
@@ -137,10 +138,76 @@ SQLite with WAL journal mode. Migrations auto-run at startup. 4 migration files 
 - **SessionStore**: `Arc<RwLock<HashMap<SessionId, SessionState>>>` - in-memory terminal state with 100KB scrollback buffer (VecDeque).
 - **AgenticLoopStore**: `Arc<DashMap<AgenticLoopId, AgenticLoopState>>` - lock-free concurrent map for high-frequency loop updates.
 - **PTY I/O**: Uses `tokio::task::spawn_blocking` because PTY read is blocking. 4KB read buffer. Signals EOF with empty vec.
+- **Tmux persistence**: When tmux is available, sessions spawn inside `tmux -L myremote` and survive agent restarts. Agent detaches on shutdown, reattaches on reconnect. Falls back to raw PTY when tmux is unavailable.
+- **Session suspension**: When a persistent-session agent disconnects, server marks sessions as `suspended` (not `closed`), keeps scrollback, notifies browsers. On reconnect, agent sends `SessionsRecovered` and sessions resume seamlessly.
 - **Auth**: SHA-256 hash stored in DB, constant-time comparison via `subtle` crate. Token never logged.
 - **Reconnection**: Agent reconnects with exponential backoff (1s min, 300s max, 25% jitter).
 - **Event broadcast**: `tokio::sync::broadcast` channel (1024 capacity) for server events to browser WebSocket clients.
 - **Channels**: mpsc channels for outbound (256), PTY output (256), agentic messages (64). Sender task multiplexes onto WebSocket.
+
+## Persistent Terminal Sessions (tmux)
+
+Terminal sessions survive agent restarts via tmux as the session backend. This is automatic -- no configuration needed.
+
+### How it works
+
+```
+Without tmux:  Agent --owns--> portable-pty --owns--> shell
+               Agent dies => PTY dies => shell dies
+
+With tmux:     Agent --communicates--> tmux server --owns--> shell
+               Agent dies => tmux + shell survive
+               Agent restarts => discovers tmux sessions => reattaches
+```
+
+### Prerequisites
+
+tmux must be installed on the remote host. The agent auto-detects it at startup (`tmux -V`). If tmux is not available, the agent falls back to raw PTY sessions (original behavior).
+
+### Lifecycle
+
+1. **Agent starts**: `detect_tmux()` checks for tmux in PATH
+2. **Session created**: `tmux -L myremote new-session -d -s myremote-{uuid}` instead of `portable-pty`
+3. **I/O**: Write directly to `/dev/pts/N` (raw bytes), read via FIFO (`pipe-pane`)
+4. **Agent disconnects**: Sessions marked `suspended` on server, browsers notified, scrollback preserved
+5. **Agent reconnects**: `tmux -L myremote list-sessions` discovers surviving sessions, sends `SessionsRecovered` to server, sessions resume as `active`
+6. **User closes session**: `tmux kill-session` (respects user intent)
+7. **Stale cleanup**: Sessions older than 24h are killed on agent startup
+
+### Isolation
+
+- Dedicated tmux socket: `-L myremote` (never touches user's own tmux sessions)
+- FIFO directory: `/tmp/myremote-tmux-{uid}/` (per-user, avoids permission issues)
+- Session naming: `myremote-{session-uuid}` (parseable, collision-free)
+
+### Session states
+
+| Status | Meaning |
+|---|---|
+| `creating` | Server sent SessionCreate, waiting for agent confirmation |
+| `active` | Session running, I/O flowing |
+| `suspended` | Agent disconnected, tmux session alive, waiting for reconnection |
+| `closed` | Session terminated (user close, process exit, or unrecovered after agent reconnect) |
+| `error` | Session failed to create |
+
+### Verification
+
+```bash
+# Check if tmux backend is active (agent logs at startup)
+# "tmux detected, persistent sessions enabled"
+
+# List active myremote tmux sessions
+tmux -L myremote ls
+
+# Simulate agent crash and recovery
+kill -9 <agent_pid>          # Sessions survive in tmux
+tmux -L myremote ls          # Still there
+# Restart agent              # Auto-discovers and resumes sessions
+```
+
+### Agentic loop detection
+
+Unchanged. `detector.rs` does BFS from shell PID. With tmux, shell PID is a child of the tmux server (not agent). BFS still works because detection scans from the shell PID. The 3-second polling in `check_sessions()` re-detects running agentic tools after recovery.
 
 ## Protocol Conventions
 
@@ -152,7 +219,7 @@ SQLite with WAL journal mode. Migrations auto-run at startup. 4 migration files 
 ## Testing
 
 ```bash
-cargo test --workspace          # 207 Rust tests (65 agent + 30 protocol + 112 server)
+cargo test --workspace          # 443 Rust tests (215 agent + 94 protocol + 134 server)
 cargo clippy --workspace        # Lint (all=deny, pedantic=warn)
 cd web && bun run test          # Vitest (2 tests)
 cd web && bun run typecheck     # tsc --noEmit

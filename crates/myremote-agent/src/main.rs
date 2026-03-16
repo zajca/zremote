@@ -8,6 +8,7 @@ mod mcp;
 mod project;
 mod pty;
 mod session;
+mod tmux;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -67,6 +68,13 @@ async fn run_agent() {
         }
     };
 
+    let use_tmux = config::detect_tmux();
+    if use_tmux {
+        tracing::info!("tmux detected, persistent sessions enabled");
+    } else {
+        tracing::info!("tmux not found, using standard PTY sessions");
+    }
+
     // Shutdown signal channel: sender sets to `true` on SIGINT/SIGTERM
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -91,7 +99,7 @@ async fn run_agent() {
 
         attempt_num += 1;
 
-        match connection::run_connection(&config, shutdown_rx.clone()).await {
+        match connection::run_connection(&config, shutdown_rx.clone(), use_tmux).await {
             Ok(()) => {
                 // Clean disconnect (e.g. server closed, or we received shutdown)
                 tracing::info!("connection closed cleanly");

@@ -7,6 +7,14 @@ use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::{GitInfo, ProjectInfo, WorktreeInfo};
 use crate::{HostId, SessionId};
 
+/// A recovered tmux session reported by the agent during reconnection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecoveredSession {
+    pub session_id: SessionId,
+    pub shell: String,
+    pub pid: u32,
+}
+
 /// Messages sent from agent to server (terminal/connection layer).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
@@ -17,6 +25,8 @@ pub enum AgentMessage {
         os: String,
         arch: String,
         token: String,
+        #[serde(default)]
+        supports_persistent_sessions: bool,
     },
     Heartbeat {
         timestamp: DateTime<Utc>,
@@ -63,6 +73,9 @@ pub enum AgentMessage {
     WorktreeError {
         project_path: String,
         message: String,
+    },
+    SessionsRecovered {
+        sessions: Vec<RecoveredSession>,
     },
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
@@ -151,6 +164,48 @@ mod tests {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             token: "secret-token".to_string(),
+            supports_persistent_sessions: false,
+        });
+        roundtrip_agent(&AgentMessage::Register {
+            hostname: "dev-machine".to_string(),
+            agent_version: "0.1.0".to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            token: "secret-token".to_string(),
+            supports_persistent_sessions: true,
+        });
+    }
+
+    #[test]
+    fn register_without_persistent_sessions_deserializes() {
+        // Backward compat: older agents won't send supports_persistent_sessions
+        let json = r#"{"type":"Register","payload":{"hostname":"h","agent_version":"0.1","os":"linux","arch":"x86_64","token":"t"}}"#;
+        let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
+        if let AgentMessage::Register { supports_persistent_sessions, .. } = msg {
+            assert!(!supports_persistent_sessions, "should default to false");
+        } else {
+            panic!("expected Register variant");
+        }
+    }
+
+    #[test]
+    fn sessions_recovered_roundtrip() {
+        roundtrip_agent(&AgentMessage::SessionsRecovered {
+            sessions: vec![
+                RecoveredSession {
+                    session_id: Uuid::new_v4(),
+                    shell: "/bin/zsh".to_string(),
+                    pid: 12345,
+                },
+                RecoveredSession {
+                    session_id: Uuid::new_v4(),
+                    shell: "/bin/bash".to_string(),
+                    pid: 67890,
+                },
+            ],
+        });
+        roundtrip_agent(&AgentMessage::SessionsRecovered {
+            sessions: vec![],
         });
     }
 

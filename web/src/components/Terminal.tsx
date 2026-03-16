@@ -11,7 +11,7 @@ interface TerminalProps {
 }
 
 interface WsMessage {
-  type: "output" | "session_closed" | "error" | "scrollback_start" | "scrollback_end";
+  type: "output" | "session_closed" | "session_suspended" | "session_resumed" | "error" | "scrollback_start" | "scrollback_end";
   data?: string;
   exit_code?: number | null;
   message?: string;
@@ -23,6 +23,7 @@ export function Terminal({ sessionId }: TerminalProps) {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const closedRef = useRef(false);
+  const suspendedRef = useRef(false);
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
@@ -101,6 +102,16 @@ export function Terminal({ sessionId }: TerminalProps) {
         term.write(
           `\r\n\x1b[90m[Session closed${msg.exit_code != null ? ` (exit code: ${String(msg.exit_code)})` : ""}]\x1b[0m`,
         );
+      } else if (msg.type === "session_suspended") {
+        suspendedRef.current = true;
+        term.write(
+          `\r\n\x1b[33m[Session suspended - waiting for agent reconnection...]\x1b[0m`,
+        );
+      } else if (msg.type === "session_resumed") {
+        suspendedRef.current = false;
+        term.write(
+          `\r\n\x1b[32m[Session resumed]\x1b[0m\r\n`,
+        );
       } else if (msg.type === "error" && msg.message) {
         term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);
       }
@@ -159,6 +170,7 @@ export function Terminal({ sessionId }: TerminalProps) {
   useEffect(() => {
     if (!containerRef.current) return;
     unmountedRef.current = false;
+    suspendedRef.current = false;
 
     const term = new XTerm({
       theme: {
@@ -199,7 +211,7 @@ export function Terminal({ sessionId }: TerminalProps) {
 
     // User input -> send directly via WS ref
     const inputDisposable = term.onData((data) => {
-      if (!closedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      if (!closedRef.current && !suspendedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "input", data }));
       }
     });
