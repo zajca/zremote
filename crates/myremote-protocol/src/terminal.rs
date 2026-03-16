@@ -448,6 +448,17 @@ mod tests {
     }
 
     #[test]
+    fn claude_agent_action_session_id_captured_roundtrip() {
+        use crate::claude::ClaudeAgentMessage;
+        roundtrip_agent(&AgentMessage::ClaudeAction(
+            ClaudeAgentMessage::SessionIdCaptured {
+                claude_task_id: Uuid::new_v4(),
+                cc_session_id: "abc-session-123".to_string(),
+            },
+        ));
+    }
+
+    #[test]
     fn claude_agent_action_discovered_roundtrip() {
         use crate::claude::{ClaudeAgentMessage, ClaudeSessionInfo};
         roundtrip_agent(&AgentMessage::ClaudeAction(

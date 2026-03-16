@@ -193,6 +193,14 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/claude-tasks/{task_id}",
             get(routes::claude_sessions::get_claude_task),
         )
+        .route(
+            "/api/claude-tasks/{task_id}/resume",
+            post(routes::claude_sessions::resume_claude_task),
+        )
+        .route(
+            "/api/hosts/{host_id}/claude-tasks/discover",
+            get(routes::claude_sessions::discover_claude_sessions),
+        )
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())
@@ -250,6 +258,16 @@ async fn main() {
         tracing::error!(error = %e, "failed to close stale agentic loops at startup");
     }
     if let Err(e) = sqlx::query(
+        "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+         WHERE status IN ('starting', 'active')",
+    )
+    .bind(&startup_now)
+    .execute(&pool)
+    .await
+    {
+        tracing::error!(error = %e, "failed to mark stale claude sessions as error at startup");
+    }
+    if let Err(e) = sqlx::query(
         "UPDATE hosts SET status = 'offline', updated_at = ? WHERE status = 'online'",
     )
     .bind(&startup_now)
@@ -269,6 +287,7 @@ async fn main() {
     let (events_tx, _) = tokio::sync::broadcast::channel(1024);
 
     let knowledge_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let claude_discover_requests = std::sync::Arc::new(dashmap::DashMap::new());
 
     let state = Arc::new(AppState {
         db: pool,
@@ -279,6 +298,7 @@ async fn main() {
         shutdown: shutdown.clone(),
         events: events_tx,
         knowledge_requests,
+        claude_discover_requests,
     });
 
     // Spawn heartbeat monitor background task
@@ -344,6 +364,7 @@ mod tests {
             shutdown: CancellationToken::new(),
             events: events_tx,
             knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

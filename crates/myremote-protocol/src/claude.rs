@@ -62,6 +62,10 @@ pub enum ClaudeAgentMessage {
         project_path: String,
         sessions: Vec<ClaudeSessionInfo>,
     },
+    SessionIdCaptured {
+        claude_task_id: Uuid,
+        cc_session_id: String,
+    },
 }
 
 #[cfg(test)]
@@ -215,6 +219,14 @@ mod tests {
                     summary: None,
                 },
             ],
+        });
+    }
+
+    #[test]
+    fn session_id_captured_roundtrip() {
+        roundtrip_agent(&ClaudeAgentMessage::SessionIdCaptured {
+            claude_task_id: Uuid::new_v4(),
+            cc_session_id: "abc123-session-id".to_string(),
         });
     }
 

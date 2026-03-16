@@ -87,6 +87,7 @@ import type {
 import type {
   ClaudeTask,
   CreateClaudeTaskRequest,
+  DiscoveredClaudeSession,
 } from "../types/claude-session";
 import type {
   KnowledgeBase,
@@ -396,5 +397,13 @@ export const api = {
       return request<ClaudeTask[]>(`/api/claude-tasks${qs ? `?${qs}` : ""}`);
     },
     get: (id: string) => request<ClaudeTask>(`/api/claude-tasks/${id}`),
+    resume: (id: string) =>
+      request<ClaudeTask>(`/api/claude-tasks/${id}/resume`, { method: "POST" }),
+    discover: (hostId: string, projectPath: string) => {
+      const params = new URLSearchParams({ project_path: projectPath });
+      return request<DiscoveredClaudeSession[]>(
+        `/api/hosts/${hostId}/claude-tasks/discover?${params}`,
+      );
+    },
   },
 };

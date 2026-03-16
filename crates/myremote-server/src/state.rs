@@ -404,6 +404,7 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     pub events: broadcast::Sender<ServerEvent>,
     pub knowledge_requests: Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<myremote_protocol::knowledge::KnowledgeAgentMessage>>>,
+    pub claude_discover_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<Vec<myremote_protocol::claude::ClaudeSessionInfo>>>>,
 }
 
 #[cfg(test)]
