@@ -83,9 +83,12 @@ async fn update_claude_settings(
     let script = script_path.to_string_lossy().to_string();
 
     // Build hook configuration
-    let hook_command = serde_json::json!({
-        "type": "command",
-        "command": script
+    let hook_entry = serde_json::json!({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": script
+        }]
     });
 
     // Merge into existing hooks (preserve user's own hooks)
@@ -112,14 +115,21 @@ async fn update_claude_settings(
 
         if let Some(arr) = event_hooks.as_array_mut() {
             // Check if myremote hook is already present
-            let already_installed = arr.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.contains("myremote-hook"))
+            let already_installed = arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains("myremote-hook"))
+                        })
+                    })
             });
 
             if !already_installed {
-                arr.push(hook_command.clone());
+                arr.push(hook_entry.clone());
             }
         }
     }
@@ -159,10 +169,17 @@ pub async fn uninstall_hooks() -> Result<(), InstallError> {
     if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for (_event, event_hooks) in hooks.iter_mut() {
             if let Some(arr) = event_hooks.as_array_mut() {
-                arr.retain(|h| {
-                    !h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.contains("myremote-hook"))
+                arr.retain(|entry| {
+                    !entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.contains("myremote-hook"))
+                            })
+                        })
                 });
             }
         }
@@ -279,7 +296,7 @@ mod tests {
         let existing = serde_json::json!({
             "hooks": {
                 "PreToolUse": [
-                    {"type": "command", "command": "/usr/local/bin/my-hook.sh"}
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/my-hook.sh"}]}
                 ]
             }
         });
