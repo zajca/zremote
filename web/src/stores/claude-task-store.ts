@@ -4,6 +4,7 @@ import type { ClaudeTask, ClaudeTaskStatus } from "../types/claude-session";
 
 interface ClaudeTaskState {
   tasks: Map<string, ClaudeTask>;
+  sessionTaskIndex: Map<string, string>;
 
   updateTask: (task: ClaudeTask) => void;
   removeTask: (taskId: string) => void;
@@ -32,19 +33,25 @@ interface ClaudeTaskState {
 
 export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
   tasks: new Map(),
+  sessionTaskIndex: new Map(),
 
   updateTask: (task) =>
     set((state) => {
       const next = new Map(state.tasks);
       next.set(task.id, task);
-      return { tasks: next };
+      const nextIndex = new Map(state.sessionTaskIndex);
+      nextIndex.set(task.session_id, task.id);
+      return { tasks: next, sessionTaskIndex: nextIndex };
     }),
 
   removeTask: (taskId) =>
     set((state) => {
+      const task = state.tasks.get(taskId);
       const next = new Map(state.tasks);
       next.delete(taskId);
-      return { tasks: next };
+      const nextIndex = new Map(state.sessionTaskIndex);
+      if (task) nextIndex.delete(task.session_id);
+      return { tasks: next, sessionTaskIndex: nextIndex };
     }),
 
   fetchTask: async (taskId) => {
@@ -56,10 +63,12 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
     const tasks = await api.claudeTasks.list(filters);
     set((state) => {
       const next = new Map(state.tasks);
+      const nextIndex = new Map(state.sessionTaskIndex);
       for (const task of tasks) {
         next.set(task.id, task);
+        nextIndex.set(task.session_id, task.id);
       }
-      return { tasks: next };
+      return { tasks: next, sessionTaskIndex: nextIndex };
     });
   },
 
