@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router";
 import type { Session } from "../../lib/api";
 import { api } from "../../lib/api";
 import { useAgenticLoops } from "../../hooks/useAgenticLoops";
+import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { Badge } from "../ui/Badge";
 
@@ -36,6 +37,9 @@ export const SessionItem = memo(function SessionItem({
   const navigate = useNavigate();
   const location = useLocation();
   const isActive = location.pathname.includes(`/sessions/${session.id}`);
+  const isClaudeTask = useClaudeTaskStore(
+    (s) => s.sessionTaskIndex.has(session.id),
+  );
   const { loops } = useAgenticLoops(
     session.status === "active" ? session.id : undefined,
   );
@@ -84,7 +88,11 @@ export const SessionItem = memo(function SessionItem({
           onClick={handleClick}
           className="flex min-w-0 flex-1 items-center gap-2"
         >
-          <Terminal size={13} className="shrink-0 text-text-tertiary" />
+          {isClaudeTask ? (
+            <Bot size={13} className="shrink-0 text-accent" />
+          ) : (
+            <Terminal size={13} className="shrink-0 text-text-tertiary" />
+          )}
           <span className="truncate">{session.name || session.shell || "shell"}</span>
           <Badge variant={sessionStatusVariant(session.status)}>
             {session.status}

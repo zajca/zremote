@@ -1,12 +1,19 @@
-import { ArrowLeft, Pencil, X } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { ArrowLeft, Bot, Columns2, Maximize2, Pencil, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useHosts } from "../hooks/useHosts";
 import { useSessions } from "../hooks/useSessions";
+import { useAgenticLoops } from "../hooks/useAgenticLoops";
+import { useClaudeTaskStore } from "../stores/claude-task-store";
 import { api } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { IconButton } from "../components/ui/IconButton";
 import { Terminal } from "../components/Terminal";
+import { AgenticLoopPanel } from "../components/agentic/AgenticLoopPanel";
+
+const MIN_PANEL_PCT = 20;
+const MAX_PANEL_PCT = 80;
+const DEFAULT_TERMINAL_PCT = 40;
 
 export function SessionPage() {
   const { hostId, sessionId } = useParams<{
@@ -23,6 +30,71 @@ export function SessionPage() {
 
   const host = hosts.find((h) => h.id === hostId);
   const session = sessions.find((s) => s.id === sessionId);
+
+  // Check if this session is a Claude task
+  const claudeTaskId = useClaudeTaskStore(
+    (s) => (sessionId ? s.sessionTaskIndex.get(sessionId) : undefined),
+  );
+  const claudeTask = useClaudeTaskStore((s) =>
+    claudeTaskId ? s.tasks.get(claudeTaskId) : undefined,
+  );
+
+  // Fetch claude tasks for this host to populate the index
+  useEffect(() => {
+    if (hostId) {
+      void useClaudeTaskStore.getState().fetchTasks({ host_id: hostId });
+    }
+  }, [hostId]);
+
+  // Get active agentic loop for this session
+  const { loops } = useAgenticLoops(
+    session?.status === "active" ? sessionId : undefined,
+  );
+  const activeLoop = useMemo(
+    () =>
+      loops.find(
+        (l) => l.status !== "completed" && l.status !== "error",
+      ),
+    [loops],
+  );
+
+  // Determine the loop to show in split view
+  const splitLoopId = claudeTask?.loop_id ?? activeLoop?.id;
+  const isClaudeSession = !!claudeTask;
+
+  // Split view state
+  const [splitActive, setSplitActive] = useState(false);
+  const [terminalPct, setTerminalPct] = useState(DEFAULT_TERMINAL_PCT);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  // Auto-enable split when Claude session has a loop
+  useEffect(() => {
+    if (isClaudeSession && splitLoopId) {
+      setSplitActive(true);
+    }
+  }, [isClaudeSession, splitLoopId]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setTerminalPct(Math.min(MAX_PANEL_PCT, Math.max(MIN_PANEL_PCT, pct)));
+    };
+
+    const onMouseUp = () => {
+      dragging.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
 
   const handleClose = useCallback(async () => {
     if (!hostId || !sessionId || closing) return;
@@ -84,6 +156,9 @@ export function SessionPage() {
         >
           <ArrowLeft size={16} />
         </Link>
+        {isClaudeSession && (
+          <Bot size={14} className="shrink-0 text-accent" />
+        )}
         <span className="font-mono text-xs text-text-tertiary">
           {sessionId?.slice(0, 8)}
         </span>
@@ -132,7 +207,14 @@ export function SessionPage() {
         >
           {session.status}
         </Badge>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-1">
+          {splitLoopId && (
+            <IconButton
+              icon={splitActive ? Maximize2 : Columns2}
+              tooltip={splitActive ? "Full-width terminal" : "Show split view"}
+              onClick={() => setSplitActive((prev) => !prev)}
+            />
+          )}
           <IconButton
             icon={X}
             tooltip="Close session"
@@ -142,8 +224,38 @@ export function SessionPage() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1">
-        {sessionId && <Terminal sessionId={sessionId} />}
+      <div ref={containerRef} className="flex min-h-0 flex-1">
+        {splitActive && splitLoopId ? (
+          <>
+            {/* Terminal panel */}
+            <div
+              className="min-h-0 min-w-0 overflow-hidden"
+              style={{ width: `${terminalPct}%` }}
+            >
+              {sessionId && <Terminal sessionId={sessionId} />}
+            </div>
+
+            {/* Drag handle */}
+            <div
+              onMouseDown={handleMouseDown}
+              className="flex w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-border transition-colors hover:bg-accent/50"
+            >
+              <div className="h-8 w-0.5 rounded-full bg-text-tertiary/30" />
+            </div>
+
+            {/* Agentic panel */}
+            <div
+              className="min-h-0 min-w-0 overflow-hidden"
+              style={{ width: `${100 - terminalPct}%` }}
+            >
+              <AgenticLoopPanel loopId={splitLoopId} />
+            </div>
+          </>
+        ) : (
+          <div className="min-h-0 flex-1">
+            {sessionId && <Terminal sessionId={sessionId} />}
+          </div>
+        )}
       </div>
     </div>
   );
