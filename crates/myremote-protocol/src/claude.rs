@@ -39,6 +39,8 @@ pub enum ClaudeServerMessage {
         skip_permissions: bool,
         output_format: Option<String>,
         custom_flags: Option<String>,
+        #[serde(default)]
+        continue_last: bool,
     },
     DiscoverSessions {
         project_path: String,
@@ -138,6 +140,7 @@ mod tests {
             skip_permissions: false,
             output_format: None,
             custom_flags: None,
+            continue_last: false,
         });
     }
 
@@ -154,6 +157,7 @@ mod tests {
             skip_permissions: false,
             output_format: None,
             custom_flags: None,
+            continue_last: false,
         });
     }
 
@@ -170,6 +174,24 @@ mod tests {
             skip_permissions: true,
             output_format: Some("stream-json".to_string()),
             custom_flags: Some("--verbose".to_string()),
+            continue_last: false,
+        });
+    }
+
+    #[test]
+    fn start_session_with_continue_roundtrip() {
+        roundtrip_server(&ClaudeServerMessage::StartSession {
+            session_id: Uuid::new_v4(),
+            claude_task_id: Uuid::new_v4(),
+            working_dir: "/home/user/project".to_string(),
+            model: None,
+            initial_prompt: None,
+            resume_cc_session_id: None,
+            allowed_tools: vec![],
+            skip_permissions: false,
+            output_format: None,
+            custom_flags: None,
+            continue_last: true,
         });
     }
 
@@ -281,6 +303,7 @@ mod tests {
             skip_permissions: false,
             output_format: None,
             custom_flags: None,
+            continue_last: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();

@@ -159,6 +159,7 @@ pub async fn create_claude_task(
         skip_permissions: body.skip_permissions.unwrap_or(false),
         output_format: body.output_format,
         custom_flags: body.custom_flags,
+        continue_last: false,
     });
 
     if sender.send(msg).await.is_err() {
@@ -279,18 +280,17 @@ pub async fn resume_claude_task(
     .await?
     .ok_or_else(|| AppError::NotFound(format!("claude task {task_id} not found")))?;
 
-    // Verify status is completed
-    if original.status != "completed" {
+    // Verify task is not still running
+    if original.status == "starting" || original.status == "active" {
         return Err(AppError::Conflict(format!(
-            "cannot resume task with status '{}', must be 'completed'",
+            "cannot resume task with status '{}', task is still running",
             original.status
         )));
     }
 
-    // Verify claude_session_id exists
-    let cc_session_id = original.claude_session_id.ok_or_else(|| {
-        AppError::Conflict("cannot resume task: no Claude Code session ID captured".to_string())
-    })?;
+    // Use claude_session_id if available; otherwise fall back to --continue
+    let cc_session_id = original.claude_session_id;
+    let continue_last = cc_session_id.is_none();
 
     let parsed_host_id: Uuid = original
         .host_id
@@ -369,18 +369,19 @@ pub async fn resume_claude_task(
             (vec![], false, None, None)
         };
 
-    // 5. Send StartSession to agent with resume_cc_session_id
+    // 5. Send StartSession to agent with resume_cc_session_id or continue_last fallback
     let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::StartSession {
         session_id: new_session_id,
         claude_task_id: new_task_id,
         working_dir: original.project_path.clone(),
         model: original.model.clone(),
         initial_prompt,
-        resume_cc_session_id: Some(cc_session_id),
+        resume_cc_session_id: cc_session_id.clone(),
         allowed_tools,
         skip_permissions,
         output_format,
         custom_flags,
+        continue_last,
     });
 
     if sender.send(msg).await.is_err() {

@@ -1,8 +1,9 @@
-import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus } from "lucide-react";
-import { memo, useCallback, useState } from "react";
+import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus, RotateCcw } from "lucide-react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
 import { api } from "../../lib/api";
+import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import { SessionItem } from "./SessionItem";
@@ -32,6 +33,52 @@ export const ProjectItem = memo(function ProjectItem({
     sessions.length > 0 || worktreeChildren.some((wt) => (projectSessionsMap?.get(wt.id) ?? []).length > 0),
   );
   const [showClaudeDialog, setShowClaudeDialog] = useState(false);
+
+  // Find the last resumable Claude task for this project (return stable string, not object)
+  const lastResumableTaskId = useClaudeTaskStore((s) => {
+    let bestId: string | null = null;
+    let bestEnded = "";
+    for (const task of s.tasks.values()) {
+      if (task.project_id !== project.id) continue;
+      if (task.status !== "completed" && task.status !== "error") continue;
+      const ended = task.ended_at ?? "";
+      if (!bestId || ended > bestEnded) {
+        bestId = task.id;
+        bestEnded = ended;
+      }
+    }
+    return bestId;
+  });
+  const lastResumableTask = useClaudeTaskStore((s) =>
+    lastResumableTaskId ? s.tasks.get(lastResumableTaskId) : undefined,
+  );
+
+  // Fetch tasks once on mount
+  useEffect(() => {
+    void useClaudeTaskStore.getState().fetchTasks({ project_id: project.id });
+  }, [project.id]);
+
+  // Re-fetch on task updates
+  useEffect(() => {
+    const handler = () =>
+      void useClaudeTaskStore.getState().fetchTasks({ project_id: project.id });
+    window.addEventListener("myremote:claude-task-update", handler);
+    return () => window.removeEventListener("myremote:claude-task-update", handler);
+  }, [project.id]);
+
+  const handleResume = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!lastResumableTaskId) return;
+      try {
+        const newTask = await api.claudeTasks.resume(lastResumableTaskId);
+        void navigate(`/hosts/${hostId}/sessions/${newTask.session_id}`);
+      } catch (err) {
+        console.error("failed to resume Claude task", err);
+      }
+    },
+    [lastResumableTaskId, navigate, hostId],
+  );
 
   const totalSessions = sessions.length + worktreeChildren.reduce(
     (acc, wt) => acc + (projectSessionsMap?.get(wt.id) ?? []).length,
@@ -133,6 +180,16 @@ export const ProjectItem = memo(function ProjectItem({
           <span className="shrink-0 text-[10px] text-text-tertiary">
             {totalSessions}
           </span>
+        )}
+        {lastResumableTaskId && (
+          <button
+            onClick={(e) => void handleResume(e)}
+            className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-accent transition-colors duration-150 hover:bg-bg-active hover:text-accent group-hover:flex"
+            aria-label="Resume last Claude task"
+            title={lastResumableTask?.summary ?? "Resume Claude"}
+          >
+            <RotateCcw size={11} />
+          </button>
         )}
         <button
           onClick={(e) => {

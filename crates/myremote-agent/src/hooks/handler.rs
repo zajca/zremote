@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -6,7 +7,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
-use myremote_protocol::{AgenticAgentMessage, ToolCallStatus};
+use myremote_protocol::claude::ClaudeAgentMessage;
+use myremote_protocol::{AgentMessage, AgenticAgentMessage, SessionId, ToolCallStatus};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -23,6 +25,10 @@ pub struct HooksState {
     pub permission_manager: Arc<PermissionManager>,
     /// Track tool call start times for duration calculation.
     pub tool_call_starts: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Instant>>>,
+    /// Sender for outbound agent messages (used for `SessionIdCaptured`).
+    pub outbound_tx: mpsc::Sender<AgentMessage>,
+    /// CC session IDs that have already been sent via `SessionIdCaptured` (dedup).
+    pub sent_cc_session_ids: Arc<tokio::sync::RwLock<HashSet<String>>>,
 }
 
 /// The JSON payload received from Claude Code hooks via stdin.
@@ -107,6 +113,46 @@ pub async fn handle_hook(
         .into_response()
 }
 
+/// If this CC session belongs to a Claude task and we haven't sent its ID yet,
+/// send a `SessionIdCaptured` message to the server so it can link the CC session
+/// to the Claude task for resume support.
+async fn try_capture_cc_session_id(
+    state: &HooksState,
+    cc_session_id: &str,
+    mapped_session_id: &SessionId,
+) {
+    // Check if already sent
+    if state
+        .sent_cc_session_ids
+        .read()
+        .await
+        .contains(cc_session_id)
+    {
+        return;
+    }
+
+    // Check if this is a Claude task session
+    let Some(claude_task_id) = state.mapper.get_claude_task_id(mapped_session_id).await else {
+        return;
+    };
+
+    // Mark as sent
+    state
+        .sent_cc_session_ids
+        .write()
+        .await
+        .insert(cc_session_id.to_string());
+
+    // Send to server
+    let msg = AgentMessage::ClaudeAction(ClaudeAgentMessage::SessionIdCaptured {
+        claude_task_id,
+        cc_session_id: cc_session_id.to_string(),
+    });
+    if state.outbound_tx.try_send(msg).is_err() {
+        tracing::warn!("outbound channel full, SessionIdCaptured dropped");
+    }
+}
+
 async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
     let Some(mapped) = state
         .mapper
@@ -116,6 +162,8 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
         tracing::debug!(cc_session = %payload.session_id, "no loop mapping for PreToolUse, ignoring");
         return;
     };
+
+    try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
     let tool_use_id = payload
         .tool_use_id
@@ -166,6 +214,8 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
     else {
         return;
     };
+
+    try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
     let tool_use_id = payload
         .tool_use_id
@@ -219,6 +269,8 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     else {
         return;
     };
+
+    try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
     // Parse transcript file for conversation entries
     if let Some(ref transcript_path) = payload.transcript_path {
@@ -289,6 +341,8 @@ async fn handle_permission_request(
         )
             .into_response();
     };
+
+    try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
     let tool_name = payload
         .tool_name
