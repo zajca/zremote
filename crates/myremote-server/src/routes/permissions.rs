@@ -4,20 +4,14 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::{Deserialize, Serialize};
+use myremote_core::queries::permissions as q;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson};
 use crate::state::AppState;
 
-/// Permission rule response for API.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct PermissionRuleResponse {
-    pub id: String,
-    pub scope: String,
-    pub tool_pattern: String,
-    pub action: String,
-}
+pub type PermissionRuleResponse = q::PermissionRuleRow;
 
 /// Request body for upserting a permission rule.
 #[derive(Debug, Deserialize)]
@@ -41,12 +35,7 @@ fn validate_action(action: &str) -> Result<(), AppError> {
 pub async fn list_permissions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PermissionRuleResponse>>, AppError> {
-    let rules: Vec<PermissionRuleResponse> = sqlx::query_as(
-        "SELECT id, scope, tool_pattern, action FROM permission_rules ORDER BY scope, tool_pattern",
-    )
-    .fetch_all(&state.db)
-    .await?;
-
+    let rules = q::list_permissions(&state.db).await?;
     Ok(Json(rules))
 }
 
@@ -62,27 +51,7 @@ pub async fn upsert_permission(
     }
 
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    sqlx::query(
-        "INSERT INTO permission_rules (id, scope, tool_pattern, action) \
-         VALUES (?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, \
-         tool_pattern = excluded.tool_pattern, action = excluded.action",
-    )
-    .bind(&id)
-    .bind(&body.scope)
-    .bind(&body.tool_pattern)
-    .bind(&body.action)
-    .execute(&state.db)
-    .await?;
-
-    let rule: PermissionRuleResponse = sqlx::query_as(
-        "SELECT id, scope, tool_pattern, action FROM permission_rules WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_one(&state.db)
-    .await?;
-
+    let rule = q::upsert_permission(&state.db, &id, &body.scope, &body.tool_pattern, &body.action).await?;
     Ok(Json(rule))
 }
 
@@ -91,14 +60,9 @@ pub async fn delete_permission(
     State(state): State<Arc<AppState>>,
     Path(rule_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let result = sqlx::query("DELETE FROM permission_rules WHERE id = ?")
-        .bind(&rule_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    let rows = q::delete_permission(&state.db, &rule_id).await?;
+    if rows == 0 {
         return Err(AppError::NotFound(format!("permission rule {rule_id} not found")));
     }
-
     Ok(StatusCode::NO_CONTENT)
 }

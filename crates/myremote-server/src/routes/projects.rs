@@ -4,37 +4,17 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use myremote_core::queries::projects as q;
+use myremote_core::queries::sessions as sq;
 use myremote_protocol::ServerMessage;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson};
-use crate::routes::sessions::SessionResponse;
 use crate::state::AppState;
 
-/// Project representation for API responses.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct ProjectResponse {
-    pub id: String,
-    pub host_id: String,
-    pub path: String,
-    pub name: String,
-    pub has_claude_config: bool,
-    pub project_type: String,
-    pub created_at: String,
-    pub parent_project_id: Option<String>,
-    pub git_branch: Option<String>,
-    pub git_commit_hash: Option<String>,
-    pub git_commit_message: Option<String>,
-    #[serde(default)]
-    pub git_is_dirty: bool,
-    #[serde(default)]
-    pub git_ahead: i32,
-    #[serde(default)]
-    pub git_behind: i32,
-    pub git_remotes: Option<String>,
-    pub git_updated_at: Option<String>,
-}
+pub type ProjectResponse = q::ProjectRow;
+pub type SessionResponse = sq::SessionRow;
 
 /// Request body for manually adding a project.
 #[derive(Debug, Deserialize)]
@@ -60,17 +40,7 @@ pub async fn list_projects(
     Path(host_id): Path<String>,
 ) -> Result<Json<Vec<ProjectResponse>>, AppError> {
     let _parsed = parse_host_id(&host_id)?;
-
-    let projects: Vec<ProjectResponse> = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
-         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
-         FROM projects WHERE host_id = ? ORDER BY name",
-    )
-    .bind(&host_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let projects = q::list_projects(&state.db, &host_id).await?;
     Ok(Json(projects))
 }
 
@@ -107,13 +77,7 @@ pub async fn add_project(
         return Err(AppError::BadRequest("path must not be empty".to_string()));
     }
 
-    // Check host exists
-    let host_exists: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE id = ?")
-        .bind(&host_id)
-        .fetch_optional(&state.db)
-        .await?;
-
-    if host_exists.is_none() {
+    if !sq::host_exists(&state.db, &host_id).await? {
         return Err(AppError::NotFound(format!("host {host_id} not found")));
     }
 
@@ -126,7 +90,6 @@ pub async fn add_project(
             .await;
     }
 
-    // Insert into DB (agent will send ProjectDiscovered to update details)
     let project_id = Uuid::new_v4().to_string();
     let name = body
         .path
@@ -135,28 +98,9 @@ pub async fn add_project(
         .unwrap_or("unknown")
         .to_string();
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&project_id)
-    .bind(&host_id)
-    .bind(&body.path)
-    .bind(&name)
-    .execute(&state.db)
-    .await?;
+    q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
 
-    // Return the project (may be existing if path was already registered)
-    let project: ProjectResponse = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
-         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
-         FROM projects WHERE host_id = ? AND path = ?",
-    )
-    .bind(&host_id)
-    .bind(&body.path)
-    .fetch_one(&state.db)
-    .await?;
-
+    let project = q::get_project_by_host_and_path(&state.db, &host_id, &body.path).await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
@@ -166,18 +110,7 @@ pub async fn get_project(
     Path(project_id): Path<String>,
 ) -> Result<Json<ProjectResponse>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-
-    let project: ProjectResponse = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
-         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
-         FROM projects WHERE id = ?",
-    )
-    .bind(&project_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
-
+    let project = q::get_project(&state.db, &project_id).await?;
     Ok(Json(project))
 }
 
@@ -187,15 +120,7 @@ pub async fn list_project_sessions(
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<SessionResponse>>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-
-    let sessions: Vec<SessionResponse> = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
-         FROM sessions WHERE project_id = ? ORDER BY created_at DESC",
-    )
-    .bind(&project_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let sessions = sq::list_sessions_by_project(&state.db, &project_id).await?;
     Ok(Json(sessions))
 }
 
@@ -206,28 +131,15 @@ pub async fn delete_project(
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
 
-    // Look up the project to find its host and path for notification
-    let project: Option<(String, String)> =
-        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    if let Some((host_id_str, path)) = project {
-        // Notify the agent
-        if let Ok(host_id) = host_id_str.parse::<Uuid>()
-            && let Some(sender) = state.connections.get_sender(&host_id).await
-        {
-            let _ = sender.send(ServerMessage::ProjectRemove { path }).await;
-        }
+    if let Some((host_id_str, path)) = q::get_project_host_and_path(&state.db, &project_id).await?
+        && let Ok(host_id) = host_id_str.parse::<Uuid>()
+        && let Some(sender) = state.connections.get_sender(&host_id).await
+    {
+        let _ = sender.send(ServerMessage::ProjectRemove { path }).await;
     }
 
-    let result = sqlx::query("DELETE FROM projects WHERE id = ?")
-        .bind(&project_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    let rows = q::delete_project(&state.db, &project_id).await?;
+    if rows == 0 {
         return Err(AppError::NotFound(format!(
             "project {project_id} not found"
         )));
@@ -243,14 +155,9 @@ pub async fn trigger_git_refresh(
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
 
-    let project: Option<(String, String)> =
-        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    let (host_id_str, path) =
-        project.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+    let (host_id_str, path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -276,17 +183,7 @@ pub async fn list_worktrees(
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<ProjectResponse>>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-
-    let worktrees: Vec<ProjectResponse> = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
-         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
-         FROM projects WHERE parent_project_id = ? ORDER BY name",
-    )
-    .bind(&project_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let worktrees = q::list_worktrees(&state.db, &project_id).await?;
     Ok(Json(worktrees))
 }
 
@@ -306,14 +203,9 @@ pub async fn create_worktree(
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
 
-    let project: Option<(String, String)> =
-        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    let (host_id_str, project_path) =
-        project.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -346,26 +238,13 @@ pub async fn delete_worktree(
     let _parsed = parse_project_id(&project_id)?;
     let _parsed_wt = parse_project_id(&worktree_id)?;
 
-    // Look up the parent project to get host_id and path
-    let parent: Option<(String, String)> =
-        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
-    let (host_id_str, project_path) =
-        parent.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
-
-    // Look up the worktree child project path
-    let worktree: Option<(String,)> =
-        sqlx::query_as("SELECT path FROM projects WHERE id = ? AND parent_project_id = ?")
-            .bind(&worktree_id)
-            .bind(&project_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    let (worktree_path,) =
-        worktree.ok_or_else(|| AppError::NotFound(format!("worktree {worktree_id} not found")))?;
+    let worktree_path = q::get_worktree_path(&state.db, &worktree_id, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("worktree {worktree_id} not found")))?;
 
     let host_id: Uuid = host_id_str
         .parse()

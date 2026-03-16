@@ -4,52 +4,19 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use myremote_core::queries::knowledge as q;
+use myremote_core::queries::projects as pq;
 use myremote_protocol::ServerMessage;
 use myremote_protocol::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage, SearchTier, ServiceAction};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson};
 use crate::state::AppState;
 
-// --- Response types ---
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct KnowledgeBaseResponse {
-    pub id: String,
-    pub host_id: String,
-    pub status: String,
-    pub openviking_version: Option<String>,
-    pub last_error: Option<String>,
-    pub started_at: Option<String>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MemoryResponse {
-    pub id: String,
-    pub project_id: String,
-    pub loop_id: Option<String>,
-    pub key: String,
-    pub content: String,
-    pub category: String,
-    pub confidence: f64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct IndexingResponse {
-    pub id: String,
-    pub project_id: String,
-    pub status: String,
-    pub files_processed: i64,
-    pub files_total: i64,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-    pub error: Option<String>,
-}
+// Re-export core row types as API response types.
+pub type KnowledgeBaseResponse = q::KnowledgeBaseRow;
+pub type MemoryResponse = q::MemoryRow;
 
 // --- Request types ---
 
@@ -99,20 +66,6 @@ fn parse_host_id(id: &str) -> Result<Uuid, AppError> {
         .map_err(|_| AppError::BadRequest(format!("invalid host ID: {id}")))
 }
 
-/// Look up a project's `host_id` and path from the DB.
-async fn get_project_info(
-    state: &AppState,
-    project_id: &str,
-) -> Result<(String, String, String), AppError> {
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, host_id, path FROM projects WHERE id = ?")
-            .bind(project_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    row.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))
-}
-
 // --- Endpoints ---
 
 /// `GET /api/projects/{project_id}/knowledge/status` - Get KB status for a project's host.
@@ -121,16 +74,8 @@ pub async fn get_status(
     Path(project_id): Path<String>,
 ) -> Result<Json<Option<KnowledgeBaseResponse>>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id, _path) = get_project_info(&state, &project_id).await?;
-
-    let kb: Option<KnowledgeBaseResponse> = sqlx::query_as(
-        "SELECT id, host_id, status, openviking_version, last_error, started_at, updated_at \
-         FROM knowledge_bases WHERE host_id = ?",
-    )
-    .bind(&host_id)
-    .fetch_optional(&state.db)
-    .await?;
-
+    let (_id, host_id, _path) = pq::get_project_info(&state.db, &project_id).await?;
+    let kb = q::get_kb_status(&state.db, &host_id).await?;
     Ok(Json(kb))
 }
 
@@ -141,7 +86,7 @@ pub async fn trigger_index(
     AppJson(body): AppJson<IndexRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -173,7 +118,7 @@ pub async fn search(
     AppJson(body): AppJson<SearchRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -192,7 +137,6 @@ pub async fn search(
         _ => SearchTier::L1,
     };
 
-    // Create oneshot channel for response
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.knowledge_requests.insert(request_id, tx);
 
@@ -209,7 +153,6 @@ pub async fn search(
         AppError::Conflict("failed to send search request to agent".to_string())
     })?;
 
-    // Wait for response with 30s timeout
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
         Ok(Ok(KnowledgeAgentMessage::SearchResults {
             results,
@@ -237,26 +180,7 @@ pub async fn list_memories(
     Query(query): Query<MemoriesQuery>,
 ) -> Result<Json<Vec<MemoryResponse>>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-
-    let memories = if let Some(ref category) = query.category {
-        sqlx::query_as::<_, MemoryResponse>(
-            "SELECT id, project_id, loop_id, key, content, category, confidence, created_at, updated_at \
-             FROM knowledge_memories WHERE project_id = ? AND category = ? ORDER BY updated_at DESC",
-        )
-        .bind(&project_id)
-        .bind(category)
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        sqlx::query_as::<_, MemoryResponse>(
-            "SELECT id, project_id, loop_id, key, content, category, confidence, created_at, updated_at \
-             FROM knowledge_memories WHERE project_id = ? ORDER BY updated_at DESC",
-        )
-        .bind(&project_id)
-        .fetch_all(&state.db)
-        .await?
-    };
-
+    let memories = q::list_memories(&state.db, &project_id, query.category.as_deref()).await?;
     Ok(Json(memories))
 }
 
@@ -267,7 +191,7 @@ pub async fn extract_memories(
     AppJson(body): AppJson<ExtractRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -278,13 +202,7 @@ pub async fn extract_memories(
         .parse()
         .map_err(|_| AppError::BadRequest("invalid loop_id".to_string()))?;
 
-    // Fetch transcript for this loop
-    let transcript_rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT role, content, timestamp FROM transcript_entries WHERE loop_id = ? ORDER BY id",
-    )
-    .bind(&body.loop_id)
-    .fetch_all(&state.db)
-    .await?;
+    let transcript_rows = q::get_transcript_for_loop(&state.db, &body.loop_id).await?;
 
     if transcript_rows.is_empty() {
         return Err(AppError::NotFound(
@@ -331,7 +249,7 @@ pub async fn generate_instructions(
     Path(project_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -343,13 +261,11 @@ pub async fn generate_instructions(
         .await
         .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
 
-    // Generate a deterministic request_id from host+path so we can match the response
     let request_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("instructions:{host_id_str}:{path}").as_bytes(),
     );
 
-    // Remove any stale request with the same key
     state.knowledge_requests.remove(&request_id);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -364,7 +280,6 @@ pub async fn generate_instructions(
         AppError::Conflict("failed to send generate request to agent".to_string())
     })?;
 
-    // Wait for response with 60s timeout
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(KnowledgeAgentMessage::InstructionsGenerated {
             content,
@@ -427,13 +342,8 @@ pub async fn delete_memory(
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
 
-    let result = sqlx::query("DELETE FROM knowledge_memories WHERE id = ? AND project_id = ?")
-        .bind(&memory_id)
-        .bind(&project_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    let rows = q::delete_memory(&state.db, &memory_id, &project_id).await?;
+    if rows == 0 {
         return Err(AppError::NotFound(format!(
             "memory {memory_id} not found"
         )));
@@ -453,39 +363,14 @@ pub async fn update_memory(
     let now = chrono::Utc::now().to_rfc3339();
 
     if let Some(ref content) = body.content {
-        sqlx::query(
-            "UPDATE knowledge_memories SET content = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-        )
-        .bind(content)
-        .bind(&now)
-        .bind(&memory_id)
-        .bind(&project_id)
-        .execute(&state.db)
-        .await?;
+        q::update_memory_content(&state.db, &memory_id, &project_id, content, &now).await?;
     }
 
     if let Some(ref category) = body.category {
-        sqlx::query(
-            "UPDATE knowledge_memories SET category = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-        )
-        .bind(category)
-        .bind(&now)
-        .bind(&memory_id)
-        .bind(&project_id)
-        .execute(&state.db)
-        .await?;
+        q::update_memory_category(&state.db, &memory_id, &project_id, category, &now).await?;
     }
 
-    let memory: MemoryResponse = sqlx::query_as(
-        "SELECT id, project_id, loop_id, key, content, category, confidence, created_at, updated_at \
-         FROM knowledge_memories WHERE id = ? AND project_id = ?",
-    )
-    .bind(&memory_id)
-    .bind(&project_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("memory {memory_id} not found")))?;
-
+    let memory = q::get_memory(&state.db, &memory_id, &project_id).await?;
     Ok(Json(memory))
 }
 
@@ -495,7 +380,7 @@ pub async fn write_claude_md(
     Path(project_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -507,7 +392,6 @@ pub async fn write_claude_md(
         .await
         .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
 
-    // Step 1: Generate instructions
     let gen_request_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("instructions:{host_id_str}:{path}").as_bytes(),
@@ -524,7 +408,6 @@ pub async fn write_claude_md(
         AppError::Conflict("failed to send generate request to agent".to_string())
     })?;
 
-    // Wait for generated content
     let content = match tokio::time::timeout(std::time::Duration::from_secs(60), gen_rx).await {
         Ok(Ok(KnowledgeAgentMessage::InstructionsGenerated { content, .. })) => content,
         Ok(Ok(_)) => return Err(AppError::Internal("unexpected response type".to_string())),
@@ -535,7 +418,6 @@ pub async fn write_claude_md(
         }
     };
 
-    // Step 2: Send WriteClaudeMd to agent
     let write_request_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("write-claude-md:{host_id_str}:{path}").as_bytes(),
@@ -554,7 +436,6 @@ pub async fn write_claude_md(
         AppError::Conflict("failed to send write request to agent".to_string())
     })?;
 
-    // Wait for confirmation (10s timeout)
     match tokio::time::timeout(std::time::Duration::from_secs(10), write_rx).await {
         Ok(Ok(KnowledgeAgentMessage::ClaudeMdWritten { bytes_written, error, .. })) => {
             if let Some(err) = error {
@@ -581,7 +462,7 @@ pub async fn bootstrap_project(
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let _parsed = parse_project_id(&project_id)?;
-    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+    let (_id, host_id_str, path) = pq::get_project_info(&state.db, &project_id).await?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -595,7 +476,7 @@ pub async fn bootstrap_project(
 
     let msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::BootstrapProject {
         project_path: path,
-        existing_claude_md: None, // Agent will read from disk
+        existing_claude_md: None,
     });
 
     sender

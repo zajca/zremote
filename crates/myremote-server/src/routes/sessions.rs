@@ -4,12 +4,16 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use myremote_core::queries::sessions as q;
 use myremote_protocol::ServerMessage;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::state::{AppState, SessionState};
+
+// Re-export the core row type so other modules (projects.rs) can use it.
+pub type SessionResponse = q::SessionRow;
 
 /// Request body for creating a new session.
 #[derive(Debug, Deserialize)]
@@ -19,22 +23,6 @@ pub struct CreateSessionRequest {
     pub rows: u16,
     pub working_dir: Option<String>,
     pub name: Option<String>,
-}
-
-/// Session representation for API responses.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct SessionResponse {
-    pub id: String,
-    pub host_id: String,
-    pub name: Option<String>,
-    pub shell: Option<String>,
-    pub status: String,
-    pub working_dir: Option<String>,
-    pub project_id: Option<String>,
-    pub pid: Option<i64>,
-    pub exit_code: Option<i32>,
-    pub created_at: String,
-    pub closed_at: Option<String>,
 }
 
 /// `POST /api/hosts/:host_id/sessions` - create a new terminal session.
@@ -47,14 +35,7 @@ pub async fn create_session(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
 
-    // Check host exists in DB
-    let host_exists: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM hosts WHERE id = ?")
-            .bind(&host_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    if host_exists.is_none() {
+    if !q::host_exists(&state.db, &host_id).await? {
         return Err(AppError::NotFound(format!("host {host_id} not found")));
     }
 
@@ -72,28 +53,19 @@ pub async fn create_session(
 
     // Resolve project_id from working_dir
     let project_id: Option<String> = if let Some(ref wd) = body.working_dir {
-        sqlx::query_scalar(
-            "SELECT id FROM projects WHERE host_id = ? AND (? = path OR ? LIKE path || '/%') LIMIT 1",
-        )
-        .bind(&host_id)
-        .bind(wd)
-        .bind(wd)
-        .fetch_optional(&state.db)
-        .await?
+        q::resolve_project_id(&state.db, &host_id, wd).await?
     } else {
         None
     };
 
-    // Insert into DB with status "creating"
-    sqlx::query(
-        "INSERT INTO sessions (id, host_id, name, status, working_dir, project_id) VALUES (?, ?, ?, 'creating', ?, ?)",
+    q::insert_session(
+        &state.db,
+        &session_id_str,
+        &host_id,
+        body.name.as_deref(),
+        body.working_dir.as_deref(),
+        project_id.as_deref(),
     )
-    .bind(&session_id_str)
-    .bind(&host_id)
-    .bind(&body.name)
-    .bind(&body.working_dir)
-    .bind(&project_id)
-    .execute(&state.db)
     .await?;
 
     // Create in-memory session state
@@ -112,7 +84,6 @@ pub async fn create_session(
     };
 
     if sender.send(msg).await.is_err() {
-        // Agent disconnected between check and send
         return Err(AppError::Conflict(
             "host went offline, cannot create session".to_string(),
         ));
@@ -135,14 +106,7 @@ pub async fn list_sessions(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
 
-    let sessions: Vec<SessionResponse> = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
-         FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
-    )
-    .bind(&host_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let sessions = q::list_sessions(&state.db, &host_id).await?;
     Ok(Json(sessions))
 }
 
@@ -155,15 +119,7 @@ pub async fn get_session(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
-    let session: SessionResponse = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
-         FROM sessions WHERE id = ?",
-    )
-    .bind(&session_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
-
+    let session = q::get_session(&state.db, &session_id).await?;
     Ok(Json(session))
 }
 
@@ -182,21 +138,8 @@ pub async fn update_session(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
-    sqlx::query("UPDATE sessions SET name = ? WHERE id = ?")
-        .bind(&body.name)
-        .bind(&session_id)
-        .execute(&state.db)
-        .await?;
-
-    let session: SessionResponse = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
-         FROM sessions WHERE id = ?",
-    )
-    .bind(&session_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
-
+    q::update_session_name(&state.db, &session_id, body.name.as_deref()).await?;
+    let session = q::get_session(&state.db, &session_id).await?;
     Ok(Json(session))
 }
 
@@ -209,14 +152,8 @@ pub async fn close_session(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
-    // Look up session to find host_id
-    let session: Option<(String, String)> =
-        sqlx::query_as("SELECT id, host_id FROM sessions WHERE id = ? AND status != 'closed'")
-            .bind(&session_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    let (_id, host_id_str) = session
+    let (_id, host_id_str) = q::find_session_for_close(&state.db, &session_id)
+        .await?
         .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found or already closed")))?;
 
     let host_id: Uuid = host_id_str
@@ -244,15 +181,9 @@ pub async fn purge_session(
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
     // Only allow purging closed sessions
-    let status: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
-            .bind(&session_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-    match status {
+    match q::get_session_status(&state.db, &session_id).await? {
         None => return Err(AppError::NotFound(format!("session {session_id} not found"))),
-        Some((s,)) if s != "closed" => {
+        Some(ref s) if s != "closed" => {
             return Err(AppError::Conflict(format!(
                 "session {session_id} is not closed (status: {s}), cannot purge"
             )));
@@ -260,23 +191,7 @@ pub async fn purge_session(
         _ => {}
     }
 
-    // Nullify session_id on agentic_loops (preserve loop data)
-    sqlx::query("UPDATE agentic_loops SET session_id = NULL WHERE session_id = ?")
-        .bind(&session_id)
-        .execute(&state.db)
-        .await?;
-
-    // Delete session stats
-    sqlx::query("DELETE FROM session_stats WHERE session_id = ?")
-        .bind(&session_id)
-        .execute(&state.db)
-        .await?;
-
-    // Delete the session row
-    sqlx::query("DELETE FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .execute(&state.db)
-        .await?;
+    q::purge_session(&state.db, &session_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
