@@ -16,6 +16,7 @@ interface KnowledgeState {
   searchResults: SearchResult[];
   searchLoading: boolean;
   indexingProgress: Record<string, IndexingProgress>;
+  bootstrapStatus: Record<string, "idle" | "running" | "done" | "error">;
 
   // Actions
   fetchStatus: (projectId: string) => Promise<void>;
@@ -37,6 +38,7 @@ interface KnowledgeState {
     action: "start" | "stop" | "restart",
   ) => Promise<void>;
   generateInstructions: (projectId: string) => Promise<void>;
+  bootstrapProject: (projectId: string) => Promise<void>;
 
   // Event handlers (called from WebSocket event listener)
   handleKnowledgeStatusChanged: (
@@ -54,6 +56,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   searchResults: [],
   searchLoading: false,
   indexingProgress: {},
+  bootstrapStatus: {},
 
   fetchStatus: async (projectId) => {
     try {
@@ -153,6 +156,25 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       await api.knowledge.generateInstructions(projectId);
     } catch (e) {
       console.error("Failed to generate instructions:", e);
+    }
+  },
+
+  bootstrapProject: async (projectId) => {
+    set((state) => ({
+      bootstrapStatus: { ...state.bootstrapStatus, [projectId]: "running" },
+    }));
+    try {
+      await api.knowledge.bootstrapProject(projectId);
+      set((state) => ({
+        bootstrapStatus: { ...state.bootstrapStatus, [projectId]: "done" },
+      }));
+      // Refresh status after bootstrap
+      setTimeout(() => get().fetchStatus(projectId), 3000);
+    } catch (e) {
+      console.error("Failed to bootstrap project:", e);
+      set((state) => ({
+        bootstrapStatus: { ...state.bootstrapStatus, [projectId]: "error" },
+      }));
     }
   },
 

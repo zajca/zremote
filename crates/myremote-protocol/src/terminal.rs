@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agentic::AgenticServerMessage;
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
-use crate::project::ProjectInfo;
+use crate::project::{GitInfo, ProjectInfo, WorktreeInfo};
 use crate::{HostId, SessionId};
 
 /// Messages sent from agent to server (terminal/connection layer).
@@ -45,6 +45,23 @@ pub enum AgentMessage {
     },
     ProjectList {
         projects: Vec<ProjectInfo>,
+    },
+    GitStatusUpdate {
+        path: String,
+        git_info: GitInfo,
+        worktrees: Vec<WorktreeInfo>,
+    },
+    WorktreeCreated {
+        project_path: String,
+        worktree: WorktreeInfo,
+    },
+    WorktreeDeleted {
+        project_path: String,
+        worktree_path: String,
+    },
+    WorktreeError {
+        project_path: String,
+        message: String,
     },
     KnowledgeAction(KnowledgeAgentMessage),
 }
@@ -89,6 +106,20 @@ pub enum ServerMessage {
     },
     ProjectRemove {
         path: String,
+    },
+    ProjectGitStatus {
+        path: String,
+    },
+    WorktreeCreate {
+        project_path: String,
+        branch: String,
+        path: Option<String>,
+        new_branch: bool,
+    },
+    WorktreeDelete {
+        project_path: String,
+        worktree_path: String,
+        force: bool,
     },
 }
 
@@ -239,12 +270,16 @@ mod tests {
                     name: "project-a".to_string(),
                     has_claude_config: true,
                     project_type: "rust".to_string(),
+                    git_info: None,
+                    worktrees: vec![],
                 },
                 ProjectInfo {
                     path: "/home/user/project-b".to_string(),
                     name: "project-b".to_string(),
                     has_claude_config: false,
                     project_type: "node".to_string(),
+                    git_info: None,
+                    worktrees: vec![],
                 },
             ],
         });
@@ -266,6 +301,101 @@ mod tests {
     fn project_remove_roundtrip() {
         roundtrip_server(&ServerMessage::ProjectRemove {
             path: "/home/user/myproject".to_string(),
+        });
+    }
+
+    #[test]
+    fn git_status_update_roundtrip() {
+        use crate::project::{GitInfo, GitRemote, WorktreeInfo};
+        roundtrip_agent(&AgentMessage::GitStatusUpdate {
+            path: "/home/user/repo".to_string(),
+            git_info: GitInfo {
+                branch: Some("main".to_string()),
+                commit_hash: Some("abc1234".to_string()),
+                commit_message: Some("fix: bug".to_string()),
+                is_dirty: false,
+                ahead: 1,
+                behind: 0,
+                remotes: vec![GitRemote {
+                    name: "origin".to_string(),
+                    url: "https://github.com/user/repo.git".to_string(),
+                }],
+            },
+            worktrees: vec![WorktreeInfo {
+                path: "/home/user/repo-feat".to_string(),
+                branch: Some("feature/x".to_string()),
+                commit_hash: Some("def5678".to_string()),
+                is_detached: false,
+                is_locked: false,
+            }],
+        });
+    }
+
+    #[test]
+    fn worktree_created_roundtrip() {
+        use crate::project::WorktreeInfo;
+        roundtrip_agent(&AgentMessage::WorktreeCreated {
+            project_path: "/home/user/repo".to_string(),
+            worktree: WorktreeInfo {
+                path: "/home/user/repo-feat".to_string(),
+                branch: Some("feature/new".to_string()),
+                commit_hash: Some("1234567".to_string()),
+                is_detached: false,
+                is_locked: false,
+            },
+        });
+    }
+
+    #[test]
+    fn worktree_deleted_roundtrip() {
+        roundtrip_agent(&AgentMessage::WorktreeDeleted {
+            project_path: "/home/user/repo".to_string(),
+            worktree_path: "/home/user/repo-feat".to_string(),
+        });
+    }
+
+    #[test]
+    fn worktree_error_roundtrip() {
+        roundtrip_agent(&AgentMessage::WorktreeError {
+            project_path: "/home/user/repo".to_string(),
+            message: "branch already exists".to_string(),
+        });
+    }
+
+    #[test]
+    fn project_git_status_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectGitStatus {
+            path: "/home/user/repo".to_string(),
+        });
+    }
+
+    #[test]
+    fn worktree_create_roundtrip() {
+        roundtrip_server(&ServerMessage::WorktreeCreate {
+            project_path: "/home/user/repo".to_string(),
+            branch: "feature/new".to_string(),
+            path: Some("/home/user/repo-feature".to_string()),
+            new_branch: true,
+        });
+        roundtrip_server(&ServerMessage::WorktreeCreate {
+            project_path: "/home/user/repo".to_string(),
+            branch: "existing-branch".to_string(),
+            path: None,
+            new_branch: false,
+        });
+    }
+
+    #[test]
+    fn worktree_delete_roundtrip() {
+        roundtrip_server(&ServerMessage::WorktreeDelete {
+            project_path: "/home/user/repo".to_string(),
+            worktree_path: "/home/user/repo-feat".to_string(),
+            force: false,
+        });
+        roundtrip_server(&ServerMessage::WorktreeDelete {
+            project_path: "/home/user/repo".to_string(),
+            worktree_path: "/home/user/repo-feat".to_string(),
+            force: true,
         });
     }
 

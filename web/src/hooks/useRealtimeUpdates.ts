@@ -4,6 +4,7 @@ import {
   dispatchWsDisconnected,
   dispatchWsReconnected,
 } from "../components/layout/ReconnectBanner";
+import { showToast } from "../components/layout/Toast";
 import type {
   AgenticLoop,
   ToolCall,
@@ -22,6 +23,9 @@ interface ServerEvent {
   tool_call?: ToolCall;
   transcript_entry?: TranscriptEntry;
   loop_id?: string;
+  host_id?: string;
+  project_path?: string;
+  message?: string;
 }
 
 const RECONNECT_DELAY_MS = 3000;
@@ -109,6 +113,11 @@ export function useRealtimeUpdates(handlers: EventHandler) {
           case "agentic_loop_metrics":
             if (parsed.loop) {
               store.updateLoop(parsed.loop);
+            }
+            break;
+          case "worktree_error":
+            if (parsed.message) {
+              showToast(`Worktree error: ${parsed.message}`, "error");
             }
             break;
         }

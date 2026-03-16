@@ -488,3 +488,120 @@ pub async fn update_memory(
 
     Ok(Json(memory))
 }
+
+/// `POST /api/projects/{project_id}/knowledge/write-claude-md` - Write knowledge to CLAUDE.md.
+pub async fn write_claude_md(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    // Step 1: Generate instructions
+    let gen_request_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("instructions:{host_id_str}:{path}").as_bytes(),
+    );
+    state.knowledge_requests.remove(&gen_request_id);
+    let (gen_tx, gen_rx) = tokio::sync::oneshot::channel();
+    state.knowledge_requests.insert(gen_request_id, gen_tx);
+
+    let gen_msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::GenerateInstructions {
+        project_path: path.clone(),
+    });
+    sender.send(gen_msg).await.map_err(|_| {
+        state.knowledge_requests.remove(&gen_request_id);
+        AppError::Conflict("failed to send generate request to agent".to_string())
+    })?;
+
+    // Wait for generated content
+    let content = match tokio::time::timeout(std::time::Duration::from_secs(60), gen_rx).await {
+        Ok(Ok(KnowledgeAgentMessage::InstructionsGenerated { content, .. })) => content,
+        Ok(Ok(_)) => return Err(AppError::Internal("unexpected response type".to_string())),
+        Ok(Err(_)) => return Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.knowledge_requests.remove(&gen_request_id);
+            return Err(AppError::Internal("instruction generation timed out after 60s".to_string()));
+        }
+    };
+
+    // Step 2: Send WriteClaudeMd to agent
+    let write_request_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("write-claude-md:{host_id_str}:{path}").as_bytes(),
+    );
+    state.knowledge_requests.remove(&write_request_id);
+    let (write_tx, write_rx) = tokio::sync::oneshot::channel();
+    state.knowledge_requests.insert(write_request_id, write_tx);
+
+    let write_msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::WriteClaudeMd {
+        project_path: path,
+        content,
+        mode: myremote_protocol::knowledge::WriteMdMode::Section,
+    });
+    sender.send(write_msg).await.map_err(|_| {
+        state.knowledge_requests.remove(&write_request_id);
+        AppError::Conflict("failed to send write request to agent".to_string())
+    })?;
+
+    // Wait for confirmation (10s timeout)
+    match tokio::time::timeout(std::time::Duration::from_secs(10), write_rx).await {
+        Ok(Ok(KnowledgeAgentMessage::ClaudeMdWritten { bytes_written, error, .. })) => {
+            if let Some(err) = error {
+                Err(AppError::Internal(format!("failed to write CLAUDE.md: {err}")))
+            } else {
+                Ok(Json(serde_json::json!({
+                    "written": true,
+                    "bytes": bytes_written,
+                })))
+            }
+        }
+        Ok(Ok(_)) => Err(AppError::Internal("unexpected response type".to_string())),
+        Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.knowledge_requests.remove(&write_request_id);
+            Err(AppError::Internal("write CLAUDE.md timed out after 10s".to_string()))
+        }
+    }
+}
+
+/// `POST /api/projects/{project_id}/knowledge/bootstrap` - Bootstrap knowledge for a project.
+pub async fn bootstrap_project(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+    let (_id, host_id_str, path) = get_project_info(&state, &project_id).await?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    let msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::BootstrapProject {
+        project_path: path,
+        existing_claude_md: None, // Agent will read from disk
+    });
+
+    sender
+        .send(msg)
+        .await
+        .map_err(|_| AppError::Conflict("failed to send bootstrap request to agent".to_string()))?;
+
+    Ok(StatusCode::ACCEPTED)
+}

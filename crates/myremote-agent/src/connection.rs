@@ -15,6 +15,7 @@ use crate::hooks::mapper::SessionMapper;
 use crate::hooks::permission::{PermissionDecision, PermissionManager};
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
+use crate::project::git::GitInspector;
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 
@@ -608,6 +609,122 @@ fn handle_server_message(
         }
         ServerMessage::ProjectRemove { path } => {
             tracing::info!(path = %path, "project removal acknowledged");
+        }
+        ServerMessage::ProjectGitStatus { path } => {
+            let tx = outbound_tx.clone();
+            let path = path.clone();
+            tokio::spawn(async move {
+                let p = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    GitInspector::inspect(std::path::Path::new(&p))
+                }).await;
+                match result {
+                    Ok(Some((git_info, worktrees))) => {
+                        if tx.send(AgentMessage::GitStatusUpdate {
+                            path,
+                            git_info,
+                            worktrees,
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, GitStatusUpdate dropped");
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(path = %path, "path is not a git repository");
+                    }
+                    Err(e) => {
+                        tracing::error!(path = %path, error = %e, "git inspect task panicked");
+                    }
+                }
+            });
+        }
+        ServerMessage::WorktreeCreate { project_path, branch, path, new_branch } => {
+            let tx = outbound_tx.clone();
+            let project_path = project_path.clone();
+            let branch = branch.clone();
+            let wt_path = path.clone();
+            let new_branch = *new_branch;
+            tokio::spawn(async move {
+                let pp = project_path.clone();
+                let b = branch.clone();
+                let wp = wt_path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    GitInspector::create_worktree(
+                        std::path::Path::new(&pp),
+                        &b,
+                        wp.as_ref().map(|p| std::path::Path::new(p.as_str())),
+                        new_branch,
+                    )
+                }).await;
+                match result {
+                    Ok(Ok(worktree)) => {
+                        if tx.send(AgentMessage::WorktreeCreated {
+                            project_path,
+                            worktree,
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeCreated dropped");
+                        }
+                    }
+                    Ok(Err(msg)) => {
+                        if tx.send(AgentMessage::WorktreeError {
+                            project_path,
+                            message: msg,
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                    Err(e) => {
+                        if tx.send(AgentMessage::WorktreeError {
+                            project_path,
+                            message: format!("worktree create task panicked: {e}"),
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                }
+            });
+        }
+        ServerMessage::WorktreeDelete { project_path, worktree_path, force } => {
+            let tx = outbound_tx.clone();
+            let project_path = project_path.clone();
+            let worktree_path = worktree_path.clone();
+            let force = *force;
+            tokio::spawn(async move {
+                let pp = project_path.clone();
+                let wp = worktree_path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    GitInspector::remove_worktree(
+                        std::path::Path::new(&pp),
+                        std::path::Path::new(&wp),
+                        force,
+                    )
+                }).await;
+                match result {
+                    Ok(Ok(())) => {
+                        if tx.send(AgentMessage::WorktreeDeleted {
+                            project_path,
+                            worktree_path,
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeDeleted dropped");
+                        }
+                    }
+                    Ok(Err(msg)) => {
+                        if tx.send(AgentMessage::WorktreeError {
+                            project_path,
+                            message: msg,
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                    Err(e) => {
+                        if tx.send(AgentMessage::WorktreeError {
+                            project_path,
+                            message: format!("worktree delete task panicked: {e}"),
+                        }).await.is_err() {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                }
+            });
         }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {

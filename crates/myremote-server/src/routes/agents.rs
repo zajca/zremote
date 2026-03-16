@@ -264,6 +264,7 @@ enum InboundMessage {
 const TERMINAL_MSG_TYPES: &[&str] = &[
     "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
     "ProjectDiscovered", "ProjectList", "KnowledgeAction",
+    "GitStatusUpdate", "WorktreeCreated", "WorktreeDeleted", "WorktreeError",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -542,6 +543,125 @@ async fn handle_agent_message(
                 });
             }
         }
+        AgentMessage::GitStatusUpdate {
+            path,
+            git_info,
+            worktrees,
+        } => {
+            let host_id_str = host_id.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let remotes_json = serde_json::to_string(&git_info.remotes).ok();
+            if let Err(e) = sqlx::query(
+                "UPDATE projects SET \
+                 git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
+                 git_is_dirty = ?, git_ahead = ?, git_behind = ?, \
+                 git_remotes = ?, git_updated_at = ? \
+                 WHERE host_id = ? AND path = ?",
+            )
+            .bind(&git_info.branch)
+            .bind(&git_info.commit_hash)
+            .bind(&git_info.commit_message)
+            .bind(git_info.is_dirty)
+            .bind(git_info.ahead)
+            .bind(git_info.behind)
+            .bind(&remotes_json)
+            .bind(&now)
+            .bind(&host_id_str)
+            .bind(&path)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(host_id = %host_id, path = %path, error = %e, "failed to update git status");
+            }
+
+            // Upsert/delete worktree children
+            upsert_worktree_children(state, &host_id_str, &path, &worktrees).await;
+
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id.to_string(),
+            });
+        }
+        AgentMessage::WorktreeCreated {
+            project_path,
+            worktree,
+        } => {
+            let host_id_str = host_id.to_string();
+
+            // Find parent project id
+            let parent: Option<(String,)> = sqlx::query_as(
+                "SELECT id FROM projects WHERE host_id = ? AND path = ?",
+            )
+            .bind(&host_id_str)
+            .bind(&project_path)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some((parent_id,)) = parent {
+                let wt_id = Uuid::new_v4().to_string();
+                let wt_name = std::path::Path::new(&worktree.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("worktree")
+                    .to_string();
+
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+                     git_branch, git_commit_hash) \
+                     VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?) \
+                     ON CONFLICT(host_id, path) DO UPDATE SET \
+                     git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash",
+                )
+                .bind(&wt_id)
+                .bind(&host_id_str)
+                .bind(&worktree.path)
+                .bind(&wt_name)
+                .bind(&parent_id)
+                .bind(&worktree.branch)
+                .bind(&worktree.commit_hash)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %worktree.path, error = %e, "failed to insert worktree child");
+                }
+            }
+
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id.to_string(),
+            });
+        }
+        AgentMessage::WorktreeDeleted {
+            project_path: _,
+            worktree_path,
+        } => {
+            let host_id_str = host_id.to_string();
+            if let Err(e) = sqlx::query(
+                "DELETE FROM projects WHERE host_id = ? AND path = ? AND parent_project_id IS NOT NULL",
+            )
+            .bind(&host_id_str)
+            .bind(&worktree_path)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(host_id = %host_id, path = %worktree_path, error = %e, "failed to delete worktree child");
+            }
+
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id.to_string(),
+            });
+        }
+        AgentMessage::WorktreeError {
+            project_path,
+            message,
+        } => {
+            tracing::warn!(host_id = %host_id, path = %project_path, error = %message, "worktree operation error");
+            let _ = state.events.send(ServerEvent::WorktreeError {
+                host_id: host_id.to_string(),
+                project_path,
+                message,
+            });
+        }
         AgentMessage::KnowledgeAction(knowledge_msg) => {
             if let Err(e) = handle_knowledge_message(state, host_id, knowledge_msg).await {
                 tracing::error!(host_id = %host_id, error = %e, "error handling knowledge message");
@@ -550,14 +670,25 @@ async fn handle_agent_message(
         AgentMessage::ProjectList { projects } => {
             let host_id_str = host_id.to_string();
             tracing::info!(host_id = %host_id, count = projects.len(), "received project list");
-            for project in projects {
+            let now = chrono::Utc::now().to_rfc3339();
+            for project in &projects {
                 let project_id = Uuid::new_v4().to_string();
+                let remotes_json = project.git_info.as_ref().map(|gi| {
+                    serde_json::to_string(&gi.remotes).unwrap_or_default()
+                });
+                let git_updated = project.git_info.as_ref().map(|_| now.clone());
                 if let Err(e) = sqlx::query(
-                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type) \
-                     VALUES (?, ?, ?, ?, ?, ?) \
+                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type, \
+                     git_branch, git_commit_hash, git_commit_message, git_is_dirty, \
+                     git_ahead, git_behind, git_remotes, git_updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(host_id, path) DO UPDATE SET \
                      name = excluded.name, has_claude_config = excluded.has_claude_config, \
-                     project_type = excluded.project_type",
+                     project_type = excluded.project_type, \
+                     git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash, \
+                     git_commit_message = excluded.git_commit_message, git_is_dirty = excluded.git_is_dirty, \
+                     git_ahead = excluded.git_ahead, git_behind = excluded.git_behind, \
+                     git_remotes = excluded.git_remotes, git_updated_at = excluded.git_updated_at",
                 )
                 .bind(&project_id)
                 .bind(&host_id_str)
@@ -565,10 +696,23 @@ async fn handle_agent_message(
                 .bind(&project.name)
                 .bind(project.has_claude_config)
                 .bind(&project.project_type)
+                .bind(project.git_info.as_ref().and_then(|gi| gi.branch.as_deref()))
+                .bind(project.git_info.as_ref().and_then(|gi| gi.commit_hash.as_deref()))
+                .bind(project.git_info.as_ref().and_then(|gi| gi.commit_message.as_deref()))
+                .bind(project.git_info.as_ref().is_some_and(|gi| gi.is_dirty))
+                .bind(project.git_info.as_ref().map_or(0, |gi| gi.ahead))
+                .bind(project.git_info.as_ref().map_or(0, |gi| gi.behind))
+                .bind(&remotes_json)
+                .bind(&git_updated)
                 .execute(&state.db)
                 .await
                 {
                     tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to upsert project");
+                }
+
+                // Upsert worktree children
+                if !project.worktrees.is_empty() {
+                    upsert_worktree_children(state, &host_id_str, &project.path, &project.worktrees).await;
                 }
             }
             let _ = state.events.send(ServerEvent::ProjectsUpdated {
@@ -577,6 +721,95 @@ async fn handle_agent_message(
         }
     }
     Ok(())
+}
+
+/// Upsert worktree children for a project and clean up stale ones.
+async fn upsert_worktree_children(
+    state: &AppState,
+    host_id_str: &str,
+    project_path: &str,
+    worktrees: &[myremote_protocol::project::WorktreeInfo],
+) {
+    // Find parent project id
+    let parent: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM projects WHERE host_id = ? AND path = ?",
+    )
+    .bind(host_id_str)
+    .bind(project_path)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((parent_id,)) = parent else {
+        return;
+    };
+
+    // Upsert each worktree as a child project
+    for wt in worktrees {
+        let wt_id = Uuid::new_v4().to_string();
+        let wt_name = std::path::Path::new(&wt.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("worktree")
+            .to_string();
+
+        if let Err(e) = sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+             git_branch, git_commit_hash) \
+             VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?) \
+             ON CONFLICT(host_id, path) DO UPDATE SET \
+             git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash, \
+             parent_project_id = excluded.parent_project_id",
+        )
+        .bind(&wt_id)
+        .bind(host_id_str)
+        .bind(&wt.path)
+        .bind(&wt_name)
+        .bind(&parent_id)
+        .bind(&wt.branch)
+        .bind(&wt.commit_hash)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(path = %wt.path, error = %e, "failed to upsert worktree child");
+        }
+    }
+
+    // Clean up stale worktree children whose paths are no longer in the list
+    let current_paths: Vec<&str> = worktrees.iter().map(|wt| wt.path.as_str()).collect();
+    if current_paths.is_empty() {
+        // Delete all worktree children for this parent
+        if let Err(e) = sqlx::query(
+            "DELETE FROM projects WHERE parent_project_id = ?",
+        )
+        .bind(&parent_id)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(parent_id = %parent_id, error = %e, "failed to clean up worktree children");
+        }
+    } else {
+        // Fetch existing child paths and delete those not in current list
+        let existing: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, path FROM projects WHERE parent_project_id = ?",
+        )
+        .bind(&parent_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+        for (child_id, child_path) in &existing {
+            if !current_paths.contains(&child_path.as_str())
+                && let Err(e) = sqlx::query("DELETE FROM projects WHERE id = ?")
+                    .bind(child_id)
+                    .execute(&state.db)
+                    .await
+            {
+                tracing::warn!(child_id = %child_id, error = %e, "failed to delete stale worktree child");
+            }
+        }
+    }
 }
 
 /// Handle an agentic agent message: update DB and in-memory state.
@@ -890,7 +1123,7 @@ async fn handle_agentic_message(
                 .unwrap_or(None);
 
                 let should_extract = auto_extract
-                    .is_some_and(|(v,)| v == "true" || v == "1");
+                    .is_none_or(|(v,)| v != "false" && v != "0");
 
                 if should_extract {
                     // Fetch project_path for this loop
@@ -1183,6 +1416,69 @@ async fn handle_knowledge_message(
                         loop_id: loop_id_str,
                         memory_count,
                     });
+
+                    // Phase 3: Increment memories_since_regen and check auto-regeneration threshold
+                    if let Err(e) = sqlx::query(
+                        "UPDATE knowledge_bases SET memories_since_regen = memories_since_regen + ? WHERE host_id = ?"
+                    )
+                    .bind(i64::from(memory_count))
+                    .bind(&host_id_str)
+                    .execute(&state.db)
+                    .await {
+                        tracing::warn!(error = %e, "failed to increment memories_since_regen");
+                    }
+
+                    // Check if we should auto-regenerate
+                    let threshold: i64 = sqlx::query_as::<_, (String,)>(
+                        "SELECT value FROM config_global WHERE key = 'openviking.regenerate_threshold'"
+                    )
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|(v,)| v.parse().ok())
+                    .unwrap_or(5);
+
+                    let current_count: Option<(i64,)> = sqlx::query_as(
+                        "SELECT memories_since_regen FROM knowledge_bases WHERE host_id = ?"
+                    )
+                    .bind(&host_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+
+                    if let Some((count,)) = current_count
+                        && count >= threshold
+                        && let Some(sender) = state.connections.get_sender(&host_id).await
+                    {
+                        // WriteClaudeMd with empty content triggers the agent to
+                        // generate instructions and write them in section mode.
+                        let _ = sender.send(myremote_protocol::ServerMessage::KnowledgeAction(
+                            myremote_protocol::knowledge::KnowledgeServerMessage::WriteClaudeMd {
+                                project_path: path.clone(),
+                                content: String::new(),
+                                mode: myremote_protocol::knowledge::WriteMdMode::Section,
+                            }
+                        )).await;
+
+                        // Also trigger skills generation
+                        let _ = sender.send(myremote_protocol::ServerMessage::KnowledgeAction(
+                            myremote_protocol::knowledge::KnowledgeServerMessage::GenerateSkills {
+                                project_path: path.clone(),
+                            }
+                        )).await;
+
+                        // Reset counter
+                        let _ = sqlx::query(
+                            "UPDATE knowledge_bases SET memories_since_regen = 0, \
+                             last_regenerated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE host_id = ?"
+                        )
+                        .bind(&host_id_str)
+                        .execute(&state.db)
+                        .await;
+
+                        tracing::info!(host_id = %host_id, path, count, threshold, "triggered auto-regeneration");
+                    }
                 }
             }
         }
@@ -1210,6 +1506,65 @@ async fn handle_knowledge_message(
                     "no pending request for generated instructions"
                 );
             }
+        }
+        KnowledgeAgentMessage::ClaudeMdWritten {
+            project_path,
+            bytes_written,
+            error,
+        } => {
+            let request_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("write-claude-md:{host_id_str}:{project_path}").as_bytes(),
+            );
+
+            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
+                let _ = sender.send(KnowledgeAgentMessage::ClaudeMdWritten {
+                    project_path,
+                    bytes_written,
+                    error,
+                });
+            } else {
+                tracing::info!(
+                    host_id = %host_id,
+                    project_path,
+                    bytes_written,
+                    "CLAUDE.md written (no waiting handler)"
+                );
+            }
+        }
+        KnowledgeAgentMessage::BootstrapComplete {
+            project_path,
+            files_indexed,
+            memories_seeded,
+            error,
+        } => {
+            if let Some(ref err) = error {
+                tracing::warn!(
+                    host_id = %host_id,
+                    project_path,
+                    error = %err,
+                    "bootstrap failed"
+                );
+            } else {
+                tracing::info!(
+                    host_id = %host_id,
+                    project_path,
+                    files_indexed,
+                    memories_seeded,
+                    "bootstrap complete"
+                );
+            }
+        }
+        KnowledgeAgentMessage::SkillsGenerated {
+            project_path,
+            skills_written,
+        } => {
+            tracing::info!(
+                host_id = %host_id,
+                project_path,
+                skills_written,
+                "skills generated"
+            );
         }
     }
     Ok(())
