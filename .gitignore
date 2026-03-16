@@ -36,6 +36,11 @@ logs/
 # Nix
 result
 
+# Coverage
+coverage/
+web/coverage/
+lcov.info
+
 # Claude Code - keep skills, ignore the rest
 .claude/**
 !.claude/skills/
