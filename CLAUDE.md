@@ -420,8 +420,19 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
     - Degradation: What happens when the backend is unavailable, data is empty, or an operation fails? Does the UI communicate this clearly?
   - The UX reviewer reads the modified component/route/API files plus the RFC, and reports issues with specific file:line references
   - UX issues block merge the same way code review issues do
+- **Security review**: Spawn `developer:code-security` teammate on the worktree changes
+  - Checks:
+    - Path traversal: Any file serving, file reads, or path construction from user input must validate resolved path stays within allowed directory.
+    - Injection: SQL (parameterized queries only), command injection (no shell interpolation of user input), XSS (sanitize before rendering).
+    - Auth/authz: New endpoints must enforce the same auth as existing ones. Local mode endpoints must not leak to network (bind 127.0.0.1).
+    - Secrets: No tokens, keys, or credentials in logs, error messages, or responses. Check tracing calls and error formatting.
+    - Denial of service: Unbounded allocations from user input (scrollback limits, query result limits, request body size).
+    - Dependency: New crate dependencies reviewed for known CVEs. Optional deps preferred over always-on.
+    - WebSocket: Validate origin, enforce message size limits, handle malformed frames gracefully.
+  - Reports issues with CWE identifiers, severity rating, and exact file:line references
+  - Security issues block merge -- no exceptions
 
-### Merge (after review passes)
+### Merge (after all reviews pass)
 - Team lead commits in worktree with descriptive message (what changed, why, key design decisions)
 - Merge to main (fast-forward when possible)
 - Run full verification on main: `cargo test --workspace`, `cargo clippy --workspace`, `bun run typecheck`
