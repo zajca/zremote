@@ -191,8 +191,15 @@ pub struct ResumeClaudeTaskRequest {
 pub async fn resume_claude_task(
     State(state): State<Arc<LocalAppState>>,
     Path(task_id): Path<String>,
-    body: Option<Json<ResumeClaudeTaskRequest>>,
+    body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, AppError> {
+    let resume_req: ResumeClaudeTaskRequest = if body.is_empty() {
+        ResumeClaudeTaskRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| AppError::BadRequest(format!("invalid JSON: {e}")))?
+    };
+
     let original = q::get_claude_task(&state.db, &task_id).await?;
 
     if original.status == "starting" || original.status == "active" {
@@ -212,7 +219,7 @@ pub async fn resume_claude_task(
     let new_task_id = Uuid::new_v4();
     let new_task_id_str = new_task_id.to_string();
 
-    let initial_prompt = body.and_then(|Json(b)| b.initial_prompt);
+    let initial_prompt = resume_req.initial_prompt;
 
     q::insert_session_for_task(
         &state.db,
