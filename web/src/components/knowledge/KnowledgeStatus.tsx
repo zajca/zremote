@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { api } from "../../lib/api";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
@@ -31,6 +33,21 @@ export function KnowledgeStatus({
   const { statusByProject, controlService, triggerIndex, fetchStatus } =
     useKnowledgeStore();
   const status = statusByProject[projectId];
+  const [bootstrapping, setBootstrapping] = useState(false);
+
+  const handleBootstrap = async () => {
+    setBootstrapping(true);
+    try {
+      await api.knowledge.bootstrapProject(projectId);
+    } catch (e) {
+      console.error("Failed to bootstrap:", e);
+    } finally {
+      setTimeout(() => {
+        setBootstrapping(false);
+        fetchStatus(projectId);
+      }, 3000);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -104,6 +121,14 @@ export function KnowledgeStatus({
               onClick={() => triggerIndex(projectId, true)}
             >
               Force Reindex
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleBootstrap}
+              disabled={bootstrapping}
+            >
+              {bootstrapping ? "Bootstrapping..." : "Bootstrap Knowledge"}
             </Button>
           </>
         )}

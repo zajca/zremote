@@ -1,4 +1,4 @@
-import { Brain, ChevronRight, FolderGit2, Plus } from "lucide-react";
+import { Brain, ChevronRight, FolderGit2, GitBranch, Plus } from "lucide-react";
 import { memo, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
@@ -70,6 +70,8 @@ export const ProjectItem = memo(function ProjectItem({
               className={`transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
             />
           </button>
+        ) : project.project_type === "worktree" ? (
+          <GitBranch size={13} className="shrink-0 text-text-tertiary" />
         ) : (
           <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
         )}
@@ -78,10 +80,27 @@ export const ProjectItem = memo(function ProjectItem({
           className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left"
         >
           {sessions.length > 0 && (
-            <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
+            project.project_type === "worktree"
+              ? <GitBranch size={13} className="shrink-0 text-text-tertiary" />
+              : <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
           )}
           <span className="truncate">{project.name}</span>
         </button>
+        {project.git_branch && (
+          <span
+            className="flex shrink-0 items-center gap-0.5 rounded bg-bg-active px-1 py-0.5 text-[9px] text-text-tertiary"
+            title={`Branch: ${project.git_branch}${project.git_ahead > 0 ? ` (+${project.git_ahead})` : ""}${project.git_behind > 0 ? ` (-${project.git_behind})` : ""}`}
+          >
+            <GitBranch size={9} />
+            <span className="max-w-[60px] truncate">{project.git_branch}</span>
+          </span>
+        )}
+        {project.git_is_dirty && (
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-warning"
+            title="Uncommitted changes"
+          />
+        )}
         {knowledgeStatus === "ready" && (
           <span title="Knowledge base active">
             <Brain size={11} className="shrink-0 text-accent" />

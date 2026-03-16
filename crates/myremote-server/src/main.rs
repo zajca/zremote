@@ -115,6 +115,19 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::projects::list_project_sessions),
         )
         .route(
+            "/api/projects/{project_id}/git/refresh",
+            post(routes::projects::trigger_git_refresh),
+        )
+        .route(
+            "/api/projects/{project_id}/worktrees",
+            get(routes::projects::list_worktrees)
+                .post(routes::projects::create_worktree),
+        )
+        .route(
+            "/api/projects/{project_id}/worktrees/{worktree_id}",
+            delete(routes::projects::delete_worktree),
+        )
+        .route(
             "/api/config/{key}",
             get(routes::config::get_global_config)
                 .put(routes::config::set_global_config),
@@ -153,6 +166,14 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project_id}/knowledge/generate-instructions",
             post(routes::knowledge::generate_instructions),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/write-claude-md",
+            post(routes::knowledge::write_claude_md),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/bootstrap",
+            post(routes::knowledge::bootstrap_project),
         )
         .route(
             "/api/hosts/{host_id}/knowledge/service",

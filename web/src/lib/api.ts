@@ -32,6 +32,15 @@ export interface Project {
   has_claude_config: boolean;
   project_type: string;
   created_at: string;
+  parent_project_id: string | null;
+  git_branch: string | null;
+  git_commit_hash: string | null;
+  git_commit_message: string | null;
+  git_is_dirty: boolean;
+  git_ahead: number;
+  git_behind: number;
+  git_remotes: string | null;
+  git_updated_at: string | null;
 }
 
 export interface ConfigValue {
@@ -167,6 +176,22 @@ export const api = {
       request<void>(`/api/projects/${id}`, { method: "DELETE" }),
     sessions: (projectId: string) =>
       request<Session[]>(`/api/projects/${projectId}/sessions`),
+    refreshGit: (id: string) =>
+      request<void>(`/api/projects/${id}/git/refresh`, { method: "POST" }),
+    worktrees: (id: string) =>
+      request<Project[]>(`/api/projects/${id}/worktrees`),
+    createWorktree: (
+      id: string,
+      body: { branch: string; path?: string; new_branch?: boolean },
+    ) =>
+      request<void>(`/api/projects/${id}/worktrees`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    deleteWorktree: (projectId: string, worktreeId: string) =>
+      request<void>(`/api/projects/${projectId}/worktrees/${worktreeId}`, {
+        method: "DELETE",
+      }),
   },
   analytics: {
     tokens: (params?: { by?: string; from?: string; to?: string }) => {
@@ -324,12 +349,23 @@ export const api = {
         body: JSON.stringify({ loop_id: loopId }),
       }),
     generateInstructions: (projectId: string) =>
-      request<{ status: string }>(
+      request<{ content: string; memories_used: number }>(
         `/api/projects/${projectId}/knowledge/generate-instructions`,
         {
           method: "POST",
         },
       ),
+    writeClaudeMd: (projectId: string) =>
+      request<{ written: boolean; bytes: number }>(
+        `/api/projects/${projectId}/knowledge/write-claude-md`,
+        {
+          method: "POST",
+        },
+      ),
+    bootstrapProject: (projectId: string) =>
+      request<void>(`/api/projects/${projectId}/knowledge/bootstrap`, {
+        method: "POST",
+      }),
     controlService: (hostId: string, action: "start" | "stop" | "restart") =>
       request<void>(`/api/hosts/${hostId}/knowledge/service`, {
         method: "POST",

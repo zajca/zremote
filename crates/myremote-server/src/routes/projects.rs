@@ -22,6 +22,18 @@ pub struct ProjectResponse {
     pub has_claude_config: bool,
     pub project_type: String,
     pub created_at: String,
+    pub parent_project_id: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit_hash: Option<String>,
+    pub git_commit_message: Option<String>,
+    #[serde(default)]
+    pub git_is_dirty: bool,
+    #[serde(default)]
+    pub git_ahead: i32,
+    #[serde(default)]
+    pub git_behind: i32,
+    pub git_remotes: Option<String>,
+    pub git_updated_at: Option<String>,
 }
 
 /// Request body for manually adding a project.
@@ -50,7 +62,9 @@ pub async fn list_projects(
     let _parsed = parse_host_id(&host_id)?;
 
     let projects: Vec<ProjectResponse> = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at \
+        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
+         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
+         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
          FROM projects WHERE host_id = ? ORDER BY name",
     )
     .bind(&host_id)
@@ -133,7 +147,9 @@ pub async fn add_project(
 
     // Return the project (may be existing if path was already registered)
     let project: ProjectResponse = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at \
+        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
+         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
+         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
          FROM projects WHERE host_id = ? AND path = ?",
     )
     .bind(&host_id)
@@ -152,7 +168,9 @@ pub async fn get_project(
     let _parsed = parse_project_id(&project_id)?;
 
     let project: ProjectResponse = sqlx::query_as(
-        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at \
+        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
+         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
+         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
          FROM projects WHERE id = ?",
     )
     .bind(&project_id)
@@ -216,4 +234,157 @@ pub async fn delete_project(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/projects/:project_id/git/refresh` - trigger git status refresh.
+pub async fn trigger_git_refresh(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let project: Option<(String, String)> =
+        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
+            .bind(&project_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let (host_id_str, path) =
+        project.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    sender
+        .send(ServerMessage::ProjectGitStatus { path })
+        .await
+        .map_err(|_| AppError::Conflict("failed to send git refresh to agent".to_string()))?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `GET /api/projects/:project_id/worktrees` - list worktree children.
+pub async fn list_worktrees(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<ProjectResponse>>, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let worktrees: Vec<ProjectResponse> = sqlx::query_as(
+        "SELECT id, host_id, path, name, has_claude_config, project_type, created_at, \
+         parent_project_id, git_branch, git_commit_hash, git_commit_message, \
+         git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at \
+         FROM projects WHERE parent_project_id = ? ORDER BY name",
+    )
+    .bind(&project_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(worktrees))
+}
+
+/// Request body for creating a worktree.
+#[derive(Debug, Deserialize)]
+pub struct CreateWorktreeRequest {
+    pub branch: String,
+    pub path: Option<String>,
+    pub new_branch: Option<bool>,
+}
+
+/// `POST /api/projects/:project_id/worktrees` - request worktree creation.
+pub async fn create_worktree(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    AppJson(body): AppJson<CreateWorktreeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let project: Option<(String, String)> =
+        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
+            .bind(&project_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let (host_id_str, project_path) =
+        project.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    sender
+        .send(ServerMessage::WorktreeCreate {
+            project_path,
+            branch: body.branch,
+            path: body.path,
+            new_branch: body.new_branch.unwrap_or(false),
+        })
+        .await
+        .map_err(|_| AppError::Conflict("failed to send worktree create to agent".to_string()))?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// `DELETE /api/projects/:project_id/worktrees/:worktree_id` - request worktree deletion.
+pub async fn delete_worktree(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, worktree_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+    let _parsed_wt = parse_project_id(&worktree_id)?;
+
+    // Look up the parent project to get host_id and path
+    let parent: Option<(String, String)> =
+        sqlx::query_as("SELECT host_id, path FROM projects WHERE id = ?")
+            .bind(&project_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let (host_id_str, project_path) =
+        parent.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    // Look up the worktree child project path
+    let worktree: Option<(String,)> =
+        sqlx::query_as("SELECT path FROM projects WHERE id = ? AND parent_project_id = ?")
+            .bind(&worktree_id)
+            .bind(&project_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    let (worktree_path,) =
+        worktree.ok_or_else(|| AppError::NotFound(format!("worktree {worktree_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    sender
+        .send(ServerMessage::WorktreeDelete {
+            project_path,
+            worktree_path,
+            force: false,
+        })
+        .await
+        .map_err(|_| AppError::Conflict("failed to send worktree delete to agent".to_string()))?;
+
+    Ok(StatusCode::ACCEPTED)
 }

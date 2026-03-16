@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::git::GitInspector;
 use myremote_protocol::ProjectInfo;
 
 const DEFAULT_MAX_DEPTH: usize = 3;
@@ -147,12 +148,27 @@ impl ProjectScanner {
             }
         }
 
-        // Also detect by .git presence even without language marker
-        let has_git = dir.join(".git").exists();
+        let git_entry = dir.join(".git");
+        let is_git_root = git_entry.is_dir();
+        let is_linked_worktree = git_entry.is_file();
 
-        if project_type.is_none() && !has_git {
+        // Linked worktree without language marker = skip (parent project owns it)
+        if project_type.is_none() && is_linked_worktree {
             return None;
         }
+        // No git and no language marker = not a project
+        if project_type.is_none() && !is_git_root {
+            return None;
+        }
+
+        // Collect git info for repo roots
+        let (git_info, worktrees) = if is_git_root {
+            GitInspector::inspect(dir)
+                .map(|(info, wts)| (Some(info), wts))
+                .unwrap_or_default()
+        } else {
+            (None, vec![])
+        };
 
         let has_claude_config = dir.join(".claude").is_dir();
         let name = dir
@@ -166,6 +182,8 @@ impl ProjectScanner {
             name,
             has_claude_config,
             project_type: project_type.unwrap_or("unknown").to_string(),
+            git_info,
+            worktrees,
         })
     }
 }

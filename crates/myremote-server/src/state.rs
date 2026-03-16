@@ -286,6 +286,12 @@ pub enum ServerEvent {
         loop_id: String,
         memory_count: u32,
     },
+    #[serde(rename = "worktree_error")]
+    WorktreeError {
+        host_id: String,
+        project_path: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,6 +798,20 @@ mod tests {
     }
 
     #[test]
+    fn server_event_worktree_error_serialization() {
+        let event = ServerEvent::WorktreeError {
+            host_id: "host-1".to_string(),
+            project_path: "/home/user/repo".to_string(),
+            message: "branch already exists".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "worktree_error");
+        assert_eq!(json["host_id"], "host-1");
+        assert_eq!(json["project_path"], "/home/user/repo");
+        assert_eq!(json["message"], "branch already exists");
+    }
+
+    #[test]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {
@@ -866,6 +886,11 @@ mod tests {
                 project_id: "p1".to_string(),
                 loop_id: "l1".to_string(),
                 memory_count: 5,
+            },
+            ServerEvent::WorktreeError {
+                host_id: "h1".to_string(),
+                project_path: "/home/user/repo".to_string(),
+                message: "error message".to_string(),
             },
         ];
         for event in &events {

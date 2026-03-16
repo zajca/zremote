@@ -73,6 +73,12 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
     return { projectSessionsMap: map, orphanSessions: orphans };
   }, [sessions]);
 
+  // Separate root projects from worktree children
+  const rootProjects = useMemo(
+    () => projects.filter((p) => p.parent_project_id === null),
+    [projects],
+  );
+
   return (
     <div>
       <div
@@ -113,7 +119,7 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
       </div>
       {expanded && (
         <div className="ml-4">
-          {projects.length > 0 && (
+          {rootProjects.length > 0 && (
             <div className="mb-0.5">
               <div className="flex items-center justify-between px-2 py-0.5">
                 <span className="text-[10px] font-medium tracking-wider text-text-tertiary uppercase">
@@ -127,14 +133,32 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                   <Search size={10} />
                 </button>
               </div>
-              {projects.map((project) => (
-                <ProjectItem
-                  key={project.id}
-                  project={project}
-                  sessions={projectSessionsMap.get(project.id) ?? []}
-                  hostId={host.id}
-                />
-              ))}
+              {rootProjects.map((project) => {
+                const worktreeChildren = projects.filter(
+                  (p) => p.parent_project_id === project.id,
+                );
+                return (
+                  <div key={project.id}>
+                    <ProjectItem
+                      project={project}
+                      sessions={projectSessionsMap.get(project.id) ?? []}
+                      hostId={host.id}
+                    />
+                    {worktreeChildren.length > 0 && (
+                      <div className="ml-4">
+                        {worktreeChildren.map((wt) => (
+                          <ProjectItem
+                            key={wt.id}
+                            project={wt}
+                            sessions={projectSessionsMap.get(wt.id) ?? []}
+                            hostId={host.id}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {orphanSessions.length > 0 && (

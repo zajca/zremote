@@ -3,12 +3,15 @@ mod config;
 mod connection;
 mod hooks;
 mod knowledge;
+mod mcp;
 mod project;
 mod pty;
 mod session;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::Parser;
 use rand::Rng;
 use tracing_subscriber::EnvFilter;
 
@@ -17,6 +20,23 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Maximum jitter fraction (25%) added to backoff delay.
 const JITTER_FRACTION: f64 = 0.25;
 
+#[derive(Default, Parser)]
+#[command(name = "myremote-agent", version, about = "MyRemote agent")]
+enum Cli {
+    /// Run as agent connecting to myremote server (default when no subcommand given)
+    #[default]
+    Run,
+    /// Run as MCP server for Claude Code (stdio transport)
+    McpServe {
+        /// Project path to serve knowledge for
+        #[arg(long)]
+        project: PathBuf,
+        /// `OpenViking` port
+        #[arg(long, default_value = "8741")]
+        ov_port: u16,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -24,6 +44,18 @@ async fn main() {
         .json()
         .init();
 
+    // Parse CLI args; default to Run if no subcommand given
+    let cli = Cli::try_parse().unwrap_or_default();
+
+    match cli {
+        Cli::Run => run_agent().await,
+        Cli::McpServe { project, ov_port } => {
+            mcp::run_mcp_server(project, ov_port).await;
+        }
+    }
+}
+
+async fn run_agent() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "myremote-agent starting");
 
     let config = match config::AgentConfig::from_env() {

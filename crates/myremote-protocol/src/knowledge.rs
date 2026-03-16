@@ -6,7 +6,7 @@ use crate::AgenticLoopId;
 
 pub type KnowledgeBaseId = Uuid;
 
-/// Status of the OpenViking service on a host.
+/// Status of the `OpenViking` service on a host.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeServiceStatus {
@@ -48,6 +48,16 @@ pub enum MemoryCategory {
     Convention,
 }
 
+/// Mode for writing CLAUDE.md files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMdMode {
+    /// Replace entire file content.
+    Replace,
+    /// Section mode: preserve user content above marker, replace below.
+    Section,
+}
+
 /// Service lifecycle action.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +86,16 @@ pub struct ExtractedMemory {
     pub category: MemoryCategory,
     pub confidence: f64,
     pub source_loop_id: AgenticLoopId,
+}
+
+/// Cached memory for local file-based cache (MCP server reads this).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CachedMemory {
+    pub key: String,
+    pub content: String,
+    pub category: MemoryCategory,
+    pub confidence: f64,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Minimal transcript fragment for memory extraction.
@@ -122,6 +142,21 @@ pub enum KnowledgeAgentMessage {
         content: String,
         memories_used: u32,
     },
+    ClaudeMdWritten {
+        project_path: String,
+        bytes_written: u64,
+        error: Option<String>,
+    },
+    BootstrapComplete {
+        project_path: String,
+        files_indexed: u64,
+        memories_seeded: u32,
+        error: Option<String>,
+    },
+    SkillsGenerated {
+        project_path: String,
+        skills_written: u32,
+    },
 }
 
 /// Knowledge messages sent from server to agent.
@@ -148,6 +183,18 @@ pub enum KnowledgeServerMessage {
         transcript: Vec<TranscriptFragment>,
     },
     GenerateInstructions {
+        project_path: String,
+    },
+    WriteClaudeMd {
+        project_path: String,
+        content: String,
+        mode: WriteMdMode,
+    },
+    BootstrapProject {
+        project_path: String,
+        existing_claude_md: Option<String>,
+    },
+    GenerateSkills {
         project_path: String,
     },
 }
@@ -343,6 +390,103 @@ mod tests {
         roundtrip_server(&KnowledgeServerMessage::GenerateInstructions {
             project_path: "/home/user/project".to_string(),
         });
+    }
+
+    #[test]
+    fn write_claude_md_roundtrip() {
+        roundtrip_server(&KnowledgeServerMessage::WriteClaudeMd {
+            project_path: "/home/user/project".to_string(),
+            content: "# Instructions\nUse Result types.".to_string(),
+            mode: WriteMdMode::Section,
+        });
+        roundtrip_server(&KnowledgeServerMessage::WriteClaudeMd {
+            project_path: "/home/user/project".to_string(),
+            content: "Full replacement content".to_string(),
+            mode: WriteMdMode::Replace,
+        });
+    }
+
+    #[test]
+    fn claude_md_written_roundtrip() {
+        roundtrip_agent(&KnowledgeAgentMessage::ClaudeMdWritten {
+            project_path: "/home/user/project".to_string(),
+            bytes_written: 1234,
+            error: None,
+        });
+        roundtrip_agent(&KnowledgeAgentMessage::ClaudeMdWritten {
+            project_path: "/home/user/project".to_string(),
+            bytes_written: 0,
+            error: Some("permission denied".to_string()),
+        });
+    }
+
+    #[test]
+    fn bootstrap_project_roundtrip() {
+        roundtrip_server(&KnowledgeServerMessage::BootstrapProject {
+            project_path: "/home/user/project".to_string(),
+            existing_claude_md: None,
+        });
+        roundtrip_server(&KnowledgeServerMessage::BootstrapProject {
+            project_path: "/home/user/project".to_string(),
+            existing_claude_md: Some("# Existing\nSome content".to_string()),
+        });
+    }
+
+    #[test]
+    fn bootstrap_complete_roundtrip() {
+        roundtrip_agent(&KnowledgeAgentMessage::BootstrapComplete {
+            project_path: "/home/user/project".to_string(),
+            files_indexed: 150,
+            memories_seeded: 5,
+            error: None,
+        });
+        roundtrip_agent(&KnowledgeAgentMessage::BootstrapComplete {
+            project_path: "/home/user/project".to_string(),
+            files_indexed: 0,
+            memories_seeded: 0,
+            error: Some("OV not running".to_string()),
+        });
+    }
+
+    #[test]
+    fn generate_skills_roundtrip() {
+        roundtrip_server(&KnowledgeServerMessage::GenerateSkills {
+            project_path: "/home/user/project".to_string(),
+        });
+    }
+
+    #[test]
+    fn skills_generated_roundtrip() {
+        roundtrip_agent(&KnowledgeAgentMessage::SkillsGenerated {
+            project_path: "/home/user/project".to_string(),
+            skills_written: 3,
+        });
+    }
+
+    #[test]
+    fn write_md_mode_serialization() {
+        assert_eq!(
+            serde_json::to_string(&WriteMdMode::Replace).unwrap(),
+            r#""replace""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WriteMdMode::Section).unwrap(),
+            r#""section""#
+        );
+    }
+
+    #[test]
+    fn cached_memory_roundtrip() {
+        let mem = CachedMemory {
+            key: "test-key".to_string(),
+            content: "test content".to_string(),
+            category: MemoryCategory::Pattern,
+            confidence: 0.85,
+            updated_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&mem).expect("serialize");
+        let parsed: CachedMemory = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(mem, parsed);
     }
 
     #[test]
