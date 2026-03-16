@@ -1,8 +1,10 @@
-import { Bot, Terminal } from "lucide-react";
+import { Bot, Terminal, X } from "lucide-react";
 import { memo, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Session } from "../../lib/api";
+import { api } from "../../lib/api";
 import { useAgenticLoops } from "../../hooks/useAgenticLoops";
+import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { Badge } from "../ui/Badge";
 
 interface SessionItemProps {
@@ -59,30 +61,57 @@ export const SessionItem = memo(function SessionItem({
     [navigate, hostId, session.id],
   );
 
+  const handleClose = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!window.confirm("Close this session?")) return;
+      try {
+        await api.sessions.close(session.id);
+        window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
+      } catch (err) {
+        console.error("failed to close session", err);
+      }
+    },
+    [session.id],
+  );
+
   return (
     <div>
-      <button
-        onClick={handleClick}
-        className={`flex h-7 w-full items-center gap-2 px-2 text-[13px] transition-colors duration-150 hover:bg-bg-hover ${isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}
+      <div
+        className={`group/session flex h-7 w-full items-center gap-2 px-2 text-[13px] transition-colors duration-150 hover:bg-bg-hover ${isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}
       >
-        <Terminal size={13} className="shrink-0 text-text-tertiary" />
-        <span className="truncate">{session.name || session.shell || "shell"}</span>
-        <Badge variant={sessionStatusVariant(session.status)}>
-          {session.status}
-        </Badge>
-        {activeLoops.length > 0 && (
-          <span
-            className={`ml-auto inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium ${
-              waitingLoops.length > 0
-                ? "animate-pulse bg-status-warning/20 text-status-warning"
-                : "bg-accent/20 text-accent"
-            }`}
+        <button
+          onClick={handleClick}
+          className="flex min-w-0 flex-1 items-center gap-2"
+        >
+          <Terminal size={13} className="shrink-0 text-text-tertiary" />
+          <span className="truncate">{session.name || session.shell || "shell"}</span>
+          <Badge variant={sessionStatusVariant(session.status)}>
+            {session.status}
+          </Badge>
+          {activeLoops.length > 0 && (
+            <span
+              className={`ml-auto inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium ${
+                waitingLoops.length > 0
+                  ? "animate-pulse bg-status-warning/20 text-status-warning"
+                  : "bg-accent/20 text-accent"
+              }`}
+            >
+              <Bot size={10} className="mr-0.5" />
+              {activeLoops.length}
+            </span>
+          )}
+        </button>
+        {session.status === "active" && (
+          <button
+            onClick={handleClose}
+            className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-status-error group-hover/session:flex"
+            aria-label="Close session"
           >
-            <Bot size={10} className="mr-0.5" />
-            {activeLoops.length}
-          </span>
+            <X size={12} />
+          </button>
         )}
-      </button>
+      </div>
       {activeLoops.map((loop) => (
         <button
           key={loop.id}

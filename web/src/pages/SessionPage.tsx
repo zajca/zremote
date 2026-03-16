@@ -29,7 +29,7 @@ export function SessionPage() {
     if (!window.confirm("Close this session?")) return;
     setClosing(true);
     try {
-      await api.sessions.close(hostId, sessionId);
+      await api.sessions.close(sessionId);
       void navigate(`/hosts/${hostId}`);
     } catch {
       setClosing(false);

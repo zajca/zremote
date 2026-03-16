@@ -10,12 +10,16 @@ interface ProjectItemProps {
   project: Project;
   sessions: Session[];
   hostId: string;
+  worktreeChildren?: Project[];
+  projectSessionsMap?: Map<string, Session[]>;
 }
 
 export const ProjectItem = memo(function ProjectItem({
   project,
   sessions,
   hostId,
+  worktreeChildren = [],
+  projectSessionsMap,
 }: ProjectItemProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -23,7 +27,14 @@ export const ProjectItem = memo(function ProjectItem({
   const knowledgeStatus = useKnowledgeStore(
     (s) => s.statusByProject[project.id]?.status,
   );
-  const [expanded, setExpanded] = useState(sessions.length > 0);
+  const [expanded, setExpanded] = useState(
+    sessions.length > 0 || worktreeChildren.some((wt) => (projectSessionsMap?.get(wt.id) ?? []).length > 0),
+  );
+
+  const totalSessions = sessions.length + worktreeChildren.reduce(
+    (acc, wt) => acc + (projectSessionsMap?.get(wt.id) ?? []).length,
+    0,
+  );
 
   const handleClick = useCallback(() => {
     void navigate(`/projects/${project.id}`);
@@ -59,7 +70,7 @@ export const ProjectItem = memo(function ProjectItem({
           isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"
         }`}
       >
-        {sessions.length > 0 ? (
+        {sessions.length > 0 || worktreeChildren.length > 0 ? (
           <button
             onClick={handleToggle}
             className="flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors duration-150 hover:bg-bg-active"
@@ -79,7 +90,7 @@ export const ProjectItem = memo(function ProjectItem({
           onClick={handleClick}
           className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left"
         >
-          {sessions.length > 0 && (
+          {(sessions.length > 0 || worktreeChildren.length > 0) && (
             project.project_type === "worktree"
               ? <GitBranch size={13} className="shrink-0 text-text-tertiary" />
               : <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
@@ -97,9 +108,11 @@ export const ProjectItem = memo(function ProjectItem({
         )}
         {project.git_is_dirty && (
           <span
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-warning"
+            className="shrink-0 rounded bg-status-warning/15 px-1 py-0.5 text-[9px] text-status-warning"
             title="Uncommitted changes"
-          />
+          >
+            M
+          </span>
         )}
         {knowledgeStatus === "ready" && (
           <span title="Knowledge base active">
@@ -108,13 +121,15 @@ export const ProjectItem = memo(function ProjectItem({
         )}
         {project.has_claude_config && (
           <span
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+            className="shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] text-accent"
             title=".claude/ config present"
-          />
+          >
+            .claude
+          </span>
         )}
-        {sessions.length > 0 && (
+        {totalSessions > 0 && (
           <span className="shrink-0 text-[10px] text-text-tertiary">
-            {sessions.length}
+            {totalSessions}
           </span>
         )}
         <button
@@ -125,12 +140,20 @@ export const ProjectItem = memo(function ProjectItem({
           <Plus size={11} />
         </button>
       </div>
-      {expanded && sessions.length > 0 && (
+      {expanded && (sessions.length > 0 || worktreeChildren.length > 0) && (
         <div className="ml-4">
           {sessions.map((session) => (
             <SessionItem
               key={session.id}
               session={session}
+              hostId={hostId}
+            />
+          ))}
+          {worktreeChildren.map((wt) => (
+            <ProjectItem
+              key={wt.id}
+              project={wt}
+              sessions={projectSessionsMap?.get(wt.id) ?? []}
               hostId={hostId}
             />
           ))}

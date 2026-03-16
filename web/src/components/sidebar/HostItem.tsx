@@ -58,10 +58,11 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
   );
 
   // Split sessions into project-linked and orphan
-  const { projectSessionsMap, orphanSessions } = useMemo(() => {
+  const { projectSessionsMap, orphanSessions, activeSessions } = useMemo(() => {
     const map = new Map<string, typeof sessions>();
     const orphans: typeof sessions = [];
-    for (const session of sessions) {
+    const nonClosed = sessions.filter((s) => s.status !== "closed");
+    for (const session of nonClosed) {
       if (session.project_id) {
         const existing = map.get(session.project_id) ?? [];
         existing.push(session);
@@ -70,7 +71,7 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
         orphans.push(session);
       }
     }
-    return { projectSessionsMap: map, orphanSessions: orphans };
+    return { projectSessionsMap: map, orphanSessions: orphans, activeSessions: nonClosed };
   }, [sessions]);
 
   // Separate root projects from worktree children
@@ -104,9 +105,9 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
         >
           <span className="truncate">{host.hostname}</span>
         </button>
-        {sessions.length > 0 && (
+        {activeSessions.length > 0 && (
           <span className="shrink-0 text-[11px] text-text-tertiary">
-            {sessions.length}
+            {activeSessions.length}
           </span>
         )}
         <button
@@ -138,25 +139,14 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                   (p) => p.parent_project_id === project.id,
                 );
                 return (
-                  <div key={project.id}>
-                    <ProjectItem
-                      project={project}
-                      sessions={projectSessionsMap.get(project.id) ?? []}
-                      hostId={host.id}
-                    />
-                    {worktreeChildren.length > 0 && (
-                      <div className="ml-4">
-                        {worktreeChildren.map((wt) => (
-                          <ProjectItem
-                            key={wt.id}
-                            project={wt}
-                            sessions={projectSessionsMap.get(wt.id) ?? []}
-                            hostId={host.id}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  <ProjectItem
+                    key={project.id}
+                    project={project}
+                    sessions={projectSessionsMap.get(project.id) ?? []}
+                    hostId={host.id}
+                    worktreeChildren={worktreeChildren}
+                    projectSessionsMap={projectSessionsMap}
+                  />
                 );
               })}
             </div>

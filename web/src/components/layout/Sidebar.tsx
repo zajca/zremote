@@ -33,7 +33,7 @@ export function Sidebar() {
         </span>
       </div>
 
-      <nav className="flex-1 overflow-y-auto py-2">
+      <nav className="sidebar-scroll flex-1 overflow-y-auto py-2">
         {loading ? (
           <div className="px-4 py-2 text-[13px] text-text-tertiary">
             Loading hosts...

@@ -34,3 +34,15 @@ body {
   @apply bg-bg-primary text-text-primary font-sans antialiased;
   font-size: 14px;
 }
+
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-bg-active) transparent;
+  scrollbar-gutter: stable;
+}
+.sidebar-scroll::-webkit-scrollbar { width: 6px; }
+.sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--color-bg-active);
+  border-radius: 3px;
+}
