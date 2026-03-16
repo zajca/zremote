@@ -380,45 +380,54 @@ The `local` cargo feature (default-on) enables: `rust-embed`, `mime_guess`, `tow
 
 ## Implementation Workflow
 
-Multi-phase features follow a manager-led team workflow. This is mandatory for any feature that spans 3+ files or requires architectural changes.
+Multi-phase features use a **team-based workflow** (TeamCreate). This is mandatory for any feature that spans 3+ files or requires architectural changes. You (the main agent) act as **team lead** -- you plan, delegate, review, and merge. Teammates do the implementation.
 
 ### Phase 0: RFC & Task Plan
-- **Explore the codebase** thoroughly before writing anything. Read all relevant source files, understand existing patterns.
-- **Write a detailed RFC** document to `docs/rfc/rfc-NNN-feature-name.md` covering:
-  - Context & problem statement
-  - Architecture diagram (how it fits into existing system)
-  - Crate dependency graph (if new crates)
-  - Phase-by-phase breakdown with explicit file-level task lists
-  - For each task: exact files to CREATE/MODIFY, function signatures, SQL schemas, struct definitions
-  - What stays where (what NOT to move)
-  - Risk assessment with mitigations
-- **Create tasks** (TaskCreate) for each phase with dependencies (blockedBy)
-- **Get user approval** on the RFC before starting implementation
+1. **Explore the codebase** thoroughly before writing anything. Use `Explore` agents to read all relevant source files in parallel.
+2. **Write a detailed RFC** document to `docs/rfc/rfc-NNN-feature-name.md` covering:
+   - Context & problem statement
+   - Architecture diagram (how it fits into existing system)
+   - Crate dependency graph (if new crates)
+   - Phase-by-phase breakdown with explicit file-level task lists
+   - For each task: exact files to CREATE/MODIFY, function signatures, SQL schemas, struct definitions
+   - What stays where (what NOT to move)
+   - Risk assessment with mitigations
+3. **Get user approval** on the RFC before starting implementation.
+4. **Create team** via `TeamCreate` (e.g. `team_name: "feature-name"`).
+5. **Create tasks** (TaskCreate) for each phase with dependencies (blockedBy).
 
 ### Phase 1-N: Implementation (per phase)
-- Spawn implementation agent in **isolated worktree** (`isolation: "worktree"`)
-- Agent prompt includes: exact files to create/modify, function signatures, references to existing code patterns, full context from RFC
-- Agent must **read source files before modifying** them
-- Agent runs `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace` before reporting done
-- **Parallel agents** for phases that don't touch the same files
+- **Spawn teammates** via Agent tool with `team_name` and `name` parameters:
+  - Implementation agents: `isolation: "worktree"`, `mode: "bypassPermissions"` -- one per phase
+  - Parallel teammates for independent phases (different files)
+- Teammate prompt includes: exact files to create/modify, function signatures, references to existing code patterns, full RFC context
+- Teammates must **read source files before modifying** them
+- Teammates run `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace` before reporting done
+- **Assign tasks** with TaskUpdate (`owner: "teammate-name"`)
+- Teammates mark tasks completed and go idle -- team lead picks up
 
 ### Review (after each phase)
-- Spawn `developer:code-reviewer` agent on the worktree changes
+- Spawn `developer:code-reviewer` teammate on the worktree changes
 - Review checks: dead code, missing wiring, type duplication, incomplete extraction, security issues
-- **If review finds issues**: resume implementation agent to fix them. No merge until clean.
+- **If review finds issues**: send message to implementation teammate (resume) to fix. No merge until clean.
 
 ### Merge (after review passes)
-- Commit in worktree with descriptive message (what changed, why, key design decisions)
+- Team lead commits in worktree with descriptive message (what changed, why, key design decisions)
 - Merge to main (fast-forward when possible)
 - Run full verification on main: `cargo test --workspace`, `cargo clippy --workspace`, `bun run typecheck`
 - Clean up worktree and branch
-- Mark task as completed, start next phase
+- Mark task as completed, assign next phase to teammate or spawn new one
+
+### Cleanup
+- When all phases are done: send `{type: "shutdown_request"}` to all teammates via SendMessage
+- Delete team via `TeamDelete`
 
 ### Rules
-- **No skipping**: Every endpoint, query, and test in the RFC must be implemented. Agents cannot claim "pre-existing issue" to skip work.
-- **No mocks**: Real implementations only. If blocked, ask rather than stub.
+- **No skipping**: Every endpoint, query, and test in the RFC must be implemented. Teammates cannot claim "pre-existing issue" to skip work.
+- **No mocks**: Real implementations only. If blocked, teammate must ask team lead rather than stub.
 - **No reconstruction**: SQL migration files, config files, and other content-addressed artifacts must use original files, never reconstruct from schema.
 - **Verify after merge**: Always run the full test suite on main after merging. Migration checksum mismatches, missing files, and broken imports surface here.
+- **Team lead reviews everything**: No merge without team lead reviewing the diff or delegating to code-reviewer teammate.
 
 ## Coding Conventions
 
