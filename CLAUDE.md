@@ -358,6 +358,11 @@ cargo test --workspace          # 549 Rust tests (312 agent + 55 core + 94 proto
 cargo clippy --workspace        # Lint (all=deny, pedantic=warn)
 cd web && bun run test          # Vitest
 cd web && bun run typecheck     # tsc --noEmit
+
+# Coverage
+cargo llvm-cov --workspace --html    # Rust coverage → target/llvm-cov/html/
+cargo llvm-cov --workspace           # Rust coverage text summary
+cd web && bun run test:coverage       # Frontend coverage → web/coverage/
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.

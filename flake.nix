@@ -18,7 +18,7 @@
           inherit system overlays;
         };
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
+          extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" "llvm-tools-preview" ];
         };
       in
       {
@@ -26,6 +26,7 @@
           buildInputs = [
             rustToolchain
             pkgs.cargo-audit
+            pkgs.cargo-llvm-cov
             pkgs.bun
             pkgs.nodejs_22
             pkgs.python312
