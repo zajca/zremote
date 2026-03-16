@@ -4,6 +4,8 @@ mod config;
 mod connection;
 mod hooks;
 mod knowledge;
+#[cfg(feature = "local")]
+mod local;
 mod mcp;
 mod project;
 mod pty;
@@ -13,7 +15,7 @@ mod tmux;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rand::Rng;
 use tracing_subscriber::EnvFilter;
 
@@ -24,10 +26,32 @@ const JITTER_FRACTION: f64 = 0.25;
 
 #[derive(Default, Parser)]
 #[command(name = "myremote-agent", version, about = "MyRemote agent")]
-enum Cli {
-    /// Run as agent connecting to myremote server (default when no subcommand given)
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Default, Subcommand)]
+enum Commands {
+    /// Connect to remote server (default)
     #[default]
     Run,
+    /// Run in local mode with embedded web server
+    #[cfg(feature = "local")]
+    Local {
+        /// HTTP/WS listen port
+        #[arg(long, default_value = "3000")]
+        port: u16,
+        /// SQLite database path
+        #[arg(long, default_value = "~/.myremote/local.db")]
+        db: String,
+        /// Serve web UI from filesystem (for development)
+        #[arg(long)]
+        web_dir: Option<String>,
+        /// Bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
     /// Run as MCP server for Claude Code (stdio transport)
     McpServe {
         /// Project path to serve knowledge for
@@ -49,9 +73,21 @@ async fn main() {
     // Parse CLI args; default to Run if no subcommand given
     let cli = Cli::try_parse().unwrap_or_default();
 
-    match cli {
-        Cli::Run => run_agent().await,
-        Cli::McpServe { project, ov_port } => {
+    match cli.command.unwrap_or_default() {
+        Commands::Run => run_agent().await,
+        #[cfg(feature = "local")]
+        Commands::Local {
+            port,
+            db,
+            web_dir,
+            bind,
+        } => {
+            if let Err(e) = local::run_local(port, &db, web_dir.as_deref(), &bind).await {
+                tracing::error!(error = %e, "local mode failed");
+                std::process::exit(1);
+            }
+        }
+        Commands::McpServe { project, ov_port } => {
             mcp::run_mcp_server(project, ov_port).await;
         }
     }

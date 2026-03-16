@@ -22,6 +22,7 @@ fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(routes::health::health))
+        .route("/api/mode", get(routes::health::api_mode))
         .route("/ws/agent", get(routes::agents::ws_handler))
         .route("/ws/events", get(routes::events::ws_handler))
         .route("/api/hosts", get(routes::hosts::list_hosts))
