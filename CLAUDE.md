@@ -407,9 +407,19 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 - Teammates mark tasks completed and go idle -- team lead picks up
 
 ### Review (after each phase)
-- Spawn `developer:code-reviewer` teammate on the worktree changes
-- Review checks: dead code, missing wiring, type duplication, incomplete extraction, security issues
-- **If review finds issues**: send message to implementation teammate (resume) to fix. No merge until clean.
+- **Code review**: Spawn `developer:code-reviewer` teammate on the worktree changes
+  - Checks: dead code, missing wiring, type duplication, incomplete extraction, security issues
+  - If review finds issues: send message to implementation teammate (resume) to fix. No merge until clean.
+- **UX review** (for phases that touch UI or API surface):
+  - Spawn a teammate to analyze the user-facing changes from the perspective of the end user
+  - Checks:
+    - API consistency: Are new endpoints consistent with existing ones? Same naming, same response shapes, same error format.
+    - UI coherence: Does the new UI fit the existing design language? No orphaned states, no dead-end flows, loading/error/empty states handled.
+    - Discoverability: Can the user find and use the new feature without reading docs? Are there entry points (sidebar, command palette, navigation)?
+    - Mode parity: If the feature exists in both server and local mode, does it behave the same from the user's perspective?
+    - Degradation: What happens when the backend is unavailable, data is empty, or an operation fails? Does the UI communicate this clearly?
+  - The UX reviewer reads the modified component/route/API files plus the RFC, and reports issues with specific file:line references
+  - UX issues block merge the same way code review issues do
 
 ### Merge (after review passes)
 - Team lead commits in worktree with descriptive message (what changed, why, key design decisions)
