@@ -36,7 +36,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
-        LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown)
+        LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false)
     }
 
     #[tokio::test]

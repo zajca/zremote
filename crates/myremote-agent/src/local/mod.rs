@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -74,8 +74,19 @@ pub async fn run_local(
         shutdown_for_signal.cancel();
     });
 
+    // Detect tmux for persistent sessions
+    let use_tmux = crate::config::detect_tmux();
+    if use_tmux {
+        tracing::info!("tmux detected, persistent sessions enabled");
+    } else {
+        tracing::info!("tmux not found, using standard PTY sessions");
+    }
+
     // Create application state
-    let state = LocalAppState::new(pool.clone(), hostname.clone(), host_id, shutdown.clone());
+    let state = LocalAppState::new(pool.clone(), hostname.clone(), host_id, shutdown.clone(), use_tmux);
+
+    // Spawn the PTY output routing loop
+    spawn_pty_output_loop(state.clone());
 
     // Upsert synthetic host row so queries against hosts table work
     upsert_local_host(&pool, &host_id, &hostname).await?;
@@ -116,7 +127,29 @@ fn build_router(
 ) -> Result<Router, Box<dyn std::error::Error>> {
     let mut router = Router::new()
         .route("/health", get(routes::health::health))
-        .route("/api/mode", get(routes::health::api_mode));
+        .route("/api/mode", get(routes::health::api_mode))
+        // Hosts endpoints (synthetic local host)
+        .route("/api/hosts", get(routes::hosts::list_hosts))
+        .route("/api/hosts/{host_id}", get(routes::hosts::get_host))
+        // Session CRUD
+        .route(
+            "/api/hosts/{host_id}/sessions",
+            post(routes::sessions::create_session).get(routes::sessions::list_sessions),
+        )
+        .route(
+            "/api/sessions/{session_id}",
+            get(routes::sessions::get_session)
+                .patch(routes::sessions::update_session)
+                .delete(routes::sessions::close_session),
+        )
+        .route(
+            "/api/sessions/{session_id}/purge",
+            delete(routes::sessions::purge_session),
+        )
+        // Terminal WebSocket
+        .route("/ws/terminal/{session_id}", get(routes::terminal::ws_handler))
+        // Events WebSocket
+        .route("/ws/events", get(routes::events::ws_handler));
 
     // Static file serving: filesystem or embedded
     if let Some(dir) = web_dir {
@@ -141,8 +174,79 @@ fn build_router(
     Ok(router)
 }
 
+/// Spawn a background task that reads PTY output from all sessions and routes it
+/// to the in-memory `SessionState` scrollback buffer and all connected browser
+/// WebSocket clients.
+///
+/// This is the local-mode equivalent of the PTY output handling in `connection.rs`.
+/// Instead of sending output over a WebSocket to a remote server, we write directly
+/// to the session store and browser senders.
+fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
+    tokio::spawn(async move {
+        let mut pty_output_rx = state.pty_output_rx.lock().await;
+        while let Some((session_id, data)) = pty_output_rx.recv().await {
+            if data.is_empty() {
+                // EOF -- session ended
+                let exit_code = {
+                    let mut mgr = state.session_manager.lock().await;
+                    mgr.close(&session_id)
+                };
+                tracing::info!(
+                    session_id = %session_id,
+                    exit_code = ?exit_code,
+                    "PTY session ended"
+                );
+
+                // Update DB status
+                let session_id_str = session_id.to_string();
+                let _ = sqlx::query(
+                    "UPDATE sessions SET status = 'closed', exit_code = ?, closed_at = datetime('now') WHERE id = ?",
+                )
+                .bind(exit_code)
+                .bind(&session_id_str)
+                .execute(&state.db)
+                .await;
+
+                // Notify browser clients
+                {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session_state) = sessions.get_mut(&session_id) {
+                        session_state.status = "closed".to_string();
+                        let msg = myremote_core::state::BrowserMessage::SessionClosed { exit_code };
+                        session_state
+                            .browser_senders
+                            .retain(|tx| tx.try_send(msg.clone()).is_ok());
+                    }
+                }
+
+                // Remove from in-memory store
+                {
+                    let mut sessions = state.sessions.write().await;
+                    sessions.remove(&session_id);
+                }
+
+                // Broadcast event
+                let _ = state.events.send(myremote_core::state::ServerEvent::SessionClosed {
+                    session_id: session_id.to_string(),
+                    exit_code,
+                });
+            } else {
+                // Normal output data
+                let mut sessions = state.sessions.write().await;
+                if let Some(session_state) = sessions.get_mut(&session_id) {
+                    session_state.append_scrollback(data.clone());
+                    let msg = myremote_core::state::BrowserMessage::Output { data };
+                    session_state
+                        .browser_senders
+                        .retain(|tx| tx.try_send(msg.clone()).is_ok());
+                }
+            }
+        }
+    });
+}
+
 /// Insert or update the local host row in the database.
-async fn upsert_local_host(
+pub(crate) async fn upsert_local_host(
     pool: &sqlx::SqlitePool,
     host_id: &Uuid,
     hostname: &str,
@@ -256,7 +360,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
 
         let router = build_router(state, None).unwrap();
 
@@ -281,7 +385,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
 
         let result = build_router(state, Some("/nonexistent/path"));
         assert!(result.is_err());
@@ -294,7 +398,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
 
         let router = build_router(state, None).unwrap();
 
@@ -323,7 +427,7 @@ mod tests {
             .unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown);
+        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
 
         let router = build_router(state, None).unwrap();
 
