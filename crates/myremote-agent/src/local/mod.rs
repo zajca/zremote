@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use myremote_protocol::{AgentMessage, AgenticAgentMessage};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -178,6 +178,129 @@ fn build_router(
         .route(
             "/api/loops/{loop_id}/action",
             post(routes::agentic::post_loop_action),
+        )
+        // Projects
+        .route(
+            "/api/hosts/{host_id}/projects",
+            get(routes::projects::list_projects).post(routes::projects::add_project),
+        )
+        .route(
+            "/api/hosts/{host_id}/projects/scan",
+            post(routes::projects::trigger_scan),
+        )
+        .route(
+            "/api/projects/{project_id}",
+            get(routes::projects::get_project).delete(routes::projects::delete_project),
+        )
+        .route(
+            "/api/projects/{project_id}/sessions",
+            get(routes::projects::list_project_sessions),
+        )
+        .route(
+            "/api/projects/{project_id}/git/refresh",
+            post(routes::projects::trigger_git_refresh),
+        )
+        .route(
+            "/api/projects/{project_id}/worktrees",
+            get(routes::projects::list_worktrees).post(routes::projects::create_worktree),
+        )
+        .route(
+            "/api/projects/{project_id}/worktrees/{worktree_id}",
+            delete(routes::projects::delete_worktree),
+        )
+        // Permissions
+        .route(
+            "/api/permissions",
+            get(routes::permissions::list_permissions).put(routes::permissions::upsert_permission),
+        )
+        .route(
+            "/api/permissions/{id}",
+            delete(routes::permissions::delete_permission),
+        )
+        // Config
+        .route(
+            "/api/config/{key}",
+            get(routes::config::get_global_config).put(routes::config::set_global_config),
+        )
+        .route(
+            "/api/hosts/{host_id}/config/{key}",
+            get(routes::config::get_host_config).put(routes::config::set_host_config),
+        )
+        // Analytics
+        .route("/api/analytics/tokens", get(routes::analytics::get_tokens))
+        .route("/api/analytics/cost", get(routes::analytics::get_cost))
+        .route(
+            "/api/analytics/sessions",
+            get(routes::analytics::get_sessions),
+        )
+        .route("/api/analytics/loops", get(routes::analytics::get_loops))
+        // Search
+        .route(
+            "/api/search/transcripts",
+            get(routes::search::search_transcripts),
+        )
+        // Knowledge
+        .route(
+            "/api/projects/{project_id}/knowledge/status",
+            get(routes::knowledge::get_status),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/index",
+            post(routes::knowledge::trigger_index),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/search",
+            post(routes::knowledge::search),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/memories",
+            get(routes::knowledge::list_memories),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/extract",
+            post(routes::knowledge::extract_memories),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/generate-instructions",
+            post(routes::knowledge::generate_instructions),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/write-claude-md",
+            post(routes::knowledge::write_claude_md),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/bootstrap",
+            post(routes::knowledge::bootstrap_project),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/generate-skills",
+            post(routes::knowledge::generate_skills),
+        )
+        .route(
+            "/api/projects/{project_id}/knowledge/memories/{memory_id}",
+            delete(routes::knowledge::delete_memory).put(routes::knowledge::update_memory),
+        )
+        .route(
+            "/api/hosts/{host_id}/knowledge/service",
+            post(routes::knowledge::control_service),
+        )
+        // Claude Tasks
+        .route(
+            "/api/claude-tasks",
+            post(routes::claude_sessions::create_claude_task)
+                .get(routes::claude_sessions::list_claude_tasks),
+        )
+        .route(
+            "/api/claude-tasks/{task_id}",
+            get(routes::claude_sessions::get_claude_task),
+        )
+        .route(
+            "/api/claude-tasks/{task_id}/resume",
+            post(routes::claude_sessions::resume_claude_task),
+        )
+        .route(
+            "/api/hosts/{host_id}/claude-tasks/discover",
+            get(routes::claude_sessions::discover_claude_sessions),
         )
         // Terminal WebSocket
         .route("/ws/terminal/{session_id}", get(routes::terminal::ws_handler))
