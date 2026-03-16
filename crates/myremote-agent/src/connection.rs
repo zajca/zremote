@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use myremote_protocol::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use myremote_protocol::knowledge::KnowledgeServerMessage;
 use myremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId, UserAction};
 use tokio::sync::mpsc;
@@ -755,6 +756,9 @@ fn handle_server_message(
                 }
             });
         }
+        ServerMessage::ClaudeAction(claude_msg) => {
+            handle_claude_server_message(claude_msg, session_manager, outbound_tx);
+        }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {
                 if tx.try_send(knowledge_msg.clone()).is_err() {
@@ -773,6 +777,137 @@ fn handle_server_message(
                     tracing::warn!("outbound channel full, knowledge error dropped");
                 }
             }
+        }
+    }
+}
+
+/// Handle a Claude server message: start sessions, discover sessions, etc.
+fn handle_claude_server_message(
+    msg: &ClaudeServerMessage,
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+) {
+    match msg {
+        ClaudeServerMessage::StartSession {
+            session_id,
+            claude_task_id,
+            working_dir,
+            model,
+            initial_prompt,
+            resume_cc_session_id,
+            allowed_tools,
+            skip_permissions,
+            output_format,
+            custom_flags,
+        } => {
+            // Build the claude CLI command
+            let opts = crate::claude::CommandOptions {
+                working_dir,
+                model: model.as_deref(),
+                initial_prompt: initial_prompt.as_deref(),
+                resume_cc_session_id: resume_cc_session_id.as_deref(),
+                allowed_tools,
+                skip_permissions: *skip_permissions,
+                output_format: output_format.as_deref(),
+                custom_flags: custom_flags.as_deref(),
+            };
+            let command = match crate::claude::CommandBuilder::build(&opts) {
+                Ok(cmd) => cmd,
+                Err(e) => {
+                    tracing::warn!(claude_task_id = %claude_task_id, error = %e, "failed to build claude command");
+                    let _ = outbound_tx.try_send(AgentMessage::ClaudeAction(
+                        ClaudeAgentMessage::SessionStartFailed {
+                            claude_task_id: *claude_task_id,
+                            session_id: *session_id,
+                            error: e,
+                        },
+                    ));
+                    return;
+                }
+            };
+
+            // Spawn PTY session using default shell
+            let shell = default_shell();
+            match session_manager.create(*session_id, shell, 120, 40, Some(working_dir)) {
+                Ok(pid) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        claude_task_id = %claude_task_id,
+                        pid = pid,
+                        "Claude PTY session created"
+                    );
+
+                    // Notify that the PTY session is created
+                    if outbound_tx
+                        .try_send(AgentMessage::SessionCreated {
+                            session_id: *session_id,
+                            shell: shell.to_string(),
+                            pid,
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!("outbound channel full, SessionCreated dropped");
+                    }
+
+                    // Write the claude command directly to the PTY stdin.
+                    // The shell buffers stdin and will execute the command once it initializes.
+                    if let Err(e) = session_manager.write_to(session_id, command.as_bytes()) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to write claude command to PTY"
+                        );
+                    }
+
+                    // Notify that the Claude task session has started
+                    if outbound_tx
+                        .try_send(AgentMessage::ClaudeAction(
+                            ClaudeAgentMessage::SessionStarted {
+                                claude_task_id: *claude_task_id,
+                                session_id: *session_id,
+                            },
+                        ))
+                        .is_err()
+                    {
+                        tracing::warn!("outbound channel full, SessionStarted dropped");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        session_id = %session_id,
+                        claude_task_id = %claude_task_id,
+                        error = %e,
+                        "failed to create PTY session for Claude task"
+                    );
+                    let _ = outbound_tx.try_send(AgentMessage::ClaudeAction(
+                        ClaudeAgentMessage::SessionStartFailed {
+                            claude_task_id: *claude_task_id,
+                            session_id: *session_id,
+                            error: format!("failed to spawn PTY: {e}"),
+                        },
+                    ));
+                }
+            }
+        }
+        ClaudeServerMessage::DiscoverSessions { project_path } => {
+            let path = project_path.clone();
+            let tx = outbound_tx.clone();
+            tokio::spawn(async move {
+                let discover_path = path.clone();
+                let sessions = tokio::task::spawn_blocking(move || {
+                    crate::claude::SessionScanner::discover(&discover_path)
+                })
+                .await
+                .unwrap_or_default();
+                let _ = tx
+                    .send(AgentMessage::ClaudeAction(
+                        ClaudeAgentMessage::SessionsDiscovered {
+                            project_path: path,
+                            sessions,
+                        },
+                    ))
+                    .await;
+            });
         }
     }
 }

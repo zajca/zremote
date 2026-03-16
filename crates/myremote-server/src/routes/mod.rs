@@ -1,6 +1,7 @@
 pub mod agentic;
 pub mod agents;
 pub mod analytics;
+pub mod claude_sessions;
 pub mod config;
 pub mod events;
 pub mod health;
