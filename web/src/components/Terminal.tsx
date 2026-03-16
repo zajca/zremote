@@ -167,7 +167,7 @@ export function Terminal({ sessionId }: TerminalProps) {
         cursor: "#f0f0f3",
         selectionBackground: "#5e6ad240",
       },
-      fontFamily: "'JetBrains Mono Variable', monospace",
+      fontFamily: "'JetBrains Mono Variable', 'JetBrainsMono Nerd Font', 'Symbols Nerd Font', monospace",
       fontSize: 14,
       cursorBlink: true,
       convertEol: true,
