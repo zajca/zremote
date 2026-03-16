@@ -1,6 +1,7 @@
 import { Settings } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useHosts } from "../../hooks/useHosts";
+import { useMode } from "../../hooks/useMode";
 import { api } from "../../lib/api";
 
 interface ConfigEntry {
@@ -24,6 +25,7 @@ const GLOBAL_CONFIG_KEYS: ConfigEntry[] = [
 
 export function SettingsPage() {
   const { hosts } = useHosts();
+  const { isLocal } = useMode();
   const [selectedHostId, setSelectedHostId] = useState<string>("");
   const [globalValues, setGlobalValues] = useState<Record<string, string>>({});
   const [hostValues, setHostValues] = useState<Record<string, string>>({});
@@ -152,60 +154,62 @@ export function SettingsPage() {
             </div>
           </section>
 
-          {/* Per-host settings */}
-          <section>
-            <h2 className="mb-4 text-sm font-semibold text-text-primary">
-              Per-Host Overrides
-            </h2>
-            <select
-              value={selectedHostId}
-              onChange={(e) => setSelectedHostId(e.target.value)}
-              className="mb-4 w-full rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary"
-            >
-              <option value="">Select a host...</option>
-              {hosts.map((host) => (
-                <option key={host.id} value={host.id}>
-                  {host.hostname}
-                </option>
-              ))}
-            </select>
-
-            {selectedHostId && (
-              <div className="space-y-3">
-                {GLOBAL_CONFIG_KEYS.map((entry) => (
-                  <label
-                    key={entry.key}
-                    className="flex items-center justify-between rounded-lg border border-border p-4"
-                  >
-                    <div>
-                      <div className="text-sm font-medium text-text-primary">
-                        {entry.label}
-                      </div>
-                      <div className="text-xs text-text-tertiary">
-                        Override for this host
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => void handleHostToggle(entry.key)}
-                      className={`relative h-5 w-9 rounded-full transition-colors duration-200 ${
-                        hostValues[entry.key] === "true"
-                          ? "bg-accent"
-                          : "bg-bg-tertiary"
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200 ${
-                          hostValues[entry.key] === "true"
-                            ? "translate-x-4"
-                            : "translate-x-0.5"
-                        }`}
-                      />
-                    </button>
-                  </label>
+          {/* Per-host settings - hidden in local mode (single host) */}
+          {!isLocal && (
+            <section>
+              <h2 className="mb-4 text-sm font-semibold text-text-primary">
+                Per-Host Overrides
+              </h2>
+              <select
+                value={selectedHostId}
+                onChange={(e) => setSelectedHostId(e.target.value)}
+                className="mb-4 w-full rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary"
+              >
+                <option value="">Select a host...</option>
+                {hosts.map((host) => (
+                  <option key={host.id} value={host.id}>
+                    {host.hostname}
+                  </option>
                 ))}
-              </div>
-            )}
-          </section>
+              </select>
+
+              {selectedHostId && (
+                <div className="space-y-3">
+                  {GLOBAL_CONFIG_KEYS.map((entry) => (
+                    <label
+                      key={entry.key}
+                      className="flex items-center justify-between rounded-lg border border-border p-4"
+                    >
+                      <div>
+                        <div className="text-sm font-medium text-text-primary">
+                          {entry.label}
+                        </div>
+                        <div className="text-xs text-text-tertiary">
+                          Override for this host
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => void handleHostToggle(entry.key)}
+                        className={`relative h-5 w-9 rounded-full transition-colors duration-200 ${
+                          hostValues[entry.key] === "true"
+                            ? "bg-accent"
+                            : "bg-bg-tertiary"
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200 ${
+                            hostValues[entry.key] === "true"
+                              ? "translate-x-4"
+                              : "translate-x-0.5"
+                          }`}
+                        />
+                      </button>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </div>

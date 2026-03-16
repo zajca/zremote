@@ -1,7 +1,8 @@
 import { useCallback } from "react";
-import { BarChart3, Clock, Monitor, Settings } from "lucide-react";
+import { BarChart3, Clock, Laptop, Monitor, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
+import { useMode } from "../../hooks/useMode";
 import { useRealtimeUpdates } from "../../hooks/useRealtimeUpdates";
 import { PROJECT_UPDATE_EVENT } from "../../hooks/useProjects";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
@@ -9,6 +10,7 @@ import { HostItem } from "../sidebar/HostItem";
 
 export function Sidebar() {
   const { hosts, loading, refetch: refetchHosts } = useHosts();
+  const { isLocal } = useMode();
 
   const onSessionUpdate = useCallback(() => {
     window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
@@ -31,6 +33,12 @@ export function Sidebar() {
         <span className="text-sm font-semibold text-text-primary">
           MyRemote
         </span>
+        {isLocal && (
+          <span className="ml-auto flex items-center gap-1 rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-tertiary">
+            <Laptop size={10} />
+            Local
+          </span>
+        )}
       </div>
 
       <nav className="sidebar-scroll flex-1 overflow-y-auto py-2">
@@ -40,7 +48,7 @@ export function Sidebar() {
           </div>
         ) : hosts.length === 0 ? (
           <div className="px-4 py-2 text-[13px] text-text-tertiary">
-            No hosts connected
+            {isLocal ? "Waiting for local agent..." : "No hosts connected"}
           </div>
         ) : (
           hosts.map((host) => <HostItem key={host.id} host={host} />)

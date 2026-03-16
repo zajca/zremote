@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { createBrowserRouter, RouterProvider } from "react-router";
 import { AppLayout } from "./components/layout/AppLayout";
+import { ModeProvider } from "./hooks/useMode";
 import { WelcomePage } from "./pages/WelcomePage";
 import { HostPage } from "./pages/HostPage";
 import { SessionPage } from "./pages/SessionPage";
@@ -65,5 +66,9 @@ const router = createBrowserRouter([
 ]);
 
 export default function App() {
-  return <RouterProvider router={router} />;
+  return (
+    <ModeProvider>
+      <RouterProvider router={router} />
+    </ModeProvider>
+  );
 }

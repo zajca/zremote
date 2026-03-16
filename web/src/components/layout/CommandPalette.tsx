@@ -10,6 +10,7 @@ import {
   Settings,
 } from "lucide-react";
 import { useHosts } from "../../hooks/useHosts";
+import { useMode } from "../../hooks/useMode";
 import { useProjects } from "../../hooks/useProjects";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import type { Project } from "../../lib/api";
@@ -18,6 +19,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const { hosts } = useHosts();
+  const { isLocal } = useMode();
 
   // Collect projects for all online hosts
   const onlineHost = hosts.find((h) => h.status === "online");
@@ -109,7 +111,7 @@ export function CommandPalette() {
                 </CommandItem>
               </Command.Group>
 
-              {hosts.length > 0 && (
+              {!isLocal && hosts.length > 0 && (
                 <Command.Group
                   heading="Hosts"
                   className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-text-tertiary"
