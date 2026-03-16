@@ -5,25 +5,14 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use myremote_core::queries::hosts as q;
+use serde::Deserialize;
 
 use crate::error::{AppError, AppJson};
 use crate::state::AppState;
 
-/// Host representation for API responses.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct HostResponse {
-    pub id: String,
-    pub name: String,
-    pub hostname: String,
-    pub status: String,
-    pub last_seen_at: Option<String>,
-    pub agent_version: Option<String>,
-    pub os: Option<String>,
-    pub arch: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
+// Re-export the core row type as the API response type.
+pub type HostResponse = q::HostRow;
 
 /// Request body for `PATCH /api/hosts/:host_id`.
 #[derive(Debug, Deserialize)]
@@ -35,13 +24,7 @@ pub struct UpdateHostRequest {
 pub async fn list_hosts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<HostResponse>>, AppError> {
-    let hosts: Vec<HostResponse> = sqlx::query_as(
-        "SELECT id, name, hostname, status, last_seen_at, agent_version, os, arch, \
-         created_at, updated_at FROM hosts ORDER BY name",
-    )
-    .fetch_all(&state.db)
-    .await?;
-
+    let hosts = q::list_hosts(&state.db).await?;
     Ok(Json(hosts))
 }
 
@@ -69,16 +52,7 @@ pub async fn get_host(
     Path(host_id): Path<String>,
 ) -> Result<Json<HostResponse>, AppError> {
     let _parsed = parse_host_id(&host_id)?;
-
-    let host: HostResponse = sqlx::query_as(
-        "SELECT id, name, hostname, status, last_seen_at, agent_version, os, arch, \
-         created_at, updated_at FROM hosts WHERE id = ?",
-    )
-    .bind(&host_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("host {host_id} not found")))?;
-
+    let host = q::get_host(&state.db, &host_id).await?;
     Ok(Json(host))
 }
 
@@ -92,27 +66,13 @@ pub async fn update_host(
     validate_update_host(&body)?;
 
     let now = Utc::now().to_rfc3339();
+    let rows = q::update_host_name(&state.db, &host_id, &body.name, &now).await?;
 
-    let result = sqlx::query("UPDATE hosts SET name = ?, updated_at = ? WHERE id = ?")
-        .bind(&body.name)
-        .bind(&now)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    if rows == 0 {
         return Err(AppError::NotFound(format!("host {host_id} not found")));
     }
 
-    // Return the updated host
-    let host: HostResponse = sqlx::query_as(
-        "SELECT id, name, hostname, status, last_seen_at, agent_version, os, arch, \
-         created_at, updated_at FROM hosts WHERE id = ?",
-    )
-    .bind(&host_id)
-    .fetch_one(&state.db)
-    .await?;
-
+    let host = q::get_host(&state.db, &host_id).await?;
     Ok(Json(host))
 }
 
@@ -121,25 +81,18 @@ pub async fn delete_host(
     State(state): State<Arc<AppState>>,
     Path(host_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    // If agent is connected, close the WebSocket by dropping the sender
     let parsed_id = parse_host_id(&host_id)?;
 
     if let Some(sender) = state.connections.get_sender(&parsed_id).await {
-        // Send an error message to notify the agent before disconnecting
         let _ = sender
             .try_send(myremote_protocol::ServerMessage::Error {
                 message: "host deleted".to_string(),
             });
-        // Unregister will drop the sender, closing the channel
         state.connections.unregister(&parsed_id).await;
     }
 
-    let result = sqlx::query("DELETE FROM hosts WHERE id = ?")
-        .bind(&host_id)
-        .execute(&state.db)
-        .await?;
-
-    if result.rows_affected() == 0 {
+    let rows = q::delete_host(&state.db, &host_id).await?;
+    if rows == 0 {
         return Err(AppError::NotFound(format!("host {host_id} not found")));
     }
 

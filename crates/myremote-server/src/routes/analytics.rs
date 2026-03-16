@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use serde::{Deserialize, Serialize};
+use myremote_core::queries::analytics as q;
+use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -27,79 +28,13 @@ pub struct CostQuery {
     pub to: Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct TokenBreakdown {
-    pub label: String,
-    pub tokens_in: i64,
-    pub tokens_out: i64,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct CostPoint {
-    pub period: String,
-    pub cost: f64,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct SessionStats {
-    pub total_sessions: i64,
-    pub active_sessions: i64,
-    pub avg_duration_seconds: Option<f64>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct LoopStats {
-    pub total_loops: i64,
-    pub completed: i64,
-    pub errored: i64,
-    pub avg_cost_usd: Option<f64>,
-    pub total_cost_usd: f64,
-    pub total_tokens_in: i64,
-    pub total_tokens_out: i64,
-}
-
-fn date_filter(sql: &mut String, binds: &mut Vec<String>, from: &Option<String>, to: &Option<String>, date_col: &str) {
-    if let Some(ref f) = *from {
-        sql.push_str(&format!(" AND {date_col} >= ?"));
-        binds.push(f.clone());
-    }
-    if let Some(ref t) = *to {
-        sql.push_str(&format!(" AND {date_col} <= ?"));
-        binds.push(t.clone());
-    }
-}
-
 /// `GET /api/analytics/tokens` - token usage breakdown.
 pub async fn get_tokens(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TokenQuery>,
-) -> Result<Json<Vec<TokenBreakdown>>, AppError> {
+) -> Result<Json<Vec<q::TokenBreakdown>>, AppError> {
     let by = query.by.as_deref().unwrap_or("day");
-
-    let group_expr = match by {
-        "model" => "COALESCE(model, 'unknown')".to_string(),
-        "host" => "COALESCE((SELECT h.hostname FROM sessions s JOIN hosts h ON h.id = s.host_id WHERE s.id = agentic_loops.session_id), 'unknown')".to_string(),
-        "project" => "COALESCE(project_path, 'unknown')".to_string(),
-        // default: day
-        _ => "date(started_at)".to_string(),
-    };
-
-    let mut sql = format!(
-        "SELECT {group_expr} as label, \
-         COALESCE(SUM(total_tokens_in), 0) as tokens_in, \
-         COALESCE(SUM(total_tokens_out), 0) as tokens_out \
-         FROM agentic_loops WHERE 1=1"
-    );
-    let mut binds: Vec<String> = Vec::new();
-    date_filter(&mut sql, &mut binds, &query.from, &query.to, "started_at");
-    sql.push_str(&format!(" GROUP BY {group_expr} ORDER BY label"));
-
-    let mut q = sqlx::query_as::<_, TokenBreakdown>(&sql);
-    for bind in &binds {
-        q = q.bind(bind);
-    }
-
-    let rows = q.fetch_all(&state.db).await?;
+    let rows = q::get_tokens(&state.db, by, &query.from, &query.to).await?;
     Ok(Json(rows))
 }
 
@@ -107,31 +42,9 @@ pub async fn get_tokens(
 pub async fn get_cost(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CostQuery>,
-) -> Result<Json<Vec<CostPoint>>, AppError> {
+) -> Result<Json<Vec<q::CostPoint>>, AppError> {
     let granularity = query.granularity.as_deref().unwrap_or("day");
-
-    let date_expr = match granularity {
-        "week" => "strftime('%Y-W%W', started_at)",
-        "month" => "strftime('%Y-%m', started_at)",
-        // default: day
-        _ => "date(started_at)",
-    };
-
-    let mut sql = format!(
-        "SELECT {date_expr} as period, \
-         COALESCE(SUM(estimated_cost_usd), 0.0) as cost \
-         FROM agentic_loops WHERE 1=1"
-    );
-    let mut binds: Vec<String> = Vec::new();
-    date_filter(&mut sql, &mut binds, &query.from, &query.to, "started_at");
-    sql.push_str(&format!(" GROUP BY {date_expr} ORDER BY period"));
-
-    let mut q = sqlx::query_as::<_, CostPoint>(&sql);
-    for bind in &binds {
-        q = q.bind(bind);
-    }
-
-    let rows = q.fetch_all(&state.db).await?;
+    let rows = q::get_cost(&state.db, granularity, &query.from, &query.to).await?;
     Ok(Json(rows))
 }
 
@@ -139,24 +52,8 @@ pub async fn get_cost(
 pub async fn get_sessions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
-) -> Result<Json<SessionStats>, AppError> {
-    let mut sql = String::from(
-        "SELECT \
-         COUNT(*) as total_sessions, \
-         SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_sessions, \
-         AVG(CASE WHEN ss.duration_seconds > 0 THEN ss.duration_seconds ELSE NULL END) as avg_duration_seconds \
-         FROM sessions LEFT JOIN session_stats ss ON ss.session_id = sessions.id \
-         WHERE 1=1"
-    );
-    let mut binds: Vec<String> = Vec::new();
-    date_filter(&mut sql, &mut binds, &query.from, &query.to, "sessions.created_at");
-
-    let mut q = sqlx::query_as::<_, SessionStats>(&sql);
-    for bind in &binds {
-        q = q.bind(bind);
-    }
-
-    let stats = q.fetch_one(&state.db).await?;
+) -> Result<Json<q::SessionStats>, AppError> {
+    let stats = q::get_session_stats(&state.db, &query.from, &query.to).await?;
     Ok(Json(stats))
 }
 
@@ -164,39 +61,19 @@ pub async fn get_sessions(
 pub async fn get_loops(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
-) -> Result<Json<LoopStats>, AppError> {
-    let mut sql = String::from(
-        "SELECT \
-         COUNT(*) as total_loops, \
-         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed, \
-         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errored, \
-         AVG(estimated_cost_usd) as avg_cost_usd, \
-         COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost_usd, \
-         COALESCE(SUM(total_tokens_in), 0) as total_tokens_in, \
-         COALESCE(SUM(total_tokens_out), 0) as total_tokens_out \
-         FROM agentic_loops WHERE 1=1"
-    );
-    let mut binds: Vec<String> = Vec::new();
-    date_filter(&mut sql, &mut binds, &query.from, &query.to, "started_at");
-
-    let mut q = sqlx::query_as::<_, LoopStats>(&sql);
-    for bind in &binds {
-        q = q.bind(bind);
-    }
-
-    let stats = q.fetch_one(&state.db).await?;
+) -> Result<Json<q::LoopStats>, AppError> {
+    let stats = q::get_loop_stats(&state.db, &query.from, &query.to).await?;
     Ok(Json(stats))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::db;
+    use myremote_core::queries::analytics::{LoopStats, SessionStats, TokenBreakdown};
 
     async fn setup_db() -> sqlx::SqlitePool {
         let pool = db::init_db("sqlite::memory:").await.unwrap();
 
-        // Insert a host and session for FK constraints
         sqlx::query(
             "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
              VALUES ('h1', 'test', 'test-host', 'hash', 'online')"
@@ -307,7 +184,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(stats.total_sessions, 1); // We inserted one session in setup
+        assert_eq!(stats.total_sessions, 1);
         assert_eq!(stats.active_sessions, 1);
     }
 

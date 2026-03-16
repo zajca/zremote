@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use myremote_core::queries::loops as q;
 use myremote_protocol::agentic::{AgenticServerMessage, AgenticStatus, UserAction};
 use serde::{Deserialize, Serialize};
 
@@ -17,48 +18,10 @@ pub struct ListLoopsQuery {
     pub project_id: Option<String>,
 }
 
-/// Agentic loop response for API.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct LoopResponse {
-    pub id: String,
-    pub session_id: String,
-    pub project_path: Option<String>,
-    pub tool_name: String,
-    pub model: Option<String>,
-    pub status: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub total_tokens_in: Option<i64>,
-    pub total_tokens_out: Option<i64>,
-    pub estimated_cost_usd: Option<f64>,
-    pub end_reason: Option<String>,
-    pub summary: Option<String>,
-}
-
-/// Tool call response for API.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct ToolCallResponse {
-    pub id: String,
-    pub loop_id: String,
-    pub tool_name: String,
-    pub arguments_json: Option<String>,
-    pub status: String,
-    pub result_preview: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub created_at: String,
-    pub resolved_at: Option<String>,
-}
-
-/// Transcript entry response for API.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct TranscriptEntryResponse {
-    pub id: i64,
-    pub loop_id: String,
-    pub role: String,
-    pub content: String,
-    pub tool_call_id: Option<String>,
-    pub timestamp: String,
-}
+// Re-export core row types as response types.
+pub type LoopResponse = q::LoopRow;
+pub type ToolCallResponse = q::ToolCallRow;
+pub type TranscriptEntryResponse = q::TranscriptEntryRow;
 
 /// Metrics response for API.
 #[derive(Debug, Serialize)]
@@ -85,47 +48,17 @@ fn parse_loop_id(loop_id: &str) -> Result<uuid::Uuid, AppError> {
 }
 
 /// `GET /api/loops` - list agentic loops with optional filters.
-#[allow(clippy::too_many_lines)]
 pub async fn list_loops(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListLoopsQuery>,
 ) -> Result<Json<Vec<LoopResponse>>, AppError> {
-    let mut sql = String::from(
-        "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
-         FROM agentic_loops WHERE 1=1",
-    );
-    let mut binds: Vec<String> = Vec::new();
-
-    if let Some(ref status) = query.status {
-        sql.push_str(" AND status = ?");
-        binds.push(status.clone());
-    }
-    if let Some(ref session_id) = query.session_id {
-        sql.push_str(" AND session_id = ?");
-        binds.push(session_id.clone());
-    }
-    if let Some(ref host_id) = query.host_id {
-        sql.push_str(
-            " AND session_id IN (SELECT id FROM sessions WHERE host_id = ?)",
-        );
-        binds.push(host_id.clone());
-    }
-    if let Some(ref project_id) = query.project_id {
-        sql.push_str(
-            " AND session_id IN (SELECT id FROM sessions WHERE project_id = ?)",
-        );
-        binds.push(project_id.clone());
-    }
-
-    sql.push_str(" ORDER BY started_at DESC");
-
-    let mut q = sqlx::query_as::<_, LoopResponse>(&sql);
-    for bind in &binds {
-        q = q.bind(bind);
-    }
-
-    let loops = q.fetch_all(&state.db).await?;
+    let filter = q::ListLoopsFilter {
+        status: query.status,
+        host_id: query.host_id,
+        session_id: query.session_id,
+        project_id: query.project_id,
+    };
+    let loops = q::list_loops(&state.db, &filter).await?;
     Ok(Json(loops))
 }
 
@@ -135,17 +68,7 @@ pub async fn get_loop(
     Path(loop_id): Path<String>,
 ) -> Result<Json<LoopResponse>, AppError> {
     let _parsed = parse_loop_id(&loop_id)?;
-
-    let row: LoopResponse = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
-         FROM agentic_loops WHERE id = ?",
-    )
-    .bind(&loop_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("loop {loop_id} not found")))?;
-
+    let row = q::get_loop(&state.db, &loop_id).await?;
     Ok(Json(row))
 }
 
@@ -155,16 +78,7 @@ pub async fn get_loop_tools(
     Path(loop_id): Path<String>,
 ) -> Result<Json<Vec<ToolCallResponse>>, AppError> {
     let _parsed = parse_loop_id(&loop_id)?;
-
-    let rows: Vec<ToolCallResponse> = sqlx::query_as(
-        "SELECT id, loop_id, tool_name, arguments_json, status, result_preview, \
-         duration_ms, created_at, resolved_at \
-         FROM tool_calls WHERE loop_id = ? ORDER BY created_at ASC",
-    )
-    .bind(&loop_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let rows = q::get_loop_tools(&state.db, &loop_id).await?;
     Ok(Json(rows))
 }
 
@@ -174,15 +88,7 @@ pub async fn get_loop_transcript(
     Path(loop_id): Path<String>,
 ) -> Result<Json<Vec<TranscriptEntryResponse>>, AppError> {
     let _parsed = parse_loop_id(&loop_id)?;
-
-    let rows: Vec<TranscriptEntryResponse> = sqlx::query_as(
-        "SELECT id, loop_id, role, content, tool_call_id, timestamp \
-         FROM transcript_entries WHERE loop_id = ? ORDER BY id ASC",
-    )
-    .bind(&loop_id)
-    .fetch_all(&state.db)
-    .await?;
-
+    let rows = q::get_loop_transcript(&state.db, &loop_id).await?;
     Ok(Json(rows))
 }
 
@@ -194,33 +100,19 @@ pub async fn post_loop_action(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let parsed_loop_id = parse_loop_id(&loop_id)?;
 
-    // Find which session (and thus host) this loop belongs to
-    let session_id: Option<(String,)> = sqlx::query_as(
-        "SELECT session_id FROM agentic_loops WHERE id = ?",
-    )
-    .bind(&loop_id)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let (session_id_str,) = session_id
+    let session_id_str = q::get_loop_session_id(&state.db, &loop_id)
+        .await?
         .ok_or_else(|| AppError::NotFound(format!("loop {loop_id} not found")))?;
 
-    // Find host_id from the session
-    let host_id: Option<(String,)> = sqlx::query_as(
-        "SELECT host_id FROM sessions WHERE id = ?",
-    )
-    .bind(&session_id_str)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let (host_id_str,) = host_id
+    let host_id_str = q::get_session_host_id(&state.db, &session_id_str)
+        .await?
         .ok_or_else(|| AppError::Internal("session has no host".to_string()))?;
 
     let parsed_host_id: uuid::Uuid = host_id_str
         .parse()
         .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
 
-    // Check loop status — only allow actions when the loop is in an actionable state
+    // Check loop status
     if let Some(entry) = state.agentic_loops.get(&parsed_loop_id) {
         match entry.status {
             AgenticStatus::Working | AgenticStatus::WaitingForInput | AgenticStatus::Paused => {}
@@ -232,7 +124,6 @@ pub async fn post_loop_action(
         }
     }
 
-    // Send AgenticServerMessage::UserAction to the agent via ConnectionManager
     let sender = state
         .connections
         .get_sender(&parsed_host_id)
@@ -273,15 +164,7 @@ pub async fn get_loop_metrics(
     }
 
     // Fall back to DB for ended loops
-    let row: LoopResponse = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
-         FROM agentic_loops WHERE id = ?",
-    )
-    .bind(&loop_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("loop {loop_id} not found")))?;
+    let row = q::get_loop(&state.db, &loop_id).await?;
 
     Ok(Json(MetricsResponse {
         loop_id,
