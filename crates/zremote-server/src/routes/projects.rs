@@ -6,12 +6,14 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
+use zremote_core::queries::claude_sessions as cq;
 use zremote_core::queries::projects as q;
 use zremote_core::queries::sessions as sq;
 use zremote_protocol::ServerMessage;
+use zremote_protocol::claude::ClaudeServerMessage;
 
 use crate::error::{AppError, AppJson};
-use crate::state::AppState;
+use crate::state::{AppState, ServerEvent, SessionState};
 
 pub type ProjectResponse = q::ProjectRow;
 pub type SessionResponse = sq::SessionRow;
@@ -688,6 +690,144 @@ pub async fn browse_directory(
     }
 }
 
+/// Request body for configure with Claude.
+#[derive(Debug, Deserialize)]
+pub struct ConfigureRequest {
+    pub model: Option<String>,
+    pub skip_permissions: Option<bool>,
+}
+
+/// `POST /api/projects/:project_id/configure` - configure project with Claude.
+#[allow(clippy::too_many_lines)]
+pub async fn configure_with_claude(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    AppJson(body): AppJson<ConfigureRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT host_id, path, project_type FROM projects WHERE id = ?",
+    )
+    .bind(&project_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+    let (host_id_str, project_path, project_type) = row;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    // Fetch current settings from agent
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.settings_get_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ProjectGetSettings {
+            request_id,
+            project_path: project_path.clone(),
+        })
+        .await
+        .map_err(|_| {
+            state.settings_get_requests.remove(&request_id);
+            AppError::Conflict("failed to send settings request to agent".to_string())
+        })?;
+
+    let existing_json = if let Ok(Ok(response)) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx).await
+    {
+        if response.error.is_some() {
+            None
+        } else {
+            response
+                .settings
+                .and_then(|s| serde_json::to_string_pretty(&s).ok())
+        }
+    } else {
+        state.settings_get_requests.remove(&request_id);
+        None
+    };
+
+    // Build the configure prompt
+    let prompt = zremote_core::configure::build_configure_prompt(
+        &project_path,
+        &project_type,
+        existing_json.as_deref(),
+    );
+
+    // Create Claude task
+    let session_id = Uuid::new_v4();
+    let session_id_str = session_id.to_string();
+    let claude_task_id = Uuid::new_v4();
+    let claude_task_id_str = claude_task_id.to_string();
+
+    cq::insert_session_for_task(
+        &state.db,
+        &session_id_str,
+        &host_id_str,
+        &project_path,
+        Some(&project_id),
+    )
+    .await?;
+
+    cq::insert_claude_task(
+        &state.db,
+        &claude_task_id_str,
+        &session_id_str,
+        &host_id_str,
+        &project_path,
+        Some(&project_id),
+        body.model.as_deref(),
+        Some(&prompt),
+        None,
+    )
+    .await?;
+
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(session_id, SessionState::new(session_id, host_id));
+    }
+
+    let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::StartSession {
+        session_id,
+        claude_task_id,
+        working_dir: project_path.clone(),
+        model: body.model.clone(),
+        initial_prompt: Some(prompt),
+        resume_cc_session_id: None,
+        allowed_tools: vec![],
+        skip_permissions: body.skip_permissions.unwrap_or(false),
+        output_format: None,
+        custom_flags: None,
+        continue_last: false,
+    });
+
+    if sender.send(msg).await.is_err() {
+        return Err(AppError::Conflict(
+            "host went offline, cannot start Claude task".to_string(),
+        ));
+    }
+
+    let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
+        task_id: claude_task_id_str.clone(),
+        session_id: session_id_str.clone(),
+        host_id: host_id_str.clone(),
+        project_path: project_path.clone(),
+    });
+
+    let task = cq::get_claude_task(&state.db, &claude_task_id_str).await?;
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,7 +919,44 @@ mod tests {
                 post(run_action),
             )
             .route("/api/hosts/{host_id}/browse", get(browse_directory))
+            .route(
+                "/api/projects/{project_id}/configure",
+                post(configure_with_claude),
+            )
             .with_state(state)
+    }
+
+    async fn insert_project_with_type(
+        state: &AppState,
+        id: &str,
+        host_id: &str,
+        path: &str,
+        name: &str,
+        project_type: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(host_id)
+        .bind(path)
+        .bind(name)
+        .bind(project_type)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn register_host_connection(
+        state: &AppState,
+        host_id: Uuid,
+    ) -> tokio::sync::mpsc::Receiver<ServerMessage> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "test-host".to_string(), tx, false)
+            .await;
+        rx
     }
 
     #[tokio::test]
@@ -1407,5 +1584,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn configure_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/projects/{proj_id}/configure"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn configure_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project_with_type(&state, &proj_id, &host_id, "/home/test", "test", "rust").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/projects/{proj_id}/configure"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn configure_success() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id_str).await;
+        insert_project_with_type(
+            &state,
+            &proj_id,
+            &host_id_str,
+            "/home/user/project",
+            "project",
+            "rust",
+        )
+        .await;
+        let mut rx = register_host_connection(&state, host_id).await;
+
+        // Spawn a task that responds to the settings request from the handler
+        let settings_requests = Arc::clone(&state.settings_get_requests);
+        tokio::spawn(async move {
+            for _ in 0..500 {
+                if !settings_requests.is_empty() {
+                    let key = settings_requests.iter().next().map(|e| *e.key());
+                    if let Some(request_id) = key {
+                        if let Some((_, tx)) = settings_requests.remove(&request_id) {
+                            let _ = tx.send(crate::state::SettingsGetResponse {
+                                settings: None,
+                                error: None,
+                            });
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        let body = serde_json::json!({
+            "model": "sonnet",
+            "skip_permissions": false,
+        });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/projects/{proj_id}/configure"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["host_id"], host_id_str);
+        assert_eq!(json["project_path"], "/home/user/project");
+        assert_eq!(json["model"], "sonnet");
+        assert_eq!(json["status"], "starting");
+
+        // Verify that the agent received messages
+        let msg = rx.try_recv();
+        assert!(msg.is_ok(), "agent should have received a message");
     }
 }
