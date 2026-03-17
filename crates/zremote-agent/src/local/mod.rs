@@ -105,6 +105,84 @@ pub async fn run_local(
         use_tmux,
     );
 
+    // === Session recovery ===
+    // Discover surviving tmux sessions from a previous agent lifecycle
+    // and reconcile DB state before starting the PTY output loop.
+    let recovery_now = chrono::Utc::now().to_rfc3339();
+
+    if use_tmux {
+        // Mark stale active/creating sessions as suspended first
+        // (they were active when the previous agent died)
+        sqlx::query(
+            "UPDATE sessions SET status = 'suspended', suspended_at = ? \
+             WHERE host_id = ? AND status IN ('creating', 'active')",
+        )
+        .bind(&recovery_now)
+        .bind(host_id.to_string())
+        .execute(&pool)
+        .await?;
+    } else {
+        // No tmux = no persistence, close everything
+        sqlx::query(
+            "UPDATE sessions SET status = 'closed', closed_at = ? \
+             WHERE host_id = ? AND status IN ('creating', 'active')",
+        )
+        .bind(&recovery_now)
+        .bind(host_id.to_string())
+        .execute(&pool)
+        .await?;
+    }
+
+    // Discover existing tmux sessions and reattach
+    let recovered = {
+        let mut mgr = state.session_manager.lock().await;
+        mgr.discover_existing()
+    };
+
+    let recovered_ids: Vec<String> = recovered.iter().map(|(id, _, _)| id.to_string()).collect();
+
+    // Resume recovered sessions in DB and create in-memory state
+    for (session_id, shell, pid) in &recovered {
+        sqlx::query(
+            "UPDATE sessions SET status = 'active', suspended_at = NULL, \
+             pid = ?, shell = ? WHERE id = ?",
+        )
+        .bind(i64::from(*pid))
+        .bind(shell)
+        .bind(session_id.to_string())
+        .execute(&pool)
+        .await?;
+
+        let mut sessions = state.sessions.write().await;
+        let mut session_state = zremote_core::state::SessionState::new(*session_id, host_id);
+        session_state.status = "active".to_string();
+        sessions.insert(*session_id, session_state);
+    }
+
+    // Close suspended sessions that weren't recovered (dead tmux sessions)
+    let suspended_rows: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE host_id = ? AND status = 'suspended'")
+            .bind(host_id.to_string())
+            .fetch_all(&pool)
+            .await?;
+
+    for row in &suspended_rows {
+        if !recovered_ids.contains(row) {
+            sqlx::query("UPDATE sessions SET status = 'closed', closed_at = ? WHERE id = ?")
+                .bind(&recovery_now)
+                .bind(row)
+                .execute(&pool)
+                .await?;
+        }
+    }
+
+    if !recovered.is_empty() {
+        tracing::info!(
+            count = recovered.len(),
+            "recovered tmux sessions from previous run"
+        );
+    }
+
     // Spawn the PTY output routing loop (includes agentic output processing)
     spawn_pty_output_loop(state.clone());
 
