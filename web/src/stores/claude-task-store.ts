@@ -75,7 +75,7 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
   handleTaskStarted: (data) => {
     // Fetch full task from server since the event only has partial data
     void get().fetchTask(data.task_id);
-    window.dispatchEvent(new Event("myremote:claude-task-update"));
+    window.dispatchEvent(new Event("zremote:claude-task-update"));
   },
 
   handleTaskUpdated: (data) =>
@@ -84,7 +84,7 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
       if (!existing) {
         // Unknown task, fetch it
         void get().fetchTask(data.task_id);
-        window.dispatchEvent(new Event("myremote:claude-task-update"));
+        window.dispatchEvent(new Event("zremote:claude-task-update"));
         return state;
       }
       const next = new Map(state.tasks);
@@ -93,7 +93,7 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
         status: data.status as ClaudeTaskStatus,
         loop_id: data.loop_id ?? existing.loop_id,
       });
-      window.dispatchEvent(new Event("myremote:claude-task-update"));
+      window.dispatchEvent(new Event("zremote:claude-task-update"));
       return { tasks: next };
     }),
 
@@ -102,7 +102,7 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
       const existing = state.tasks.get(data.task_id);
       if (!existing) {
         void get().fetchTask(data.task_id);
-        window.dispatchEvent(new Event("myremote:claude-task-update"));
+        window.dispatchEvent(new Event("zremote:claude-task-update"));
         return state;
       }
       const next = new Map(state.tasks);
@@ -113,7 +113,7 @@ export const useClaudeTaskStore = create<ClaudeTaskState>((set, get) => ({
         total_cost_usd: data.total_cost_usd,
         ended_at: new Date().toISOString(),
       });
-      window.dispatchEvent(new Event("myremote:claude-task-update"));
+      window.dispatchEvent(new Event("zremote:claude-task-update"));
       return { tasks: next };
     }),
 }));

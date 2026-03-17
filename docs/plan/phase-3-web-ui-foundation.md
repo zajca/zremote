@@ -61,7 +61,7 @@
   - Fetch `GET /api/hosts/{hostId}/sessions` on mount + hostId change
   - Return `{ sessions, loading, error, refetch }`
 - [ ] `Sidebar` component:
-  - Header: "MyRemote" branding, version
+  - Header: "ZRemote" branding, version
   - Host list with `HostItem` components
   - Bottom: settings link
 - [ ] `HostItem` component:
@@ -83,7 +83,7 @@
 
 ## 3.4 Real-time Status Updates
 
-**Files:** `crates/myremote-server/src/routes/events.rs`, `web/src/hooks/useRealtimeUpdates.ts`
+**Files:** `crates/zremote-server/src/routes/events.rs`, `web/src/hooks/useRealtimeUpdates.ts`
 
 - [ ] Server: `/ws/events` endpoint
   - Use `tokio::sync::broadcast` channel (buffer 1024) for server-wide events
@@ -110,7 +110,7 @@
 **Files:** `web/src/pages/{WelcomePage,HostPage,SessionPage}.tsx`
 
 - [ ] `WelcomePage`:
-  - Centered content, MyRemote logo/title
+  - Centered content, ZRemote logo/title
   - Brief description of the tool
   - Instructions for connecting first agent (show example env vars + command)
   - Empty state when no hosts connected -- clear call-to-action

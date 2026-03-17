@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { AgenticLoop } from "../types/agentic";
 
-export const AGENTIC_LOOP_UPDATE_EVENT = "myremote:agentic-loop-update";
+export const AGENTIC_LOOP_UPDATE_EVENT = "zremote:agentic-loop-update";
 
 export function useAgenticLoops(sessionId: string | undefined) {
   const [loops, setLoops] = useState<AgenticLoop[]>([]);

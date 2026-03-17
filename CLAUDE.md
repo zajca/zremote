@@ -1,4 +1,4 @@
-# MyRemote
+# ZRemote
 
 Remote machine management platform with terminal sessions, agentic loop control, and real-time monitoring. Supports two operating modes: **Server mode** (multi-host via central server) and **Local mode** (single-host, serverless).
 
@@ -12,16 +12,16 @@ LOCAL MODE:   Browser <--HTTP/WS--> Agent (Axum HTTP/WS server)
                                     |-- REST API (/api/*)
                                     |-- Terminal WS (/ws/terminal/:id)
                                     |-- Events WS (/ws/events)
-                                    |-- SQLite (~/.myremote/local.db)
+                                    |-- SQLite (~/.zremote/local.db)
                                     |-- PTY sessions (direct)
                                     |-- Agentic detection
                                     |-- Projects / Knowledge
 ```
 
-- **Core** (`myremote-core`): Shared types, DB init, error handling, query functions, message processing. Used by both server and agent.
-- **Server** (`myremote-server`): Central hub for multi-host deployments. Axum web server with SQLite, manages multiple agents and browser clients.
-- **Agent** (`myremote-agent`): Runs on each machine. In server mode, connects to server via WebSocket. In local mode, serves the web UI and all APIs directly.
-- **Protocol** (`myremote-protocol`): Shared message types for WebSocket communication between server and agent.
+- **Core** (`zremote-core`): Shared types, DB init, error handling, query functions, message processing. Used by both server and agent.
+- **Server** (`zremote-server`): Central hub for multi-host deployments. Axum web server with SQLite, manages multiple agents and browser clients.
+- **Agent** (`zremote-agent`): Runs on each machine. In server mode, connects to server via WebSocket. In local mode, serves the web UI and all APIs directly.
+- **Protocol** (`zremote-protocol`): Shared message types for WebSocket communication between server and agent.
 - **Web** (`web/`): React + TypeScript frontend with xterm.js terminal, zustand state, recharts analytics. Detects mode automatically via `/api/mode`.
 
 ## Quick Start
@@ -37,7 +37,7 @@ nix develop                           # Enter dev shell (Rust, Bun, SQLite, etc.
 cd web && bun install && bun run build && cd ..
 
 # Run agent in local mode
-cargo run -p myremote-agent -- local --port 3000
+cargo run -p zremote-agent -- local --port 3000
 
 # Open browser at http://127.0.0.1:3000
 ```
@@ -45,7 +45,7 @@ cargo run -p myremote-agent -- local --port 3000
 For development with hot-reload:
 ```bash
 # Terminal 1: Agent with filesystem-served UI
-cargo run -p myremote-agent -- local --port 3000 --web-dir ./web/dist/
+cargo run -p zremote-agent -- local --port 3000 --web-dir ./web/dist/
 
 # Terminal 2: Vite dev server (proxies API to agent)
 cd web && bun run dev                 # :5173 proxies to :3000
@@ -55,10 +55,10 @@ cd web && bun run dev                 # :5173 proxies to :3000
 
 ```bash
 # Server
-MYREMOTE_TOKEN=secret cargo run -p myremote-server
+ZREMOTE_TOKEN=secret cargo run -p zremote-server
 
 # Agent (on remote host or another terminal)
-MYREMOTE_SERVER_URL=ws://localhost:3000/ws/agent MYREMOTE_TOKEN=secret cargo run -p myremote-agent
+ZREMOTE_SERVER_URL=ws://localhost:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent
 
 # Web UI
 cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :3000
@@ -68,7 +68,7 @@ cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :30
 
 ```bash
 # Run agent as MCP server on stdio (for Claude Code integration)
-cargo run -p myremote-agent -- mcp-serve --project /path/to/project
+cargo run -p zremote-agent -- mcp-serve --project /path/to/project
 ```
 
 ## Environment Variables
@@ -77,10 +77,10 @@ cargo run -p myremote-agent -- mcp-serve --project /path/to/project
 
 | Variable | Required | Used by | Default | Description |
 |---|---|---|---|---|
-| `MYREMOTE_TOKEN` | Yes | Server + Agent | - | Shared authentication token |
-| `MYREMOTE_SERVER_URL` | Yes | Agent | - | WebSocket URL, e.g. `ws://host:3000/ws/agent` |
-| `DATABASE_URL` | No | Server | `sqlite:myremote.db` | SQLite connection string |
-| `MYREMOTE_PORT` | No | Server | `3000` | HTTP/WS listen port |
+| `ZREMOTE_TOKEN` | Yes | Server + Agent | - | Shared authentication token |
+| `ZREMOTE_SERVER_URL` | Yes | Agent | - | WebSocket URL, e.g. `ws://host:3000/ws/agent` |
+| `DATABASE_URL` | No | Server | `sqlite:zremote.db` | SQLite connection string |
+| `ZREMOTE_PORT` | No | Server | `3000` | HTTP/WS listen port |
 | `TELEGRAM_BOT_TOKEN` | No | Server | - | Enables Telegram bot integration |
 | `RUST_LOG` | No | Both | `info` | Tracing filter level |
 
@@ -90,13 +90,13 @@ cargo run -p myremote-agent -- mcp-serve --project /path/to/project
 |---|---|---|---|
 | `RUST_LOG` | No | `info` | Tracing filter level |
 
-Local mode CLI flags: `--port` (3000), `--db` (~/.myremote/local.db), `--bind` (127.0.0.1), `--web-dir` (embedded)
+Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (127.0.0.1), `--web-dir` (embedded)
 
 ## Crate Structure
 
 ```
 crates/
-  myremote-protocol/     Shared types: AgentMessage, ServerMessage, AgenticAgentMessage, etc.
+  zremote-protocol/     Shared types: AgentMessage, ServerMessage, AgenticAgentMessage, etc.
     src/
       lib.rs             Top-level re-exports
       terminal.rs        Terminal session messages (Register, SessionCreate, TerminalInput/Output, etc.)
@@ -105,7 +105,7 @@ crates/
       knowledge.rs       Knowledge integration protocol
       claude.rs          Claude task protocol
 
-  myremote-core/         Shared types, DB, queries, processing (used by server + agent)
+  zremote-core/         Shared types, DB, queries, processing (used by server + agent)
     src/
       lib.rs             Module re-exports
       error.rs           AppError enum + AppJson extractor with IntoResponse
@@ -128,7 +128,7 @@ crates/
         terminal.rs      TerminalProcessor - session created/closed handlers
     migrations/          11 SQL migration files (single source of truth)
 
-  myremote-server/       Axum HTTP/WS server (multi-host mode)
+  zremote-server/       Axum HTTP/WS server (multi-host mode)
     src/
       main.rs            Router setup (30+ routes), startup, graceful shutdown
       state.rs           ConnectionManager, AppState (re-exports shared types from core)
@@ -153,7 +153,7 @@ crates/
       telegram/          Optional Telegram bot (TELEGRAM_BOT_TOKEN)
         mod.rs, commands.rs, callbacks.rs, notifications.rs, format.rs
 
-  myremote-agent/        Agent binary (runs on each host)
+  zremote-agent/        Agent binary (runs on each host)
     src/
       main.rs            CLI: Run (server mode), Local, McpServe subcommands
       config.rs          AgentConfig::from_env(), detect_tmux()
@@ -249,7 +249,7 @@ Stack: React 19, TypeScript 5.8, Vite 6, Tailwind CSS 4, zustand 5, xterm.js 6, 
 
 ## Database
 
-SQLite with WAL journal mode. Migrations auto-run at startup. Migrations live in `crates/myremote-core/migrations/` (single source of truth, used by both server and local mode). 11 migration files define:
+SQLite with WAL journal mode. Migrations auto-run at startup. Migrations live in `crates/zremote-core/migrations/` (single source of truth, used by both server and local mode). 11 migration files define:
 
 - **hosts** - registered remote machines (id, hostname, status, agent_version, os, arch)
 - **sessions** - terminal sessions (host_id FK, shell, status: creating/active/closed/suspended, pid, suspended_at, tmux_name)
@@ -271,7 +271,7 @@ SQLite with WAL journal mode. Migrations auto-run at startup. Migrations live in
 - **SessionStore**: `Arc<RwLock<HashMap<SessionId, SessionState>>>` - in-memory terminal state with 100KB scrollback buffer (VecDeque).
 - **AgenticLoopStore**: `Arc<DashMap<AgenticLoopId, AgenticLoopState>>` - lock-free concurrent map for high-frequency loop updates.
 - **PTY I/O**: Uses `tokio::task::spawn_blocking` because PTY read is blocking. 4KB read buffer. Signals EOF with empty vec.
-- **Tmux persistence**: When tmux is available, sessions spawn inside `tmux -L myremote` and survive agent restarts. Agent detaches on shutdown, reattaches on reconnect. Falls back to raw PTY when tmux is unavailable.
+- **Tmux persistence**: When tmux is available, sessions spawn inside `tmux -L zremote` and survive agent restarts. Agent detaches on shutdown, reattaches on reconnect. Falls back to raw PTY when tmux is unavailable.
 - **Session suspension**: When a persistent-session agent disconnects, server marks sessions as `suspended` (not `closed`), keeps scrollback, notifies browsers. On reconnect, agent sends `SessionsRecovered` and sessions resume seamlessly.
 - **Auth**: SHA-256 hash stored in DB, constant-time comparison via `subtle` crate. Token never logged.
 - **Reconnection**: Agent reconnects with exponential backoff (1s min, 300s max, 25% jitter).
@@ -302,18 +302,18 @@ tmux must be installed on the remote host. The agent auto-detects it at startup 
 ### Lifecycle
 
 1. **Agent starts**: `detect_tmux()` checks for tmux in PATH
-2. **Session created**: `tmux -L myremote new-session -d -s myremote-{uuid}` instead of `portable-pty`
+2. **Session created**: `tmux -L zremote new-session -d -s zremote-{uuid}` instead of `portable-pty`
 3. **I/O**: Write directly to `/dev/pts/N` (raw bytes), read via FIFO (`pipe-pane`)
 4. **Agent disconnects**: Sessions marked `suspended` on server, browsers notified, scrollback preserved
-5. **Agent reconnects**: `tmux -L myremote list-sessions` discovers surviving sessions, sends `SessionsRecovered` to server, sessions resume as `active`
+5. **Agent reconnects**: `tmux -L zremote list-sessions` discovers surviving sessions, sends `SessionsRecovered` to server, sessions resume as `active`
 6. **User closes session**: `tmux kill-session` (respects user intent)
 7. **Stale cleanup**: Sessions older than 24h are killed on agent startup
 
 ### Isolation
 
-- Dedicated tmux socket: `-L myremote` (never touches user's own tmux sessions)
-- FIFO directory: `/tmp/myremote-tmux-{uid}/` (per-user, avoids permission issues)
-- Session naming: `myremote-{session-uuid}` (parseable, collision-free)
+- Dedicated tmux socket: `-L zremote` (never touches user's own tmux sessions)
+- FIFO directory: `/tmp/zremote-tmux-{uid}/` (per-user, avoids permission issues)
+- Session naming: `zremote-{session-uuid}` (parseable, collision-free)
 
 ### Session states
 
@@ -331,12 +331,12 @@ tmux must be installed on the remote host. The agent auto-detects it at startup 
 # Check if tmux backend is active (agent logs at startup)
 # "tmux detected, persistent sessions enabled"
 
-# List active myremote tmux sessions
-tmux -L myremote ls
+# List active zremote tmux sessions
+tmux -L zremote ls
 
 # Simulate agent crash and recovery
 kill -9 <agent_pid>          # Sessions survive in tmux
-tmux -L myremote ls          # Still there
+tmux -L zremote ls          # Still there
 # Restart agent              # Auto-discovers and resumes sessions
 ```
 
@@ -392,10 +392,10 @@ cargo build --workspace
 
 # Agent with local mode (default feature, includes embedded web UI)
 cd web && bun run build           # Produces web/dist/ (required for rust-embed)
-cargo build -p myremote-agent     # Embeds web/dist/ into binary
+cargo build -p zremote-agent     # Embeds web/dist/ into binary
 
 # Agent without local mode (smaller binary, server mode only)
-cargo build -p myremote-agent --no-default-features
+cargo build -p zremote-agent --no-default-features
 ```
 
 The `local` cargo feature (default-on) enables: `rust-embed`, `mime_guess`, `tower-http`, `sqlx` as optional deps on the agent. The `build.rs` ensures `web/dist/` directory exists at compile time.

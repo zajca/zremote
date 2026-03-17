@@ -1,4 +1,4 @@
-# MyRemote
+# ZRemote
 
 ## Vision
 
@@ -20,7 +20,7 @@ The sidebar is the main navigation element. It presents a tree that mirrors the 
 Sidebar
 ├── Host: devbox-01 (online)
 │   ├── Projects
-│   │   ├── /home/user/myremote
+│   │   ├── /home/user/zremote
 │   │   │   ├── Sessions (2)
 │   │   │   │   ├── session-abc (bash, idle)
 │   │   │   │   └── session-def (zsh, running)
@@ -56,7 +56,7 @@ Each top-level node represents a connected (or previously connected) machine.
 
 Projects live under a host and correspond to directories on the remote machine.
 
-- **Identified by:** absolute path on the remote host (e.g. `/home/user/myremote`)
+- **Identified by:** absolute path on the remote host (e.g. `/home/user/zremote`)
 - **Displays:** directory name (or custom name from `.claude/` config), count of active sessions, count of active agentic loops
 - **Actions:**
   - Open a new terminal session in this directory

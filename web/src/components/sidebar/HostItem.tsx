@@ -15,7 +15,7 @@ interface HostItemProps {
 }
 
 function getStorageKey(hostId: string) {
-  return `myremote:host-expanded:${hostId}`;
+  return `zremote:host-expanded:${hostId}`;
 }
 
 export const HostItem = memo(function HostItem({ host }: HostItemProps) {

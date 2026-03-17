@@ -8,7 +8,7 @@
 
 ## 1.1 Split Protocol into Directional Messages
 
-**File:** `crates/myremote-protocol/src/lib.rs`, workspace `Cargo.toml`
+**File:** `crates/zremote-protocol/src/lib.rs`, workspace `Cargo.toml`
 
 - [ ] Add `chrono = { version = "0.4", features = ["serde"] }` to workspace deps and protocol crate
 - [ ] Remove the existing `Message` enum
@@ -33,7 +33,7 @@
 
 ## 1.2 Server Application State & Modular Structure
 
-**Files:** `crates/myremote-server/src/{state.rs, db.rs, error.rs, routes/mod.rs, routes/health.rs, main.rs}`
+**Files:** `crates/zremote-server/src/{state.rs, db.rs, error.rs, routes/mod.rs, routes/health.rs, main.rs}`
 
 - [ ] Create `state.rs`:
   - `AgentConnection` struct: `host_id: HostId`, `hostname: String`, `sender: mpsc::Sender<ServerMessage>`, `last_heartbeat: Instant`
@@ -59,10 +59,10 @@
 
 ## 1.3 Database Schema & Migrations
 
-**Files:** `crates/myremote-server/migrations/001_initial.sql`, `db.rs`
+**Files:** `crates/zremote-server/migrations/001_initial.sql`, `db.rs`
 
 - [ ] Add `migrate` feature to sqlx in workspace `Cargo.toml`
-- [ ] Create `migrations/` directory in myremote-server crate
+- [ ] Create `migrations/` directory in zremote-server crate
 - [ ] Create `001_initial.sql` with:
   ```sql
   CREATE TABLE hosts (
@@ -100,10 +100,10 @@
 
 ## 1.4 Agent Authentication
 
-**Files:** `crates/myremote-server/src/auth.rs`, server `Cargo.toml`
+**Files:** `crates/zremote-server/src/auth.rs`, server `Cargo.toml`
 
 - [ ] Add `sha2` and `subtle` crates to server Cargo.toml (workspace deps)
-- [ ] Server reads `MYREMOTE_AGENT_TOKEN` env var at startup -- fail fast if missing
+- [ ] Server reads `ZREMOTE_AGENT_TOKEN` env var at startup -- fail fast if missing
 - [ ] `hash_token(token: &str) -> String` -- SHA256 hex digest
 - [ ] `verify_token(provided: &str, stored_hash: &str) -> bool` -- hash the provided token, constant-time comparison using `subtle::ConstantTimeEq`
 - [ ] Token sent inside `AgentMessage::Register` (first WS message), NOT in URL query params
@@ -114,7 +114,7 @@
 
 ## 1.5 Agent WebSocket Endpoint
 
-**Files:** `crates/myremote-server/src/routes/agents.rs`
+**Files:** `crates/zremote-server/src/routes/agents.rs`
 
 - [ ] Add `/ws/agent` route accepting `WebSocketUpgrade` + `State<Arc<AppState>>`
 - [ ] Connection lifecycle:
@@ -138,12 +138,12 @@
 
 ## 1.6 Agent: WebSocket Client + Reconnect
 
-**Files:** `crates/myremote-agent/src/{main.rs, connection.rs, config.rs}`, agent `Cargo.toml`
+**Files:** `crates/zremote-agent/src/{main.rs, connection.rs, config.rs}`, agent `Cargo.toml`
 
 - [ ] Add `hostname`, `url`, `tokio-tungstenite` to agent Cargo.toml
 - [ ] `config.rs`:
   - `AgentConfig` struct: `server_url: Url`, `token: String`
-  - `AgentConfig::from_env()` -- read `MYREMOTE_SERVER_URL` and `MYREMOTE_TOKEN`, fail fast with clear error if missing
+  - `AgentConfig::from_env()` -- read `ZREMOTE_SERVER_URL` and `ZREMOTE_TOKEN`, fail fast with clear error if missing
 - [ ] `connection.rs`:
   - `connect(config: &AgentConfig) -> Result<WebSocketStream>` -- connect via `tokio_tungstenite::connect_async`
   - `register(ws: &mut WebSocketStream, config: &AgentConfig) -> Result<HostId>`:
@@ -167,7 +167,7 @@
 
 ## 1.7 REST API for Hosts
 
-**Files:** `crates/myremote-server/src/routes/hosts.rs`
+**Files:** `crates/zremote-server/src/routes/hosts.rs`
 
 - [ ] `GET /api/hosts` -- list all hosts
   - Response: `[{ id, name, hostname, status, last_seen_at, agent_version, os, arch }]`

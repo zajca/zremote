@@ -1,4 +1,4 @@
-# MyRemote
+# ZRemote
 
 A self-hosted platform for managing remote machines through the browser. Connect agents on your servers, open terminal sessions, monitor AI agentic loops in real-time, track token usage and costs, and receive Telegram notifications -- all from a single dashboard.
 
@@ -6,7 +6,7 @@ A self-hosted platform for managing remote machines through the browser. Connect
 
 ```
 ┌─────────────┐       HTTP / WebSocket       ┌─────────────────┐       WebSocket       ┌─────────────┐
-│   Browser    │  <───────────────────────>   │  MyRemote Server │  <────────────────>   │    Agent     │
+│   Browser    │  <───────────────────────>   │  ZRemote Server │  <────────────────>   │    Agent     │
 │  (React UI)  │                             │   (Axum + SQLite) │                      │ (remote host)│
 └─────────────┘                              └─────────────────┘                       └─────────────┘
                                                     │
@@ -40,8 +40,8 @@ A self-hosted platform for managing remote machines through the browser. Connect
 ```bash
 nix develop
 
-export MYREMOTE_TOKEN="your-secret-token"
-cargo run -p myremote-server
+export ZREMOTE_TOKEN="your-secret-token"
+cargo run -p zremote-server
 ```
 
 Server starts on `http://localhost:3000`.
@@ -53,9 +53,9 @@ On the remote machine (or another terminal for local testing):
 ```bash
 nix develop
 
-export MYREMOTE_TOKEN="your-secret-token"
-export MYREMOTE_SERVER_URL="ws://localhost:3000/ws/agent"
-cargo run -p myremote-agent
+export ZREMOTE_TOKEN="your-secret-token"
+export ZREMOTE_SERVER_URL="ws://localhost:3000/ws/agent"
+cargo run -p zremote-agent
 ```
 
 ### 3. Open the web UI
@@ -72,12 +72,12 @@ Open `http://localhost:5173` in your browser. Connected hosts appear automatical
 
 | Variable | Required | Component | Default | Description |
 |---|---|---|---|---|
-| `MYREMOTE_TOKEN` | Yes | Server + Agent | -- | Shared authentication token |
-| `MYREMOTE_SERVER_URL` | Yes | Agent | -- | Server WebSocket URL (e.g. `ws://host:3000/ws/agent`) |
-| `DATABASE_URL` | No | Server | `sqlite:myremote.db` | SQLite database path |
-| `MYREMOTE_PORT` | No | Server | `3000` | Server listen port |
+| `ZREMOTE_TOKEN` | Yes | Server + Agent | -- | Shared authentication token |
+| `ZREMOTE_SERVER_URL` | Yes | Agent | -- | Server WebSocket URL (e.g. `ws://host:3000/ws/agent`) |
+| `DATABASE_URL` | No | Server | `sqlite:zremote.db` | SQLite database path |
+| `ZREMOTE_PORT` | No | Server | `3000` | Server listen port |
 | `TELEGRAM_BOT_TOKEN` | No | Server | -- | Telegram bot token for notifications |
-| `RUST_LOG` | No | Both | `info` | Log level filter (e.g. `debug`, `myremote_server=debug`) |
+| `RUST_LOG` | No | Both | `info` | Log level filter (e.g. `debug`, `zremote_server=debug`) |
 
 ## Persistent Sessions
 
@@ -87,7 +87,7 @@ When [tmux](https://github.com/tmux/tmux) is installed on the remote host, termi
 
 Without tmux, killing the agent kills all terminal sessions. With tmux enabled:
 
-1. Sessions spawn inside a dedicated tmux server (`tmux -L myremote`)
+1. Sessions spawn inside a dedicated tmux server (`tmux -L zremote`)
 2. When the agent stops (crash, update, restart), tmux keeps the shells alive
 3. The browser shows sessions as **suspended** with a yellow badge
 4. When the agent reconnects, it discovers the surviving tmux sessions and resumes them
@@ -106,14 +106,14 @@ This is especially useful for long-running Claude Code sessions that would other
 # Check agent logs at startup for:
 # "tmux detected, persistent sessions enabled"
 
-# List active myremote sessions
-tmux -L myremote ls
+# List active zremote sessions
+tmux -L zremote ls
 
 # Test it: open a session in the UI, then kill the agent
-kill -9 $(pgrep myremote-agent)
+kill -9 $(pgrep zremote-agent)
 
 # Sessions are still alive
-tmux -L myremote ls    # myremote-<uuid>: 1 windows ...
+tmux -L zremote ls    # zremote-<uuid>: 1 windows ...
 
 # Restart the agent -- sessions resume automatically
 ```
@@ -146,12 +146,12 @@ bun run format                       # Prettier
 ## Project Structure
 
 ```
-myremote/
+zremote/
 ├── crates/
-│   ├── myremote-protocol/           # Shared WebSocket message types
-│   ├── myremote-server/             # Axum server (REST API + WebSocket + Telegram)
+│   ├── zremote-protocol/           # Shared WebSocket message types
+│   ├── zremote-server/             # Axum server (REST API + WebSocket + Telegram)
 │   │   └── migrations/              # SQLite migrations (11 files)
-│   └── myremote-agent/              # Agent binary (PTY/tmux, project scanning, loop detection)
+│   └── zremote-agent/              # Agent binary (PTY/tmux, project scanning, loop detection)
 ├── web/                             # React frontend (Vite + TypeScript + Tailwind)
 │   └── src/
 │       ├── components/              # UI components (terminal, agentic panels, sidebar)

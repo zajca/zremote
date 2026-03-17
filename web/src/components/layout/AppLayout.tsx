@@ -6,7 +6,7 @@ import { ToastContainer } from "./Toast";
 import { ReconnectBanner } from "./ReconnectBanner";
 import { ErrorBoundary } from "./ErrorBoundary";
 
-const SIDEBAR_KEY = "myremote:sidebar-visible";
+const SIDEBAR_KEY = "zremote:sidebar-visible";
 
 function getPersistedSidebar(): boolean {
   try {

@@ -77,7 +77,7 @@ Even fixing any single bug alone would not make the feature work - all three mus
 
 ### 3.1 Bug 1: Process Detection Fails
 
-**File:** `crates/myremote-agent/src/agentic/detector.rs:37-44`
+**File:** `crates/zremote-agent/src/agentic/detector.rs:37-44`
 
 **Current code:**
 ```rust
@@ -123,7 +123,7 @@ if cmd_line.contains(signature) {
 
 ### 3.2 Bug 2: Missing Broadcast Event for LoopDetected
 
-**File:** `crates/myremote-server/src/routes/agents.rs:822-864`
+**File:** `crates/zremote-server/src/routes/agents.rs:822-864`
 
 **Current code (LoopDetected handler):**
 ```rust
@@ -218,7 +218,7 @@ Approving one tool call approves whatever the underlying tool is currently waiti
 
 ### 4.3 "Pause" Actually Sends Ctrl+C (P2)
 
-**File:** `crates/myremote-agent/src/agentic/claude_code.rs`
+**File:** `crates/zremote-agent/src/agentic/claude_code.rs`
 ```rust
 UserAction::Pause | UserAction::Stop => vec![0x03],  // Ctrl+C = SIGINT
 ```
@@ -227,7 +227,7 @@ The "Pause" button label is misleading - it actually interrupts/kills the proces
 
 ### 4.4 Empty model and project_path (P2)
 
-**File:** `crates/myremote-agent/src/agentic/manager.rs:90-92`
+**File:** `crates/zremote-agent/src/agentic/manager.rs:90-92`
 ```rust
 messages.push(AgenticAgentMessage::LoopDetected {
     project_path: String::new(),  // always empty
@@ -272,17 +272,17 @@ When the `"lagged"` event arrives (broadcast channel overflow), hosts/sessions/p
 ### Phase 1: Fix Critical Bugs (P0)
 
 #### Task 1.1: Fix process detection
-- **File:** `crates/myremote-agent/src/agentic/detector.rs`
+- **File:** `crates/zremote-agent/src/agentic/detector.rs`
 - Add `process.cmd()` matching alongside `process.name()` matching
 - Add unit tests for cmd-based matching
 
 #### Task 1.2: Fix project_path detection
-- **File:** `crates/myremote-agent/src/agentic/manager.rs`
+- **File:** `crates/zremote-agent/src/agentic/manager.rs`
 - Use `process.cwd()` from sysinfo to populate `project_path` in `LoopDetected`
 - Pass `&self.system` to the detection path so process metadata is accessible
 
 #### Task 1.3: Add ServerEvent variants and fix naming
-- **File:** `crates/myremote-server/src/state.rs`
+- **File:** `crates/zremote-server/src/state.rs`
 - Add `LoopInfo` serializable struct matching frontend `AgenticLoop` interface
 - Add `ToolCallInfo` serializable struct matching frontend `ToolCall` interface
 - Add `TranscriptInfo` serializable struct matching frontend `TranscriptEntry` interface
@@ -297,7 +297,7 @@ When the `"lagged"` event arrives (broadcast channel overflow), hosts/sessions/p
 - Update existing tests for renamed variants
 
 #### Task 1.4: Emit broadcast events for all agentic messages
-- **File:** `crates/myremote-server/src/routes/agents.rs`
+- **File:** `crates/zremote-server/src/routes/agents.rs`
 - Add `state.events.send(ServerEvent::LoopDetected { ... })` in `LoopDetected` handler
 - Add broadcast in `LoopToolResult` handler
 - Add broadcast in `LoopTranscript` handler
@@ -346,10 +346,10 @@ These are documented for future work, not part of this RFC:
 
 | File | Phase | Description |
 |------|-------|-------------|
-| `crates/myremote-agent/src/agentic/detector.rs` | 1.1 | Add cmd() matching |
-| `crates/myremote-agent/src/agentic/manager.rs` | 1.2 | Populate project_path from cwd |
-| `crates/myremote-server/src/state.rs` | 1.3 | Add/rename ServerEvent variants, add LoopInfo struct |
-| `crates/myremote-server/src/routes/agents.rs` | 1.4 | Emit broadcast events for all agentic messages |
+| `crates/zremote-agent/src/agentic/detector.rs` | 1.1 | Add cmd() matching |
+| `crates/zremote-agent/src/agentic/manager.rs` | 1.2 | Populate project_path from cwd |
+| `crates/zremote-server/src/state.rs` | 1.3 | Add/rename ServerEvent variants, add LoopInfo struct |
+| `crates/zremote-server/src/routes/agents.rs` | 1.4 | Emit broadcast events for all agentic messages |
 | `web/src/hooks/useRealtimeUpdates.ts` | 1.5 | Update event payload interface |
 | `web/src/stores/agentic-store.ts` | 2.1 | Add error handling to sendAction |
 | `web/src/hooks/useAgenticLoops.ts` | 2.2 | Error logging, fallback polling |
@@ -368,8 +368,8 @@ cd web && bun run test              # Frontend tests
 ```
 
 ### Manual Integration Test
-1. Start server: `MYREMOTE_TOKEN=secret cargo run -p myremote-server`
-2. Start agent: `MYREMOTE_SERVER_URL=ws://localhost:3000/ws/agent MYREMOTE_TOKEN=secret cargo run -p myremote-agent`
+1. Start server: `ZREMOTE_TOKEN=secret cargo run -p zremote-server`
+2. Start agent: `ZREMOTE_SERVER_URL=ws://localhost:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent`
 3. Open web UI at `http://localhost:5173`
 4. Create a terminal session on the connected host
 5. Run `claude` in the terminal

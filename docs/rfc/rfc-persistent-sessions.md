@@ -2,7 +2,7 @@
 
 ## 1. Problem Statement
 
-When the myremote-agent process stops (crash, update, restart), all terminal sessions are immediately killed. This happens because:
+When the zremote-agent process stops (crash, update, restart), all terminal sessions are immediately killed. This happens because:
 
 1. `PtySession::drop()` calls `self.kill()` on the child process
 2. `session_manager.close_all()` is called at end of every connection lifecycle
@@ -33,7 +33,7 @@ This kills running Claude Code sessions, destroys user work mid-operation, and m
 - Programmatic CLI: `new-session`, `send-keys`, `capture-pane`, `resize-window`, `pipe-pane`
 - Process tree stays walkable for agentic loop detection (shell PID is child of tmux)
 - Available in every Linux distro, trivially installable
-- Dedicated socket (`tmux -L myremote`) isolates from user's own tmux sessions
+- Dedicated socket (`tmux -L zremote`) isolates from user's own tmux sessions
 
 ### 4.2 Why not alternatives
 
@@ -73,7 +73,7 @@ New file implementing `TmuxSession` struct with the same interface as `PtySessio
 - `resize()` -- `tmux resize-window`
 - `kill()` -- `tmux kill-session` + FIFO cleanup
 - `detach()` -- Stops reader/pipe-pane without killing tmux session
-- `discover_sessions()` -- Lists `myremote-*` sessions, reattaches each
+- `discover_sessions()` -- Lists `zremote-*` sessions, reattaches each
 - `cleanup_stale()` -- Kills sessions older than 24 hours
 
 Drop implementation only detaches (never kills), preserving persistence.
@@ -166,9 +166,9 @@ creating --> active --> closed
 
 | Concern | Solution |
 |---|---|
-| User's tmux sessions | Dedicated socket: `tmux -L myremote` |
-| File permissions | Per-UID FIFO dir: `/tmp/myremote-tmux-{uid}/` |
-| Session naming | `myremote-{uuid}` prefix (parseable, collision-free) |
+| User's tmux sessions | Dedicated socket: `tmux -L zremote` |
+| File permissions | Per-UID FIFO dir: `/tmp/zremote-tmux-{uid}/` |
+| Session naming | `zremote-{uuid}` prefix (parseable, collision-free) |
 | Stale sessions | Auto-cleanup at agent startup (>24h) |
 | Orphaned FIFOs | Cleaned when no matching tmux session exists |
 
@@ -176,17 +176,17 @@ creating --> active --> closed
 
 | File | Change |
 |---|---|
-| `crates/myremote-agent/src/tmux.rs` | **NEW** -- TmuxSession implementation (709 lines) |
-| `crates/myremote-agent/src/session.rs` | SessionBackend enum, discover_existing(), detach_all() |
-| `crates/myremote-agent/src/config.rs` | detect_tmux() |
-| `crates/myremote-agent/src/connection.rs` | Recovery after registration, conditional close |
-| `crates/myremote-agent/src/main.rs` | tmux detection, module declaration |
-| `crates/myremote-protocol/src/terminal.rs` | SessionsRecovered, RecoveredSession, Register extension |
-| `crates/myremote-server/src/routes/agents.rs` | Suspend/resume logic, SessionsRecovered handler |
-| `crates/myremote-server/src/routes/terminal.rs` | Suspended session browser connection |
-| `crates/myremote-server/src/state.rs` | SessionSuspended/SessionResumed events, persistent flag |
-| `crates/myremote-server/src/main.rs` | Updated register() call sites in tests |
-| `crates/myremote-server/migrations/011_persistent_sessions.sql` | **NEW** -- suspended_at, tmux_name |
+| `crates/zremote-agent/src/tmux.rs` | **NEW** -- TmuxSession implementation (709 lines) |
+| `crates/zremote-agent/src/session.rs` | SessionBackend enum, discover_existing(), detach_all() |
+| `crates/zremote-agent/src/config.rs` | detect_tmux() |
+| `crates/zremote-agent/src/connection.rs` | Recovery after registration, conditional close |
+| `crates/zremote-agent/src/main.rs` | tmux detection, module declaration |
+| `crates/zremote-protocol/src/terminal.rs` | SessionsRecovered, RecoveredSession, Register extension |
+| `crates/zremote-server/src/routes/agents.rs` | Suspend/resume logic, SessionsRecovered handler |
+| `crates/zremote-server/src/routes/terminal.rs` | Suspended session browser connection |
+| `crates/zremote-server/src/state.rs` | SessionSuspended/SessionResumed events, persistent flag |
+| `crates/zremote-server/src/main.rs` | Updated register() call sites in tests |
+| `crates/zremote-server/migrations/011_persistent_sessions.sql` | **NEW** -- suspended_at, tmux_name |
 | `web/src/lib/api.ts` | suspended status type |
 | `web/src/components/Terminal.tsx` | Suspension overlay, input blocking |
 | `web/src/components/sidebar/SessionItem.tsx` | Pause icon, warning badge |

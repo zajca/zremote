@@ -8,7 +8,7 @@
 
 ## 2.1 Agent: PTY Management
 
-**Files:** `crates/myremote-agent/src/{pty.rs, session.rs}`
+**Files:** `crates/zremote-agent/src/{pty.rs, session.rs}`
 
 - [ ] Create `PtySession` struct wrapping `portable-pty`:
   - Fields: `writer: Box<dyn Write + Send>`, `child: Box<dyn Child + Send>`, `reader_handle: JoinHandle<()>`
@@ -38,7 +38,7 @@
 
 ## 2.2 Server: Session Management & Relay
 
-**Files:** `crates/myremote-server/src/routes/sessions.rs`, `state.rs` (extend)
+**Files:** `crates/zremote-server/src/routes/sessions.rs`, `state.rs` (extend)
 
 - [ ] Extend server state with session tracking:
   - `SessionState` struct: `session_id`, `host_id`, `status`, `browser_senders: Vec<mpsc::Sender<BrowserMessage>>`, `scrollback: VecDeque<Vec<u8>>` (max 100KB ring buffer)
@@ -66,7 +66,7 @@
 
 ## 2.3 Browser WebSocket for Terminal
 
-**Files:** `crates/myremote-server/src/routes/terminal.rs`
+**Files:** `crates/zremote-server/src/routes/terminal.rs`
 
 - [ ] Add `/ws/terminal/{session_id}` endpoint with `WebSocketUpgrade`
 - [ ] On connect:

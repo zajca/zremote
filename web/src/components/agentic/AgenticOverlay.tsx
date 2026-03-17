@@ -33,7 +33,7 @@ type OverlayTab = "tools" | "transcript";
 
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
 const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
-const OVERLAY_HEIGHT_KEY = "myremote:overlay-height-pct";
+const OVERLAY_HEIGHT_KEY = "zremote:overlay-height-pct";
 const DEFAULT_HEIGHT_PCT = 50;
 const MIN_HEIGHT_PCT = 15;
 const MAX_HEIGHT_PCT = 85;

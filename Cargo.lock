@@ -1586,96 +1586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "myremote-agent"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "clap",
- "dashmap",
- "dirs",
- "futures-util",
- "glob-match",
- "hostname",
- "mime_guess",
- "myremote-core",
- "myremote-protocol",
- "portable-pty",
- "rand 0.9.2",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "sqlx",
- "sysinfo",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "myremote-core"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "dashmap",
- "http-body-util",
- "myremote-protocol",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "myremote-protocol"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "myremote-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "dashmap",
- "http-body-util",
- "myremote-core",
- "myremote-protocol",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "subtle",
- "teloxide",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4275,6 +4185,96 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zremote-agent"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "dashmap",
+ "dirs",
+ "futures-util",
+ "glob-match",
+ "hostname",
+ "mime_guess",
+ "portable-pty",
+ "rand 0.9.2",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zremote-core",
+ "zremote-protocol",
+]
+
+[[package]]
+name = "zremote-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "dashmap",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zremote-protocol",
+]
+
+[[package]]
+name = "zremote-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "zremote-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "dashmap",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "subtle",
+ "teloxide",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zremote-core",
+ "zremote-protocol",
+]
 
 [[package]]
 name = "zstd"

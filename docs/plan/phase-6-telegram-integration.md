@@ -8,7 +8,7 @@
 
 ## 6.1 Bot Core
 
-**Files:** `crates/myremote-server/src/telegram/{mod.rs, state.rs}`
+**Files:** `crates/zremote-server/src/telegram/{mod.rs, state.rs}`
 
 - [ ] Init `teloxide` bot from `TELEGRAM_BOT_TOKEN` env var
   - Telegram integration is optional: if env var is missing, skip bot startup with INFO log
@@ -27,7 +27,7 @@
 
 ## 6.2 Server Event Bus
 
-**Files:** `crates/myremote-server/src/events.rs`
+**Files:** `crates/zremote-server/src/events.rs`
 
 - [ ] Create `ServerEvent` enum:
   - `HostConnected { host_id, hostname }`
@@ -50,7 +50,7 @@
 
 ## 6.3 Notifications
 
-**Files:** `crates/myremote-server/src/telegram/{notifications.rs, format.rs}`
+**Files:** `crates/zremote-server/src/telegram/{notifications.rs, format.rs}`
 
 - [ ] Events that trigger Telegram notifications:
   - Agentic loop error -> "Loop errored on {host}: {tool_name} -- {error_message}"
@@ -73,7 +73,7 @@
 
 ## 6.4 Commands
 
-**Files:** `crates/myremote-server/src/telegram/commands.rs`
+**Files:** `crates/zremote-server/src/telegram/commands.rs`
 
 - [ ] `/sessions` -- list active sessions and loops across all hosts
   - Format: host name, session shell, loop status icon, tool name
@@ -94,7 +94,7 @@
 
 ## 6.5 Interactive Actions
 
-**Files:** `crates/myremote-server/src/telegram/callbacks.rs`
+**Files:** `crates/zremote-server/src/telegram/callbacks.rs`
 
 - [ ] Inline keyboard on "waiting for input" notifications:
   - [Approve] [Reject] buttons

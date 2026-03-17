@@ -1,5 +1,5 @@
 {
-  description = "MyRemote development environment";
+  description = "ZRemote development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -36,7 +36,7 @@
           ];
 
           shellHook = ''
-            echo "MyRemote dev shell ready"
+            echo "ZRemote dev shell ready"
             echo "  Rust: $(rustc --version)"
             echo "  Cargo: $(cargo --version)"
             echo "  Bun: $(bun --version)"

@@ -252,7 +252,7 @@ describe("SessionItem", () => {
         expect.objectContaining({ method: "DELETE" }),
       );
       expect(dispatchSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "myremote:session-update" }),
+        expect.objectContaining({ type: "zremote:session-update" }),
       );
     });
   });

@@ -136,17 +136,17 @@ export function ProjectLoopsTab({ projectId, hostId }: ProjectLoopsTabProps) {
   // Listen for real-time loop updates
   useEffect(() => {
     const handler = () => fetchLoops();
-    window.addEventListener("myremote:agentic-loop-update", handler);
+    window.addEventListener("zremote:agentic-loop-update", handler);
     return () =>
-      window.removeEventListener("myremote:agentic-loop-update", handler);
+      window.removeEventListener("zremote:agentic-loop-update", handler);
   }, [fetchLoops]);
 
   // Listen for real-time task updates
   useEffect(() => {
     const handler = () => fetchTasks();
-    window.addEventListener("myremote:claude-task-update", handler);
+    window.addEventListener("zremote:claude-task-update", handler);
     return () =>
-      window.removeEventListener("myremote:claude-task-update", handler);
+      window.removeEventListener("zremote:claude-task-update", handler);
   }, [fetchTasks]);
 
   // Fallback polling every 15s

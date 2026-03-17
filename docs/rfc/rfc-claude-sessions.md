@@ -6,14 +6,14 @@
 
 ## Problem Statement
 
-MyRemote currently treats Claude Code as a passive observation target. The agent detects Claude Code processes inside terminal sessions by scanning child processes every 3 seconds, then monitors tool calls, transcripts, and metrics. But users cannot:
+ZRemote currently treats Claude Code as a passive observation target. The agent detects Claude Code processes inside terminal sessions by scanning child processes every 3 seconds, then monitors tool calls, transcripts, and metrics. But users cannot:
 
 1. **Start** Claude Code from the UI
 2. **Resume** a previous Claude Code conversation
 3. **Configure** options (model, tools) before launch
 4. **See** Claude tasks as first-class entities — they appear as "agentic loops" buried under terminal sessions
 
-Users must manually open a terminal, type `claude` with the right flags, and only then does MyRemote notice.
+Users must manually open a terminal, type `claude` with the right flags, and only then does ZRemote notice.
 
 ## Goals
 
@@ -72,7 +72,7 @@ Relationship: `session (terminal) --1:N--> claude_sessions --1:1--> agentic_loop
 Instead of server-side command injection via TerminalInput (which has security and coordination issues), the agent receives a structured message and handles command construction + execution locally:
 
 ```rust
-// New module: crates/myremote-protocol/src/claude.rs
+// New module: crates/zremote-protocol/src/claude.rs
 // Wrapped as ClaudeAction(...) in AgentMessage/ServerMessage
 
 pub enum ClaudeServerMessage {
@@ -183,7 +183,7 @@ Fallback: Agent scans `~/.claude/projects/` directory for session metadata files
 **Start Dialog** (prompt-first, minimal):
 ```
 +--------------------------------------+
-| Start Claude on: myremote            |
+| Start Claude on: zremote            |
 |                                      |
 | [What should Claude do?           ]  |
 | [                                 ]  |
@@ -204,7 +204,7 @@ Tool presets: "Standard" (default) | "Read only" | "Full access" | "Custom..." (
 **Startup Progress View** (replaces raw terminal during startup):
 ```
 +----------------------------------------------+
-| [Bot] Starting Claude on myremote            |
+| [Bot] Starting Claude on zremote            |
 +----------------------------------------------+
 | [check] Session created                      |
 | [spinner] Launching Claude Code...           |

@@ -86,14 +86,14 @@ export function useRealtimeUpdates(handlers: EventHandler) {
             handlersRef.current.onSessionUpdate?.();
             handlersRef.current.onProjectUpdate?.();
             // Also refresh agentic loops on lag
-            window.dispatchEvent(new Event("myremote:agentic-loop-update"));
+            window.dispatchEvent(new Event("zremote:agentic-loop-update"));
             break;
           case "agentic_loop_detected":
           case "agentic_loop_state_update":
             if (parsed.loop) {
               store.updateLoop(parsed.loop);
               window.dispatchEvent(
-                new Event("myremote:agentic-loop-update"),
+                new Event("zremote:agentic-loop-update"),
               );
             }
             break;
@@ -101,7 +101,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
             if (parsed.loop) {
               store.updateLoop(parsed.loop);
               window.dispatchEvent(
-                new Event("myremote:agentic-loop-update"),
+                new Event("zremote:agentic-loop-update"),
               );
             }
             break;

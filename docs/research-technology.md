@@ -1,7 +1,7 @@
-# Research: Technology Stack for MyRemote
+# Research: Technology Stack for ZRemote
 
 ## Context
-Selection of the best technologies for MyRemote implementation based on analysis of existing projects and the current ecosystem state (2026).
+Selection of the best technologies for ZRemote implementation based on analysis of existing projects and the current ecosystem state (2026).
 
 ---
 
@@ -19,7 +19,7 @@ Same pattern used by Claude Code Remote Control, Tailscale DERP, ngrok. The host
 | **HTTP long polling** | Claude Code RC | Simplicity, passes everywhere | Higher latency, more requests |
 | **SSH reverse tunnel** | Classic pattern | Proven security, widely supported | More complex setup, not native in browser |
 
-**Recommendation for MyRemote**: **WebSocket** as the primary host-to-server channel. Reasons:
+**Recommendation for ZRemote**: **WebSocket** as the primary host-to-server channel. Reasons:
 - Passes through NAT, firewalls, HTTP proxies without configuration
 - Bidirectional real-time (terminal I/O needs low latency)
 - Native in browser (server UI can use the same protocol)
@@ -106,11 +106,11 @@ Host agent creates a PTY process, streams I/O over WebSocket to the server, serv
 
 ---
 
-## 5. Recommended Architecture for MyRemote
+## 5. Recommended Architecture for ZRemote
 
 ```
 ┌─────────────────┐     wss://     ┌──────────────────┐     wss://     ┌─────────────────┐
-│   Web Browser   │ <-----------> │   MyRemote       │ <-----------> │   Host Agent    │
+│   Web Browser   │ <-----------> │   ZRemote       │ <-----------> │   Host Agent    │
 │   (React +      │               │   Server         │               │   (Rust binary) │
 │    xterm.js)    │               │   (Rust/Axum)    │               │                 │
 └─────────────────┘               │                  │               │   - PTY mgmt    │

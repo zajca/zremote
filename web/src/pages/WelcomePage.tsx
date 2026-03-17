@@ -16,7 +16,7 @@ export function WelcomePage() {
         </div>
         <div className="space-y-2">
           <h1 className="text-2xl font-semibold text-text-primary">
-            Welcome to MyRemote
+            Welcome to ZRemote
           </h1>
           <p className="text-sm text-text-secondary">
             Connect remote agents to manage terminal sessions from your browser.
@@ -28,10 +28,10 @@ export function WelcomePage() {
             Connect your first agent
           </div>
           <pre className="overflow-x-auto rounded bg-bg-tertiary p-3 font-mono text-xs text-text-secondary">
-            {`export MYREMOTE_SERVER=http://localhost:3000
-export MYREMOTE_TOKEN=<your-token>
+            {`export ZREMOTE_SERVER=http://localhost:3000
+export ZREMOTE_TOKEN=<your-token>
 
-myremote-agent`}
+zremote-agent`}
           </pre>
         </div>
         {firstHost && (
