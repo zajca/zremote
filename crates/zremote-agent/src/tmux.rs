@@ -204,13 +204,7 @@ impl TmuxSession {
         // original window/pane 0 was closed and only index 1+ remains).
         let reattach_target = {
             let out = tmux_cmd()
-                .args([
-                    "list-panes",
-                    "-t",
-                    &tmux_name,
-                    "-F",
-                    "#{pane_id}",
-                ])
+                .args(["list-panes", "-t", &tmux_name, "-F", "#{pane_id}"])
                 .output()
                 .map_err(|e| format!("failed to list panes for {tmux_name}: {e}"))?;
             if !out.status.success() {
@@ -255,14 +249,14 @@ impl TmuxSession {
         if let Ok(cap) = tmux_cmd()
             .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
             .output()
+            && cap.status.success()
+            && !cap.stdout.is_empty()
         {
-            if cap.status.success() && !cap.stdout.is_empty() {
-                let _ = output_tx.try_send(PtyOutput {
-                    session_id,
-                    pane_id: None,
-                    data: cap.stdout,
-                });
-            }
+            let _ = output_tx.try_send(PtyOutput {
+                session_id,
+                pane_id: None,
+                data: cap.stdout,
+            });
         }
 
         let mut known_pane_ids = HashSet::new();

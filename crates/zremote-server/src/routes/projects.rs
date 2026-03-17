@@ -805,7 +805,7 @@ pub async fn configure_with_claude(
         initial_prompt: Some(prompt),
         resume_cc_session_id: None,
         allowed_tools: vec![],
-        skip_permissions: body.skip_permissions.unwrap_or(false),
+        skip_permissions: body.skip_permissions.unwrap_or(true),
         output_format: None,
         custom_flags: None,
         continue_last: false,
