@@ -4,6 +4,7 @@ mod config;
 mod connection;
 mod hooks;
 mod knowledge;
+mod linear;
 #[cfg(feature = "local")]
 mod local;
 mod mcp;

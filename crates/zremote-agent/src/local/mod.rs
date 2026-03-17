@@ -410,6 +410,35 @@ fn build_router(
             "/api/hosts/{host_id}/claude-tasks/discover",
             get(routes::claude_sessions::discover_claude_sessions),
         )
+        // Linear integration
+        .route(
+            "/api/projects/{project_id}/linear/me",
+            get(routes::linear::get_me),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/issues",
+            get(routes::linear::list_issues),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/issues/{issue_id}",
+            get(routes::linear::get_issue),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/teams",
+            get(routes::linear::list_teams),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/projects",
+            get(routes::linear::list_projects),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/cycles",
+            get(routes::linear::list_cycles),
+        )
+        .route(
+            "/api/projects/{project_id}/linear/actions/{action_index}",
+            post(routes::linear::execute_action),
+        )
         // Terminal WebSocket
         .route(
             "/ws/terminal/{session_id}",

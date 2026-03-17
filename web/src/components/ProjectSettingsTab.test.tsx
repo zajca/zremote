@@ -269,4 +269,127 @@ describe("ProjectSettingsTab", () => {
       expect(screen.getByText("Reset to defaults")).toBeInTheDocument();
     });
   });
+
+  test("renders linear section when settings have linear config", async () => {
+    const settingsWithLinear = {
+      ...defaultSettings,
+      linear: {
+        token_env_var: "MY_TOKEN",
+        team_key: "ENG",
+        my_email: "jan@test.com",
+        actions: [{ name: "Analyze", prompt: "Analyze {{issue.title}}" }],
+      },
+    };
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/settings")) {
+        return mockFetchResponse({ settings: settingsWithLinear });
+      }
+      return mockFetchResponse({});
+    });
+    render(
+      <MemoryRouter>
+        <ProjectSettingsTab projectId="proj-1" projectPath="/home/user/project" hostId="host-1" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Linear Integration")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("MY_TOKEN")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("ENG")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("jan@test.com")).toBeInTheDocument();
+    });
+  });
+
+  test("linear toggle shows fields when enabled", async () => {
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/settings")) {
+        return mockFetchResponse({ settings: defaultSettings });
+      }
+      return mockFetchResponse({});
+    });
+    render(
+      <MemoryRouter>
+        <ProjectSettingsTab projectId="proj-1" projectPath="/home/user/project" hostId="host-1" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Linear Integration")).toBeInTheDocument();
+    });
+
+    // Linear fields should not be visible initially
+    expect(screen.queryByPlaceholderText("e.g. ENG")).not.toBeInTheDocument();
+
+    // Enable linear
+    await userEvent.click(screen.getByLabelText("Enable Linear integration"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Validate")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("e.g. ENG")).toBeInTheDocument();
+    });
+  });
+
+  test("linear validate calls API", async () => {
+    const settingsWithLinear = {
+      ...defaultSettings,
+      linear: {
+        token_env_var: "LINEAR_TOKEN",
+        team_key: "ENG",
+        actions: [],
+      },
+    };
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/linear/me")) {
+        return mockFetchResponse({ id: "u1", name: "Jan", email: "jan@test.com", displayName: "Jan N" });
+      }
+      if (url.includes("/settings")) {
+        return mockFetchResponse({ settings: settingsWithLinear });
+      }
+      return mockFetchResponse({});
+    });
+    render(
+      <MemoryRouter>
+        <ProjectSettingsTab projectId="proj-1" projectPath="/home/user/project" hostId="host-1" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Validate")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByText("Validate"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Authenticated as Jan N/)).toBeInTheDocument();
+    });
+  });
+
+  test("linear actions can be added and removed", async () => {
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/settings")) {
+        return mockFetchResponse({ settings: defaultSettings });
+      }
+      return mockFetchResponse({});
+    });
+    render(
+      <MemoryRouter>
+        <ProjectSettingsTab projectId="proj-1" projectPath="/home/user/project" hostId="host-1" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Linear Integration")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByLabelText("Enable Linear integration"));
+
+    await waitFor(() => {
+      // Default actions should be added (3 starters)
+      expect(screen.getAllByLabelText("Linear action name").length).toBe(3);
+    });
+
+    // Remove one action
+    const removeButtons = screen.getAllByLabelText("Remove linear action");
+    await userEvent.click(removeButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getAllByLabelText("Linear action name").length).toBe(2);
+    });
+  });
 });

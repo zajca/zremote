@@ -21,9 +21,10 @@ import { ProjectLoopsTab } from "../components/agentic/ProjectLoopsTab";
 import { ProjectSettingsTab } from "../components/ProjectSettingsTab";
 import { ActionsTab } from "../components/project/ActionsTab";
 import { WorktreeCard } from "../components/project/WorktreeCard";
+import { LinearIssuesPanel } from "../components/linear/LinearIssuesPanel";
 import { showToast } from "../components/layout/Toast";
 
-type Tab = "sessions" | "actions" | "loops" | "knowledge" | "settings" | "git";
+type Tab = "sessions" | "actions" | "loops" | "knowledge" | "linear" | "settings" | "git";
 
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -308,6 +309,7 @@ export function ProjectPage() {
               "loops",
               ...(project.git_branch !== null ? ["git" as const] : []),
               "knowledge",
+              "linear",
               "settings",
             ] as const
           ).map((tab) => (
@@ -358,6 +360,9 @@ export function ProjectPage() {
         )}
         {activeTab === "knowledge" && (
           <KnowledgePanel projectId={project.id} hostId={project.host_id} />
+        )}
+        {activeTab === "linear" && (
+          <LinearIssuesPanel projectId={project.id} hostId={project.host_id} />
         )}
         {activeTab === "settings" && (
           <ProjectSettingsTab

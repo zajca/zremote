@@ -6,6 +6,7 @@ pub mod events;
 pub mod health;
 pub mod hosts;
 pub mod knowledge;
+pub mod linear;
 pub mod permissions;
 pub mod projects;
 pub mod search;
