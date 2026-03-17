@@ -40,6 +40,10 @@ export const SessionItem = memo(function SessionItem({
   const navigate = useNavigate();
   const location = useLocation();
   const isActive = location.pathname.includes(`/sessions/${session.id}`);
+  const claudeTaskName = useClaudeTaskStore((s) => {
+    const taskId = s.sessionTaskIndex.get(session.id);
+    return taskId ? s.tasks.get(taskId)?.task_name : undefined;
+  });
   const isClaudeTask = useClaudeTaskStore(
     (s) => s.sessionTaskIndex.has(session.id),
   );
@@ -100,7 +104,11 @@ export const SessionItem = memo(function SessionItem({
           ) : (
             <Terminal size={13} className="shrink-0 text-text-tertiary" />
           )}
-          <span className="truncate">{session.name || session.shell || "shell"}</span>
+          <span className="truncate">
+            {isClaudeTask && claudeTaskName
+              ? claudeTaskName
+              : session.name || session.shell || "shell"}
+          </span>
           <Badge variant={sessionStatusVariant(session.status)}>
             {session.status}
           </Badge>

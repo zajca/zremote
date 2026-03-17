@@ -126,6 +126,11 @@ export function SessionPage() {
         {!!claudeTask && (
           <Bot size={14} className="shrink-0 text-accent" />
         )}
+        {claudeTask?.task_name && (
+          <span className="text-sm font-medium text-accent">
+            {claudeTask.task_name}
+          </span>
+        )}
         <span className="font-mono text-xs text-text-tertiary">
           {sessionId?.slice(0, 8)}
         </span>
