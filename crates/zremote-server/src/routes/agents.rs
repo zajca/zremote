@@ -2288,6 +2288,7 @@ async fn upsert_host(
 /// Clean up after an agent disconnects: close sessions, clean agentic loops,
 /// remove from connection manager (only if generation matches), and mark as offline.
 async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
+    // Read the persistent flag BEFORE unregistering (removal clears it from the map).
     let supports_persistent = state
         .connections
         .supports_persistent_sessions(host_id)
@@ -2296,6 +2297,18 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
         .connections
         .unregister_if_generation(host_id, generation)
         .await;
+
+    if !removed {
+        // A newer connection has already replaced this one. Skip cleanup
+        // to avoid race conditions where we re-suspend sessions that the
+        // new connection has already recovered.
+        tracing::debug!(
+            host_id = %host_id,
+            generation,
+            "skipping stale cleanup (newer connection active)"
+        );
+        return;
+    }
 
     let now = Utc::now().to_rfc3339();
     let host_id_str = host_id.to_string();
