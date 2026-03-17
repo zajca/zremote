@@ -509,6 +509,57 @@ The team lead (you, the main agent) is the single point of accountability. Teamm
 - Fundamental architectural problem (wrong crate boundary, security vulnerability in design): revert worktree, update RFC if needed, re-assign with corrected instructions.
 - Implementation-level issues (missing error handling, incomplete tests, wrong field names): send teammate back to fix. This is the normal path.
 
+### UX Discipline
+
+The UX bar for this project is **top-in-class** -- every interaction must feel polished and intentional. The UX reviewer checks; the team lead enforces. Do not merge UI changes that merely "work." They must feel right.
+
+**Verification protocol (mandatory for every UI-touching phase):**
+- Walk through every interaction path: initial load, data arrives, empty state, error state, window resize, navigate away and back. Each must be visually complete.
+- Verify the UX reviewer covered all states, not just the happy path. If the reviewer report mentions 2 states but the component has 5, send the reviewer back.
+- Open the component at mobile-width (`max-w-sm`) and wide (`> 1400px`). Layout must not break, overflow, or waste space at either extreme.
+- Check that new UI is reachable: sidebar entry, route, command palette registration -- at least one entry point. No orphaned pages.
+
+**Visual quality bar:**
+
+| Area | Standard | Reference |
+|------|----------|-----------|
+| **Loading** | Skeleton loaders that match the shape of loaded content. No bare "Loading..." text. Zero layout shift when data arrives. | *Current codebase uses text loading -- new components must use skeletons.* |
+| **Empty states** | Icon (lucide-react, 32px) + primary message (`text-sm text-text-secondary`) + CTA button. Centered with `gap-4 pt-24`. | `HostPage.tsx` lines 75-83 |
+| **Error states** | Inline recovery UI for page-level failures (retry button + explanation). Toast-only is insufficient for errors that block the entire view. | Toasts for transient errors, inline for blocking errors. |
+| **Transitions** | `duration-150` for color/opacity fades, `duration-200` for size/layout changes. No pop-in/pop-out. All interactive elements use `transition-colors duration-150` or `transition-all duration-150`. | `Button.tsx`, `IconButton.tsx` |
+| **Spacing** | Tailwind scale only. Cards: `p-4`. Page containers: `p-6`. Headers: `px-6 py-4`. List items: `px-3 py-2`. Gaps: `gap-1.5` through `gap-4`. No arbitrary pixel values. | `HostPage.tsx`, `SessionItem.tsx` |
+| **Typography** | 4-level hierarchy: `text-lg font-semibold` (page title), `text-sm` (body), `text-sm text-text-secondary` (secondary), `text-xs text-text-tertiary` (metadata/labels). Monospace data: `font-mono`. | Sidebar, HostPage, AgenticLoopPanel |
+| **Colors** | All colors from `index.css` `@theme` tokens. No hardcoded hex anywhere -- including recharts chart fills, strokes, and tooltip backgrounds. Use `getComputedStyle` or CSS custom properties. | `--color-accent: #5e6ad2`, `--color-bg-tertiary: #1a1a1e`, etc. |
+
+**Anti-patterns to reject** (block merge if found):
+1. Text-only loading states (`"Loading..."` without skeleton structure)
+2. Missing empty states (component renders blank when data array is empty)
+3. Toast-only page errors (page-level fetch failure shows only a toast, no inline recovery)
+4. Inline styles for layout (`style={{ marginTop: 12 }}` instead of Tailwind classes)
+5. Hardcoded color values (`#5e6ad2`, `rgb(90, 106, 210)` instead of `text-accent`, `bg-accent`)
+6. Missing hover/focus/disabled states on interactive elements
+7. Layout shift on load (content jumps when data arrives because container size changes)
+8. Unstyled scrollbars in panels (use `scrollbar-thin` or custom scrollbar classes)
+9. Icon buttons without `aria-label` (every `IconButton` / clickable icon must have one)
+10. Inconsistent border radius (mixing `rounded-md`, `rounded-lg`, `rounded-xl` without pattern)
+11. Orphaned visual states (component shows stale data from previous selection during loading)
+12. Duplicated utility code (`formatTokens`, `statusBadgeVariant`, `formatDuration`, `formatCost` -- extract to shared utils, do not copy between components)
+
+**Accessibility baseline** (non-negotiable, block merge if missing):
+- Every interactive element reachable via keyboard (Tab order logical, no focus traps)
+- Visible focus rings: `focus-visible:ring-2 focus-visible:outline-none` on all interactive elements
+- `aria-label` on every icon-only button (reference: `IconButton.tsx` pattern)
+- `role="alert"` or `aria-live="polite"` on status changes that happen asynchronously (toast, inline error, loading-to-loaded transitions)
+- Color is never the sole indicator of state (pair with icon, text, or shape)
+- Minimum click target: `h-7 w-7` for icon buttons, `h-8` for text buttons (reference: `Button.tsx` size variants)
+- Form inputs have associated `<label>` with `htmlFor` (reference: `Input.tsx` pattern)
+
+**Performance perception:**
+- Visual feedback within 100ms for any action that triggers a fetch (spinner, skeleton, or optimistic update)
+- Optimistic updates for mutations where possible (toggle, delete, reorder) -- revert on error
+- Terminal component (`Terminal.tsx`) must never re-render from parent state changes. Memo and isolate.
+- Real-time data (WebSocket messages, PTY output) must use `requestAnimationFrame` batching -- never trigger React re-render per message
+
 ## Coding Conventions
 
 - Rust edition 2024, resolver v2
