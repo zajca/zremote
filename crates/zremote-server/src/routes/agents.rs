@@ -567,14 +567,32 @@ async fn handle_agent_message(
 
             let now = chrono::Utc::now().to_rfc3339();
 
-            // Get all currently suspended sessions for this host
+            // Get all currently suspended sessions for this host from BOTH
+            // in-memory store and DB (DB may have sessions from before server restart).
             let suspended_session_ids: Vec<uuid::Uuid> = {
-                let sessions_store = state.sessions.read().await;
-                sessions_store
-                    .iter()
-                    .filter(|(_, s)| s.host_id == host_id && s.status == "suspended")
-                    .map(|(id, _)| *id)
-                    .collect()
+                let mut ids: HashSet<uuid::Uuid> = {
+                    let sessions_store = state.sessions.read().await;
+                    sessions_store
+                        .iter()
+                        .filter(|(_, s)| s.host_id == host_id && s.status == "suspended")
+                        .map(|(id, _)| *id)
+                        .collect()
+                };
+                // Also check DB for suspended sessions not yet in memory (server restart case)
+                if let Ok(db_rows) = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM sessions WHERE host_id = ? AND status = 'suspended'",
+                )
+                .bind(host_id.to_string())
+                .fetch_all(&state.db)
+                .await
+                {
+                    for row in db_rows {
+                        if let Ok(id) = row.parse::<uuid::Uuid>() {
+                            ids.insert(id);
+                        }
+                    }
+                }
+                ids.into_iter().collect()
             };
 
             let recovered_ids: HashSet<uuid::Uuid> =

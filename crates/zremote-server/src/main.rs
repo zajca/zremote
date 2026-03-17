@@ -232,17 +232,32 @@ async fn main() {
     });
 
     // Clean stale data from previous server runs.
-    // At startup no agents are connected and SessionStore is empty,
-    // so any "active" or "creating" entries are leftovers.
+    // Sessions with tmux_name are persistent and may be recovered when the agent reconnects.
+    // Sessions without tmux_name are dead for sure (no persistence mechanism).
     let startup_now = chrono::Utc::now().to_rfc3339();
+
+    // Persistent sessions: mark as suspended (agent may recover them)
     if let Err(e) = sqlx::query(
-        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE status IN ('creating', 'active')",
+        "UPDATE sessions SET status = 'suspended', suspended_at = ? \
+         WHERE status IN ('creating', 'active') AND tmux_name IS NOT NULL",
     )
     .bind(&startup_now)
     .execute(&pool)
     .await
     {
-        tracing::error!(error = %e, "failed to close stale sessions at startup");
+        tracing::error!(error = %e, "failed to suspend persistent sessions at startup");
+    }
+
+    // Non-persistent sessions: close them (no recovery possible)
+    if let Err(e) = sqlx::query(
+        "UPDATE sessions SET status = 'closed', closed_at = ? \
+         WHERE status IN ('creating', 'active') AND tmux_name IS NULL",
+    )
+    .bind(&startup_now)
+    .execute(&pool)
+    .await
+    {
+        tracing::error!(error = %e, "failed to close non-persistent sessions at startup");
     }
     if let Err(e) = sqlx::query(
         "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'server_restart' \
