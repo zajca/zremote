@@ -790,6 +790,7 @@ async fn handle_agent_message(
         AgentMessage::WorktreeCreated {
             project_path,
             worktree,
+            hook_result: _,
         } => {
             let host_id_str = host_id.to_string();
 
@@ -866,6 +867,22 @@ async fn handle_agent_message(
                 project_path,
                 message,
             });
+        }
+        AgentMessage::WorktreeHookResult {
+            project_path,
+            worktree_path,
+            hook_type,
+            success,
+            ..
+        } => {
+            tracing::info!(
+                host_id = %host_id,
+                path = %project_path,
+                worktree = %worktree_path,
+                hook = %hook_type,
+                success = %success,
+                "worktree hook result"
+            );
         }
         AgentMessage::KnowledgeAction(knowledge_msg) => {
             if let Err(e) = handle_knowledge_message(state, host_id, knowledge_msg).await {

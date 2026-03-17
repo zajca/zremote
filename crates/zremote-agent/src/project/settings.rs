@@ -262,6 +262,8 @@ mod tests {
             working_dir: None,
             env: std::collections::HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
             agentic: Default::default(),
+            actions: vec![],
+            worktree: None,
         };
 
         write_settings(tmp.path(), &settings).unwrap();

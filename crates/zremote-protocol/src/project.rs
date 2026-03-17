@@ -49,6 +49,12 @@ pub struct WorktreeInfo {
     pub is_detached: bool,
     /// Whether the worktree is locked.
     pub is_locked: bool,
+    /// Whether the worktree has uncommitted changes.
+    #[serde(default)]
+    pub is_dirty: bool,
+    /// First line of HEAD commit message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
 }
 
 /// Per-project settings stored in .zremote/settings.json.
@@ -62,6 +68,10 @@ pub struct ProjectSettings {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub agentic: AgenticSettings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ProjectAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeSettings>,
 }
 
 /// Agentic behavior settings for a project.
@@ -87,6 +97,32 @@ impl Default for AgenticSettings {
             auto_approve_patterns: Vec::new(),
         }
     }
+}
+
+/// A user-defined action configured in .zremote/settings.json.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectAction {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub worktree_scoped: bool,
+}
+
+/// Worktree lifecycle hook configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorktreeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
 }
 
 /// Information about a discovered project on a remote host.
@@ -174,6 +210,8 @@ mod tests {
                 commit_hash: Some("def5678".to_string()),
                 is_detached: false,
                 is_locked: false,
+                is_dirty: false,
+                commit_message: None,
             }],
         };
         let json = serde_json::to_string(&info).expect("serialize");
@@ -243,6 +281,8 @@ mod tests {
             commit_hash: Some("1234567".to_string()),
             is_detached: false,
             is_locked: false,
+            is_dirty: false,
+            commit_message: None,
         };
         let json = serde_json::to_string(&wt).expect("serialize");
         let parsed: WorktreeInfo = serde_json::from_str(&json).expect("deserialize");
@@ -257,6 +297,8 @@ mod tests {
             commit_hash: Some("abcdef0".to_string()),
             is_detached: true,
             is_locked: true,
+            is_dirty: false,
+            commit_message: None,
         };
         let json = serde_json::to_string(&wt).expect("serialize");
         let parsed: WorktreeInfo = serde_json::from_str(&json).expect("deserialize");
@@ -301,6 +343,8 @@ mod tests {
                 default_permissions: vec!["Read".to_string(), "Glob".to_string()],
                 auto_approve_patterns: vec!["cargo test*".to_string()],
             },
+            actions: vec![],
+            worktree: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -316,6 +360,8 @@ mod tests {
         assert!(settings.agentic.auto_detect);
         assert!(settings.agentic.default_permissions.is_empty());
         assert!(settings.agentic.auto_approve_patterns.is_empty());
+        assert!(settings.actions.is_empty());
+        assert!(settings.worktree.is_none());
     }
 
     #[test]
@@ -354,5 +400,112 @@ mod tests {
         let json = r#"{"path":"/p","name":"p","has_claude_config":false,"project_type":"rust"}"#;
         let parsed: ProjectInfo = serde_json::from_str(json).expect("deserialize");
         assert!(!parsed.has_zremote_config);
+    }
+
+    #[test]
+    fn project_action_roundtrip() {
+        let action = ProjectAction {
+            name: "build".to_string(),
+            command: "cargo build --release".to_string(),
+            description: Some("Build the project".to_string()),
+            icon: Some("hammer".to_string()),
+            working_dir: Some("/home/user/project".to_string()),
+            env: HashMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+            worktree_scoped: true,
+        };
+        let json = serde_json::to_string(&action).expect("serialize");
+        let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(action, parsed);
+    }
+
+    #[test]
+    fn project_action_minimal() {
+        let json = r#"{"name":"test","command":"cargo test"}"#;
+        let parsed: ProjectAction = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.command, "cargo test");
+        assert!(parsed.description.is_none());
+        assert!(parsed.icon.is_none());
+        assert!(parsed.working_dir.is_none());
+        assert!(parsed.env.is_empty());
+        assert!(!parsed.worktree_scoped);
+    }
+
+    #[test]
+    fn worktree_settings_roundtrip() {
+        let settings = WorktreeSettings {
+            on_create: Some("npm install".to_string()),
+            on_delete: Some("rm -rf node_modules".to_string()),
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: WorktreeSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn worktree_settings_empty() {
+        let settings: WorktreeSettings = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(settings, WorktreeSettings::default());
+        assert!(settings.on_create.is_none());
+        assert!(settings.on_delete.is_none());
+    }
+
+    #[test]
+    fn project_settings_backward_compat_no_actions() {
+        let json = r#"{"shell":"/bin/bash","agentic":{"auto_detect":true}}"#;
+        let parsed: ProjectSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.shell.as_deref(), Some("/bin/bash"));
+        assert!(parsed.actions.is_empty());
+        assert!(parsed.worktree.is_none());
+    }
+
+    #[test]
+    fn project_settings_with_actions_roundtrip() {
+        let settings = ProjectSettings {
+            shell: Some("/bin/zsh".to_string()),
+            working_dir: None,
+            env: HashMap::new(),
+            agentic: AgenticSettings::default(),
+            actions: vec![ProjectAction {
+                name: "test".to_string(),
+                command: "cargo test".to_string(),
+                description: None,
+                icon: None,
+                working_dir: None,
+                env: HashMap::new(),
+                worktree_scoped: false,
+            }],
+            worktree: Some(WorktreeSettings {
+                on_create: Some("npm install".to_string()),
+                on_delete: None,
+            }),
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn worktree_info_backward_compat_no_dirty() {
+        let json = r#"{"path":"/p","branch":"main","commit_hash":"abc1234","is_detached":false,"is_locked":false}"#;
+        let parsed: WorktreeInfo = serde_json::from_str(json).expect("deserialize");
+        assert!(!parsed.is_dirty);
+        assert!(parsed.commit_message.is_none());
+    }
+
+    #[test]
+    fn worktree_info_enriched_roundtrip() {
+        let wt = WorktreeInfo {
+            path: "/home/user/repo-feat".to_string(),
+            branch: Some("feature/x".to_string()),
+            commit_hash: Some("abc1234".to_string()),
+            is_detached: false,
+            is_locked: false,
+            is_dirty: true,
+            commit_message: Some("work in progress".to_string()),
+        };
+        let json = serde_json::to_string(&wt).expect("serialize");
+        let parsed: WorktreeInfo = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(wt, parsed);
     }
 }
