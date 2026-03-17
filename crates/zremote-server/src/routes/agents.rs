@@ -402,7 +402,10 @@ async fn handle_agent_message(
         AgentMessage::TerminalOutput { session_id, data } => {
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
-                let browser_msg = crate::state::BrowserMessage::Output { data: data.clone() };
+                let browser_msg = crate::state::BrowserMessage::Output {
+                    pane_id: None,
+                    data: data.clone(),
+                };
                 session.append_scrollback(data);
                 // Forward to all browser senders, remove dead ones
                 session.browser_senders.retain(|sender| {

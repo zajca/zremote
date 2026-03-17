@@ -19,9 +19,18 @@ const BROWSER_CHANNEL_SIZE: usize = 256;
 #[serde(tag = "type")]
 enum BrowserInput {
     #[serde(rename = "input")]
-    Input { data: String },
+    Input {
+        #[serde(default)]
+        pane_id: Option<String>,
+        data: String,
+    },
     #[serde(rename = "resize")]
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        #[serde(default)]
+        pane_id: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// WebSocket upgrade handler for browser terminal connections.
@@ -133,7 +142,10 @@ async fn handle_terminal_connection(
         for chunk in &scrollback_data {
             merged.extend_from_slice(chunk);
         }
-        let output_msg = BrowserMessage::Output { data: merged };
+        let output_msg = BrowserMessage::Output {
+            pane_id: None,
+            data: merged,
+        };
         if let Ok(json) = serde_json::to_string(&output_msg)
             && socket.send(Message::Text(json.into())).await.is_err()
         {
@@ -145,6 +157,42 @@ async fn handle_terminal_connection(
             && socket.send(Message::Text(json.into())).await.is_err()
         {
             return;
+        }
+    }
+
+    // Send extra pane info and scrollback
+    {
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id) {
+            for (pane_id, (chunks, _size)) in &session.pane_scrollbacks {
+                // Notify about existing pane
+                let pane_added = BrowserMessage::PaneAdded {
+                    pane_id: pane_id.clone(),
+                    index: 0, // index not stored in scrollback, will be refreshed by sync
+                };
+                if let Ok(json) = serde_json::to_string(&pane_added)
+                    && socket.send(Message::Text(json.into())).await.is_err()
+                {
+                    return;
+                }
+
+                // Send pane scrollback
+                if !chunks.is_empty() {
+                    let mut merged = Vec::new();
+                    for chunk in chunks {
+                        merged.extend_from_slice(chunk);
+                    }
+                    let output_msg = BrowserMessage::Output {
+                        pane_id: Some(pane_id.clone()),
+                        data: merged,
+                    };
+                    if let Ok(json) = serde_json::to_string(&output_msg)
+                        && socket.send(Message::Text(json.into())).await.is_err()
+                    {
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -183,14 +231,14 @@ async fn handle_terminal_connection(
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<BrowserInput>(&text) {
-                            Ok(BrowserInput::Input { data }) => {
+                            Ok(BrowserInput::Input { pane_id: target_pane, data }) => {
                                 if data.len() > 4096 {
                                     tracing::warn!("browser terminal input exceeds 4096 bytes, closing connection");
                                     break;
                                 }
                                 // Flush any buffered output before forwarding input
                                 if !output_buf.is_empty() {
-                                    let msg = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                                    let msg = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
                                     coalesce_deadline = None;
                                     if let Ok(json) = serde_json::to_string(&msg)
                                         && socket.send(Message::Text(json.into())).await.is_err()
@@ -198,16 +246,26 @@ async fn handle_terminal_connection(
                                         break;
                                     }
                                 }
-                                // Write directly to PTY via session manager
+                                // Write to specific pane or main pane
                                 let mut mgr = state.session_manager.lock().await;
-                                if let Err(e) = mgr.write_to(&session_id, data.as_bytes()) {
+                                let result = if let Some(ref pid) = target_pane {
+                                    mgr.write_to_pane(&session_id, pid, data.as_bytes())
+                                } else {
+                                    mgr.write_to(&session_id, data.as_bytes())
+                                };
+                                if let Err(e) = result {
                                     tracing::warn!(error = %e, "failed to write to PTY");
                                     break;
                                 }
                             }
-                            Ok(BrowserInput::Resize { cols, rows }) => {
+                            Ok(BrowserInput::Resize { pane_id: target_pane, cols, rows }) => {
                                 let mgr = state.session_manager.lock().await;
-                                if let Err(e) = mgr.resize(&session_id, cols, rows) {
+                                let result = if let Some(ref pid) = target_pane {
+                                    mgr.resize_pane(&session_id, pid, cols, rows)
+                                } else {
+                                    mgr.resize(&session_id, cols, rows)
+                                };
+                                if let Err(e) = result {
                                     tracing::warn!(error = %e, "failed to resize PTY");
                                 }
                             }
@@ -230,7 +288,7 @@ async fn handle_terminal_connection(
             // PTY -> browser: receive and buffer output chunks
             browser_msg = rx.recv() => {
                 match browser_msg {
-                    Some(BrowserMessage::Output { data }) => {
+                    Some(BrowserMessage::Output { data, .. }) => {
                         output_buf.extend_from_slice(&data);
                         if coalesce_deadline.is_none() {
                             coalesce_deadline = Some(Instant::now() + COALESCE_WINDOW);
@@ -239,7 +297,7 @@ async fn handle_terminal_connection(
                     Some(msg) => {
                         // Non-output messages (session_closed, error) flush buffer first
                         if !output_buf.is_empty() {
-                            let flush = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                            let flush = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
                             coalesce_deadline = None;
                             if let Ok(json) = serde_json::to_string(&flush)
                                 && socket.send(Message::Text(json.into())).await.is_err()
@@ -259,7 +317,7 @@ async fn handle_terminal_connection(
             // Flush coalesced output when the window expires
             () = flush_sleep => {
                 if !output_buf.is_empty() {
-                    let msg = BrowserMessage::Output { data: std::mem::take(&mut output_buf) };
+                    let msg = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
                     coalesce_deadline = None;
                     if let Ok(json) = serde_json::to_string(&msg)
                         && socket.send(Message::Text(json.into())).await.is_err()

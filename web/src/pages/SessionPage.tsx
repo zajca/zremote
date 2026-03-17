@@ -9,8 +9,10 @@ import { api } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { IconButton } from "../components/ui/IconButton";
 import { Terminal } from "../components/Terminal";
+import { PaneTabBar } from "../components/PaneTabBar";
 import { AgenticOverlay } from "../components/agentic/AgenticOverlay";
 import { showToast } from "../components/layout/Toast";
+import type { PaneInfo, PaneEvent } from "../types/terminal";
 
 export function SessionPage() {
   const { hostId, sessionId } = useParams<{
@@ -24,6 +26,8 @@ export function SessionPage() {
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState("");
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const [panes, setPanes] = useState<PaneInfo[]>([]);
+  const [activePaneId, setActivePaneId] = useState<string | undefined>(undefined);
 
   const host = hosts.find((h) => h.id === hostId);
   const session = sessions.find((s) => s.id === sessionId);
@@ -92,6 +96,20 @@ export function SessionPage() {
       showToast("Failed to rename session", "error");
     }
   }, [sessionId, nameValue, refetch]);
+
+  const handlePaneEvent = useCallback((event: PaneEvent) => {
+    if (event.type === "pane_added") {
+      setPanes((prev) => {
+        if (prev.some((p) => p.pane_id === event.pane_id)) return prev;
+        return [...prev, { pane_id: event.pane_id, index: event.index }];
+      });
+    } else if (event.type === "pane_removed") {
+      setPanes((prev) => prev.filter((p) => p.pane_id !== event.pane_id));
+      setActivePaneId((prev) =>
+        prev === event.pane_id ? undefined : prev,
+      );
+    }
+  }, []);
 
   const handleRenameKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -192,8 +210,39 @@ export function SessionPage() {
       {/* Terminal area with optional overlay */}
       <div className="relative min-h-0 flex-1 flex flex-col">
         {overlayLoopId && <AgenticOverlay loopId={overlayLoopId} />}
+        <PaneTabBar
+          panes={panes}
+          activePaneId={activePaneId}
+          onSelectPane={setActivePaneId}
+        />
         <div className="relative min-h-0 flex-1">
-          {sessionId && <Terminal sessionId={sessionId} />}
+          {sessionId && (
+            <>
+              {/* Main terminal - always mounted, hidden when not active */}
+              <div
+                className="absolute inset-0"
+                style={{ display: activePaneId === undefined ? "block" : "none" }}
+              >
+                <Terminal
+                  sessionId={sessionId}
+                  onPaneEvent={handlePaneEvent}
+                />
+              </div>
+              {/* Extra pane terminals - always mounted, hidden when not active */}
+              {panes.map((pane) => (
+                <div
+                  key={pane.pane_id}
+                  className="absolute inset-0"
+                  style={{ display: activePaneId === pane.pane_id ? "block" : "none" }}
+                >
+                  <Terminal
+                    sessionId={sessionId}
+                    paneId={pane.pane_id}
+                  />
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
     </div>

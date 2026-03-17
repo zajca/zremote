@@ -11,7 +11,7 @@ use zremote_protocol::SessionId;
 use crate::agentic::manager::AgenticLoopManager;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::permission::PermissionManager;
-use crate::session::SessionManager;
+use crate::session::{PtyOutput, SessionManager};
 
 /// Application state for local mode.
 ///
@@ -26,7 +26,7 @@ pub struct LocalAppState {
     pub hostname: String,
     pub host_id: Uuid,
     pub session_manager: Mutex<SessionManager>,
-    pub pty_output_rx: Mutex<mpsc::Receiver<(SessionId, Vec<u8>)>>,
+    pub pty_output_rx: Mutex<mpsc::Receiver<PtyOutput>>,
     pub agentic_manager: Mutex<AgenticLoopManager>,
     pub agentic_processor: Arc<AgenticProcessor>,
     pub hooks_permission_manager: Arc<PermissionManager>,
