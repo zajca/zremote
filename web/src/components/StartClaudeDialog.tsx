@@ -11,6 +11,7 @@ interface StartClaudeDialogProps {
   projectPath: string;
   hostId: string;
   projectId?: string;
+  initialPrompt?: string;
   onClose: () => void;
 }
 
@@ -44,12 +45,13 @@ export function StartClaudeDialog({
   projectPath,
   hostId,
   projectId,
+  initialPrompt,
   onClose,
 }: StartClaudeDialogProps) {
   const navigate = useNavigate();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(initialPrompt ?? "");
   const [model, setModel] = useState("sonnet");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [toolPreset, setToolPreset] = useState<ToolPreset>("standard");
@@ -63,6 +65,12 @@ export function StartClaudeDialog({
   const [completedTasks, setCompletedTasks] = useState<ClaudeTask[]>([]);
   const [loadingPrevious, setLoadingPrevious] = useState(false);
   const [resumingId, setResumingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialPrompt) {
+      setPrompt(initialPrompt);
+    }
+  }, [initialPrompt]);
 
   useEffect(() => {
     const timer = setTimeout(() => textareaRef.current?.focus(), 50);

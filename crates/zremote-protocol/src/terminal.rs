@@ -108,7 +108,7 @@ pub enum AgentMessage {
     },
     ProjectSettingsResult {
         request_id: uuid::Uuid,
-        settings: Option<ProjectSettings>,
+        settings: Option<Box<ProjectSettings>>,
         error: Option<String>,
     },
     ProjectSettingsSaved {
@@ -735,6 +735,7 @@ mod tests {
                 agentic: AgenticSettings::default(),
                 actions: vec![],
                 worktree: None,
+                linear: None,
             },
         });
     }
@@ -744,14 +745,15 @@ mod tests {
         use crate::project::{AgenticSettings, ProjectSettings};
         roundtrip_agent(&AgentMessage::ProjectSettingsResult {
             request_id: Uuid::new_v4(),
-            settings: Some(ProjectSettings {
+            settings: Some(Box::new(ProjectSettings {
                 shell: Some("/bin/bash".to_string()),
                 working_dir: None,
                 env: std::collections::HashMap::new(),
                 agentic: AgenticSettings::default(),
                 actions: vec![],
                 worktree: None,
-            }),
+                linear: None,
+            })),
             error: None,
         });
     }

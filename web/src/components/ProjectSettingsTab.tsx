@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, Bot, Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
@@ -8,9 +8,28 @@ import {
   type ProjectSettings,
   type WorktreeSettings,
 } from "../lib/api";
+import type { LinearAction } from "../types/linear";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { showToast } from "./layout/Toast";
+
+const DEFAULT_LINEAR_ACTIONS: LinearAction[] = [
+  {
+    name: "Analyze",
+    icon: "search",
+    prompt: "Analyze issue {{issue.identifier}}: {{issue.title}}\n\n{{issue.description}}\n\nProvide a detailed analysis.",
+  },
+  {
+    name: "Write RFC",
+    icon: "file-text",
+    prompt: "Write an RFC for issue {{issue.identifier}}: {{issue.title}}\n\n{{issue.description}}",
+  },
+  {
+    name: "Implement",
+    icon: "code",
+    prompt: "Implement issue {{issue.identifier}}: {{issue.title}}\n\n{{issue.description}}",
+  },
+];
 
 interface ProjectSettingsTabProps {
   projectId: string;
@@ -84,6 +103,15 @@ export function ProjectSettingsTab({
   const [expandedActions, setExpandedActions] = useState<Set<number>>(new Set());
   const [worktreeOnCreate, setWorktreeOnCreate] = useState("");
   const [worktreeOnDelete, setWorktreeOnDelete] = useState("");
+  const [linearEnabled, setLinearEnabled] = useState(false);
+  const [linearTokenEnvVar, setLinearTokenEnvVar] = useState("LINEAR_TOKEN");
+  const [linearTeamKey, setLinearTeamKey] = useState("");
+  const [linearProjectId, setLinearProjectId] = useState("");
+  const [linearMyEmail, setLinearMyEmail] = useState("");
+  const [linearActions, setLinearActions] = useState<LinearAction[]>([]);
+  const [tokenValid, setTokenValid] = useState<boolean | null>(null);
+  const [tokenUserName, setTokenUserName] = useState<string | null>(null);
+  const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const initialRef = useRef<string>("");
@@ -98,6 +126,21 @@ export function ProjectSettingsTab({
     setActions(settings.actions ?? []);
     setWorktreeOnCreate(settings.worktree?.on_create ?? "");
     setWorktreeOnDelete(settings.worktree?.on_delete ?? "");
+    if (settings.linear) {
+      setLinearEnabled(true);
+      setLinearTokenEnvVar(settings.linear.token_env_var || "LINEAR_TOKEN");
+      setLinearTeamKey(settings.linear.team_key || "");
+      setLinearProjectId(settings.linear.project_id ?? "");
+      setLinearMyEmail(settings.linear.my_email ?? "");
+      setLinearActions(settings.linear.actions ?? []);
+    } else {
+      setLinearEnabled(false);
+      setLinearTokenEnvVar("LINEAR_TOKEN");
+      setLinearTeamKey("");
+      setLinearProjectId("");
+      setLinearMyEmail("");
+      setLinearActions([]);
+    }
     initialRef.current = JSON.stringify(settings);
     setDirty(false);
   }, []);
@@ -122,6 +165,15 @@ export function ProjectSettingsTab({
             on_delete: worktreeOnDelete.trim() || undefined,
           }
         : undefined;
+    const linear = linearEnabled
+      ? {
+          token_env_var: linearTokenEnvVar.trim() || "LINEAR_TOKEN",
+          team_key: linearTeamKey.trim(),
+          project_id: linearProjectId.trim() || undefined,
+          my_email: linearMyEmail.trim() || undefined,
+          actions: linearActions.filter((a) => a.name.trim() && a.prompt.trim()),
+        }
+      : undefined;
     return {
       shell: shell.trim() || undefined,
       working_dir: workingDir.trim() || undefined,
@@ -129,8 +181,9 @@ export function ProjectSettingsTab({
       agentic,
       actions: validActions.length > 0 ? validActions : undefined,
       worktree,
+      linear,
     };
-  }, [shell, workingDir, envVars, autoDetect, defaultPermissions, autoApprovePatterns, actions, worktreeOnCreate, worktreeOnDelete]);
+  }, [shell, workingDir, envVars, autoDetect, defaultPermissions, autoApprovePatterns, actions, worktreeOnCreate, worktreeOnDelete, linearEnabled, linearTokenEnvVar, linearTeamKey, linearProjectId, linearMyEmail, linearActions]);
 
   const checkDirty = useCallback(() => {
     const current = JSON.stringify(buildSettings());
@@ -283,6 +336,38 @@ export function ProjectSettingsTab({
     (index: number, field: "key" | "value", val: string) => {
       setEnvVars((prev) =>
         prev.map((v, i) => (i === index ? { ...v, [field]: val } : v)),
+      );
+    },
+    [],
+  );
+
+  const handleValidateToken = useCallback(async () => {
+    setValidating(true);
+    setTokenValid(null);
+    setTokenUserName(null);
+    try {
+      const user = await api.linear.me(projectId);
+      setTokenValid(true);
+      setTokenUserName(user.displayName || user.name);
+    } catch {
+      setTokenValid(false);
+    } finally {
+      setValidating(false);
+    }
+  }, [projectId]);
+
+  const handleAddLinearAction = useCallback(() => {
+    setLinearActions((prev) => [...prev, { name: "", prompt: "" }]);
+  }, []);
+
+  const handleRemoveLinearAction = useCallback((index: number) => {
+    setLinearActions((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handleLinearActionChange = useCallback(
+    (index: number, field: keyof LinearAction, val: string | undefined) => {
+      setLinearActions((prev) =>
+        prev.map((a, i) => (i === index ? { ...a, [field]: val } : a)),
       );
     },
     [],
@@ -618,6 +703,154 @@ export function ProjectSettingsTab({
               {"{{branch}}"}
             </code>
           </p>
+        </div>
+      </section>
+
+      {/* Linear Integration */}
+      <section>
+        <h2 className="mb-3 text-sm font-medium text-text-primary">
+          Linear Integration
+        </h2>
+        <div className="space-y-3 rounded-md border border-border bg-bg-secondary p-4">
+          <label className="flex items-center gap-2 text-sm text-text-secondary">
+            <input
+              type="checkbox"
+              checked={linearEnabled}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                setLinearEnabled(enabled);
+                if (enabled && linearActions.length === 0) {
+                  setLinearActions(DEFAULT_LINEAR_ACTIONS);
+                }
+              }}
+              className="rounded border-border"
+              aria-label="Enable Linear integration"
+            />
+            Enable Linear integration
+          </label>
+          {linearEnabled && (
+            <div className="space-y-3 border-t border-border pt-3">
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <Input
+                    label="Token environment variable"
+                    value={linearTokenEnvVar}
+                    onChange={(e) => setLinearTokenEnvVar(e.target.value)}
+                    placeholder="LINEAR_TOKEN"
+                    className="font-mono"
+                  />
+                </div>
+                <Button
+                  onClick={() => void handleValidateToken()}
+                  variant="ghost"
+                  size="sm"
+                  disabled={validating}
+                >
+                  {validating ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : tokenValid === true ? (
+                    <Check size={14} className="text-status-online" />
+                  ) : tokenValid === false ? (
+                    <AlertCircle size={14} className="text-status-error" />
+                  ) : null}
+                  Validate
+                </Button>
+              </div>
+              {tokenValid === true && tokenUserName && (
+                <p className="text-xs text-status-online">
+                  Authenticated as {tokenUserName}
+                </p>
+              )}
+              {tokenValid === false && (
+                <p className="text-xs text-status-error">
+                  Token validation failed. Check the environment variable.
+                </p>
+              )}
+              <Input
+                label="Team key"
+                value={linearTeamKey}
+                onChange={(e) => setLinearTeamKey(e.target.value)}
+                placeholder="e.g. ENG"
+              />
+              <Input
+                label="Project ID (optional)"
+                value={linearProjectId}
+                onChange={(e) => setLinearProjectId(e.target.value)}
+                placeholder="Optional - scope to a specific project"
+              />
+              <Input
+                label="My email (for 'My Issues' filter)"
+                value={linearMyEmail}
+                onChange={(e) => setLinearMyEmail(e.target.value)}
+                placeholder="user@example.com"
+              />
+              <div>
+                <span className="mb-2 block text-xs font-medium text-text-secondary">
+                  Actions
+                </span>
+                <div className="space-y-2">
+                  {linearActions.map((action, i) => (
+                    <div
+                      key={i}
+                      className="rounded-md border border-border bg-bg-tertiary p-3"
+                    >
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 space-y-2">
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={action.name}
+                              onChange={(e) =>
+                                handleLinearActionChange(i, "name", e.target.value)
+                              }
+                              placeholder="Action name"
+                              className="h-8 flex-1 rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                              aria-label="Linear action name"
+                            />
+                            <input
+                              type="text"
+                              value={action.icon ?? ""}
+                              onChange={(e) =>
+                                handleLinearActionChange(
+                                  i,
+                                  "icon",
+                                  e.target.value || undefined,
+                                )
+                              }
+                              placeholder="Icon"
+                              className="h-8 w-24 rounded-md border border-border bg-bg-secondary px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                              aria-label="Linear action icon"
+                            />
+                          </div>
+                          <textarea
+                            value={action.prompt}
+                            onChange={(e) =>
+                              handleLinearActionChange(i, "prompt", e.target.value)
+                            }
+                            placeholder="Prompt template (use {{issue.identifier}}, {{issue.title}}, {{issue.description}})"
+                            rows={3}
+                            className="w-full rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                            aria-label="Linear action prompt"
+                          />
+                        </div>
+                        <button
+                          onClick={() => handleRemoveLinearAction(i)}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-status-error"
+                          aria-label="Remove linear action"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <Button onClick={handleAddLinearAction} variant="ghost" size="sm">
+                    <Plus size={14} />
+                    Add action
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

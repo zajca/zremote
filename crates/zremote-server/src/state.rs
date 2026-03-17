@@ -138,7 +138,7 @@ pub struct DirectoryListingResponse {
 
 /// Response type for settings get oneshot channels.
 pub struct SettingsGetResponse {
-    pub settings: Option<zremote_protocol::project::ProjectSettings>,
+    pub settings: Option<Box<zremote_protocol::project::ProjectSettings>>,
     pub error: Option<String>,
 }
 

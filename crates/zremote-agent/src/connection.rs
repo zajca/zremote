@@ -818,7 +818,7 @@ fn handle_server_message(
                 let msg = match result {
                     Ok(settings) => AgentMessage::ProjectSettingsResult {
                         request_id,
-                        settings,
+                        settings: settings.map(Box::new),
                         error: None,
                     },
                     Err(e) => AgentMessage::ProjectSettingsResult {

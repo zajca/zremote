@@ -92,6 +92,7 @@ export interface ProjectSettings {
   agentic: AgenticSettings;
   actions?: ProjectAction[];
   worktree?: WorktreeSettings;
+  linear?: LinearSettings;
 }
 
 export interface ConfigValue {
@@ -154,6 +155,15 @@ import type {
   SearchResponse,
   SearchTier,
 } from "../types/knowledge";
+import type {
+  LinearUser,
+  LinearIssue,
+  LinearTeam,
+  LinearProject,
+  LinearCycle,
+  LinearSettings,
+  IssuePreset,
+} from "../types/linear";
 
 export const api = {
   hosts: {
@@ -499,5 +509,44 @@ export const api = {
         `/api/hosts/${hostId}/claude-tasks/discover?${params}`,
       );
     },
+  },
+  linear: {
+    me: (projectId: string) =>
+      request<LinearUser>(`/api/projects/${projectId}/linear/me`),
+
+    issues: (projectId: string, params?: {
+      preset?: IssuePreset;
+      state_type?: string;
+      label?: string;
+      first?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.preset) qs.set("preset", params.preset);
+      if (params?.state_type) qs.set("state_type", params.state_type);
+      if (params?.label) qs.set("label", params.label);
+      if (params?.first) qs.set("first", String(params.first));
+      const s = qs.toString();
+      return request<LinearIssue[]>(
+        `/api/projects/${projectId}/linear/issues${s ? `?${s}` : ""}`,
+      );
+    },
+
+    issue: (projectId: string, issueId: string) =>
+      request<LinearIssue>(`/api/projects/${projectId}/linear/issues/${issueId}`),
+
+    teams: (projectId: string) =>
+      request<LinearTeam[]>(`/api/projects/${projectId}/linear/teams`),
+
+    projects: (projectId: string) =>
+      request<LinearProject[]>(`/api/projects/${projectId}/linear/projects`),
+
+    cycles: (projectId: string) =>
+      request<LinearCycle[]>(`/api/projects/${projectId}/linear/cycles`),
+
+    executeAction: (projectId: string, actionIndex: number, issueId: string) =>
+      request<{ prompt: string; issue: LinearIssue }>(
+        `/api/projects/${projectId}/linear/actions/${actionIndex}`,
+        { method: "POST", body: JSON.stringify({ issue_id: issueId }) },
+      ),
   },
 };

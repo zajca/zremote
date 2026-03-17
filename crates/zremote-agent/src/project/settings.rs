@@ -264,6 +264,7 @@ mod tests {
             agentic: Default::default(),
             actions: vec![],
             worktree: None,
+            linear: None,
         };
 
         write_settings(tmp.path(), &settings).unwrap();

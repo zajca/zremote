@@ -72,6 +72,8 @@ pub struct ProjectSettings {
     pub actions: Vec<ProjectAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<LinearSettings>,
 }
 
 /// Agentic behavior settings for a project.
@@ -123,6 +125,36 @@ pub struct WorktreeSettings {
     pub on_create: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
+}
+
+/// Linear integration settings for a project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LinearSettings {
+    /// Name of the environment variable holding the Linear API token.
+    pub token_env_var: String,
+    /// Linear team key (e.g., "ENG").
+    pub team_key: String,
+    /// Optional Linear project ID to scope issue queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// User's email in Linear for "my issues" filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_email: Option<String>,
+    /// Custom actions available on issues.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<LinearAction>,
+}
+
+/// A custom action that can be performed on a Linear issue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinearAction {
+    /// Display name for the action button.
+    pub name: String,
+    /// Lucide icon name (e.g., "search", "file-text", "code").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Prompt template with {{issue.identifier}}, {{issue.title}}, {{issue.description}} placeholders.
+    pub prompt: String,
 }
 
 /// Information about a discovered project on a remote host.
@@ -345,6 +377,7 @@ mod tests {
             },
             actions: vec![],
             worktree: None,
+            linear: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -362,6 +395,7 @@ mod tests {
         assert!(settings.agentic.auto_approve_patterns.is_empty());
         assert!(settings.actions.is_empty());
         assert!(settings.worktree.is_none());
+        assert!(settings.linear.is_none());
     }
 
     #[test]
@@ -479,6 +513,7 @@ mod tests {
                 on_create: Some("npm install".to_string()),
                 on_delete: None,
             }),
+            linear: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -507,5 +542,83 @@ mod tests {
         let json = serde_json::to_string(&wt).expect("serialize");
         let parsed: WorktreeInfo = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(wt, parsed);
+    }
+
+    #[test]
+    fn project_settings_with_linear_roundtrip() {
+        let settings = ProjectSettings {
+            shell: Some("/bin/zsh".to_string()),
+            working_dir: None,
+            env: HashMap::new(),
+            agentic: AgenticSettings::default(),
+            actions: vec![],
+            worktree: None,
+            linear: Some(LinearSettings {
+                token_env_var: "LINEAR_API_KEY".to_string(),
+                team_key: "ENG".to_string(),
+                project_id: Some("proj_123".to_string()),
+                my_email: Some("dev@example.com".to_string()),
+                actions: vec![
+                    LinearAction {
+                        name: "Investigate".to_string(),
+                        icon: Some("search".to_string()),
+                        prompt: "Investigate {{issue.identifier}}: {{issue.title}}".to_string(),
+                    },
+                    LinearAction {
+                        name: "Implement".to_string(),
+                        icon: None,
+                        prompt: "Implement {{issue.identifier}}".to_string(),
+                    },
+                ],
+            }),
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn project_settings_backward_compat_without_linear() {
+        let json = r#"{"shell":"/bin/bash","agentic":{"auto_detect":true}}"#;
+        let parsed: ProjectSettings = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.shell.as_deref(), Some("/bin/bash"));
+        assert!(parsed.linear.is_none());
+    }
+
+    #[test]
+    fn linear_settings_default() {
+        let settings = LinearSettings::default();
+        assert_eq!(settings.token_env_var, "");
+        assert_eq!(settings.team_key, "");
+        assert!(settings.project_id.is_none());
+        assert!(settings.my_email.is_none());
+        assert!(settings.actions.is_empty());
+    }
+
+    #[test]
+    fn linear_action_roundtrip() {
+        let with_icon = LinearAction {
+            name: "Review".to_string(),
+            icon: Some("file-text".to_string()),
+            prompt: "Review {{issue.identifier}}: {{issue.description}}".to_string(),
+        };
+        let json = serde_json::to_string(&with_icon).expect("serialize");
+        let parsed: LinearAction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(with_icon, parsed);
+
+        let without_icon = LinearAction {
+            name: "Fix".to_string(),
+            icon: None,
+            prompt: "Fix {{issue.identifier}}".to_string(),
+        };
+        let json = serde_json::to_string(&without_icon).expect("serialize");
+        let parsed: LinearAction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(without_icon, parsed);
+        // icon should be absent from JSON when None
+        let val = serde_json::to_value(&without_icon).unwrap();
+        assert!(
+            val.get("icon").is_none(),
+            "icon should be skipped when None"
+        );
     }
 }
