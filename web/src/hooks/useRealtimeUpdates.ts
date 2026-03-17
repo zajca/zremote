@@ -123,6 +123,13 @@ export function useRealtimeUpdates(handlers: EventHandler) {
           case "agentic_loop_metrics":
             if (parsed.loop) {
               store.updateLoop(parsed.loop);
+              // If task_name arrived, refresh linked claude task
+              if (parsed.loop.task_name) {
+                const sessionTaskId = taskStore.sessionTaskIndex.get(parsed.loop.session_id);
+                if (sessionTaskId) {
+                  void taskStore.fetchTask(sessionTaskId);
+                }
+              }
             }
             break;
           case "worktree_error":

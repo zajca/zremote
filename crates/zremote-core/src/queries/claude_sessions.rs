@@ -23,12 +23,13 @@ pub struct ClaudeTaskRow {
     pub total_tokens_in: Option<i64>,
     pub total_tokens_out: Option<i64>,
     pub summary: Option<String>,
+    pub task_name: Option<String>,
     pub created_at: String,
 }
 
 const TASK_COLUMNS: &str = "id, session_id, host_id, project_path, project_id, model, initial_prompt, \
      claude_session_id, resume_from, status, options_json, loop_id, started_at, ended_at, \
-     total_cost_usd, total_tokens_in, total_tokens_out, summary, created_at";
+     total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at";
 
 pub struct ListClaudeTasksFilter {
     pub host_id: Option<String>,
@@ -258,6 +259,38 @@ mod tests {
         assert_eq!(task.status, "starting");
         assert!(task.project_id.is_none());
         assert!(task.options_json.is_none());
+        assert!(task.task_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_claude_task_returns_task_name() {
+        let pool = test_db().await;
+        let host_id = "host-1";
+        let session_id = "sess-1";
+        let task_id = "task-1";
+        insert_host(&pool, host_id).await;
+        insert_session(&pool, session_id, host_id).await;
+
+        insert_claude_task(
+            &pool, task_id, session_id, host_id, "/proj", None, None, None, None,
+        )
+        .await
+        .unwrap();
+
+        // Set task_name via UPDATE (simulating what agentic processing does)
+        sqlx::query(
+            "UPDATE claude_sessions SET task_name = 'velvety-hopping-hejlsberg' WHERE id = ?",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let task = get_claude_task(&pool, task_id).await.unwrap();
+        assert_eq!(
+            task.task_name,
+            Some("velvety-hopping-hejlsberg".to_string())
+        );
     }
 
     #[tokio::test]
