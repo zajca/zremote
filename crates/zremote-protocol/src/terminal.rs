@@ -15,6 +15,15 @@ pub struct RecoveredSession {
     pub pid: u32,
 }
 
+/// Result of a worktree lifecycle hook execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookResultInfo {
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    pub duration_ms: u64,
+}
+
 /// Messages sent from agent to server (terminal/connection layer).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
@@ -67,6 +76,16 @@ pub enum AgentMessage {
     WorktreeCreated {
         project_path: String,
         worktree: WorktreeInfo,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_result: Option<HookResultInfo>,
+    },
+    WorktreeHookResult {
+        project_path: String,
+        worktree_path: String,
+        hook_type: String,
+        success: bool,
+        output: Option<String>,
+        duration_ms: u64,
     },
     WorktreeDeleted {
         project_path: String,
@@ -116,6 +135,8 @@ pub enum ServerMessage {
         working_dir: Option<String>,
         #[serde(default)]
         env: Option<std::collections::HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_command: Option<String>,
     },
     SessionClose {
         session_id: SessionId,
@@ -297,6 +318,7 @@ mod tests {
                 ("RUST_LOG".to_string(), "debug".to_string()),
                 ("MY_VAR".to_string(), "value".to_string()),
             ])),
+            initial_command: None,
         });
         roundtrip_server(&ServerMessage::SessionCreate {
             session_id: Uuid::new_v4(),
@@ -305,6 +327,7 @@ mod tests {
             rows: 24,
             working_dir: None,
             env: None,
+            initial_command: None,
         });
     }
 
@@ -313,8 +336,17 @@ mod tests {
         // Backward compat: older servers/agents won't send env field
         let json = r#"{"type":"SessionCreate","payload":{"session_id":"550e8400-e29b-41d4-a716-446655440000","shell":"/bin/bash","cols":80,"rows":24,"working_dir":null}}"#;
         let msg: ServerMessage = serde_json::from_str(json).expect("should deserialize");
-        if let ServerMessage::SessionCreate { env, .. } = msg {
+        if let ServerMessage::SessionCreate {
+            env,
+            initial_command,
+            ..
+        } = msg
+        {
             assert!(env.is_none(), "env should default to None");
+            assert!(
+                initial_command.is_none(),
+                "initial_command should default to None"
+            );
         } else {
             panic!("expected SessionCreate variant");
         }
@@ -439,6 +471,8 @@ mod tests {
                 commit_hash: Some("def5678".to_string()),
                 is_detached: false,
                 is_locked: false,
+                is_dirty: false,
+                commit_message: None,
             }],
         });
     }
@@ -454,7 +488,10 @@ mod tests {
                 commit_hash: Some("1234567".to_string()),
                 is_detached: false,
                 is_locked: false,
+                is_dirty: false,
+                commit_message: None,
             },
+            hook_result: None,
         });
     }
 
@@ -675,6 +712,8 @@ mod tests {
                 working_dir: None,
                 env: HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
                 agentic: AgenticSettings::default(),
+                actions: vec![],
+                worktree: None,
             },
         });
     }
@@ -689,6 +728,8 @@ mod tests {
                 working_dir: None,
                 env: std::collections::HashMap::new(),
                 agentic: AgenticSettings::default(),
+                actions: vec![],
+                worktree: None,
             }),
             error: None,
         });
@@ -725,6 +766,92 @@ mod tests {
         roundtrip_agent(&AgentMessage::ProjectSettingsSaved {
             request_id: Uuid::new_v4(),
             error: Some("permission denied".to_string()),
+        });
+    }
+
+    #[test]
+    fn session_create_with_initial_command_roundtrip() {
+        roundtrip_server(&ServerMessage::SessionCreate {
+            session_id: Uuid::new_v4(),
+            shell: Some("/bin/bash".to_string()),
+            cols: 80,
+            rows: 24,
+            working_dir: Some("/home/user".to_string()),
+            env: None,
+            initial_command: Some("npm run dev".to_string()),
+        });
+    }
+
+    #[test]
+    fn session_create_backward_compat_no_initial_command() {
+        let json = r#"{"type":"SessionCreate","payload":{"session_id":"550e8400-e29b-41d4-a716-446655440000","shell":"/bin/bash","cols":80,"rows":24,"working_dir":null,"env":null}}"#;
+        let msg: ServerMessage = serde_json::from_str(json).expect("should deserialize");
+        if let ServerMessage::SessionCreate {
+            initial_command, ..
+        } = msg
+        {
+            assert!(
+                initial_command.is_none(),
+                "initial_command should default to None"
+            );
+        } else {
+            panic!("expected SessionCreate variant");
+        }
+    }
+
+    #[test]
+    fn worktree_hook_result_roundtrip() {
+        roundtrip_agent(&AgentMessage::WorktreeHookResult {
+            project_path: "/home/user/repo".to_string(),
+            worktree_path: "/home/user/repo-feat".to_string(),
+            hook_type: "on_create".to_string(),
+            success: true,
+            output: Some("npm install completed".to_string()),
+            duration_ms: 3500,
+        });
+    }
+
+    #[test]
+    fn hook_result_info_roundtrip() {
+        let info = HookResultInfo {
+            success: true,
+            output: Some("setup completed".to_string()),
+            duration_ms: 1200,
+        };
+        let json = serde_json::to_string(&info).expect("serialize");
+        let parsed: HookResultInfo = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(info, parsed);
+
+        // Minimal (no output)
+        let info_minimal = HookResultInfo {
+            success: false,
+            output: None,
+            duration_ms: 50,
+        };
+        let json = serde_json::to_string(&info_minimal).expect("serialize");
+        let parsed: HookResultInfo = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(info_minimal, parsed);
+    }
+
+    #[test]
+    fn worktree_created_with_hook_roundtrip() {
+        use crate::project::WorktreeInfo;
+        roundtrip_agent(&AgentMessage::WorktreeCreated {
+            project_path: "/home/user/repo".to_string(),
+            worktree: WorktreeInfo {
+                path: "/home/user/repo-feat".to_string(),
+                branch: Some("feature/new".to_string()),
+                commit_hash: Some("1234567".to_string()),
+                is_detached: false,
+                is_locked: false,
+                is_dirty: false,
+                commit_message: Some("initial commit".to_string()),
+            },
+            hook_result: Some(HookResultInfo {
+                success: true,
+                output: Some("npm install done".to_string()),
+                duration_ms: 2000,
+            }),
         });
     }
 }

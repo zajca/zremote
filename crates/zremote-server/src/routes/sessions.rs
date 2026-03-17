@@ -80,6 +80,7 @@ pub async fn create_session(
         rows: body.rows,
         working_dir: body.working_dir,
         env: None,
+        initial_command: None,
     };
 
     if sender.send(msg).await.is_err() {

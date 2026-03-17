@@ -594,6 +594,7 @@ fn handle_server_message(
             rows,
             working_dir,
             env,
+            initial_command: _,
         } => {
             handle_session_create(
                 session_manager,
@@ -847,6 +848,7 @@ fn handle_server_message(
                             .send(AgentMessage::WorktreeCreated {
                                 project_path,
                                 worktree,
+                                hook_result: None,
                             })
                             .await
                             .is_err()

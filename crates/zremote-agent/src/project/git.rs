@@ -68,6 +68,8 @@ pub fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
                     commit_hash: commit_hash.take(),
                     is_detached,
                     is_locked,
+                    is_dirty: false,
+                    commit_message: None,
                 });
             }
             is_detached = false;
@@ -95,6 +97,8 @@ pub fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
             commit_hash,
             is_detached,
             is_locked,
+            is_dirty: false,
+            commit_message: None,
         });
     }
 
@@ -124,6 +128,21 @@ pub fn parse_remotes(output: &str) -> Vec<GitRemote> {
     }
 
     remotes
+}
+
+/// Enrich parsed worktrees with dirty state and commit message.
+pub fn enrich_worktrees(worktrees: &mut [WorktreeInfo]) {
+    for wt in worktrees.iter_mut() {
+        let path = std::path::Path::new(&wt.path);
+        if path.is_dir() {
+            wt.is_dirty = run_git(path, &["status", "--porcelain"])
+                .map(|output| !output.is_empty())
+                .unwrap_or(false);
+            wt.commit_message = run_git(path, &["log", "-1", "--format=%s"])
+                .ok()
+                .filter(|s| !s.is_empty());
+        }
+    }
 }
 
 /// Git inspector for collecting repository metadata and managing worktrees.
@@ -181,6 +200,8 @@ impl GitInspector {
             worktrees.remove(0);
         }
 
+        enrich_worktrees(&mut worktrees);
+
         let git_info = GitInfo {
             branch,
             commit_hash,
@@ -229,12 +250,22 @@ impl GitInspector {
             .filter(|s| !s.is_empty());
         let wt_hash = run_git(wt_path, &["rev-parse", "--short", "HEAD"]).ok();
 
+        let wt_path_str = wt_path.to_string_lossy().to_string();
+        let is_dirty = run_git(wt_path, &["status", "--porcelain"])
+            .map(|output| !output.is_empty())
+            .unwrap_or(false);
+        let commit_message = run_git(wt_path, &["log", "-1", "--format=%s"])
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Ok(WorktreeInfo {
-            path: wt_path.to_string_lossy().to_string(),
+            path: wt_path_str,
             branch: wt_branch,
             commit_hash: wt_hash,
             is_detached: false,
             is_locked: false,
+            is_dirty,
+            commit_message,
         })
     }
 
