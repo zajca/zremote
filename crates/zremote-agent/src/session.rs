@@ -6,6 +6,18 @@ use zremote_protocol::SessionId;
 use crate::pty::PtySession;
 use crate::tmux::TmuxSession;
 
+/// Terminal output from either a PTY or tmux-backed session.
+///
+/// For PTY sessions, `pane_id` is always `None`.
+/// For tmux sessions, `pane_id` identifies which pane produced the output.
+/// `None` pane_id means the main (original) pane.
+#[derive(Debug)]
+pub struct PtyOutput {
+    pub session_id: SessionId,
+    pub pane_id: Option<String>,
+    pub data: Vec<u8>,
+}
+
 pub enum SessionBackend {
     Pty(PtySession),
     Tmux(TmuxSession),
@@ -13,12 +25,12 @@ pub enum SessionBackend {
 
 pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
-    output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
+    output_tx: mpsc::Sender<PtyOutput>,
     use_tmux: bool,
 }
 
 impl SessionManager {
-    pub fn new(output_tx: mpsc::Sender<(SessionId, Vec<u8>)>, use_tmux: bool) -> Self {
+    pub fn new(output_tx: mpsc::Sender<PtyOutput>, use_tmux: bool) -> Self {
         Self {
             sessions: HashMap::new(),
             output_tx,
@@ -173,6 +185,58 @@ impl SessionManager {
             };
             (*id, pid)
         })
+    }
+
+    /// Write to a specific pane within a tmux session.
+    pub fn write_to_pane(
+        &mut self,
+        session_id: &SessionId,
+        pane_id: &str,
+        data: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let backend = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+        match backend {
+            SessionBackend::Tmux(session) => {
+                session.write_to_pane(pane_id, data)?;
+                Ok(())
+            }
+            SessionBackend::Pty(_) => Err("PTY sessions do not support pane targeting".into()),
+        }
+    }
+
+    /// Resize a specific pane within a tmux session.
+    pub fn resize_pane(
+        &self,
+        session_id: &SessionId,
+        pane_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let backend = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+        match backend {
+            SessionBackend::Tmux(session) => session.resize_pane(pane_id, cols, rows),
+            SessionBackend::Pty(_) => Err("PTY sessions do not support pane targeting".into()),
+        }
+    }
+
+    /// Sync panes for all tmux sessions. Returns (session_id, changes) pairs.
+    pub fn sync_all_panes(&mut self) -> Vec<(SessionId, Vec<crate::tmux::PaneChange>)> {
+        let mut results = Vec::new();
+        for (session_id, backend) in &mut self.sessions {
+            if let SessionBackend::Tmux(session) = backend {
+                let changes = session.sync_panes();
+                if !changes.is_empty() {
+                    results.push((*session_id, changes));
+                }
+            }
+        }
+        results
     }
 
     /// Whether tmux-backed sessions are enabled.

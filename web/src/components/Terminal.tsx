@@ -5,19 +5,26 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import type { PaneEvent } from "../types/terminal";
 
 interface TerminalProps {
   sessionId: string;
+  paneId?: string;
+  onPaneEvent?: (event: PaneEvent) => void;
 }
 
 interface WsMessage {
-  type: "output" | "session_closed" | "session_suspended" | "session_resumed" | "error" | "scrollback_start" | "scrollback_end";
+  type: "output" | "session_closed" | "session_suspended" | "session_resumed"
+      | "error" | "scrollback_start" | "scrollback_end"
+      | "pane_added" | "pane_removed";
+  pane_id?: string;
+  index?: number;
   data?: string;
   exit_code?: number | null;
   message?: string;
 }
 
-export function Terminal({ sessionId }: TerminalProps) {
+export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -30,6 +37,9 @@ export function Terminal({ sessionId }: TerminalProps) {
   // RAF-based write batching: accumulate chunks, flush once per frame
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const rafIdRef = useRef<number | null>(null);
+  // Stable ref for onPaneEvent to avoid reconnecting WS on callback change
+  const onPaneEventRef = useRef(onPaneEvent);
+  onPaneEventRef.current = onPaneEvent;
 
   const flushWrites = useCallback(() => {
     rafIdRef.current = null;
@@ -81,6 +91,38 @@ export function Terminal({ sessionId }: TerminalProps) {
         return;
       }
 
+      // Handle pane lifecycle events (only on main terminal instance)
+      if (msg.type === "pane_added") {
+        onPaneEventRef.current?.({
+          type: "pane_added",
+          pane_id: msg.pane_id!,
+          index: msg.index ?? 0,
+        });
+        return;
+      } else if (msg.type === "pane_removed") {
+        onPaneEventRef.current?.({
+          type: "pane_removed",
+          pane_id: msg.pane_id!,
+        });
+        return;
+      }
+
+      // Filter output by pane_id: main terminal shows main-pane output (no pane_id),
+      // extra pane terminals only show their specific pane_id output.
+      if (msg.type === "output") {
+        const msgPaneId = msg.pane_id ?? undefined;
+        if (msgPaneId !== paneId) return;
+
+        if (msg.data) {
+          const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+          scheduleWrite(bytes);
+        }
+        return;
+      }
+
+      // Non-output messages only handled by main terminal
+      if (paneId !== undefined) return;
+
       if (msg.type === "scrollback_start") {
         // Cancel pending RAF and clear write buffer to avoid stale data
         if (rafIdRef.current !== null) {
@@ -90,13 +132,8 @@ export function Terminal({ sessionId }: TerminalProps) {
         writeBufferRef.current = [];
         // Full reset: clears buffer + resets ANSI parser state
         term.reset();
-        return;
       } else if (msg.type === "scrollback_end") {
         // Marker for future use
-        return;
-      } else if (msg.type === "output" && msg.data) {
-        const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
-        scheduleWrite(bytes);
       } else if (msg.type === "session_closed") {
         closedRef.current = true;
         term.write(
@@ -116,7 +153,7 @@ export function Terminal({ sessionId }: TerminalProps) {
         term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);
       }
     },
-    [scheduleWrite],
+    [scheduleWrite, paneId],
   );
 
   // Connect WebSocket directly (bypass React state)
@@ -141,7 +178,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       const term = termRef.current;
       if (term) {
         ws.send(
-          JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
+          JSON.stringify({ type: "resize", pane_id: paneId, cols: term.cols, rows: term.rows }),
         );
       }
     };
@@ -164,7 +201,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     ws.onerror = () => {
       // onclose fires after onerror
     };
-  }, [sessionId, handleWsMessage]);
+  }, [sessionId, paneId, handleWsMessage]);
 
   // Initialize xterm.js + WebSocket
   useEffect(() => {
@@ -212,7 +249,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     // User input -> send directly via WS ref
     const inputDisposable = term.onData((data) => {
       if (!closedRef.current && !suspendedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "input", data }));
+        wsRef.current.send(JSON.stringify({ type: "input", pane_id: paneId, data }));
       }
     });
 
@@ -226,6 +263,7 @@ export function Terminal({ sessionId }: TerminalProps) {
           wsRef.current.send(
             JSON.stringify({
               type: "resize",
+              pane_id: paneId,
               cols: term.cols,
               rows: term.rows,
             }),

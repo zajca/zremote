@@ -457,6 +457,51 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
                         mgr.session_pids().collect()
                     };
 
+                    // Sync tmux panes and broadcast changes
+                    let pane_changes = {
+                        let mut mgr = state.session_manager.lock().await;
+                        mgr.sync_all_panes()
+                    };
+                    for (session_id, changes) in pane_changes {
+                        // Collect messages first, then send them
+                        let mut browser_msgs = Vec::new();
+                        let mut removed_pane_ids = Vec::new();
+                        for change in changes {
+                            match change {
+                                crate::tmux::PaneChange::Added(info) => {
+                                    browser_msgs.push(zremote_core::state::BrowserMessage::PaneAdded {
+                                        pane_id: info.pane_id,
+                                        index: info.index,
+                                    });
+                                }
+                                crate::tmux::PaneChange::Removed(pane_id) => {
+                                    browser_msgs.push(zremote_core::state::BrowserMessage::PaneRemoved {
+                                        pane_id: pane_id.clone(),
+                                    });
+                                    removed_pane_ids.push(pane_id);
+                                }
+                            }
+                        }
+                        // Send all messages and clean up scrollbacks
+                        {
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(session_state) = sessions.get_mut(&session_id) {
+                                for pid in &removed_pane_ids {
+                                    session_state.remove_pane_scrollback(pid);
+                                }
+                                for msg in browser_msgs {
+                                    session_state
+                                        .browser_senders
+                                        .retain(|tx| match tx.try_send(msg.clone()) {
+                                            Ok(()) => true,
+                                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                                        });
+                                }
+                            }
+                        }
+                    }
+
                     // Check for agentic tools
                     let messages = {
                         let mut mgr = state.agentic_manager.lock().await;
@@ -506,9 +551,20 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
 fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
     tokio::spawn(async move {
         let mut pty_output_rx = state.pty_output_rx.lock().await;
-        while let Some((session_id, data)) = pty_output_rx.recv().await {
+        while let Some(pty_output) = pty_output_rx.recv().await {
+            let session_id = pty_output.session_id;
+            let pane_id = pty_output.pane_id;
+            let data = pty_output.data;
+
             if data.is_empty() {
-                // EOF -- session ended
+                if pane_id.is_some() {
+                    // EOF from an extra pane -- don't close the session,
+                    // just clean up that pane's scrollback.
+                    // The pane removal is handled by sync_panes().
+                    continue;
+                }
+
+                // EOF from main pane -- session ended
 
                 // Notify agentic manager that session closed
                 let loop_ended = {
@@ -573,8 +629,23 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                         session_id: session_id.to_string(),
                         exit_code,
                     });
+            } else if pane_id.is_some() {
+                // Extra pane output -> per-pane scrollback + browser senders
+                let mut sessions = state.sessions.write().await;
+                if let Some(session_state) = sessions.get_mut(&session_id) {
+                    session_state
+                        .append_pane_scrollback(pane_id.as_deref().unwrap_or(""), data.clone());
+                    let msg = zremote_core::state::BrowserMessage::Output { pane_id, data };
+                    session_state
+                        .browser_senders
+                        .retain(|tx| match tx.try_send(msg.clone()) {
+                            Ok(()) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        });
+                }
             } else {
-                // Feed output to agentic manager for state detection
+                // Main pane output -> feed to agentic manager + scrollback + browser senders
                 let agentic_msgs = {
                     let mut mgr = state.agentic_manager.lock().await;
                     mgr.process_output(&session_id, &data)
@@ -585,11 +656,13 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                     }
                 }
 
-                // Normal output data -> scrollback + browser senders
                 let mut sessions = state.sessions.write().await;
                 if let Some(session_state) = sessions.get_mut(&session_id) {
                     session_state.append_scrollback(data.clone());
-                    let msg = zremote_core::state::BrowserMessage::Output { data };
+                    let msg = zremote_core::state::BrowserMessage::Output {
+                        pane_id: None,
+                        data,
+                    };
                     session_state
                         .browser_senders
                         .retain(|tx| match tx.try_send(msg.clone()) {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,8 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zremote_protocol::SessionId;
 
+use crate::session::PtyOutput;
+
 const TMUX_SOCKET: &str = "zremote";
 const FIFO_DIR_PREFIX: &str = "/tmp/zremote-tmux";
 const STALE_SESSION_HOURS: u64 = 24;
@@ -16,12 +19,38 @@ const STALE_SESSION_HOURS: u64 = 24;
 /// Session name prefix used for all zremote-managed tmux sessions.
 const SESSION_PREFIX: &str = "zremote-";
 
+/// Information about a single tmux pane.
+#[derive(Debug, Clone)]
+pub struct PaneInfo {
+    pub pane_id: String,
+    pub pid: u32,
+    pub index: u16,
+    pub is_active: bool,
+}
+
+/// A change detected in the set of panes within a tmux session.
+#[derive(Debug)]
+pub enum PaneChange {
+    Added(PaneInfo),
+    Removed(String), // pane_id
+}
+
+struct ExtraPaneHandle {
+    pane_id: String,
+    fifo_path: PathBuf,
+    reader_handle: JoinHandle<()>,
+}
+
 pub struct TmuxSession {
     session_id: SessionId,
     tmux_name: String,
+    pane_id: String,
     fifo_path: PathBuf,
     reader_handle: JoinHandle<()>,
     pid: u32,
+    output_tx: mpsc::Sender<PtyOutput>,
+    extra_panes: Vec<ExtraPaneHandle>,
+    known_pane_ids: HashSet<String>,
 }
 
 /// Create a `Command` pre-configured with `tmux -L zremote`.
@@ -67,7 +96,7 @@ impl TmuxSession {
         rows: u16,
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
-        output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
+        output_tx: mpsc::Sender<PtyOutput>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         let tmux_name = tmux_session_name(session_id);
         let dir = fifo_dir();
@@ -118,25 +147,38 @@ impl TmuxSession {
             }
         }
 
-        // Get shell PID
-        let pid = get_pane_pid(&tmux_name)?;
+        // Capture the stable pane ID (%N) before anything can split the window
+        let pane_id = get_pane_id(&tmux_name)?;
+
+        // Get shell PID using the stable pane_id
+        let pid = get_pane_pid(&pane_id)?;
 
         // Create FIFO
         let fifo_path = dir.join(format!("{session_id}.fifo"));
         create_fifo(&fifo_path)?;
 
-        // Set up pipe-pane to redirect output into the FIFO
-        setup_pipe_pane(&tmux_name, &fifo_path)?;
+        // Set up pipe-pane targeting the stable pane_id
+        setup_pipe_pane(&pane_id, &fifo_path)?;
 
         // Spawn async reader task on FIFO
-        let reader_handle = spawn_fifo_reader(session_id, fifo_path.clone(), output_tx);
+        let reader_handle =
+            spawn_fifo_reader(session_id, None, fifo_path.clone(), output_tx.clone());
+
+        tracing::info!(session_id = %session_id, pane_id = %pane_id, "pane ID captured");
+
+        let mut known_pane_ids = HashSet::new();
+        known_pane_ids.insert(pane_id.clone());
 
         let session = Self {
             session_id,
             tmux_name,
+            pane_id,
             fifo_path,
             reader_handle,
             pid,
+            output_tx,
+            extra_panes: Vec::new(),
+            known_pane_ids,
         };
 
         Ok((session, pid))
@@ -146,7 +188,7 @@ impl TmuxSession {
     /// agent restart or reconnection.
     pub fn reattach(
         session_id: SessionId,
-        output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
+        output_tx: mpsc::Sender<PtyOutput>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let tmux_name = tmux_session_name(session_id);
 
@@ -157,8 +199,13 @@ impl TmuxSession {
 
         tracing::info!(session_id = %session_id, tmux_name = %tmux_name, "reattaching to tmux session");
 
-        // Get shell PID
-        let pid = get_pane_pid(&tmux_name)?;
+        // Target window 0, pane 0 -- always the original shell pane.
+        // tmux does not reindex panes, so :0.0 is stable.
+        let reattach_target = format!("{tmux_name}:0.0");
+        let pane_id = get_pane_id(&reattach_target)?;
+
+        // Get shell PID using the stable pane_id
+        let pid = get_pane_pid(&pane_id)?;
 
         // Create/recreate FIFO
         let dir = fifo_dir();
@@ -169,19 +216,29 @@ impl TmuxSession {
         let _ = fs::remove_file(&fifo_path);
         create_fifo(&fifo_path)?;
 
-        // Stop any existing pipe-pane, then set up fresh
-        let _ = tmux_cmd().args(["pipe-pane", "-t", &tmux_name]).output();
-        setup_pipe_pane(&tmux_name, &fifo_path)?;
+        // Stop any existing pipe-pane, then set up fresh targeting the stable pane_id
+        let _ = tmux_cmd().args(["pipe-pane", "-t", &pane_id]).output();
+        setup_pipe_pane(&pane_id, &fifo_path)?;
 
         // Spawn async reader task on FIFO
-        let reader_handle = spawn_fifo_reader(session_id, fifo_path.clone(), output_tx);
+        let reader_handle =
+            spawn_fifo_reader(session_id, None, fifo_path.clone(), output_tx.clone());
+
+        tracing::info!(session_id = %session_id, pane_id = %pane_id, "pane ID captured on reattach");
+
+        let mut known_pane_ids = HashSet::new();
+        known_pane_ids.insert(pane_id.clone());
 
         Ok(Self {
             session_id,
             tmux_name,
+            pane_id,
             fifo_path,
             reader_handle,
             pid,
+            output_tx,
+            extra_panes: Vec::new(),
+            known_pane_ids,
         })
     }
 
@@ -193,6 +250,11 @@ impl TmuxSession {
     /// Return the session ID.
     pub fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    /// Return the stable pane ID (`%N` format).
+    pub fn pane_id(&self) -> &str {
+        &self.pane_id
     }
 
     /// Send raw bytes as input to the tmux pane via `send-keys -H` (hex mode).
@@ -207,7 +269,7 @@ impl TmuxSession {
         }
 
         let mut cmd = tmux_cmd();
-        cmd.args(["send-keys", "-t", &self.tmux_name, "-H"]);
+        cmd.args(["send-keys", "-t", &self.pane_id, "-H"]);
         for byte in data {
             cmd.arg(format!("{byte:02x}"));
         }
@@ -222,7 +284,7 @@ impl TmuxSession {
         Ok(())
     }
 
-    /// Resize the tmux window.
+    /// Resize the tmux pane.
     pub fn resize(
         &self,
         cols: u16,
@@ -230,9 +292,9 @@ impl TmuxSession {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let output = tmux_cmd()
             .args([
-                "resize-window",
+                "resize-pane",
                 "-t",
-                &self.tmux_name,
+                &self.pane_id,
                 "-x",
                 &cols.to_string(),
                 "-y",
@@ -242,7 +304,180 @@ impl TmuxSession {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tmux resize-window failed: {stderr}").into());
+            return Err(format!("tmux resize-pane failed: {stderr}").into());
+        }
+
+        Ok(())
+    }
+
+    /// List all panes in this session.
+    pub fn list_panes(&self) -> Vec<PaneInfo> {
+        let output = tmux_cmd()
+            .args([
+                "list-panes",
+                "-t",
+                &self.tmux_name,
+                "-F",
+                "#{pane_id}:#{pane_pid}:#{pane_index}:#{pane_active}",
+            ])
+            .output();
+
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.trim().splitn(4, ':').collect();
+                if parts.len() < 4 {
+                    return None;
+                }
+                Some(PaneInfo {
+                    pane_id: parts[0].to_owned(),
+                    pid: parts[1].parse().unwrap_or(0),
+                    index: parts[2].parse().unwrap_or(0),
+                    is_active: parts[3] == "1",
+                })
+            })
+            .collect()
+    }
+
+    /// Detect pane changes, setup/teardown extra pane I/O. Returns changes.
+    pub fn sync_panes(&mut self) -> Vec<PaneChange> {
+        let current_panes = self.list_panes();
+        let current_ids: HashSet<String> =
+            current_panes.iter().map(|p| p.pane_id.clone()).collect();
+
+        let mut changes = Vec::new();
+
+        // Detect new panes (not the main pane)
+        for pane in &current_panes {
+            if pane.pane_id == self.pane_id {
+                continue; // Skip the main pane
+            }
+            if !self.known_pane_ids.contains(&pane.pane_id) {
+                // New pane detected -- set up FIFO + reader
+                let stripped = pane.pane_id.trim_start_matches('%');
+                let fifo_path = fifo_dir().join(format!("{}-{stripped}.fifo", self.session_id));
+
+                if create_fifo(&fifo_path).is_err() {
+                    tracing::warn!(pane_id = %pane.pane_id, "failed to create FIFO for extra pane");
+                    continue;
+                }
+
+                if setup_pipe_pane(&pane.pane_id, &fifo_path).is_err() {
+                    tracing::warn!(pane_id = %pane.pane_id, "failed to set up pipe-pane for extra pane");
+                    let _ = fs::remove_file(&fifo_path);
+                    continue;
+                }
+
+                let reader_handle = spawn_fifo_reader(
+                    self.session_id,
+                    Some(pane.pane_id.clone()),
+                    fifo_path.clone(),
+                    self.output_tx.clone(),
+                );
+
+                self.extra_panes.push(ExtraPaneHandle {
+                    pane_id: pane.pane_id.clone(),
+                    fifo_path,
+                    reader_handle,
+                });
+                self.known_pane_ids.insert(pane.pane_id.clone());
+
+                tracing::info!(
+                    session_id = %self.session_id,
+                    pane_id = %pane.pane_id,
+                    index = pane.index,
+                    "extra pane detected"
+                );
+
+                changes.push(PaneChange::Added(pane.clone()));
+            }
+        }
+
+        // Detect removed panes
+        let removed_ids: Vec<String> = self
+            .known_pane_ids
+            .iter()
+            .filter(|id| *id != &self.pane_id && !current_ids.contains(*id))
+            .cloned()
+            .collect();
+
+        for removed_id in removed_ids {
+            // Clean up the extra pane handle
+            if let Some(pos) = self
+                .extra_panes
+                .iter()
+                .position(|h| h.pane_id == removed_id)
+            {
+                let handle = self.extra_panes.remove(pos);
+                handle.reader_handle.abort();
+                let _ = fs::remove_file(&handle.fifo_path);
+            }
+            self.known_pane_ids.remove(&removed_id);
+
+            tracing::info!(
+                session_id = %self.session_id,
+                pane_id = %removed_id,
+                "extra pane removed"
+            );
+
+            changes.push(PaneChange::Removed(removed_id));
+        }
+
+        changes
+    }
+
+    /// Write to a specific pane (main or extra).
+    pub fn write_to_pane(&mut self, pane_id: &str, data: &[u8]) -> std::io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut cmd = tmux_cmd();
+        cmd.args(["send-keys", "-t", pane_id, "-H"]);
+        for byte in data {
+            cmd.arg(format!("{byte:02x}"));
+        }
+
+        let output = cmd.output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(std::io::Error::other(format!(
+                "tmux send-keys to pane {pane_id} failed: {stderr}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Resize a specific pane.
+    pub fn resize_pane(
+        &self,
+        pane_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let output = tmux_cmd()
+            .args([
+                "resize-pane",
+                "-t",
+                pane_id,
+                "-x",
+                &cols.to_string(),
+                "-y",
+                &rows.to_string(),
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tmux resize-pane for {pane_id} failed: {stderr}").into());
         }
 
         Ok(())
@@ -250,6 +485,12 @@ impl TmuxSession {
 
     /// Kill the tmux session and clean up the FIFO.
     pub fn kill(&mut self) {
+        // Clean up extra pane handles first
+        for handle in self.extra_panes.drain(..) {
+            handle.reader_handle.abort();
+            let _ = fs::remove_file(&handle.fifo_path);
+        }
+
         let output = tmux_cmd()
             .args(["kill-session", "-t", &self.tmux_name])
             .output();
@@ -285,12 +526,19 @@ impl TmuxSession {
     /// Used during graceful agent shutdown so that tmux sessions persist for
     /// later reattachment.
     pub fn detach(&mut self) {
+        // Clean up extra pane handles
+        for handle in self.extra_panes.drain(..) {
+            handle.reader_handle.abort();
+            let _ = tmux_cmd()
+                .args(["pipe-pane", "-t", &handle.pane_id])
+                .output();
+            let _ = fs::remove_file(&handle.fifo_path);
+        }
+
         self.reader_handle.abort();
 
-        // Stop pipe-pane so the FIFO writer side closes
-        let _ = tmux_cmd()
-            .args(["pipe-pane", "-t", &self.tmux_name])
-            .output();
+        // Stop pipe-pane targeting the stable pane_id
+        let _ = tmux_cmd().args(["pipe-pane", "-t", &self.pane_id]).output();
 
         // Remove the FIFO file
         let _ = fs::remove_file(&self.fifo_path);
@@ -298,6 +546,7 @@ impl TmuxSession {
         tracing::info!(
             session_id = %self.session_id,
             tmux_name = %self.tmux_name,
+            pane_id = %self.pane_id,
             "detached from tmux session (session remains alive)"
         );
     }
@@ -305,20 +554,26 @@ impl TmuxSession {
 
 impl Drop for TmuxSession {
     fn drop(&mut self) {
+        // Clean up extra pane handles
+        for handle in self.extra_panes.drain(..) {
+            handle.reader_handle.abort();
+            let _ = fs::remove_file(&handle.fifo_path);
+            let _ = tmux_cmd()
+                .args(["pipe-pane", "-t", &handle.pane_id])
+                .output();
+        }
         // Only detach, do NOT kill the tmux session
         self.reader_handle.abort();
         // Remove FIFO
         let _ = fs::remove_file(&self.fifo_path);
-        // Stop pipe-pane
-        let _ = tmux_cmd()
-            .args(["pipe-pane", "-t", &self.tmux_name])
-            .output();
+        // Stop pipe-pane targeting the stable pane_id
+        let _ = tmux_cmd().args(["pipe-pane", "-t", &self.pane_id]).output();
     }
 }
 
 /// Discover all existing zremote tmux sessions and reattach to them.
 /// Sessions that fail to reattach are logged and skipped.
-pub fn discover_sessions(output_tx: mpsc::Sender<(SessionId, Vec<u8>)>) -> Vec<TmuxSession> {
+pub fn discover_sessions(output_tx: mpsc::Sender<PtyOutput>) -> Vec<TmuxSession> {
     let names = match list_zremote_sessions() {
         Ok(names) => names,
         Err(e) => {
@@ -450,6 +705,36 @@ pub fn cleanup_stale() {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Get the stable pane ID (`%N` format) for the first pane of the given tmux target.
+///
+/// The target can be a session name (returns the active pane), a fully-qualified
+/// `session:window.pane` target, or an existing pane ID.
+fn get_pane_id(target: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let output = tmux_cmd()
+        .args(["list-panes", "-t", target, "-F", "#{pane_id}"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(
+            format!("tmux list-panes (pane_id) failed for target '{target}': {stderr}").into(),
+        );
+    }
+
+    let pane_id = String::from_utf8(output.stdout)?
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+
+    if !pane_id.starts_with('%') || pane_id.len() < 2 {
+        return Err(format!("invalid pane_id '{pane_id}' from tmux for target '{target}'").into());
+    }
+
+    Ok(pane_id)
+}
+
 /// Get the shell PID for a tmux session's pane.
 fn get_pane_pid(tmux_name: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let output = tmux_cmd()
@@ -552,8 +837,9 @@ fn list_zremote_sessions() -> Result<Vec<String>, Box<dyn std::error::Error + Se
 /// signaled with an empty vec.
 fn spawn_fifo_reader(
     session_id: SessionId,
+    pane_id: Option<String>,
     fifo_path: PathBuf,
-    output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
+    output_tx: mpsc::Sender<PtyOutput>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         // Opening a FIFO for reading blocks until a writer opens the other end.
@@ -567,7 +853,11 @@ fn spawn_fifo_reader(
                     error = %e,
                     "failed to open FIFO for reading"
                 );
-                let _ = output_tx.blocking_send((session_id, Vec::new()));
+                let _ = output_tx.blocking_send(PtyOutput {
+                    session_id,
+                    pane_id: pane_id.clone(),
+                    data: Vec::new(),
+                });
                 return;
             }
         };
@@ -579,12 +869,20 @@ fn spawn_fifo_reader(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // EOF -- pipe-pane stopped or tmux session ended
-                    let _ = output_tx.blocking_send((session_id, Vec::new()));
+                    let _ = output_tx.blocking_send(PtyOutput {
+                        session_id,
+                        pane_id: pane_id.clone(),
+                        data: Vec::new(),
+                    });
                     break;
                 }
                 Ok(n) => {
                     if output_tx
-                        .blocking_send((session_id, buf[..n].to_vec()))
+                        .blocking_send(PtyOutput {
+                            session_id,
+                            pane_id: pane_id.clone(),
+                            data: buf[..n].to_vec(),
+                        })
                         .is_err()
                     {
                         // Receiver dropped -- connection gone
@@ -597,7 +895,11 @@ fn spawn_fifo_reader(
                         error = %e,
                         "FIFO read error"
                     );
-                    let _ = output_tx.blocking_send((session_id, Vec::new()));
+                    let _ = output_tx.blocking_send(PtyOutput {
+                        session_id,
+                        pane_id: pane_id.clone(),
+                        data: Vec::new(),
+                    });
                     break;
                 }
             }
@@ -686,5 +988,12 @@ mod tests {
             "fifo_dir should return an absolute path, got: {}",
             dir.display()
         );
+    }
+
+    #[test]
+    fn get_pane_id_rejects_nonexistent_session() {
+        // Calling get_pane_id on a non-existent target should return an error
+        let result = get_pane_id("nonexistent-session-12345");
+        assert!(result.is_err());
     }
 }

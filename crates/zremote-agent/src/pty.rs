@@ -5,6 +5,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use zremote_protocol::SessionId;
 
+use crate::session::PtyOutput;
+
 pub struct PtySession {
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -26,7 +28,7 @@ impl PtySession {
         rows: u16,
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
-        output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
+        output_tx: mpsc::Sender<PtyOutput>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         let pty_system = native_pty_system();
         let size = PtySize {
@@ -62,12 +64,20 @@ impl PtySession {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         // EOF -- child closed the PTY
-                        let _ = output_tx.blocking_send((session_id, Vec::new()));
+                        let _ = output_tx.blocking_send(PtyOutput {
+                            session_id,
+                            pane_id: None,
+                            data: Vec::new(),
+                        });
                         break;
                     }
                     Ok(n) => {
                         if output_tx
-                            .blocking_send((session_id, buf[..n].to_vec()))
+                            .blocking_send(PtyOutput {
+                                session_id,
+                                pane_id: None,
+                                data: buf[..n].to_vec(),
+                            })
                             .is_err()
                         {
                             // Receiver dropped -- connection gone
@@ -76,7 +86,11 @@ impl PtySession {
                     }
                     Err(_) => {
                         // Read error -- PTY closed
-                        let _ = output_tx.blocking_send((session_id, Vec::new()));
+                        let _ = output_tx.blocking_send(PtyOutput {
+                            session_id,
+                            pane_id: None,
+                            data: Vec::new(),
+                        });
                         break;
                     }
                 }
@@ -196,9 +210,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
-                Ok(Some((sid, data))) => {
-                    assert_eq!(sid, session_id);
-                    if String::from_utf8_lossy(&data).contains("hello_from_pty") {
+                Ok(Some(output)) => {
+                    assert_eq!(output.session_id, session_id);
+                    assert!(output.pane_id.is_none());
+                    if String::from_utf8_lossy(&output.data).contains("hello_from_pty") {
                         found = true;
                         break;
                     }
@@ -262,11 +277,11 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
-                Ok(Some((_, data))) if data.is_empty() => {
+                Ok(Some(output)) if output.data.is_empty() => {
                     got_eof = true;
                     break;
                 }
-                Ok(Some(_)) => continue,
+                Ok(Some(_output)) => continue,
                 _ => break,
             }
         }

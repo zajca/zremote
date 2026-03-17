@@ -310,7 +310,7 @@ pub async fn run_connection(
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(256);
 
     // Channel for PTY output data
-    let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<(SessionId, Vec<u8>)>(256);
+    let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<crate::session::PtyOutput>(256);
 
     // Session manager
     let mut session_manager = SessionManager::new(pty_output_tx, use_tmux);
@@ -517,9 +517,16 @@ pub async fn run_connection(
                     }
                 }
             }
-            Some((session_id, data)) = pty_output_rx.recv() => {
+            Some(pty_output) = pty_output_rx.recv() => {
+                let session_id = pty_output.session_id;
+                let data = pty_output.data;
+
                 if data.is_empty() {
-                    // Session ended (EOF from PTY reader)
+                    if pty_output.pane_id.is_some() {
+                        // EOF from extra pane -- ignore, sync_panes handles cleanup
+                        continue;
+                    }
+                    // Session ended (EOF from main PTY reader)
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()
                     {
@@ -533,8 +540,8 @@ pub async fn run_connection(
                     }).is_err() {
                         tracing::warn!("outbound channel full, message dropped");
                     }
-                } else {
-                    // Pass output through agentic manager for parsing
+                } else if pty_output.pane_id.is_none() {
+                    // Main pane output -- pass through agentic manager
                     let agentic_msgs = agentic_manager.process_output(&session_id, &data);
                     for msg in agentic_msgs {
                         if agentic_tx.try_send(msg).is_err() {
@@ -542,6 +549,14 @@ pub async fn run_connection(
                         }
                     }
 
+                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
+                        session_id,
+                        data,
+                    }).is_err() {
+                        tracing::warn!("outbound channel full, message dropped");
+                    }
+                } else {
+                    // Extra pane output -- forward without agentic processing
                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
