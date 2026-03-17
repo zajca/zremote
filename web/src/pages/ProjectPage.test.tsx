@@ -133,6 +133,13 @@ describe("ProjectPage", () => {
     });
   });
 
+  test("renders configure button in header", async () => {
+    renderProjectPage();
+    await waitFor(() => {
+      expect(screen.getByText("Configure")).toBeInTheDocument();
+    });
+  });
+
   test("shows Project not found for nonexistent project", async () => {
     global.fetch = vi.fn().mockImplementation(() => mockFetchError());
     render(

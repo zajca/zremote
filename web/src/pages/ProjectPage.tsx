@@ -1,4 +1,5 @@
 import {
+  Bot,
   FolderGit2,
   GitBranch,
   Link as LinkIcon,
@@ -39,6 +40,7 @@ export function ProjectPage() {
   const [isNewBranch, setIsNewBranch] = useState(false);
   const [creating, setCreating] = useState(false);
   const [worktreeActions, setWorktreeActions] = useState<ProjectAction[]>([]);
+  const [configuring, setConfiguring] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
@@ -190,6 +192,20 @@ export function ProjectPage() {
     }
   }, [projectId, project, navigate]);
 
+  const handleConfigureWithClaude = useCallback(async () => {
+    if (!project) return;
+    setConfiguring(true);
+    try {
+      const task = await api.projects.configureWithClaude(project.id);
+      void navigate(`/hosts/${project.host_id}/sessions/${task.session_id}`);
+    } catch (e) {
+      console.error("failed to start configuration", e);
+      showToast("Failed to start configuration", "error");
+    } finally {
+      setConfiguring(false);
+    }
+  }, [project, navigate]);
+
   const handleOpenTerminal = useCallback(async () => {
     if (!project) return;
     try {
@@ -242,6 +258,15 @@ export function ProjectPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            onClick={() => void handleConfigureWithClaude()}
+            variant="ghost"
+            size="sm"
+            disabled={configuring}
+          >
+            <Bot size={14} />
+            {configuring ? "Starting..." : "Configure"}
+          </Button>
           <Button
             onClick={() =>
               void navigate(`/hosts/${project.host_id}`)

@@ -1,5 +1,6 @@
-import { ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import {
   api,
   type AgenticSettings,
@@ -67,7 +68,10 @@ type LoadState = "loading" | "no-settings" | "loaded" | "error";
 export function ProjectSettingsTab({
   projectId,
   projectPath,
+  hostId,
 }: ProjectSettingsTabProps) {
+  const navigate = useNavigate();
+  const [configuring, setConfiguring] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [shell, setShell] = useState("");
@@ -204,6 +208,19 @@ export function ProjectSettingsTab({
     }
   }, [projectId, applySettings]);
 
+  const handleConfigureWithClaude = useCallback(async () => {
+    setConfiguring(true);
+    try {
+      const task = await api.projects.configureWithClaude(projectId);
+      void navigate(`/hosts/${hostId}/sessions/${task.session_id}`);
+    } catch (e) {
+      console.error("failed to start configuration", e);
+      showToast("Failed to start configuration", "error");
+    } finally {
+      setConfiguring(false);
+    }
+  }, [projectId, hostId, navigate]);
+
   const handleReset = useCallback(async () => {
     setSaving(true);
     try {
@@ -289,10 +306,21 @@ export function ProjectSettingsTab({
             <code className="rounded bg-bg-active px-1 py-0.5 text-xs">.zremote/settings.json</code>{" "}
             file to configure this project.
           </p>
-          <Button onClick={() => void handleCreate()} disabled={saving}>
-            {saving && <Loader2 size={14} className="animate-spin" />}
-            Create Settings
-          </Button>
+          <div className="flex items-center justify-center gap-3">
+            <Button onClick={() => void handleCreate()} disabled={saving}>
+              {saving && <Loader2 size={14} className="animate-spin" />}
+              Create Settings
+            </Button>
+            <Button
+              onClick={() => void handleConfigureWithClaude()}
+              variant="secondary"
+              size="sm"
+              disabled={configuring}
+            >
+              <Bot size={14} />
+              {configuring ? "Starting..." : "Configure with Claude"}
+            </Button>
+          </div>
         </div>
       </div>
     );
