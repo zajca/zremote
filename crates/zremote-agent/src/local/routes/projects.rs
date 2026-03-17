@@ -804,7 +804,7 @@ pub async fn configure_with_claude(
     let claude_task_id_str = claude_task_id.to_string();
 
     let model = body.model.as_deref();
-    let skip_permissions = body.skip_permissions.unwrap_or(false);
+    let skip_permissions = body.skip_permissions.unwrap_or(true);
 
     // Insert DB rows
     cq::insert_session_for_task(
