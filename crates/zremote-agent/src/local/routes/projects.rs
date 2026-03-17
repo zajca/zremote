@@ -8,13 +8,17 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use uuid::Uuid;
 use zremote_core::error::{AppError, AppJson};
+use zremote_core::queries::claude_sessions as cq;
 use zremote_core::queries::projects as q;
 use zremote_core::queries::sessions as sq;
-use zremote_core::state::ServerEvent;
+use zremote_core::state::{ServerEvent, SessionState};
 
+use crate::claude::{CommandBuilder, CommandOptions};
 use crate::local::state::LocalAppState;
+use crate::project::configure::build_configure_prompt;
 use crate::project::git::GitInspector;
 use crate::project::scanner::ProjectScanner;
+use crate::project::settings::read_settings;
 
 pub type ProjectResponse = q::ProjectRow;
 pub type SessionResponse = sq::SessionRow;
@@ -746,6 +750,141 @@ pub async fn run_action(
             "pid": pid,
         })),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureRequest {
+    pub model: Option<String>,
+    pub skip_permissions: Option<bool>,
+}
+
+/// Resolve the default shell (same logic as sessions.rs).
+fn configure_default_shell() -> &'static str {
+    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
+}
+
+/// `POST /api/projects/:project_id/configure` - Configure project with Claude.
+#[allow(clippy::too_many_lines)]
+pub async fn configure_with_claude(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath(project_id): AxumPath<String>,
+    AppJson(body): AppJson<ConfigureRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let project_row = sqlx::query_as::<_, (String, String)>(
+        "SELECT path, project_type FROM projects WHERE id = ?",
+    )
+    .bind(&project_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound("project not found".to_string()))?;
+
+    let (project_path, project_type) = project_row;
+
+    // Read existing settings
+    let path_for_settings = project_path.clone();
+    let existing_json =
+        tokio::task::spawn_blocking(move || read_settings(Path::new(&path_for_settings)))
+            .await
+            .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::to_string_pretty(&s).ok());
+
+    // Build configure prompt
+    let prompt = build_configure_prompt(&project_path, &project_type, existing_json.as_deref());
+
+    let host_id = state.host_id.to_string();
+    let session_id = Uuid::new_v4();
+    let session_id_str = session_id.to_string();
+    let claude_task_id = Uuid::new_v4();
+    let claude_task_id_str = claude_task_id.to_string();
+
+    let model = body.model.as_deref();
+    let skip_permissions = body.skip_permissions.unwrap_or(false);
+
+    // Insert DB rows
+    cq::insert_session_for_task(
+        &state.db,
+        &session_id_str,
+        &host_id,
+        &project_path,
+        Some(&project_id),
+    )
+    .await?;
+
+    cq::insert_claude_task(
+        &state.db,
+        &claude_task_id_str,
+        &session_id_str,
+        &host_id,
+        &project_path,
+        Some(&project_id),
+        model,
+        Some(&prompt),
+        None,
+    )
+    .await?;
+
+    // Create in-memory session state
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(session_id, SessionState::new(session_id, state.host_id));
+    }
+
+    // Build claude command via CommandBuilder (PTY injection path)
+    let opts = CommandOptions {
+        working_dir: &project_path,
+        model,
+        initial_prompt: Some(&prompt),
+        resume_cc_session_id: None,
+        continue_last: false,
+        allowed_tools: &[],
+        skip_permissions,
+        output_format: None,
+        custom_flags: None,
+    };
+
+    let cmd = CommandBuilder::build(&opts)
+        .map_err(|e| AppError::BadRequest(format!("invalid command options: {e}")))?;
+
+    // Spawn PTY session
+    let shell = configure_default_shell();
+    let pid = {
+        let mut mgr = state.session_manager.lock().await;
+        mgr.create(session_id, shell, 120, 40, Some(&project_path), None)
+            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+    };
+
+    // Update session status in DB
+    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
+        .bind(shell)
+        .bind(i64::from(pid))
+        .bind(&session_id_str)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
+
+    // Write the claude command into the PTY
+    {
+        let mut mgr = state.session_manager.lock().await;
+        mgr.write_to(&session_id, cmd.as_bytes())
+            .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
+    }
+
+    // Broadcast event
+    let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
+        task_id: claude_task_id_str.clone(),
+        session_id: session_id_str.clone(),
+        host_id: host_id.clone(),
+        project_path: project_path.clone(),
+    });
+
+    let task = cq::get_claude_task(&state.db, &claude_task_id_str).await?;
+    Ok((StatusCode::CREATED, Json(task)))
 }
 
 #[cfg(test)]
@@ -2262,5 +2401,29 @@ mod tests {
         assert_eq!(req.branch, "feature");
         assert_eq!(req.path.as_deref(), Some("/tmp/wt"));
         assert_eq!(req.new_branch, Some(true));
+    }
+
+    #[test]
+    fn configure_request_deserialize_empty() {
+        let json = r#"{}"#;
+        let req: ConfigureRequest = serde_json::from_str(json).unwrap();
+        assert!(req.model.is_none());
+        assert!(req.skip_permissions.is_none());
+    }
+
+    #[test]
+    fn configure_request_deserialize_full() {
+        let json = r#"{"model": "opus", "skip_permissions": true}"#;
+        let req: ConfigureRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.skip_permissions, Some(true));
+    }
+
+    #[test]
+    fn configure_request_deserialize_partial() {
+        let json = r#"{"model": "sonnet"}"#;
+        let req: ConfigureRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model.as_deref(), Some("sonnet"));
+        assert!(req.skip_permissions.is_none());
     }
 }

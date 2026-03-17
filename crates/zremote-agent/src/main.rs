@@ -61,6 +61,18 @@ enum Commands {
         #[arg(long, default_value = "8741")]
         ov_port: u16,
     },
+    /// Configure project settings with Claude
+    Configure {
+        /// Path to the project to configure
+        #[arg(long)]
+        project: PathBuf,
+        /// Claude model to use
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+        /// Skip Claude Code permission prompts
+        #[arg(long)]
+        skip_permissions: bool,
+    },
 }
 
 #[tokio::main]
@@ -90,7 +102,56 @@ async fn main() {
         Commands::McpServe { project, ov_port } => {
             mcp::run_mcp_server(project, ov_port).await;
         }
+        Commands::Configure {
+            project,
+            model,
+            skip_permissions,
+        } => {
+            run_configure(&project, &model, skip_permissions);
+        }
     }
+}
+
+fn run_configure(project: &std::path::Path, model: &str, skip_permissions: bool) {
+    if !project.exists() {
+        tracing::error!(path = %project.display(), "project path does not exist");
+        std::process::exit(1);
+    }
+
+    let project_type = project::configure::detect_project_type(project);
+    tracing::info!(
+        path = %project.display(),
+        project_type,
+        "configuring project"
+    );
+
+    let existing_json = match project::settings::read_settings(project) {
+        Ok(Some(settings)) => serde_json::to_string_pretty(&settings).ok(),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read existing settings, starting fresh");
+            None
+        }
+    };
+
+    let prompt = project::configure::build_configure_prompt(
+        &project.display().to_string(),
+        project_type,
+        existing_json.as_deref(),
+    );
+
+    let mut cmd =
+        project::configure::build_claude_command(project, model, &prompt, skip_permissions);
+
+    let status = match cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to execute claude command");
+            std::process::exit(1);
+        }
+    };
+
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 async fn run_agent() {

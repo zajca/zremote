@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi, beforeEach } from "vitest";
+import { MemoryRouter } from "react-router";
 import { ProjectSettingsTab } from "./ProjectSettingsTab";
 
 function mockFetchResponse(data: unknown) {
@@ -39,11 +40,13 @@ describe("ProjectSettingsTab", () => {
   test("renders loading state", () => {
     global.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     expect(screen.getByText("Loading settings...")).toBeInTheDocument();
   });
@@ -55,11 +58,13 @@ describe("ProjectSettingsTab", () => {
       json: async () => ({ settings: null }),
     });
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByText("Create Settings")).toBeInTheDocument();
@@ -74,11 +79,13 @@ describe("ProjectSettingsTab", () => {
       return mockFetchResponse({});
     });
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByDisplayValue("/bin/zsh")).toBeInTheDocument();
@@ -106,11 +113,13 @@ describe("ProjectSettingsTab", () => {
       return mockFetchResponse({});
     });
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByText("General")).toBeInTheDocument();
@@ -145,11 +154,13 @@ describe("ProjectSettingsTab", () => {
     global.fetch = fetchMock;
 
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByText("General")).toBeInTheDocument();
@@ -194,11 +205,13 @@ describe("ProjectSettingsTab", () => {
     global.fetch = fetchMock;
 
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
 
     await waitFor(() => {
@@ -215,6 +228,27 @@ describe("ProjectSettingsTab", () => {
     });
   });
 
+  test("renders configure with claude button in empty state", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ settings: null }),
+      json: async () => ({ settings: null }),
+    });
+    render(
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Create Settings")).toBeInTheDocument();
+      expect(screen.getByText("Configure with Claude")).toBeInTheDocument();
+    });
+  });
+
   test("shows error state with reset button", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -222,11 +256,13 @@ describe("ProjectSettingsTab", () => {
       json: async () => ({}),
     });
     render(
-      <ProjectSettingsTab
-        projectId="proj-1"
-        projectPath="/home/user/project"
-        hostId="host-1"
-      />,
+      <MemoryRouter>
+        <ProjectSettingsTab
+          projectId="proj-1"
+          projectPath="/home/user/project"
+          hostId="host-1"
+        />
+      </MemoryRouter>,
     );
     await waitFor(() => {
       expect(screen.getByText("Failed to load settings")).toBeInTheDocument();

@@ -288,6 +288,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body ?? {}),
       }),
+    configureWithClaude: (projectId: string, model?: string, skipPermissions?: boolean) =>
+      request<ClaudeTask>(`/api/projects/${projectId}/configure`, {
+        method: "POST",
+        body: JSON.stringify({ model, skip_permissions: skipPermissions }),
+      }),
   },
   analytics: {
     tokens: (params?: { by?: string; from?: string; to?: string }) => {

@@ -234,6 +234,10 @@ fn build_router(
             "/api/projects/{project_id}/actions/{action_name}/run",
             post(routes::projects::run_action),
         )
+        .route(
+            "/api/projects/{project_id}/configure",
+            post(routes::projects::configure_with_claude),
+        )
         // Permissions
         .route(
             "/api/permissions",
