@@ -219,7 +219,7 @@ mod tests {
         let result = super::detect_tmux();
         // On CI or systems without tmux, this will be false; on dev machines, true.
         // We can't assert either way, but we verify it runs without error.
-        assert!(result || !result);
+        let _ = result;
     }
 
     #[test]

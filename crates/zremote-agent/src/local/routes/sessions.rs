@@ -14,7 +14,7 @@ use crate::local::state::LocalAppState;
 
 /// Resolve the default shell from the passwd database, falling back to $SHELL
 /// and then `/bin/sh`.
-fn default_shell() -> &'static str {
+pub(crate) fn default_shell() -> &'static str {
     static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHELL.get_or_init(|| {
         login_shell_from_passwd()
@@ -51,6 +51,8 @@ pub struct CreateSessionRequest {
     pub rows: Option<u16>,
     pub working_dir: Option<String>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub initial_command: Option<String>,
 }
 
 /// `POST /api/hosts/:host_id/sessions` - create a new terminal session.
@@ -172,6 +174,21 @@ pub async fn create_session(
             status: "active".to_string(),
         },
     });
+
+    // Write initial command to PTY after a short delay for shell init
+    if let Some(ref cmd) = body.initial_command {
+        let cmd_with_newline = format!("{cmd}\n");
+        let state_clone = state.clone();
+        let sid = session_id;
+        let cmd_bytes = cmd_with_newline.into_bytes();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let mut mgr = state_clone.session_manager.lock().await;
+            if let Err(e) = mgr.write_to(&sid, &cmd_bytes) {
+                tracing::warn!(session_id = %sid, error = %e, "failed to write initial_command to PTY");
+            }
+        });
+    }
 
     let response = serde_json::json!({
         "id": session_id_str,

@@ -195,6 +195,46 @@ fn serialize_agentic_message(msg: &AgenticAgentMessage) -> Result<Message, Conne
     Ok(Message::Text(json.into()))
 }
 
+/// Run a worktree lifecycle hook if configured in project settings.
+async fn run_worktree_hook_server(
+    project_path: &str,
+    worktree_path: &str,
+    branch: &str,
+    hook_selector: impl FnOnce(&zremote_protocol::project::WorktreeSettings) -> Option<&str>,
+) -> Option<zremote_protocol::HookResultInfo> {
+    let pp = project_path.to_string();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(std::path::Path::new(&pp))
+    })
+    .await
+    .ok()?
+    .ok()
+    .flatten()?;
+
+    let wt_settings = settings.worktree.as_ref()?;
+    let template = hook_selector(wt_settings)?;
+
+    let cmd =
+        crate::project::hooks::expand_hook_template(template, project_path, worktree_path, branch);
+    let result = crate::project::hooks::execute_hook_async(
+        cmd,
+        std::path::PathBuf::from(worktree_path),
+        vec![],
+        None,
+    )
+    .await;
+
+    Some(zremote_protocol::HookResultInfo {
+        success: result.success,
+        output: if result.output.is_empty() {
+            None
+        } else {
+            Some(result.output)
+        },
+        duration_ms: result.duration.as_millis() as u64,
+    })
+}
+
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
 #[allow(clippy::too_many_arguments)]
 fn handle_session_create(
@@ -206,6 +246,7 @@ fn handle_session_create(
     rows: u16,
     working_dir: Option<&str>,
     env: Option<&std::collections::HashMap<String, String>>,
+    initial_command: Option<&str>,
 ) {
     let shell = shell.unwrap_or(default_shell());
     match session_manager.create(session_id, shell, cols, rows, working_dir, env) {
@@ -220,6 +261,14 @@ fn handle_session_create(
                 .is_err()
             {
                 tracing::warn!("outbound channel full, message dropped");
+            }
+            // Write initial command to PTY after a short delay for shell init
+            if let Some(cmd) = initial_command {
+                let cmd_with_newline = format!("{cmd}\n");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Err(e) = session_manager.write_to(&session_id, cmd_with_newline.as_bytes()) {
+                    tracing::warn!(session_id = %session_id, error = %e, "failed to write initial_command to PTY");
+                }
             }
         }
         Err(e) => {
@@ -594,7 +643,7 @@ fn handle_server_message(
             rows,
             working_dir,
             env,
-            initial_command: _,
+            initial_command,
         } => {
             handle_session_create(
                 session_manager,
@@ -605,6 +654,7 @@ fn handle_server_message(
                 *rows,
                 working_dir.as_deref(),
                 env.as_ref(),
+                initial_command.as_deref(),
             );
         }
         ServerMessage::SessionClose { session_id } => {
@@ -844,11 +894,20 @@ fn handle_server_message(
                 .await;
                 match result {
                     Ok(Ok(worktree)) => {
+                        // Run on_create hook if configured
+                        let hook_result = run_worktree_hook_server(
+                            &project_path,
+                            &worktree.path,
+                            worktree.branch.as_deref().unwrap_or_default(),
+                            |wt| wt.on_create.as_deref(),
+                        )
+                        .await;
+
                         if tx
                             .send(AgentMessage::WorktreeCreated {
                                 project_path,
                                 worktree,
-                                hook_result: None,
+                                hook_result,
                             })
                             .await
                             .is_err()
@@ -893,6 +952,27 @@ fn handle_server_message(
             let worktree_path = worktree_path.clone();
             let force = *force;
             tokio::spawn(async move {
+                // Run on_delete hook before removing worktree
+                let hook_result =
+                    run_worktree_hook_server(&project_path, &worktree_path, "", |wt| {
+                        wt.on_delete.as_deref()
+                    })
+                    .await;
+
+                if let Some(ref hr) = hook_result {
+                    // Send hook result to server
+                    let _ = tx
+                        .send(AgentMessage::WorktreeHookResult {
+                            project_path: project_path.clone(),
+                            worktree_path: worktree_path.clone(),
+                            hook_type: "on_delete".to_string(),
+                            success: hr.success,
+                            output: hr.output.clone(),
+                            duration_ms: hr.duration_ms,
+                        })
+                        .await;
+                }
+
                 let pp = project_path.clone();
                 let wp = worktree_path.clone();
                 let result = tokio::task::spawn_blocking(move || {

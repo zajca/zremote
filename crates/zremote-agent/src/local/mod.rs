@@ -225,6 +225,15 @@ fn build_router(
             "/api/projects/{project_id}/settings",
             get(routes::projects::get_settings).put(routes::projects::save_settings),
         )
+        // Project Actions
+        .route(
+            "/api/projects/{project_id}/actions",
+            get(routes::projects::list_actions),
+        )
+        .route(
+            "/api/projects/{project_id}/actions/{action_name}/run",
+            post(routes::projects::run_action),
+        )
         // Permissions
         .route(
             "/api/permissions",
