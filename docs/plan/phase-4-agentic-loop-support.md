@@ -8,7 +8,7 @@
 
 ## 4.1 Protocol Extensions for Agentic Messages
 
-**Files:** `crates/myremote-protocol/src/lib.rs` (consider splitting into `lib.rs`, `terminal.rs`, `agentic.rs`)
+**Files:** `crates/zremote-protocol/src/lib.rs` (consider splitting into `lib.rs`, `terminal.rs`, `agentic.rs`)
 
 - [ ] Add `AgenticLoopId = Uuid` type alias
 - [ ] New `AgentMessage` variants:
@@ -34,7 +34,7 @@
 
 ## 4.2 Agent: Agentic Loop Detection
 
-**Files:** `crates/myremote-agent/src/agentic/{mod.rs, detector.rs, manager.rs, claude_code.rs, types.rs}`
+**Files:** `crates/zremote-agent/src/agentic/{mod.rs, detector.rs, manager.rs, claude_code.rs, types.rs}`
 
 - [ ] `detector.rs` -- Process tree inspection:
   - Periodically check child processes of PTY shell (every 2-3s)
@@ -66,7 +66,7 @@
 
 ## 4.3 Server: Agentic State & API
 
-**Files:** `crates/myremote-server/src/state/agentic.rs`, `routes/agentic.rs`, `migrations/002_agentic.sql`
+**Files:** `crates/zremote-server/src/state/agentic.rs`, `routes/agentic.rs`, `migrations/002_agentic.sql`
 
 - [ ] Add `dashmap` crate to server dependencies
 - [ ] `002_agentic.sql` migration:
@@ -202,7 +202,7 @@
 
 ## 4.5 Permission Management
 
-**Files:** `crates/myremote-agent/src/agentic/permissions.rs`, `crates/myremote-server/src/routes/permissions.rs`, `web/src/components/settings/PermissionRulesEditor.tsx`
+**Files:** `crates/zremote-agent/src/agentic/permissions.rs`, `crates/zremote-server/src/routes/permissions.rs`, `web/src/components/settings/PermissionRulesEditor.tsx`
 
 - [ ] DB migration (add to 002_agentic.sql):
   ```sql

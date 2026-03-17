@@ -131,7 +131,7 @@ describe("handleTaskStarted", () => {
     });
 
     const eventSpy = vi.fn();
-    window.addEventListener("myremote:claude-task-update", eventSpy);
+    window.addEventListener("zremote:claude-task-update", eventSpy);
 
     const { result } = renderHook(() => useClaudeTaskStore());
     act(() => {
@@ -146,14 +146,14 @@ describe("handleTaskStarted", () => {
     expect(eventSpy).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalled();
 
-    window.removeEventListener("myremote:claude-task-update", eventSpy);
+    window.removeEventListener("zremote:claude-task-update", eventSpy);
   });
 });
 
 describe("handleTaskUpdated", () => {
   test("updates existing task status and loop_id", () => {
     const eventSpy = vi.fn();
-    window.addEventListener("myremote:claude-task-update", eventSpy);
+    window.addEventListener("zremote:claude-task-update", eventSpy);
 
     const { result } = renderHook(() => useClaudeTaskStore());
     act(() => result.current.updateTask(mockTask));
@@ -170,7 +170,7 @@ describe("handleTaskUpdated", () => {
     expect(result.current.tasks.get("t1")?.loop_id).toBe("l1");
     expect(eventSpy).toHaveBeenCalled();
 
-    window.removeEventListener("myremote:claude-task-update", eventSpy);
+    window.removeEventListener("zremote:claude-task-update", eventSpy);
   });
 
   test("fetches unknown task from server", () => {
@@ -210,7 +210,7 @@ describe("handleTaskUpdated", () => {
 describe("handleTaskEnded", () => {
   test("updates existing task with end data", () => {
     const eventSpy = vi.fn();
-    window.addEventListener("myremote:claude-task-update", eventSpy);
+    window.addEventListener("zremote:claude-task-update", eventSpy);
 
     const { result } = renderHook(() => useClaudeTaskStore());
     act(() => result.current.updateTask(mockTask));
@@ -231,7 +231,7 @@ describe("handleTaskEnded", () => {
     expect(task.ended_at).toBeTruthy();
     expect(eventSpy).toHaveBeenCalled();
 
-    window.removeEventListener("myremote:claude-task-update", eventSpy);
+    window.removeEventListener("zremote:claude-task-update", eventSpy);
   });
 
   test("fetches unknown task on end", () => {

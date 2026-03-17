@@ -145,7 +145,7 @@ describe("HostItem", () => {
     ];
 
     // Need to start expanded to load sessions
-    localStorage.setItem("myremote:host-expanded:host-1", "true");
+    localStorage.setItem("zremote:host-expanded:host-1", "true");
 
     render(
       <MemoryRouter>
@@ -193,14 +193,14 @@ describe("HostItem", () => {
     );
 
     await userEvent.click(screen.getByLabelText("Expand"));
-    expect(localStorage.getItem("myremote:host-expanded:host-1")).toBe("true");
+    expect(localStorage.getItem("zremote:host-expanded:host-1")).toBe("true");
 
     await userEvent.click(screen.getByLabelText("Collapse"));
-    expect(localStorage.getItem("myremote:host-expanded:host-1")).toBe("false");
+    expect(localStorage.getItem("zremote:host-expanded:host-1")).toBe("false");
   });
 
   test("restores expanded state from localStorage", () => {
-    localStorage.setItem("myremote:host-expanded:host-1", "true");
+    localStorage.setItem("zremote:host-expanded:host-1", "true");
 
     render(
       <MemoryRouter>
@@ -222,7 +222,7 @@ describe("HostItem", () => {
 
   test("does not show session count for 0 active sessions", () => {
     mockSessions = [mockSession({ status: "closed" })];
-    localStorage.setItem("myremote:host-expanded:host-1", "true");
+    localStorage.setItem("zremote:host-expanded:host-1", "true");
 
     render(
       <MemoryRouter>
@@ -271,7 +271,7 @@ describe("HostItem", () => {
       mockSession({ id: "s2", status: "suspended" }),
     ];
 
-    localStorage.setItem("myremote:host-expanded:host-1", "true");
+    localStorage.setItem("zremote:host-expanded:host-1", "true");
 
     render(
       <MemoryRouter>

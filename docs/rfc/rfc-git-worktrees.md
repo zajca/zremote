@@ -2,7 +2,7 @@
 
 ## 1. Problem Statement
 
-MyRemote projects currently track only basic metadata: path, name, project_type, has_claude_config. When managing remote machines, developers need visibility into git state — which branch is checked out, whether there are uncommitted changes, how far ahead/behind upstream they are, and which worktrees exist. Currently, the only way to check this is to open a terminal session and run git commands manually.
+ZRemote projects currently track only basic metadata: path, name, project_type, has_claude_config. When managing remote machines, developers need visibility into git state — which branch is checked out, whether there are uncommitted changes, how far ahead/behind upstream they are, and which worktrees exist. Currently, the only way to check this is to open a terminal session and run git commands manually.
 
 ## 2. Goals
 
@@ -54,7 +54,7 @@ Remote URLs with embedded credentials (`https://user:token@github.com/...`) are 
 
 ## 5. Technical Design
 
-### 5.1 Protocol Layer (`myremote-protocol`)
+### 5.1 Protocol Layer (`zremote-protocol`)
 
 #### New types in `project.rs`
 
@@ -172,7 +172,7 @@ CREATE INDEX idx_projects_parent ON projects(parent_project_id);
 
 ### 5.3 Agent Git Inspector (`git.rs`)
 
-New module `crates/myremote-agent/src/project/git.rs` with a `GitInspector` struct that wraps all git CLI interactions.
+New module `crates/zremote-agent/src/project/git.rs` with a `GitInspector` struct that wraps all git CLI interactions.
 
 **Public API:**
 ```rust
@@ -365,9 +365,9 @@ deleteWorktree: (projectId: string, worktreeId: string) => ...,
 
 #### Sidebar — ProjectItem.tsx
 
-Current: `[icon] myremote [rust] [.claude] (3)`
+Current: `[icon] zremote [rust] [.claude] (3)`
 
-New: `[icon] myremote [main] [rust] [.claude] (3) [*]`
+New: `[icon] zremote [main] [rust] [.claude] (3) [*]`
 
 - `[main]` — git branch badge (muted color, small text)
 - `[*]` — dirty indicator (yellow dot or asterisk) only if `git_is_dirty`
@@ -413,7 +413,7 @@ Add handler for `worktree_error` WebSocket event to show error toast. Git status
 | Empty git repo (no commits) | `commit_hash` and `commit_message` are `None`, `branch` may be `None` |
 | No upstream tracking branch | `ahead`/`behind` default to `0` |
 | Agent offline during worktree create/delete | API returns 409 Conflict |
-| Worktree deleted outside MyRemote | Stale child project cleaned up on next scan |
+| Worktree deleted outside ZRemote | Stale child project cleaned up on next scan |
 | Very large repo (slow `git status`) | 5s timeout per command, graceful degradation |
 | Remote URL with credentials | Stripped before transmit (see 4.4) |
 | Worktree path collision | `git worktree add` fails, agent sends `WorktreeError` |
@@ -424,16 +424,16 @@ Add handler for `worktree_error` WebSocket event to show error toast. Git status
 ## 7. Implementation Plan & Task List
 
 ### Phase 1: Protocol & Data Model
-- [ ] 1.1 Add `GitInfo`, `GitRemote`, `WorktreeInfo` structs to `crates/myremote-protocol/src/project.rs`
+- [ ] 1.1 Add `GitInfo`, `GitRemote`, `WorktreeInfo` structs to `crates/zremote-protocol/src/project.rs`
 - [ ] 1.2 Extend `ProjectInfo` with `git_info: Option<GitInfo>` and `worktrees: Vec<WorktreeInfo>` (with `#[serde(default)]`)
 - [ ] 1.3 Add `GitStatusUpdate`, `WorktreeCreated`, `WorktreeDeleted`, `WorktreeError` to `AgentMessage` in `terminal.rs`
 - [ ] 1.4 Add `ProjectGitStatus`, `WorktreeCreate`, `WorktreeDelete` to `ServerMessage` in `terminal.rs`
 - [ ] 1.5 Add roundtrip serde tests for all new types and message variants
-- [ ] 1.6 Create migration `crates/myremote-server/migrations/007_git.sql` (git columns + parent_project_id)
-- [ ] 1.7 Verify `cargo test -p myremote-protocol` passes
+- [ ] 1.6 Create migration `crates/zremote-server/migrations/007_git.sql` (git columns + parent_project_id)
+- [ ] 1.7 Verify `cargo test -p zremote-protocol` passes
 
 ### Phase 2: Agent Git Inspector
-- [ ] 2.1 Create `crates/myremote-agent/src/project/git.rs` with `GitInspector` struct
+- [ ] 2.1 Create `crates/zremote-agent/src/project/git.rs` with `GitInspector` struct
 - [ ] 2.2 Implement `run_git()` helper (Command + 5s timeout)
 - [ ] 2.3 Implement `sanitize_remote_url()` (strip https credentials, leave SSH as-is)
 - [ ] 2.4 Implement `parse_worktree_list()` (parse `git worktree list --porcelain` output)
@@ -441,13 +441,13 @@ Add handler for `worktree_error` WebSocket event to show error toast. Git status
 - [ ] 2.6 Implement `GitInspector::inspect()` — full git metadata collection
 - [ ] 2.7 Implement `GitInspector::create_worktree()` — `git worktree add [-b]`
 - [ ] 2.8 Implement `GitInspector::remove_worktree()` — `git worktree remove [--force]`
-- [ ] 2.9 Add `pub mod git;` to `crates/myremote-agent/src/project/mod.rs`
+- [ ] 2.9 Add `pub mod git;` to `crates/zremote-agent/src/project/mod.rs`
 - [ ] 2.10 Integrate `GitInspector::inspect()` into `scanner.rs::detect_project()`
 - [ ] 2.11 Add `.git` file vs directory detection to skip linked worktree dirs in scanner
 - [ ] 2.12 Add match arms in `connection.rs` for `ProjectGitStatus`, `WorktreeCreate`, `WorktreeDelete`
 - [ ] 2.13 Write unit tests for `git.rs` (tempfile + git init, inspect, sanitize URL, parse porcelain, create/remove worktree)
 - [ ] 2.14 Extend scanner tests for git info detection and worktree skipping
-- [ ] 2.15 Verify `cargo test -p myremote-agent` passes
+- [ ] 2.15 Verify `cargo test -p zremote-agent` passes
 
 ### Phase 3: Server Changes
 - [ ] 3.1 Update `ProjectResponse` in `projects.rs` with new git + parent_project_id fields
@@ -466,7 +466,7 @@ Add handler for `worktree_error` WebSocket event to show error toast. Git status
 - [ ] 3.14 Implement `delete_worktree` endpoint in `projects.rs`
 - [ ] 3.15 Register new routes in `main.rs`
 - [ ] 3.16 Write server integration tests (git data persistence, worktree child CRUD, API endpoints)
-- [ ] 3.17 Verify `cargo test -p myremote-server` passes
+- [ ] 3.17 Verify `cargo test -p zremote-server` passes
 - [ ] 3.18 Verify `cargo clippy --workspace` passes
 
 ### Phase 4: Frontend
@@ -495,17 +495,17 @@ Add handler for `worktree_error` WebSocket event to show error toast. Git status
 
 | # | File | Action | Description |
 |---|------|--------|-------------|
-| 1 | `crates/myremote-protocol/src/project.rs` | Modify | Add `GitInfo`, `GitRemote`, `WorktreeInfo` structs; extend `ProjectInfo`; add tests |
-| 2 | `crates/myremote-protocol/src/terminal.rs` | Modify | Add 4 `AgentMessage` + 3 `ServerMessage` variants; add roundtrip tests |
-| 3 | `crates/myremote-agent/src/project/git.rs` | **Create** | `GitInspector` with inspect/create/remove + helpers + tests |
-| 4 | `crates/myremote-agent/src/project/mod.rs` | Modify | Add `pub mod git;` |
-| 5 | `crates/myremote-agent/src/project/scanner.rs` | Modify | Integrate git inspection; skip linked worktree dirs; extend tests |
-| 6 | `crates/myremote-agent/src/connection.rs` | Modify | Handle 3 new `ServerMessage` variants |
-| 7 | `crates/myremote-server/migrations/007_git.sql` | **Create** | Git columns + parent_project_id + index |
-| 8 | `crates/myremote-server/src/routes/agents.rs` | Modify | Extend upsert queries; add 4 new agent message handlers |
-| 9 | `crates/myremote-server/src/routes/projects.rs` | Modify | Extend `ProjectResponse`; update queries; add 4 endpoints |
-| 10 | `crates/myremote-server/src/state.rs` | Modify | Add `WorktreeError` to `ServerEvent` |
-| 11 | `crates/myremote-server/src/main.rs` | Modify | Register 3 new route groups |
+| 1 | `crates/zremote-protocol/src/project.rs` | Modify | Add `GitInfo`, `GitRemote`, `WorktreeInfo` structs; extend `ProjectInfo`; add tests |
+| 2 | `crates/zremote-protocol/src/terminal.rs` | Modify | Add 4 `AgentMessage` + 3 `ServerMessage` variants; add roundtrip tests |
+| 3 | `crates/zremote-agent/src/project/git.rs` | **Create** | `GitInspector` with inspect/create/remove + helpers + tests |
+| 4 | `crates/zremote-agent/src/project/mod.rs` | Modify | Add `pub mod git;` |
+| 5 | `crates/zremote-agent/src/project/scanner.rs` | Modify | Integrate git inspection; skip linked worktree dirs; extend tests |
+| 6 | `crates/zremote-agent/src/connection.rs` | Modify | Handle 3 new `ServerMessage` variants |
+| 7 | `crates/zremote-server/migrations/007_git.sql` | **Create** | Git columns + parent_project_id + index |
+| 8 | `crates/zremote-server/src/routes/agents.rs` | Modify | Extend upsert queries; add 4 new agent message handlers |
+| 9 | `crates/zremote-server/src/routes/projects.rs` | Modify | Extend `ProjectResponse`; update queries; add 4 endpoints |
+| 10 | `crates/zremote-server/src/state.rs` | Modify | Add `WorktreeError` to `ServerEvent` |
+| 11 | `crates/zremote-server/src/main.rs` | Modify | Register 3 new route groups |
 | 12 | `web/src/lib/api.ts` | Modify | Extend `Project` interface; add 4 API methods |
 | 13 | `web/src/components/sidebar/ProjectItem.tsx` | Modify | Git branch badge, dirty indicator, worktree icon |
 | 14 | `web/src/components/sidebar/HostItem.tsx` | Modify | Worktree nesting logic |

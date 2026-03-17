@@ -62,8 +62,8 @@ export const ProjectItem = memo(function ProjectItem({
   useEffect(() => {
     const handler = () =>
       void useClaudeTaskStore.getState().fetchTasks({ project_id: project.id });
-    window.addEventListener("myremote:claude-task-update", handler);
-    return () => window.removeEventListener("myremote:claude-task-update", handler);
+    window.addEventListener("zremote:claude-task-update", handler);
+    return () => window.removeEventListener("zremote:claude-task-update", handler);
   }, [project.id]);
 
   const handleResume = useCallback(

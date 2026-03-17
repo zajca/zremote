@@ -2,7 +2,7 @@
 
 ## Context
 
-MyRemote has an "agentic session monitoring" feature designed to provide real-time visibility into AI coding tools (Claude Code, Codex, Gemini CLI, Aider) running inside PTY sessions. The system has three layers: Agent (detects and reports), Server (stores and broadcasts), Browser (displays).
+ZRemote has an "agentic session monitoring" feature designed to provide real-time visibility into AI coding tools (Claude Code, Codex, Gemini CLI, Aider) running inside PTY sessions. The system has three layers: Agent (detects and reports), Server (stores and broadcasts), Browser (displays).
 
 **Problem**: The server pipeline, REST API, WebSocket events, database schema, and all frontend UI components are fully implemented and functional. However, the agent never sends structured data -- tool calls, transcripts, and metrics never arrive. The UI exists but remains empty. The feature is effectively non-functional.
 
@@ -43,24 +43,24 @@ MyRemote has an "agentic session monitoring" feature designed to provide real-ti
 
 ### Root Cause
 
-The agent's `ClaudeCodeAdapter` (`crates/myremote-agent/src/agentic/claude_code.rs`) parses raw ANSI terminal output using simple string patterns. This approach cannot extract structured data (tool names, arguments, results, token counts, costs) because Claude Code's terminal output is human-readable formatted text, not structured data.
+The agent's `ClaudeCodeAdapter` (`crates/zremote-agent/src/agentic/claude_code.rs`) parses raw ANSI terminal output using simple string patterns. This approach cannot extract structured data (tool names, arguments, results, token counts, costs) because Claude Code's terminal output is human-readable formatted text, not structured data.
 
 ### Key Files
 
 **Agent (data source - needs changes):**
-- `crates/myremote-agent/src/agentic/claude_code.rs` - terminal parser, only generates StatusChanged/Ended
-- `crates/myremote-agent/src/agentic/manager.rs` - loop lifecycle, event -> protocol message translation
-- `crates/myremote-agent/src/agentic/detector.rs` - process tree BFS detection
-- `crates/myremote-agent/src/agentic/types.rs` - AgenticEvent enum (ToolCall/Transcript/Metrics variants exist but unused)
-- `crates/myremote-agent/src/connection.rs` - WS lifecycle, message routing, sender task with agentic channel (64 cap)
+- `crates/zremote-agent/src/agentic/claude_code.rs` - terminal parser, only generates StatusChanged/Ended
+- `crates/zremote-agent/src/agentic/manager.rs` - loop lifecycle, event -> protocol message translation
+- `crates/zremote-agent/src/agentic/detector.rs` - process tree BFS detection
+- `crates/zremote-agent/src/agentic/types.rs` - AgenticEvent enum (ToolCall/Transcript/Metrics variants exist but unused)
+- `crates/zremote-agent/src/connection.rs` - WS lifecycle, message routing, sender task with agentic channel (64 cap)
 
 **Protocol (shared types):**
-- `crates/myremote-protocol/src/agentic.rs` - AgenticAgentMessage (7 variants), AgenticServerMessage (2 variants)
+- `crates/zremote-protocol/src/agentic.rs` - AgenticAgentMessage (7 variants), AgenticServerMessage (2 variants)
 
 **Server (no changes needed for Phases 1-3):**
-- `crates/myremote-server/src/routes/agents.rs` - WS handler, handles all agentic messages
-- `crates/myremote-server/src/routes/agentic.rs` - REST endpoints
-- `crates/myremote-server/src/state.rs` - AgenticLoopStore (DashMap), ServerEvent enum
+- `crates/zremote-server/src/routes/agents.rs` - WS handler, handles all agentic messages
+- `crates/zremote-server/src/routes/agentic.rs` - REST endpoints
+- `crates/zremote-server/src/state.rs` - AgenticLoopStore (DashMap), ServerEvent enum
 
 **Browser (no changes needed for Phases 1-3):**
 - `web/src/components/agentic/` - all UI components (6 files)
@@ -96,7 +96,7 @@ All hooks receive base JSON: `{ session_id, transcript_path, cwd, hook_event_nam
 ### Architecture
 
 ```
-Claude Code process (in PTY session managed by myremote)
+Claude Code process (in PTY session managed by zremote)
   |
   +--> Hook fires (PreToolUse / PostToolUse / Stop / PermissionRequest)
   |      |
@@ -108,14 +108,14 @@ Claude Code process (in PTY session managed by myremote)
          +--> Existing PTY relay to server (unchanged)
          +--> Existing pattern matching (kept as fallback)
 
-Agent (myremote-agent)
+Agent (zremote-agent)
   |
   +--> HTTP sidecar receives structured hook data
-  +--> Maps CC session_id -> myremote loop_id
+  +--> Maps CC session_id -> zremote loop_id
   +--> Translates to AgenticAgentMessage
   +--> Sends via existing agentic_tx channel -> WebSocket -> Server
 
-Server (myremote-server) -- NO CHANGES NEEDED
+Server (zremote-server) -- NO CHANGES NEEDED
   |
   +--> Existing handlers persist to DB, update in-memory store
   +--> Existing broadcast sends events to browser clients
@@ -143,10 +143,10 @@ Browser (React) -- NO CHANGES NEEDED for data flow
 |------|------------|
 | CC hook timeout kills PermissionRequest blocking | 55s timeout (under CC's 60s limit), fallback to terminal prompt |
 | CC changes hook JSON schema | Defensive JSON parsing, version detection, graceful degradation |
-| Hook install modifies user's settings.json | Merge-style update (preserve existing hooks), backup file, `managed by myremote` markers |
+| Hook install modifies user's settings.json | Merge-style update (preserve existing hooks), backup file, `managed by zremote` markers |
 | Multiple CC instances on same machine | Disambiguate via `cwd` + PID matching to known PTY sessions |
 | CC not installed or old version without hooks | Fall back to existing terminal parsing (current behavior preserved) |
-| Agent HTTP port conflicts | Bind to `127.0.0.1:0` (OS-assigned port), write to `~/.myremote/hooks-port` |
+| Agent HTTP port conflicts | Bind to `127.0.0.1:0` (OS-assigned port), write to `~/.zremote/hooks-port` |
 
 ---
 
@@ -157,22 +157,22 @@ Browser (React) -- NO CHANGES NEEDED for data flow
 **Goal**: Agent starts HTTP listener. Hook scripts POST tool call data to it. Agent emits `LoopToolCall`/`LoopToolResult` via existing WS channel. Server + frontend automatically display tool calls.
 
 **Create:**
-- `crates/myremote-agent/src/hooks/mod.rs` - module exports
-- `crates/myremote-agent/src/hooks/server.rs` - axum HTTP server on `127.0.0.1:0`, writes port to `~/.myremote/hooks-port`
-- `crates/myremote-agent/src/hooks/handler.rs` - POST /hooks endpoint, dispatches by `hook_event_name`
-- `crates/myremote-agent/src/hooks/mapper.rs` - CC `session_id` <-> myremote `loop_id` mapping (via cwd + PTY PID)
-- `crates/myremote-agent/src/hooks/installer.rs` - generates/updates `~/.claude/settings.json` with hook commands
+- `crates/zremote-agent/src/hooks/mod.rs` - module exports
+- `crates/zremote-agent/src/hooks/server.rs` - axum HTTP server on `127.0.0.1:0`, writes port to `~/.zremote/hooks-port`
+- `crates/zremote-agent/src/hooks/handler.rs` - POST /hooks endpoint, dispatches by `hook_event_name`
+- `crates/zremote-agent/src/hooks/mapper.rs` - CC `session_id` <-> zremote `loop_id` mapping (via cwd + PTY PID)
+- `crates/zremote-agent/src/hooks/installer.rs` - generates/updates `~/.claude/settings.json` with hook commands
 
 **Modify:**
-- `crates/myremote-agent/src/main.rs` - start hooks server alongside WS connection
-- `crates/myremote-agent/src/connection.rs` - pass `agentic_tx` sender to hooks server, so hook handler can emit messages
-- `crates/myremote-agent/src/agentic/manager.rs` - expose method to register CC session_id -> loop_id mapping when LoopDetected fires
-- `crates/myremote-agent/Cargo.toml` - add deps if needed
+- `crates/zremote-agent/src/main.rs` - start hooks server alongside WS connection
+- `crates/zremote-agent/src/connection.rs` - pass `agentic_tx` sender to hooks server, so hook handler can emit messages
+- `crates/zremote-agent/src/agentic/manager.rs` - expose method to register CC session_id -> loop_id mapping when LoopDetected fires
+- `crates/zremote-agent/Cargo.toml` - add deps if needed
 
-**Hook script** (generated by installer, stored in `~/.myremote/hooks/`):
+**Hook script** (generated by installer, stored in `~/.zremote/hooks/`):
 ```bash
 #!/bin/sh
-PORT=$(cat ~/.myremote/hooks-port 2>/dev/null) || exit 0
+PORT=$(cat ~/.zremote/hooks-port 2>/dev/null) || exit 0
 curl -s -X POST "http://127.0.0.1:$PORT/hooks" \
   -H "Content-Type: application/json" \
   -d "$(cat -)" >/dev/null 2>&1
@@ -183,7 +183,7 @@ exit 0
 - `PreToolUse` hook -> `LoopToolCall { tool_call_id: tool_use_id, tool_name, arguments_json: tool_input, status: Pending }`
 - `PostToolUse` hook -> `LoopToolResult { tool_call_id: tool_use_id, result_preview: tool_response[..500], duration_ms }`
 
-**Verification:** Start CC in a MyRemote PTY session. Open ToolCallQueue in browser. Verify tool calls appear in real-time with names + arguments.
+**Verification:** Start CC in a ZRemote PTY session. Open ToolCallQueue in browser. Verify tool calls appear in real-time with names + arguments.
 
 ---
 
@@ -192,12 +192,12 @@ exit 0
 **Goal**: Extract conversation transcript and token/cost metrics from CC transcript JSONL files. CostTracker and TranscriptView display real data.
 
 **Create:**
-- `crates/myremote-agent/src/hooks/transcript.rs` - JSONL parser, extracts messages + token counts
-- `crates/myremote-agent/src/hooks/metrics.rs` - token aggregation + cost calculation (model pricing table)
+- `crates/zremote-agent/src/hooks/transcript.rs` - JSONL parser, extracts messages + token counts
+- `crates/zremote-agent/src/hooks/metrics.rs` - token aggregation + cost calculation (model pricing table)
 
 **Modify:**
-- `crates/myremote-agent/src/hooks/handler.rs` - handle `Stop` hook event: parse transcript, emit LoopTranscript + LoopMetrics
-- `crates/myremote-agent/src/hooks/mapper.rs` - store `transcript_path` per loop, track read offset for incremental parsing
+- `crates/zremote-agent/src/hooks/handler.rs` - handle `Stop` hook event: parse transcript, emit LoopTranscript + LoopMetrics
+- `crates/zremote-agent/src/hooks/mapper.rs` - store `transcript_path` per loop, track read offset for incremental parsing
 
 **Data flow:**
 1. `Stop` hook fires -> agent receives `{ transcript_path, session_id, ... }`
@@ -218,15 +218,15 @@ exit 0
 
 ### Phase 3: Permission Control + Auto-Approve Rules
 
-**Goal**: Intercept CC permission requests. User can approve/deny from MyRemote UI. Auto-approve rules applied by agent.
+**Goal**: Intercept CC permission requests. User can approve/deny from ZRemote UI. Auto-approve rules applied by agent.
 
 **Create:**
-- `crates/myremote-agent/src/hooks/permission.rs` - PermissionRequest handler with blocking HTTP response pattern
+- `crates/zremote-agent/src/hooks/permission.rs` - PermissionRequest handler with blocking HTTP response pattern
 
 **Modify:**
-- `crates/myremote-agent/src/hooks/handler.rs` - route `PermissionRequest` hook to permission handler
-- `crates/myremote-agent/src/connection.rs` - handle `PermissionRulesUpdate` from server, store rules in agent state
-- `crates/myremote-agent/src/agentic/manager.rs` - permission rule matching logic (glob pattern against tool_name)
+- `crates/zremote-agent/src/hooks/handler.rs` - route `PermissionRequest` hook to permission handler
+- `crates/zremote-agent/src/connection.rs` - handle `PermissionRulesUpdate` from server, store rules in agent state
+- `crates/zremote-agent/src/agentic/manager.rs` - permission rule matching logic (glob pattern against tool_name)
 
 **Data flow:**
 1. CC shows permission dialog -> `PermissionRequest` hook fires -> POST to agent
@@ -245,7 +245,7 @@ exit 0
 - Agent stores `Vec<PermissionRule>` in memory, updated when server sends `PermissionRulesUpdate`
 - Matching: glob pattern (e.g., `Bash*`, `Read`, `*`) against incoming tool_name
 
-**Verification:** Start CC, trigger a tool that requires permission. Verify prompt appears in MyRemote UI. Click approve. Verify CC proceeds without terminal interaction.
+**Verification:** Start CC, trigger a tool that requires permission. Verify prompt appears in ZRemote UI. Click approve. Verify CC proceeds without terminal interaction.
 
 ---
 
@@ -294,13 +294,13 @@ exit 0
 **Goal**: Improve monitoring quality for non-CC tools (Codex, Gemini CLI, Aider) which lack hooks support.
 
 **Create:**
-- `crates/myremote-agent/src/agentic/codex.rs` - Codex-specific terminal output patterns
-- `crates/myremote-agent/src/agentic/gemini.rs` - Gemini CLI-specific patterns
-- `crates/myremote-agent/src/agentic/aider.rs` - Aider-specific patterns (Aider has `--watch` mode and some structured output)
+- `crates/zremote-agent/src/agentic/codex.rs` - Codex-specific terminal output patterns
+- `crates/zremote-agent/src/agentic/gemini.rs` - Gemini CLI-specific patterns
+- `crates/zremote-agent/src/agentic/aider.rs` - Aider-specific patterns (Aider has `--watch` mode and some structured output)
 
 **Modify:**
-- `crates/myremote-agent/src/agentic/claude_code.rs` - improve existing patterns, keep as fallback when hooks unavailable
-- `crates/myremote-agent/src/agentic/mod.rs` - register new adapters in factory
+- `crates/zremote-agent/src/agentic/claude_code.rs` - improve existing patterns, keep as fallback when hooks unavailable
+- `crates/zremote-agent/src/agentic/mod.rs` - register new adapters in factory
 
 **Support tiers:**
 - **Tier 1 (full)**: Claude Code via hooks - tool calls, transcripts, metrics, permissions
@@ -330,7 +330,7 @@ exit 0
 - [ ] Create `hooks/mod.rs` module structure
 - [ ] Implement HTTP sidecar server (`hooks/server.rs`) - bind 127.0.0.1:0, write port file
 - [ ] Implement hook event handler (`hooks/handler.rs`) - parse hook JSON, dispatch by event type
-- [ ] Implement session ID mapper (`hooks/mapper.rs`) - CC session_id <-> myremote loop_id
+- [ ] Implement session ID mapper (`hooks/mapper.rs`) - CC session_id <-> zremote loop_id
 - [ ] Implement hook installer (`hooks/installer.rs`) - generate scripts, update ~/.claude/settings.json
 - [ ] Modify `main.rs` to start hooks server
 - [ ] Modify `connection.rs` to pass agentic_tx to hooks server

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Session, api } from "../lib/api";
 
-export const SESSION_UPDATE_EVENT = "myremote:session-update";
+export const SESSION_UPDATE_EVENT = "zremote:session-update";
 
 export function useSessions(hostId: string | undefined) {
   const [sessions, setSessions] = useState<Session[]>([]);

@@ -22,14 +22,14 @@ export function ReconnectBanner() {
     function onWsReconnect() {
       setDisconnected(false);
     }
-    window.addEventListener("myremote:ws-disconnected", onWsDisconnect);
-    window.addEventListener("myremote:ws-reconnected", onWsReconnect);
+    window.addEventListener("zremote:ws-disconnected", onWsDisconnect);
+    window.addEventListener("zremote:ws-reconnected", onWsReconnect);
 
     return () => {
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
-      window.removeEventListener("myremote:ws-disconnected", onWsDisconnect);
-      window.removeEventListener("myremote:ws-reconnected", onWsReconnect);
+      window.removeEventListener("zremote:ws-disconnected", onWsDisconnect);
+      window.removeEventListener("zremote:ws-reconnected", onWsReconnect);
     };
   }, []);
 
@@ -45,9 +45,9 @@ export function ReconnectBanner() {
 
 // Utility to dispatch WS connection events from useRealtimeUpdates
 export function dispatchWsDisconnected() {
-  window.dispatchEvent(new Event("myremote:ws-disconnected"));
+  window.dispatchEvent(new Event("zremote:ws-disconnected"));
 }
 
 export function dispatchWsReconnected() {
-  window.dispatchEvent(new Event("myremote:ws-reconnected"));
+  window.dispatchEvent(new Event("zremote:ws-reconnected"));
 }

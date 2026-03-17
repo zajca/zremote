@@ -8,7 +8,7 @@
 
 ## 7.1 History & Analytics Data
 
-**Files:** `crates/myremote-server/src/analytics/queries.rs`, `routes/analytics.rs`, `routes/search.rs`, `migrations/004_analytics.sql`
+**Files:** `crates/zremote-server/src/analytics/queries.rs`, `routes/analytics.rs`, `routes/search.rs`, `migrations/004_analytics.sql`
 
 - [ ] `004_analytics.sql` migration:
   ```sql

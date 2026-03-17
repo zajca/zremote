@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Project, api } from "../lib/api";
 
-export const PROJECT_UPDATE_EVENT = "myremote:project-update";
+export const PROJECT_UPDATE_EVENT = "zremote:project-update";
 
 export function useProjects(hostId: string | undefined) {
   const [projects, setProjects] = useState<Project[]>([]);

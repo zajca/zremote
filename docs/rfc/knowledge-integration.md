@@ -2,16 +2,16 @@
 
 ## Context
 
-MyRemote has a partially built knowledge system powered by OpenViking (semantic indexing, memory extraction, CLAUDE.md generation). The system gathers knowledge but never delivers it back to Claude Code. Generated instructions are displayed in a web UI for manual clipboard copy. There is no automatic integration with Claude Code's context system, no on-demand querying during sessions, and no bootstrapping for existing projects.
+ZRemote has a partially built knowledge system powered by OpenViking (semantic indexing, memory extraction, CLAUDE.md generation). The system gathers knowledge but never delivers it back to Claude Code. Generated instructions are displayed in a web UI for manual clipboard copy. There is no automatic integration with Claude Code's context system, no on-demand querying during sessions, and no bootstrapping for existing projects.
 
-**Problem**: Knowledge gathered by myremote is invisible to Claude Code sessions.
+**Problem**: Knowledge gathered by zremote is invisible to Claude Code sessions.
 
 **Goal**: Claude Code sessions on remote hosts should automatically benefit from accumulated project knowledge through three progressive layers:
 1. **CLAUDE.md** -- baseline context loaded at every session start
 2. **MCP Server** -- on-demand semantic search and memory queries during sessions
 3. **Automatic lifecycle** -- knowledge extraction, regeneration, and freshness without manual intervention
 
-**Decision**: CLAUDE.md uses **section mode** -- single file, user content above `<!-- MyRemote Knowledge -->` marker, auto-generated content below.
+**Decision**: CLAUDE.md uses **section mode** -- single file, user content above `<!-- ZRemote Knowledge -->` marker, auto-generated content below.
 
 ---
 
@@ -23,10 +23,10 @@ Claude Code session (on remote host)
   +-- reads {project}/.claude/CLAUDE.md        [Layer 1: always loaded, ~50 lines]
   |     (user section + auto-generated section)
   |
-  +-- MCP stdio --> myremote-agent mcp-serve   [Layer 2: on-demand]
+  +-- MCP stdio --> zremote-agent mcp-serve   [Layer 2: on-demand]
   |                   |
   |                   +-- HTTP --> OpenViking (localhost, semantic search)
-  |                   +-- reads --> local memory cache (~/.myremote/memories/{project}.json)
+  |                   +-- reads --> local memory cache (~/.zremote/memories/{project}.json)
   |
   +-- PTY output --> agentic detection -----> server --> auto-extract --> memories DB
                                                     |
@@ -45,7 +45,7 @@ For memories (stored in server's SQLite), the agent periodically syncs a local c
 
 ### 1.1 Protocol Changes
 
-**File**: `crates/myremote-protocol/src/knowledge.rs`
+**File**: `crates/zremote-protocol/src/knowledge.rs`
 
 Add new enum variant to `KnowledgeServerMessage`:
 ```rust
@@ -77,13 +77,13 @@ pub enum WriteMdMode {
 
 ### 1.2 Agent Write Logic
 
-**File**: `crates/myremote-agent/src/knowledge/mod.rs`
+**File**: `crates/zremote-agent/src/knowledge/mod.rs`
 
 Add `write_claude_md()` method to `KnowledgeManager`:
 
 - `Section` mode (default):
   1. Read existing `{project_path}/.claude/CLAUDE.md` if it exists
-  2. Find marker line `<!-- MyRemote Knowledge (auto-generated, do not edit below) -->`
+  2. Find marker line `<!-- ZRemote Knowledge (auto-generated, do not edit below) -->`
   3. If marker found: keep everything above marker, replace everything below with new content
   4. If file exists but no marker: append `\n\n` + marker + content at end
   5. If no file: create `.claude/` directory, write marker + content
@@ -94,7 +94,7 @@ Handle `WriteClaudeMd` in `handle_message()` match arm.
 
 ### 1.3 Server Endpoint
 
-**File**: `crates/myremote-server/src/routes/knowledge.rs`
+**File**: `crates/zremote-server/src/routes/knowledge.rs`
 
 Add `POST /api/projects/{project_id}/knowledge/write-claude-md`:
 1. Fetch project info (host_id, path)
@@ -103,7 +103,7 @@ Add `POST /api/projects/{project_id}/knowledge/write-claude-md`:
 4. Wait for `ClaudeMdWritten` confirmation (10s timeout via oneshot channel)
 5. Return `{ written: true, bytes: N }` or error
 
-**File**: `crates/myremote-server/src/routes/agents.rs`
+**File**: `crates/zremote-server/src/routes/agents.rs`
 
 Handle `ClaudeMdWritten` in `handle_knowledge_message()` -- route to oneshot channel.
 
@@ -112,7 +112,7 @@ Handle `ClaudeMdWritten` in `handle_knowledge_message()` -- route to oneshot cha
 The synthesized content from OpenViking will be wrapped in a compact template:
 
 ```markdown
-<!-- MyRemote Knowledge (auto-generated, do not edit below) -->
+<!-- ZRemote Knowledge (auto-generated, do not edit below) -->
 
 ## Architecture
 {2-3 line summary from Architecture memories, confidence >= 0.7}
@@ -127,7 +127,7 @@ The synthesized content from OpenViking will be wrapped in a compact template:
 {bullet list from Convention memories, max 5 items, confidence >= 0.7}
 
 ## Knowledge Tools
-This project has a MyRemote knowledge base. Use MCP tools for detailed queries:
+This project has a ZRemote knowledge base. Use MCP tools for detailed queries:
 - `knowledge_search`: semantic code search
 - `knowledge_memories`: query project learnings
 ```
@@ -161,7 +161,7 @@ Add `knowledge.writeClaudeMd(projectId): Promise<{ written: boolean, bytes: numb
 
 ### 2.1 Architecture Decision
 
-**Agent subcommand** (`myremote-agent mcp-serve --project /path/to/project`):
+**Agent subcommand** (`zremote-agent mcp-serve --project /path/to/project`):
 - Shares `OvClient` code for OpenViking HTTP calls
 - Shares `OvConf` for configuration (port, data_dir)
 - Single binary to deploy on remote hosts
@@ -177,7 +177,7 @@ schemars = "0.8"
 clap = { version = "4", features = ["derive"] }
 ```
 
-**File**: `crates/myremote-agent/Cargo.toml`
+**File**: `crates/zremote-agent/Cargo.toml`
 ```toml
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
@@ -190,13 +190,13 @@ mcp = ["dep:rmcp", "dep:schemars"]
 
 ### 2.3 CLI Subcommand
 
-**File**: `crates/myremote-agent/src/main.rs`
+**File**: `crates/zremote-agent/src/main.rs`
 
 Replace direct main logic with `clap` subcommands:
 ```rust
 #[derive(clap::Parser)]
 enum Cli {
-    /// Run as agent connecting to myremote server (default)
+    /// Run as agent connecting to zremote server (default)
     Run,
     /// Run as MCP server for Claude Code
     McpServe {
@@ -215,9 +215,9 @@ When no subcommand given, default to `Run` (backwards compatible).
 ### 2.4 MCP Server Module
 
 **New files**:
-- `crates/myremote-agent/src/mcp/mod.rs` -- Server struct, initialization
-- `crates/myremote-agent/src/mcp/tools.rs` -- Tool definitions
-- `crates/myremote-agent/src/mcp/resources.rs` -- Resource definitions
+- `crates/zremote-agent/src/mcp/mod.rs` -- Server struct, initialization
+- `crates/zremote-agent/src/mcp/tools.rs` -- Tool definitions
+- `crates/zremote-agent/src/mcp/resources.rs` -- Resource definitions
 
 **Server struct**:
 ```rust
@@ -247,18 +247,18 @@ Each tool returns `ToolUseResultBlock::text()` with formatted results. Keep resp
 
 | Resource URI | Content |
 |-------------|---------|
-| `myremote://context` | Auto-generated section of CLAUDE.md |
-| `myremote://memories/pattern` | Pattern memories |
-| `myremote://memories/decision` | Decision memories |
-| `myremote://memories/pitfall` | Pitfall memories |
-| `myremote://memories/architecture` | Architecture memories |
-| `myremote://memories/convention` | Convention memories |
+| `zremote://context` | Auto-generated section of CLAUDE.md |
+| `zremote://memories/pattern` | Pattern memories |
+| `zremote://memories/decision` | Decision memories |
+| `zremote://memories/pitfall` | Pitfall memories |
+| `zremote://memories/architecture` | Architecture memories |
+| `zremote://memories/convention` | Convention memories |
 
 ### 2.7 Memory Cache Sync
 
 The MCP server runs independently of the server WebSocket connection. For memories (stored in server DB), it needs a local cache.
 
-**Approach**: File-based cache at `~/.myremote/memories/{project_name}.json`
+**Approach**: File-based cache at `~/.zremote/memories/{project_name}.json`
 
 - The agent's main process (running in WebSocket mode) writes this file whenever `MemoryExtracted` is received
 - The MCP server process reads this file on startup and watches for changes (inotify)
@@ -268,7 +268,7 @@ The MCP server runs independently of the server WebSocket connection. For memori
 Add to `KnowledgeManager`:
 ```rust
 async fn sync_memories_to_cache(&self, project_path: &str, memories: &[ExtractedMemory]) {
-    // Write to ~/.myremote/memories/{project_name}.json
+    // Write to ~/.zremote/memories/{project_name}.json
 }
 ```
 
@@ -280,8 +280,8 @@ When knowledge is first enabled for a project, the agent writes:
 ```json
 {
   "mcpServers": {
-    "myremote-knowledge": {
-      "command": "myremote-agent",
+    "zremote-knowledge": {
+      "command": "zremote-agent",
       "args": ["mcp-serve", "--project", "{project_path}"],
       "env": {}
     }
@@ -289,7 +289,7 @@ When knowledge is first enabled for a project, the agent writes:
 }
 ```
 
-Or user manually runs: `claude mcp add myremote-knowledge -- myremote-agent mcp-serve --project /path`
+Or user manually runs: `claude mcp add zremote-knowledge -- zremote-agent mcp-serve --project /path`
 
 Add `write_mcp_json()` to `KnowledgeManager`, called after first successful indexing.
 
@@ -307,21 +307,21 @@ Add `write_mcp_json()` to `KnowledgeManager`, called after first successful inde
 
 ### 3.1 Fix Auto-Extract on Loop End
 
-**File**: `crates/myremote-server/src/routes/agents.rs` (lines 883-940)
+**File**: `crates/zremote-server/src/routes/agents.rs` (lines 883-940)
 
 Current issues:
 1. `openviking.auto_extract` defaults to disabled -- **change default to enabled**
 2. `project_path` in `agentic_loops` table is often empty because `LoopDetected` doesn't reliably send it
 
 Fix for project_path detection:
-- **File**: `crates/myremote-agent/src/agentic/manager.rs`
+- **File**: `crates/zremote-agent/src/agentic/manager.rs`
 - When `LoopDetected` is emitted, resolve project_path from the session's working directory
 - The session's working directory comes from PTY's cwd: read `/proc/{pid}/cwd` symlink
 - Fall back to matching against known project paths from the project scanner
 
 ### 3.2 Auto-Regenerate CLAUDE.md After Extraction
 
-**File**: `crates/myremote-server/src/routes/agents.rs` -- in `handle_knowledge_message()`, after `MemoryExtracted` is processed:
+**File**: `crates/zremote-server/src/routes/agents.rs` -- in `handle_knowledge_message()`, after `MemoryExtracted` is processed:
 
 1. Count memories extracted
 2. Increment `memories_since_regen` counter in `knowledge_bases` table
@@ -332,7 +332,7 @@ Fix for project_path detection:
 
 ### 3.3 DB Migration
 
-**File**: `crates/myremote-server/migrations/007_knowledge_lifecycle.sql`
+**File**: `crates/zremote-server/migrations/007_knowledge_lifecycle.sql`
 
 ```sql
 ALTER TABLE knowledge_bases ADD COLUMN memories_since_regen INTEGER NOT NULL DEFAULT 0;
@@ -358,7 +358,7 @@ Or simpler: have the agent's knowledge manager always write cache after receivin
 
 ### 3.5 Auto-Extract Default
 
-**File**: `crates/myremote-server/src/routes/agents.rs` (line 892-893)
+**File**: `crates/zremote-server/src/routes/agents.rs` (line 892-893)
 
 Change:
 ```rust
@@ -387,7 +387,7 @@ This makes auto-extract enabled by default, opt-out via `openviking.auto_extract
 
 ### 4.1 Bootstrap Protocol
 
-**File**: `crates/myremote-protocol/src/knowledge.rs`
+**File**: `crates/zremote-protocol/src/knowledge.rs`
 
 Add to `KnowledgeServerMessage`:
 ```rust
@@ -409,14 +409,14 @@ BootstrapComplete {
 
 ### 4.2 Bootstrap Flow
 
-**File**: `crates/myremote-server/src/routes/agents.rs`
+**File**: `crates/zremote-server/src/routes/agents.rs`
 
 In `ProjectDiscovered` / `ProjectList` handler, after inserting project into DB:
 1. Check if OpenViking is running for this host (query `knowledge_bases` where status = 'ready')
 2. Check if project has any memories already (query `knowledge_memories` count)
 3. If OV running AND zero memories: send `BootstrapProject` to agent
 
-**File**: `crates/myremote-agent/src/knowledge/mod.rs`
+**File**: `crates/zremote-agent/src/knowledge/mod.rs`
 
 Add `bootstrap_project()` method:
 1. Index project files via `OvClient::index_project()` (if not already indexed)
@@ -431,7 +431,7 @@ Add `bootstrap_project()` method:
 
 ### 4.3 Server-Side Bootstrap Trigger
 
-**File**: `crates/myremote-server/src/routes/agents.rs`
+**File**: `crates/zremote-server/src/routes/agents.rs`
 
 In existing `ProjectDiscovered` handling (around line 481-545), after DB insert:
 ```rust
@@ -481,7 +481,7 @@ When `BootstrapProject` is received, agent reads `{project_path}/.claude/CLAUDE.
 
 ### 5.1 Skills Generation
 
-**File**: `crates/myremote-agent/src/knowledge/mod.rs`
+**File**: `crates/zremote-agent/src/knowledge/mod.rs`
 
 Add `generate_skills()` method, called after CLAUDE.md regeneration:
 
@@ -489,14 +489,14 @@ Generate `.claude/skills/` files from memory categories with sufficient memories
 
 | File | Content | Load Trigger |
 |------|---------|-------------|
-| `.claude/skills/myremote-architecture/SKILL.md` | Architecture + Decision memories | Structural changes, new modules |
-| `.claude/skills/myremote-patterns/SKILL.md` | Pattern memories with context | Feature implementation |
-| `.claude/skills/myremote-pitfalls/SKILL.md` | Pitfall memories | Touching relevant code areas |
+| `.claude/skills/zremote-architecture/SKILL.md` | Architecture + Decision memories | Structural changes, new modules |
+| `.claude/skills/zremote-patterns/SKILL.md` | Pattern memories with context | Feature implementation |
+| `.claude/skills/zremote-pitfalls/SKILL.md` | Pitfall memories | Touching relevant code areas |
 
 Skill file format:
 ```markdown
 ---
-name: myremote-architecture
+name: zremote-architecture
 description: Project architecture decisions and component relationships
 ---
 
@@ -522,11 +522,11 @@ SkillsGenerated {
 
 ### 5.3 Write Skills Logic
 
-**File**: `crates/myremote-agent/src/knowledge/mod.rs`
+**File**: `crates/zremote-agent/src/knowledge/mod.rs`
 
 1. Group memories by category
 2. For each category with >= 3 memories (confidence >= 0.6):
-   - Create `.claude/skills/myremote-{category}/` directory
+   - Create `.claude/skills/zremote-{category}/` directory
    - Write `SKILL.md` with frontmatter + formatted memories
 3. Clean up skills for categories that no longer have enough memories
 
@@ -563,7 +563,7 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 - [ ] **P2-T05**: Implement `knowledge_memories` tool (read from local memory cache)
 - [ ] **P2-T06**: Implement `knowledge_context` tool (read CLAUDE.md section)
 - [ ] **P2-T07**: Create `mcp/resources.rs` -- implement resource listing and reading
-- [ ] **P2-T08**: Implement memory cache file I/O (`~/.myremote/memories/{project}.json`)
+- [ ] **P2-T08**: Implement memory cache file I/O (`~/.zremote/memories/{project}.json`)
 - [ ] **P2-T09**: Add `write_mcp_json()` to agent -- generate `.mcp.json` for project
 - [ ] **P2-T10**: Test MCP server startup and tool listing via JSON-RPC
 - [ ] **P2-T11**: Test `knowledge_search` tool with mock OvClient
@@ -576,7 +576,7 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 - [ ] **P3-T03**: Create migration `007_knowledge_lifecycle.sql` (add columns to `knowledge_bases`)
 - [ ] **P3-T04**: Implement `memories_since_regen` counter -- increment on `MemoryExtracted`
 - [ ] **P3-T05**: Implement auto-regeneration trigger -- when counter >= threshold, fire GenerateInstructions + WriteClaudeMd
-- [ ] **P3-T06**: Add memory cache sync in agent's `extract_memory()` (write to `~/.myremote/memories/`)
+- [ ] **P3-T06**: Add memory cache sync in agent's `extract_memory()` (write to `~/.zremote/memories/`)
 - [ ] **P3-T07**: Test auto-extract default behavior
 - [ ] **P3-T08**: Test regeneration threshold trigger
 - [ ] **P3-T09**: Test memory cache written after extraction
@@ -605,17 +605,17 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 
 | File | Phase | Changes |
 |------|-------|---------|
-| `crates/myremote-protocol/src/knowledge.rs` | 1,4,5 | WriteMdMode, WriteClaudeMd, ClaudeMdWritten, BootstrapProject, BootstrapComplete, GenerateSkills, SkillsGenerated |
-| `crates/myremote-agent/src/knowledge/mod.rs` | 1,2,3,4,5 | write_claude_md(), format_claude_md_section(), bootstrap_project(), generate_skills(), sync_memories_to_cache() |
-| `crates/myremote-agent/src/main.rs` | 2 | clap subcommands (Run/McpServe) |
-| `crates/myremote-agent/src/mcp/mod.rs` | 2 | **NEW** -- KnowledgeMcpServer, stdio setup |
-| `crates/myremote-agent/src/mcp/tools.rs` | 2 | **NEW** -- knowledge_search, knowledge_memories, knowledge_context |
-| `crates/myremote-agent/src/mcp/resources.rs` | 2 | **NEW** -- resource listing and reading |
-| `crates/myremote-agent/src/agentic/manager.rs` | 3 | Fix project_path in LoopDetected |
-| `crates/myremote-agent/Cargo.toml` | 2 | Add rmcp, schemars, clap deps |
-| `crates/myremote-server/src/routes/agents.rs` | 1,3,4 | Handle ClaudeMdWritten, fix auto-extract default, auto-regen, bootstrap trigger |
-| `crates/myremote-server/src/routes/knowledge.rs` | 1 | write-claude-md endpoint |
-| `crates/myremote-server/migrations/007_knowledge_lifecycle.sql` | 3 | **NEW** -- lifecycle tracking columns |
+| `crates/zremote-protocol/src/knowledge.rs` | 1,4,5 | WriteMdMode, WriteClaudeMd, ClaudeMdWritten, BootstrapProject, BootstrapComplete, GenerateSkills, SkillsGenerated |
+| `crates/zremote-agent/src/knowledge/mod.rs` | 1,2,3,4,5 | write_claude_md(), format_claude_md_section(), bootstrap_project(), generate_skills(), sync_memories_to_cache() |
+| `crates/zremote-agent/src/main.rs` | 2 | clap subcommands (Run/McpServe) |
+| `crates/zremote-agent/src/mcp/mod.rs` | 2 | **NEW** -- KnowledgeMcpServer, stdio setup |
+| `crates/zremote-agent/src/mcp/tools.rs` | 2 | **NEW** -- knowledge_search, knowledge_memories, knowledge_context |
+| `crates/zremote-agent/src/mcp/resources.rs` | 2 | **NEW** -- resource listing and reading |
+| `crates/zremote-agent/src/agentic/manager.rs` | 3 | Fix project_path in LoopDetected |
+| `crates/zremote-agent/Cargo.toml` | 2 | Add rmcp, schemars, clap deps |
+| `crates/zremote-server/src/routes/agents.rs` | 1,3,4 | Handle ClaudeMdWritten, fix auto-extract default, auto-regen, bootstrap trigger |
+| `crates/zremote-server/src/routes/knowledge.rs` | 1 | write-claude-md endpoint |
+| `crates/zremote-server/migrations/007_knowledge_lifecycle.sql` | 3 | **NEW** -- lifecycle tracking columns |
 | `web/src/components/knowledge/InstructionGenerator.tsx` | 1 | "Write to CLAUDE.md" button |
 | `web/src/components/knowledge/KnowledgeStatus.tsx` | 4 | "Bootstrap" button |
 | `web/src/lib/api.ts` | 1 | writeClaudeMd endpoint |
@@ -650,8 +650,8 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 7. `cargo clippy --workspace` -- no warnings
 
 ### Phase 2
-1. `myremote-agent mcp-serve --project /path/to/project` starts without error
-2. `claude mcp add myremote-knowledge -- myremote-agent mcp-serve --project /path` succeeds
+1. `zremote-agent mcp-serve --project /path/to/project` starts without error
+2. `claude mcp add zremote-knowledge -- zremote-agent mcp-serve --project /path` succeeds
 3. Start Claude Code session, verify MCP tools appear in `/mcp`
 4. Ask Claude Code to use `knowledge_search` -- verify semantic results returned
 5. Ask Claude Code to use `knowledge_memories` -- verify memories returned
@@ -661,7 +661,7 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 1. Run a Claude Code session in a tracked project, complete it
 2. Verify memories auto-extracted (check server logs + DB)
 3. After threshold (5 memories), verify CLAUDE.md auto-regenerated
-4. Verify `~/.myremote/memories/{project}.json` cache file updated
+4. Verify `~/.zremote/memories/{project}.json` cache file updated
 5. `cargo test --workspace` passes
 
 ### Phase 4
@@ -673,7 +673,7 @@ Generate `.claude/settings.json` hook entry for post-session notification. This 
 6. `cargo test --workspace` passes
 
 ### Phase 5
-1. Verify `.claude/skills/myremote-*.md` files generated after regeneration
+1. Verify `.claude/skills/zremote-*.md` files generated after regeneration
 2. In Claude Code, verify skills appear when typing `/`
 3. Verify skills contain correctly formatted memories
 4. `cargo test --workspace` passes

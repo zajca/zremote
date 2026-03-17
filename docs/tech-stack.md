@@ -1,6 +1,6 @@
-# MyRemote — Technology Stack
+# ZRemote — Technology Stack
 
-Version-pinned technology choices for MyRemote (March 2026).
+Version-pinned technology choices for ZRemote (March 2026).
 
 ---
 

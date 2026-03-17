@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/myremote-protocol",
-    "crates/myremote-core",
-    "crates/myremote-server",
-    "crates/myremote-agent",
+    "crates/zremote-protocol",
+    "crates/zremote-core",
+    "crates/zremote-server",
+    "crates/zremote-agent",
 ]
 
 [workspace.package]
@@ -45,8 +45,8 @@ rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
 
 # Internal
-myremote-protocol = { path = "crates/myremote-protocol" }
-myremote-core = { path = "crates/myremote-core" }
+zremote-protocol = { path = "crates/zremote-protocol" }
+zremote-core = { path = "crates/zremote-core" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

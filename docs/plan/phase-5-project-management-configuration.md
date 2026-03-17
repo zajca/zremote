@@ -8,10 +8,10 @@
 
 ## 5.1 Project Discovery
 
-**Files:** `crates/myremote-agent/src/project/{scanner.rs, config.rs}`, `crates/myremote-server/src/routes/projects.rs`, `migrations/003_projects.sql`
+**Files:** `crates/zremote-agent/src/project/{scanner.rs, config.rs}`, `crates/zremote-server/src/routes/projects.rs`, `migrations/003_projects.sql`
 
 - [ ] Agent filesystem scanner (`scanner.rs`):
-  - Walk configurable base directories (env var `MYREMOTE_SCAN_DIRS`, default: `$HOME`)
+  - Walk configurable base directories (env var `ZREMOTE_SCAN_DIRS`, default: `$HOME`)
   - Detect projects by marker files: `.claude/`, `.git/`, `Cargo.toml`, `package.json`, `pyproject.toml`
   - Determine project type: `rust`, `node`, `python`, `unknown`
   - Check for `.claude/` config presence
@@ -52,7 +52,7 @@
 
 ## 5.2 Configuration Hierarchy
 
-**Files:** `crates/myremote-server/src/routes/config.rs`, `migrations/003_projects.sql` (extend)
+**Files:** `crates/zremote-server/src/routes/config.rs`, `migrations/003_projects.sql` (extend)
 
 - [ ] Three-level config:
   - **Global**: server DB `config_global` table -- applies to all hosts/projects

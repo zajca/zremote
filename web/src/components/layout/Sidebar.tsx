@@ -35,7 +35,7 @@ export function Sidebar({ onCollapse }: SidebarProps) {
       <div className="flex h-12 items-center gap-2 border-b border-border px-4">
         <Monitor size={18} className="text-accent" />
         <span className="text-sm font-semibold text-text-primary">
-          MyRemote
+          ZRemote
         </span>
         {isLocal && (
           <span className="ml-auto flex items-center gap-1 rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-tertiary">
