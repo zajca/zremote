@@ -199,10 +199,34 @@ impl TmuxSession {
 
         tracing::info!(session_id = %session_id, tmux_name = %tmux_name, "reattaching to tmux session");
 
-        // Target window 0, pane 0 -- always the original shell pane.
-        // tmux does not reindex panes, so :0.0 is stable.
-        let reattach_target = format!("{tmux_name}:0.0");
-        let pane_id = get_pane_id(&reattach_target)?;
+        // Resolve the first pane's stable %id directly. We cannot hard-code
+        // `:0.0` because tmux may renumber both windows and panes (e.g., the
+        // original window/pane 0 was closed and only index 1+ remains).
+        let reattach_target = {
+            let out = tmux_cmd()
+                .args([
+                    "list-panes",
+                    "-t",
+                    &tmux_name,
+                    "-F",
+                    "#{pane_id}",
+                ])
+                .output()
+                .map_err(|e| format!("failed to list panes for {tmux_name}: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "tmux list-panes failed for {tmux_name}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+                .into());
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .ok_or_else(|| format!("no panes found in {tmux_name}"))?
+                .to_string()
+        };
+        let pane_id = reattach_target;
 
         // Get shell PID using the stable pane_id
         let pid = get_pane_pid(&pane_id)?;
