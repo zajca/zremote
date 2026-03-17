@@ -285,6 +285,9 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
     "WorktreeDeleted",
     "WorktreeError",
     "SessionsRecovered",
+    "DirectoryListing",
+    "ProjectSettingsResult",
+    "ProjectSettingsSaved",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -715,15 +718,17 @@ async fn handle_agent_message(
             path,
             name,
             has_claude_config,
+            has_zremote_config,
             project_type,
         } => {
             let host_id_str = host_id.to_string();
             let project_id = Uuid::new_v4().to_string();
             if let Err(e) = sqlx::query(
-                "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type) \
-                 VALUES (?, ?, ?, ?, ?, ?) \
+                "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(host_id, path) DO UPDATE SET \
                  name = excluded.name, has_claude_config = excluded.has_claude_config, \
+                 has_zremote_config = excluded.has_zremote_config, \
                  project_type = excluded.project_type",
             )
             .bind(&project_id)
@@ -731,6 +736,7 @@ async fn handle_agent_message(
             .bind(&path)
             .bind(&name)
             .bind(has_claude_config)
+            .bind(has_zremote_config)
             .bind(&project_type)
             .execute(&state.db)
             .await
@@ -878,12 +884,13 @@ async fn handle_agent_message(
                     .map(|gi| serde_json::to_string(&gi.remotes).unwrap_or_default());
                 let git_updated = project.git_info.as_ref().map(|_| now.clone());
                 if let Err(e) = sqlx::query(
-                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type, \
+                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type, \
                      git_branch, git_commit_hash, git_commit_message, git_is_dirty, \
                      git_ahead, git_behind, git_remotes, git_updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(host_id, path) DO UPDATE SET \
                      name = excluded.name, has_claude_config = excluded.has_claude_config, \
+                     has_zremote_config = excluded.has_zremote_config, \
                      project_type = excluded.project_type, \
                      git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash, \
                      git_commit_message = excluded.git_commit_message, git_is_dirty = excluded.git_is_dirty, \
@@ -895,6 +902,7 @@ async fn handle_agent_message(
                 .bind(&project.path)
                 .bind(&project.name)
                 .bind(project.has_claude_config)
+                .bind(project.has_zremote_config)
                 .bind(&project.project_type)
                 .bind(project.git_info.as_ref().and_then(|gi| gi.branch.as_deref()))
                 .bind(project.git_info.as_ref().and_then(|gi| gi.commit_hash.as_deref()))
@@ -924,6 +932,36 @@ async fn handle_agent_message(
             let _ = state.events.send(ServerEvent::ProjectsUpdated {
                 host_id: host_id.to_string(),
             });
+        }
+        AgentMessage::DirectoryListing {
+            request_id,
+            entries,
+            error,
+            ..
+        } => {
+            if let Some((_, sender)) = state.directory_requests.remove(&request_id) {
+                let _ = sender.send(crate::state::DirectoryListingResponse { entries, error });
+            } else {
+                tracing::warn!(request_id = %request_id, "no pending request for directory listing");
+            }
+        }
+        AgentMessage::ProjectSettingsResult {
+            request_id,
+            settings,
+            error,
+        } => {
+            if let Some((_, sender)) = state.settings_get_requests.remove(&request_id) {
+                let _ = sender.send(crate::state::SettingsGetResponse { settings, error });
+            } else {
+                tracing::warn!(request_id = %request_id, "no pending request for settings get");
+            }
+        }
+        AgentMessage::ProjectSettingsSaved { request_id, error } => {
+            if let Some((_, sender)) = state.settings_save_requests.remove(&request_id) {
+                let _ = sender.send(crate::state::SettingsSaveResponse { error });
+            } else {
+                tracing::warn!(request_id = %request_id, "no pending request for settings save");
+            }
         }
         AgentMessage::ClaudeAction(claude_msg) => {
             if let Err(e) = handle_claude_message(state, host_id, claude_msg).await {

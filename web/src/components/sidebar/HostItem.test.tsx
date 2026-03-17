@@ -71,6 +71,7 @@ const mockProject = (overrides: Partial<Project> = {}): Project => ({
   path: "/home/user/my-app",
   name: "my-app",
   has_claude_config: true,
+  has_zremote_config: false,
   project_type: "node",
   created_at: new Date().toISOString(),
   parent_project_id: null,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -98,7 +98,12 @@ pub async fn add_project(
         .unwrap_or("unknown")
         .to_string();
 
-    q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
+    let inserted = q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
+    if !inserted {
+        return Err(AppError::Conflict(
+            "project path already exists".to_string(),
+        ));
+    }
 
     let project = q::get_project_by_host_and_path(&state.db, &host_id, &body.path).await?;
     Ok((StatusCode::CREATED, Json(project)))
@@ -268,6 +273,173 @@ pub async fn delete_worktree(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// `GET /api/projects/:project_id/settings` - get project settings.
+pub async fn get_settings(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.settings_get_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ProjectGetSettings {
+            request_id,
+            project_path,
+        })
+        .await
+        .map_err(|_| {
+            state.settings_get_requests.remove(&request_id);
+            AppError::Conflict("failed to send settings request to agent".to_string())
+        })?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(response)) => {
+            if let Some(error) = response.error {
+                Err(AppError::Internal(error))
+            } else {
+                Ok(Json(response.settings))
+            }
+        }
+        Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.settings_get_requests.remove(&request_id);
+            Err(AppError::Internal(
+                "settings request timed out after 10s".to_string(),
+            ))
+        }
+    }
+}
+
+/// `PUT /api/projects/:project_id/settings` - save project settings.
+pub async fn save_settings(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    AppJson(settings): AppJson<zremote_protocol::project::ProjectSettings>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.settings_save_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ProjectSaveSettings {
+            request_id,
+            project_path,
+            settings,
+        })
+        .await
+        .map_err(|_| {
+            state.settings_save_requests.remove(&request_id);
+            AppError::Conflict("failed to send settings save to agent".to_string())
+        })?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(response)) => {
+            if let Some(error) = response.error {
+                Err(AppError::Internal(error))
+            } else {
+                Ok(StatusCode::NO_CONTENT)
+            }
+        }
+        Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.settings_save_requests.remove(&request_id);
+            Err(AppError::Internal(
+                "settings save timed out after 10s".to_string(),
+            ))
+        }
+    }
+}
+
+/// Query parameters for directory browsing.
+#[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    pub path: String,
+}
+
+/// `GET /api/hosts/:host_id/browse?path=` - browse directory on host.
+pub async fn browse_directory(
+    State(state): State<Arc<AppState>>,
+    Path(host_id): Path<String>,
+    Query(query): Query<BrowseQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed = parse_host_id(&host_id)?;
+
+    if query.path.is_empty() {
+        return Err(AppError::BadRequest("path must not be empty".to_string()));
+    }
+
+    let sender = state
+        .connections
+        .get_sender(&parsed)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.directory_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ListDirectory {
+            request_id,
+            path: query.path,
+        })
+        .await
+        .map_err(|_| {
+            state.directory_requests.remove(&request_id);
+            AppError::Conflict("failed to send browse request to agent".to_string())
+        })?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(response)) => {
+            if let Some(error) = response.error {
+                Err(AppError::BadRequest(error))
+            } else {
+                Ok(Json(response.entries))
+            }
+        }
+        Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.directory_requests.remove(&request_id);
+            Err(AppError::Internal(
+                "directory listing timed out after 10s".to_string(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +466,9 @@ mod tests {
             events: events_tx,
             knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            directory_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -350,6 +525,7 @@ mod tests {
                 "/api/projects/{project_id}/worktrees/{worktree_id}",
                 delete(delete_worktree),
             )
+            .route("/api/hosts/{host_id}/browse", get(browse_directory))
             .with_state(state)
     }
 
@@ -673,5 +849,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn browse_directory_empty_path_returns_400() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/browse?path="))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn browse_directory_host_offline_returns_conflict() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/browse?path=/home/user"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

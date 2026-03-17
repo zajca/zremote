@@ -130,6 +130,23 @@ impl ConnectionManager {
     }
 }
 
+/// Response type for directory listing oneshot channels.
+pub struct DirectoryListingResponse {
+    pub entries: Vec<zremote_protocol::project::DirectoryEntry>,
+    pub error: Option<String>,
+}
+
+/// Response type for settings get oneshot channels.
+pub struct SettingsGetResponse {
+    pub settings: Option<zremote_protocol::project::ProjectSettings>,
+    pub error: Option<String>,
+}
+
+/// Response type for settings save oneshot channels.
+pub struct SettingsSaveResponse {
+    pub error: Option<String>,
+}
+
 /// Shared application state.
 pub struct AppState {
     pub db: SqlitePool,
@@ -151,6 +168,12 @@ pub struct AppState {
             tokio::sync::oneshot::Sender<Vec<zremote_protocol::claude::ClaudeSessionInfo>>,
         >,
     >,
+    pub directory_requests:
+        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<DirectoryListingResponse>>>,
+    pub settings_get_requests:
+        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsGetResponse>>>,
+    pub settings_save_requests:
+        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsSaveResponse>>>,
 }
 
 #[cfg(test)]

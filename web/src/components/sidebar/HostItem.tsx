@@ -5,6 +5,7 @@ import type { Host } from "../../lib/api";
 import { api } from "../../lib/api";
 import { useProjects } from "../../hooks/useProjects";
 import { useSessions } from "../../hooks/useSessions";
+import { AddProjectDialog } from "../AddProjectDialog";
 import { StatusDot } from "../ui/StatusDot";
 import { ProjectItem } from "./ProjectItem";
 import { SessionItem } from "./SessionItem";
@@ -29,6 +30,8 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
 
   const { sessions } = useSessions(expanded ? host.id : undefined);
   const { projects } = useProjects(expanded ? host.id : undefined);
+
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
 
   const handleScanProjects = useCallback(
     async (e: React.MouseEvent) => {
@@ -126,12 +129,12 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
       </div>
       {expanded && (
         <div className="ml-4">
-          {rootProjects.length > 0 && (
-            <div className="mb-0.5">
-              <div className="flex items-center justify-between px-2 py-0.5">
-                <span className="text-[10px] font-medium tracking-wider text-text-tertiary uppercase">
-                  Projects
-                </span>
+          <div className="mb-0.5">
+            <div className="flex items-center justify-between px-2 py-0.5">
+              <span className="text-[10px] font-medium tracking-wider text-text-tertiary uppercase">
+                Projects
+              </span>
+              <div className="flex items-center gap-0.5">
                 <button
                   onClick={handleScanProjects}
                   className="flex h-4 w-4 items-center justify-center rounded text-text-tertiary hover:bg-bg-active hover:text-text-primary"
@@ -139,24 +142,40 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                 >
                   <Search size={10} />
                 </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAddProjectOpen(true);
+                  }}
+                  className="flex h-4 w-4 items-center justify-center rounded text-text-tertiary hover:bg-bg-active hover:text-text-primary"
+                  aria-label="Add project"
+                  title="Add project"
+                >
+                  <Plus size={10} />
+                </button>
               </div>
-              {rootProjects.map((project) => {
-                const worktreeChildren = projects.filter(
-                  (p) => p.parent_project_id === project.id,
-                );
-                return (
-                  <ProjectItem
-                    key={project.id}
-                    project={project}
-                    sessions={projectSessionsMap.get(project.id) ?? []}
-                    hostId={host.id}
-                    worktreeChildren={worktreeChildren}
-                    projectSessionsMap={projectSessionsMap}
-                  />
-                );
-              })}
             </div>
-          )}
+            {rootProjects.length === 0 && (
+              <div className="px-2 py-2 text-[11px] text-text-tertiary">
+                No projects
+              </div>
+            )}
+            {rootProjects.map((project) => {
+              const worktreeChildren = projects.filter(
+                (p) => p.parent_project_id === project.id,
+              );
+              return (
+                <ProjectItem
+                  key={project.id}
+                  project={project}
+                  sessions={projectSessionsMap.get(project.id) ?? []}
+                  hostId={host.id}
+                  worktreeChildren={worktreeChildren}
+                  projectSessionsMap={projectSessionsMap}
+                />
+              );
+            })}
+          </div>
           {orphanSessions.length > 0 && (
             <div>
               {projects.length > 0 && (
@@ -177,6 +196,11 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
           )}
         </div>
       )}
+      <AddProjectDialog
+        hostId={host.id}
+        open={addProjectOpen}
+        onClose={() => setAddProjectOpen(false)}
+      />
     </div>
   );
 });

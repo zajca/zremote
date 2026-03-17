@@ -11,6 +11,8 @@ pub struct ProjectRow {
     pub path: String,
     pub name: String,
     pub has_claude_config: bool,
+    #[serde(default)]
+    pub has_zremote_config: bool,
     pub project_type: String,
     pub created_at: String,
     pub parent_project_id: Option<String>,
@@ -27,7 +29,7 @@ pub struct ProjectRow {
     pub git_updated_at: Option<String>,
 }
 
-const PROJECT_COLUMNS: &str = "id, host_id, path, name, has_claude_config, project_type, created_at, \
+const PROJECT_COLUMNS: &str = "id, host_id, path, name, has_claude_config, has_zremote_config, project_type, created_at, \
      parent_project_id, git_branch, git_commit_hash, git_commit_message, \
      git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at";
 
@@ -67,21 +69,23 @@ pub async fn get_project_by_host_and_path(
     Ok(project)
 }
 
+/// Insert a project. Returns `true` if the row was inserted, `false` if it was a duplicate.
 pub async fn insert_project(
     pool: &SqlitePool,
     project_id: &str,
     host_id: &str,
     path: &str,
     name: &str,
-) -> Result<(), AppError> {
-    sqlx::query("INSERT OR IGNORE INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)")
-        .bind(project_id)
-        .bind(host_id)
-        .bind(path)
-        .bind(name)
-        .execute(pool)
-        .await?;
-    Ok(())
+) -> Result<bool, AppError> {
+    let result =
+        sqlx::query("INSERT OR IGNORE INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)")
+            .bind(project_id)
+            .bind(host_id)
+            .bind(path)
+            .bind(name)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_project_host_and_path(

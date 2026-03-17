@@ -17,9 +17,10 @@ import { Input } from "../components/ui/Input";
 import { SessionItem } from "../components/sidebar/SessionItem";
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 import { ProjectLoopsTab } from "../components/agentic/ProjectLoopsTab";
+import { ProjectSettingsTab } from "../components/ProjectSettingsTab";
 import { showToast } from "../components/layout/Toast";
 
-type Tab = "sessions" | "loops" | "knowledge" | "config" | "git";
+type Tab = "sessions" | "loops" | "knowledge" | "settings" | "git";
 
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -260,7 +261,7 @@ export function ProjectPage() {
               "loops",
               ...(project.git_branch !== null ? ["git" as const] : []),
               "knowledge",
-              "config",
+              "settings",
             ] as const
           ).map((tab) => (
             <button
@@ -304,10 +305,12 @@ export function ProjectPage() {
         {activeTab === "knowledge" && (
           <KnowledgePanel projectId={project.id} hostId={project.host_id} />
         )}
-        {activeTab === "config" && (
-          <div className="text-sm text-text-tertiary">
-            Project configuration (.claude/) will appear here.
-          </div>
+        {activeTab === "settings" && (
+          <ProjectSettingsTab
+            projectId={project.id}
+            projectPath={project.path}
+            hostId={project.host_id}
+          />
         )}
         {activeTab === "git" && (
           <div className="space-y-6">

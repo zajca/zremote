@@ -198,6 +198,10 @@ fn build_router(
             post(routes::projects::trigger_scan),
         )
         .route(
+            "/api/hosts/{host_id}/browse",
+            get(routes::projects::browse_directory),
+        )
+        .route(
             "/api/projects/{project_id}",
             get(routes::projects::get_project).delete(routes::projects::delete_project),
         )
@@ -216,6 +220,10 @@ fn build_router(
         .route(
             "/api/projects/{project_id}/worktrees/{worktree_id}",
             delete(routes::projects::delete_worktree),
+        )
+        .route(
+            "/api/projects/{project_id}/settings",
+            get(routes::projects::get_settings).put(routes::projects::save_settings),
         )
         // Permissions
         .route(

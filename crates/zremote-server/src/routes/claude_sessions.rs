@@ -371,6 +371,9 @@ mod tests {
             events: events_tx,
             knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            directory_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

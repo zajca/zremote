@@ -34,6 +34,7 @@ impl SessionManager {
         cols: u16,
         rows: u16,
         working_dir: Option<&str>,
+        env: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         if self.use_tmux {
             let (session, pid) = TmuxSession::spawn(
@@ -42,6 +43,7 @@ impl SessionManager {
                 cols,
                 rows,
                 working_dir,
+                env,
                 self.output_tx.clone(),
             )?;
             self.sessions
@@ -54,6 +56,7 @@ impl SessionManager {
                 cols,
                 rows,
                 working_dir,
+                env,
                 self.output_tx.clone(),
             )?;
             self.sessions

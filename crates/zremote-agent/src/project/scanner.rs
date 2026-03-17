@@ -171,6 +171,7 @@ impl ProjectScanner {
         };
 
         let has_claude_config = dir.join(".claude").is_dir();
+        let has_zremote_config = dir.join(".zremote").is_dir();
         let name = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -181,6 +182,7 @@ impl ProjectScanner {
             path: dir.to_string_lossy().to_string(),
             name,
             has_claude_config,
+            has_zremote_config,
             project_type: project_type.unwrap_or("unknown").to_string(),
             git_info,
             worktrees,

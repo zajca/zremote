@@ -52,6 +52,7 @@ const mockProject: Project = {
   path: "/home/user/project",
   name: "my-project",
   has_claude_config: false,
+  has_zremote_config: false,
   project_type: "node",
   created_at: new Date().toISOString(),
   parent_project_id: null,

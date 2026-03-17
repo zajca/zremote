@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::agentic::AgenticServerMessage;
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
-use crate::project::{GitInfo, ProjectInfo, WorktreeInfo};
+use crate::project::{DirectoryEntry, GitInfo, ProjectInfo, ProjectSettings, WorktreeInfo};
 use crate::{HostId, SessionId};
 
 /// A recovered tmux session reported by the agent during reconnection.
@@ -52,6 +52,8 @@ pub enum AgentMessage {
         path: String,
         name: String,
         has_claude_config: bool,
+        #[serde(default)]
+        has_zremote_config: bool,
         project_type: String,
     },
     ProjectList {
@@ -77,6 +79,21 @@ pub enum AgentMessage {
     SessionsRecovered {
         sessions: Vec<RecoveredSession>,
     },
+    DirectoryListing {
+        request_id: uuid::Uuid,
+        path: String,
+        entries: Vec<DirectoryEntry>,
+        error: Option<String>,
+    },
+    ProjectSettingsResult {
+        request_id: uuid::Uuid,
+        settings: Option<ProjectSettings>,
+        error: Option<String>,
+    },
+    ProjectSettingsSaved {
+        request_id: uuid::Uuid,
+        error: Option<String>,
+    },
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
 }
@@ -97,6 +114,8 @@ pub enum ServerMessage {
         cols: u16,
         rows: u16,
         working_dir: Option<String>,
+        #[serde(default)]
+        env: Option<std::collections::HashMap<String, String>>,
     },
     SessionClose {
         session_id: SessionId,
@@ -136,6 +155,19 @@ pub enum ServerMessage {
         project_path: String,
         worktree_path: String,
         force: bool,
+    },
+    ListDirectory {
+        request_id: uuid::Uuid,
+        path: String,
+    },
+    ProjectGetSettings {
+        request_id: uuid::Uuid,
+        project_path: String,
+    },
+    ProjectSaveSettings {
+        request_id: uuid::Uuid,
+        project_path: String,
+        settings: ProjectSettings,
     },
 }
 
@@ -261,6 +293,10 @@ mod tests {
             cols: 120,
             rows: 40,
             working_dir: Some("/home/user".to_string()),
+            env: Some(std::collections::HashMap::from([
+                ("RUST_LOG".to_string(), "debug".to_string()),
+                ("MY_VAR".to_string(), "value".to_string()),
+            ])),
         });
         roundtrip_server(&ServerMessage::SessionCreate {
             session_id: Uuid::new_v4(),
@@ -268,7 +304,20 @@ mod tests {
             cols: 80,
             rows: 24,
             working_dir: None,
+            env: None,
         });
+    }
+
+    #[test]
+    fn session_create_without_env_deserializes() {
+        // Backward compat: older servers/agents won't send env field
+        let json = r#"{"type":"SessionCreate","payload":{"session_id":"550e8400-e29b-41d4-a716-446655440000","shell":"/bin/bash","cols":80,"rows":24,"working_dir":null}}"#;
+        let msg: ServerMessage = serde_json::from_str(json).expect("should deserialize");
+        if let ServerMessage::SessionCreate { env, .. } = msg {
+            assert!(env.is_none(), "env should default to None");
+        } else {
+            panic!("expected SessionCreate variant");
+        }
     }
 
     #[test]
@@ -316,6 +365,7 @@ mod tests {
             path: "/home/user/myproject".to_string(),
             name: "myproject".to_string(),
             has_claude_config: true,
+            has_zremote_config: false,
             project_type: "rust".to_string(),
         });
     }
@@ -329,6 +379,7 @@ mod tests {
                     path: "/home/user/project-a".to_string(),
                     name: "project-a".to_string(),
                     has_claude_config: true,
+                    has_zremote_config: false,
                     project_type: "rust".to_string(),
                     git_info: None,
                     worktrees: vec![],
@@ -337,6 +388,7 @@ mod tests {
                     path: "/home/user/project-b".to_string(),
                     name: "project-b".to_string(),
                     has_claude_config: false,
+                    has_zremote_config: true,
                     project_type: "node".to_string(),
                     git_info: None,
                     worktrees: vec![],
@@ -561,5 +613,118 @@ mod tests {
                 project_path: "/home/user/project".to_string(),
             },
         ));
+    }
+
+    #[test]
+    fn list_directory_roundtrip() {
+        roundtrip_server(&ServerMessage::ListDirectory {
+            request_id: Uuid::new_v4(),
+            path: "/home/user".to_string(),
+        });
+    }
+
+    #[test]
+    fn directory_listing_roundtrip() {
+        use crate::project::DirectoryEntry;
+        roundtrip_agent(&AgentMessage::DirectoryListing {
+            request_id: Uuid::new_v4(),
+            path: "/home/user".to_string(),
+            entries: vec![
+                DirectoryEntry {
+                    name: "src".to_string(),
+                    is_dir: true,
+                    is_symlink: false,
+                },
+                DirectoryEntry {
+                    name: "README.md".to_string(),
+                    is_dir: false,
+                    is_symlink: false,
+                },
+            ],
+            error: None,
+        });
+    }
+
+    #[test]
+    fn directory_listing_with_error_roundtrip() {
+        roundtrip_agent(&AgentMessage::DirectoryListing {
+            request_id: Uuid::new_v4(),
+            path: "/root".to_string(),
+            entries: vec![],
+            error: Some("permission denied".to_string()),
+        });
+    }
+
+    #[test]
+    fn project_get_settings_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectGetSettings {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/project".to_string(),
+        });
+    }
+
+    #[test]
+    fn project_save_settings_roundtrip() {
+        use crate::project::{AgenticSettings, ProjectSettings};
+        use std::collections::HashMap;
+        roundtrip_server(&ServerMessage::ProjectSaveSettings {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/project".to_string(),
+            settings: ProjectSettings {
+                shell: Some("/bin/zsh".to_string()),
+                working_dir: None,
+                env: HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
+                agentic: AgenticSettings::default(),
+            },
+        });
+    }
+
+    #[test]
+    fn project_settings_result_roundtrip() {
+        use crate::project::{AgenticSettings, ProjectSettings};
+        roundtrip_agent(&AgentMessage::ProjectSettingsResult {
+            request_id: Uuid::new_v4(),
+            settings: Some(ProjectSettings {
+                shell: Some("/bin/bash".to_string()),
+                working_dir: None,
+                env: std::collections::HashMap::new(),
+                agentic: AgenticSettings::default(),
+            }),
+            error: None,
+        });
+    }
+
+    #[test]
+    fn project_settings_result_none_roundtrip() {
+        roundtrip_agent(&AgentMessage::ProjectSettingsResult {
+            request_id: Uuid::new_v4(),
+            settings: None,
+            error: None,
+        });
+    }
+
+    #[test]
+    fn project_settings_result_error_roundtrip() {
+        roundtrip_agent(&AgentMessage::ProjectSettingsResult {
+            request_id: Uuid::new_v4(),
+            settings: None,
+            error: Some("file not readable".to_string()),
+        });
+    }
+
+    #[test]
+    fn project_settings_saved_roundtrip() {
+        roundtrip_agent(&AgentMessage::ProjectSettingsSaved {
+            request_id: Uuid::new_v4(),
+            error: None,
+        });
+    }
+
+    #[test]
+    fn project_settings_saved_error_roundtrip() {
+        roundtrip_agent(&AgentMessage::ProjectSettingsSaved {
+            request_id: Uuid::new_v4(),
+            error: Some("permission denied".to_string()),
+        });
     }
 }

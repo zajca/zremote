@@ -5,6 +5,7 @@ import {
   BarChart3,
   Bot,
   Clock,
+  FolderPlus,
   Laptop,
   Search,
   Settings,
@@ -12,6 +13,7 @@ import {
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
 import { useProjects } from "../../hooks/useProjects";
+import { AddProjectDialog } from "../AddProjectDialog";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import type { Project } from "../../lib/api";
 
@@ -24,6 +26,8 @@ export function CommandPalette() {
   // Collect projects for all online hosts
   const onlineHost = hosts.find((h) => h.status === "online");
   const { projects } = useProjects(onlineHost?.id);
+
+  const [addProjectHostId, setAddProjectHostId] = useState<string | null>(null);
 
   const [claudeDialogProject, setClaudeDialogProject] = useState<{
     project: Project;
@@ -50,6 +54,14 @@ export function CommandPalette() {
     [navigate],
   );
 
+  const handleAddProject = useCallback(
+    (hostId: string) => {
+      setOpen(false);
+      setAddProjectHostId(hostId);
+    },
+    [],
+  );
+
   const handleStartClaude = useCallback(
     (project: Project, hostId: string) => {
       setOpen(false);
@@ -58,7 +70,7 @@ export function CommandPalette() {
     [],
   );
 
-  if (!open && !claudeDialogProject) return null;
+  if (!open && !claudeDialogProject && !addProjectHostId) return null;
 
   return (
     <>
@@ -128,6 +140,20 @@ export function CommandPalette() {
                 </Command.Group>
               )}
 
+              {onlineHost && (
+                <Command.Group
+                  heading="Projects"
+                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-text-tertiary"
+                >
+                  <CommandItem
+                    icon={<FolderPlus size={14} />}
+                    onSelect={() => handleAddProject(onlineHost.id)}
+                  >
+                    Add project
+                  </CommandItem>
+                </Command.Group>
+              )}
+
               {onlineHost && projects.length > 0 && (
                 <Command.Group
                   heading="Start Claude"
@@ -159,6 +185,14 @@ export function CommandPalette() {
             </div>
           </Command>
         </div>
+      )}
+
+      {addProjectHostId && (
+        <AddProjectDialog
+          hostId={addProjectHostId}
+          open={true}
+          onClose={() => setAddProjectHostId(null)}
+        />
       )}
 
       {claudeDialogProject && (

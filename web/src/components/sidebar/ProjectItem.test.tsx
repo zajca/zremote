@@ -26,6 +26,7 @@ const mockProject: Project = {
   path: "/home/user/my-project",
   project_type: "rust",
   has_claude_config: true,
+  has_zremote_config: false,
   git_branch: "main",
   git_commit_hash: "abc123def456",
   git_commit_message: "Initial commit",
@@ -82,6 +83,25 @@ describe("ProjectItem", () => {
       </MemoryRouter>,
     );
     expect(screen.queryByText(".claude")).not.toBeInTheDocument();
+  });
+
+  test("renders .zremote badge when has_zremote_config", () => {
+    const withZremote = { ...mockProject, has_zremote_config: true };
+    render(
+      <MemoryRouter>
+        <ProjectItem project={withZremote} sessions={[]} hostId="host-1" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(".zremote")).toBeInTheDocument();
+  });
+
+  test("does not render .zremote badge when config is absent", () => {
+    render(
+      <MemoryRouter>
+        <ProjectItem project={mockProject} sessions={[]} hostId="host-1" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(".zremote")).not.toBeInTheDocument();
   });
 
   test("renders dirty indicator when git is dirty", () => {
