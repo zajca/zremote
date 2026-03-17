@@ -19,7 +19,7 @@ interface AgenticLoopPanelProps {
   loopId: string;
 }
 
-type TabId = "terminal" | "tools" | "transcript";
+type TabId = "tools" | "transcript";
 
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
 const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
@@ -137,12 +137,9 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
 
       switch (e.key) {
         case "1":
-          setActiveTab("terminal");
-          break;
-        case "2":
           setActiveTab("tools");
           break;
-        case "3":
+        case "2":
           setActiveTab("transcript");
           break;
       }
@@ -160,9 +157,8 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
   }
 
   const tabs: { id: TabId; label: string; shortcut: string }[] = [
-    { id: "terminal", label: "Terminal", shortcut: "1" },
-    { id: "tools", label: "Tool Queue", shortcut: "2" },
-    { id: "transcript", label: "Transcript", shortcut: "3" },
+    { id: "tools", label: "Tool Queue", shortcut: "1" },
+    { id: "transcript", label: "Transcript", shortcut: "2" },
   ];
 
   return (
@@ -173,9 +169,6 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
         <span className="text-sm font-semibold text-text-primary">
           {loop.tool_name}
         </span>
-        {loop.model && (
-          <span className="text-xs text-text-tertiary">{loop.model}</span>
-        )}
         <Badge variant={statusBadgeVariant(loop.status)}>{loop.status}</Badge>
         <div className="flex items-center gap-1 text-xs text-text-tertiary">
           <Clock size={12} />
@@ -186,7 +179,6 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
             costUsd={loop.estimated_cost_usd}
             tokensIn={loop.total_tokens_in}
             tokensOut={loop.total_tokens_out}
-            model={loop.model}
           />
           <div className="w-48">
             <ContextUsageBar
@@ -227,11 +219,6 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
 
       {/* Content Area */}
       <div className="min-h-0 flex-1">
-        {activeTab === "terminal" && (
-          <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
-            Terminal output is shown in the session terminal above
-          </div>
-        )}
         {activeTab === "tools" && (
           <ToolCallQueue
             toolCalls={toolCalls}

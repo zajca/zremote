@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { BarChart3, Clock, Laptop, Monitor, Settings } from "lucide-react";
+import { BarChart3, Clock, Laptop, Monitor, PanelLeftClose, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
@@ -8,7 +8,11 @@ import { PROJECT_UPDATE_EVENT } from "../../hooks/useProjects";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { HostItem } from "../sidebar/HostItem";
 
-export function Sidebar() {
+interface SidebarProps {
+  onCollapse?: () => void;
+}
+
+export function Sidebar({ onCollapse }: SidebarProps) {
   const { hosts, loading, refetch: refetchHosts } = useHosts();
   const { isLocal } = useMode();
 
@@ -38,6 +42,15 @@ export function Sidebar() {
             <Laptop size={10} />
             Local
           </span>
+        )}
+        {onCollapse && (
+          <button
+            onClick={onCollapse}
+            className={`${isLocal ? "" : "ml-auto "}inline-flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-primary`}
+            title="Hide sidebar (Ctrl+B)"
+          >
+            <PanelLeftClose size={16} />
+          </button>
         )}
       </div>
 

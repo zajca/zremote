@@ -1,7 +1,7 @@
 import { Check, Clock, Loader2, X } from "lucide-react";
 import type { ToolCall, ToolCallStatus } from "../../types/agentic";
 import { Badge } from "../ui/Badge";
-import { Button } from "../ui/Button";
+import { IconButton } from "../ui/IconButton";
 
 interface ToolCallQueueProps {
   toolCalls: ToolCall[];
@@ -89,22 +89,18 @@ export function ToolCallQueue({
                   {truncateArgs(tc.arguments_json)}
                 </span>
                 <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="primary"
+                  <IconButton
+                    icon={Check}
+                    tooltip="Approve"
                     onClick={() => onApprove(tc.id)}
-                  >
-                    <Check size={12} />
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
+                    className="text-status-online hover:bg-status-online/10"
+                  />
+                  <IconButton
+                    icon={X}
+                    tooltip="Reject"
                     onClick={() => onReject(tc.id)}
-                  >
-                    <X size={12} />
-                    Reject
-                  </Button>
+                    className="text-status-error hover:bg-status-error/10"
+                  />
                 </div>
               </div>
             ))}
