@@ -117,7 +117,7 @@ pub async fn create_claude_task(
     let shell = default_shell();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, 120, 40, Some(&body.project_path))
+        mgr.create(session_id, shell, 120, 40, Some(&body.project_path), None)
             .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
@@ -289,8 +289,15 @@ pub async fn resume_claude_task(
     let shell = default_shell();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(new_session_id, shell, 120, 40, Some(&original.project_path))
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            new_session_id,
+            shell,
+            120,
+            40,
+            Some(&original.project_path),
+            None,
+        )
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     // Update session status in DB

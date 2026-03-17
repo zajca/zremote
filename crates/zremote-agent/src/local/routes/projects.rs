@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -83,7 +83,12 @@ pub async fn add_project(
         .unwrap_or("unknown")
         .to_string();
 
-    q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
+    let inserted = q::insert_project(&state.db, &project_id, &host_id, &body.path, &name).await?;
+    if !inserted {
+        return Err(AppError::Conflict(
+            "project path already exists".to_string(),
+        ));
+    }
 
     // Update git info if detected
     if let Some(ref info) = info
@@ -92,13 +97,14 @@ pub async fn add_project(
         let remotes_json = serde_json::to_string(&git.remotes).unwrap_or_default();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE projects SET project_type = ?, has_claude_config = ?, \
+            "UPDATE projects SET project_type = ?, has_claude_config = ?, has_zremote_config = ?, \
              git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
              git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
              WHERE id = ?",
         )
         .bind(&info.project_type)
         .bind(info.has_claude_config)
+        .bind(info.has_zremote_config)
         .bind(&git.branch)
         .bind(&git.commit_hash)
         .bind(&git.commit_message)
@@ -156,13 +162,14 @@ pub async fn trigger_scan(
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
-            "UPDATE projects SET project_type = ?, has_claude_config = ?, \
+            "UPDATE projects SET project_type = ?, has_claude_config = ?, has_zremote_config = ?, \
              git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
              git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
              WHERE id = ?",
         )
         .bind(&info.project_type)
         .bind(info.has_claude_config)
+        .bind(info.has_zremote_config)
         .bind(info.git_info.as_ref().and_then(|g| g.branch.as_deref()))
         .bind(
             info.git_info
@@ -411,6 +418,84 @@ pub async fn delete_worktree(
     q::delete_project(&state.db, &worktree_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/projects/:project_id/settings` - get project settings.
+pub async fn get_settings(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath(project_id): AxumPath<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (_, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&project_path))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?;
+
+    match result {
+        Ok(settings) => Ok(Json(settings)),
+        Err(e) => Err(AppError::Internal(e)),
+    }
+}
+
+/// `PUT /api/projects/:project_id/settings` - save project settings.
+pub async fn save_settings(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath(project_id): AxumPath<String>,
+    AppJson(settings): AppJson<zremote_protocol::project::ProjectSettings>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (_, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project::settings::write_settings(Path::new(&project_path), &settings)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings write task failed: {e}")))?;
+
+    match result {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err(AppError::Internal(e)),
+    }
+}
+
+/// Query parameters for directory browsing.
+#[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    pub path: String,
+}
+
+/// `GET /api/hosts/:host_id/browse?path=` - browse directory on host.
+pub async fn browse_directory(
+    State(_state): State<Arc<LocalAppState>>,
+    AxumPath(host_id): AxumPath<String>,
+    Query(query): Query<BrowseQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_host_id(&host_id)?;
+
+    if query.path.is_empty() {
+        return Err(AppError::BadRequest("path must not be empty".to_string()));
+    }
+
+    let path = query.path;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project::settings::list_directory(Path::new(&path))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("directory listing task failed: {e}")))?;
+
+    match result {
+        Ok(entries) => Ok(Json(entries)),
+        Err(e) => Err(AppError::BadRequest(e)),
+    }
 }
 
 #[cfg(test)]

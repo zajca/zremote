@@ -29,6 +29,7 @@ const mockProject = {
   path: "/home/user/my-project",
   project_type: "rust",
   has_claude_config: true,
+  has_zremote_config: false,
   git_branch: "main",
   git_commit_hash: "abc123def456",
   git_commit_message: "Initial commit",
@@ -127,7 +128,7 @@ describe("ProjectPage", () => {
       expect(screen.getByText("sessions")).toBeInTheDocument();
       expect(screen.getByText("loops")).toBeInTheDocument();
       expect(screen.getByText("knowledge")).toBeInTheDocument();
-      expect(screen.getByText("config")).toBeInTheDocument();
+      expect(screen.getByText("settings")).toBeInTheDocument();
     });
   });
 

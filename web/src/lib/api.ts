@@ -41,6 +41,26 @@ export interface Project {
   git_behind: number;
   git_remotes: string | null;
   git_updated_at: string | null;
+  has_zremote_config: boolean;
+}
+
+export interface DirectoryEntry {
+  name: string;
+  is_dir: boolean;
+  is_symlink: boolean;
+}
+
+export interface AgenticSettings {
+  auto_detect: boolean;
+  default_permissions: string[];
+  auto_approve_patterns: string[];
+}
+
+export interface ProjectSettings {
+  shell?: string;
+  working_dir?: string;
+  env: Record<string, string>;
+  agentic: AgenticSettings;
 }
 
 export interface ConfigValue {
@@ -191,6 +211,10 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+    browse: (hostId: string, path: string) =>
+      request<DirectoryEntry[]>(
+        `/api/hosts/${hostId}/browse?path=${encodeURIComponent(path)}`,
+      ),
     sessions: (projectId: string) =>
       request<Session[]>(`/api/projects/${projectId}/sessions`),
     refreshGit: (id: string) =>
@@ -208,6 +232,23 @@ export const api = {
     deleteWorktree: (projectId: string, worktreeId: string) =>
       request<void>(`/api/projects/${projectId}/worktrees/${worktreeId}`, {
         method: "DELETE",
+      }),
+    getSettings: async (projectId: string): Promise<{ settings: ProjectSettings | null; error?: string }> => {
+      const res = await fetch(`/api/projects/${projectId}/settings`);
+      if (!res.ok) {
+        const body = await res.text();
+        return { settings: null, error: body };
+      }
+      const data = await res.json();
+      if (data && typeof data === "object" && "settings" in data) {
+        return { settings: data.settings ?? null, error: data.error };
+      }
+      return { settings: data as ProjectSettings, error: undefined };
+    },
+    saveSettings: (projectId: string, settings: ProjectSettings) =>
+      request<void>(`/api/projects/${projectId}/settings`, {
+        method: "PUT",
+        body: JSON.stringify(settings),
       }),
   },
   analytics: {

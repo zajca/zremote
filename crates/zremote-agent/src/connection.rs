@@ -196,6 +196,7 @@ fn serialize_agentic_message(msg: &AgenticAgentMessage) -> Result<Message, Conne
 }
 
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
+#[allow(clippy::too_many_arguments)]
 fn handle_session_create(
     session_manager: &mut SessionManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
@@ -204,9 +205,10 @@ fn handle_session_create(
     cols: u16,
     rows: u16,
     working_dir: Option<&str>,
+    env: Option<&std::collections::HashMap<String, String>>,
 ) {
     let shell = shell.unwrap_or(default_shell());
-    match session_manager.create(session_id, shell, cols, rows, working_dir) {
+    match session_manager.create(session_id, shell, cols, rows, working_dir, env) {
         Ok(pid) => {
             tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
             if outbound_tx
@@ -591,6 +593,7 @@ fn handle_server_message(
             cols,
             rows,
             working_dir,
+            env,
         } => {
             handle_session_create(
                 session_manager,
@@ -600,6 +603,7 @@ fn handle_server_message(
                 *cols,
                 *rows,
                 working_dir.as_deref(),
+                env.as_ref(),
             );
         }
         ServerMessage::SessionClose { session_id } => {
@@ -691,6 +695,7 @@ fn handle_server_message(
                         path: info.path,
                         name: info.name,
                         has_claude_config: info.has_claude_config,
+                        has_zremote_config: info.has_zremote_config,
                         project_type: info.project_type,
                     })
                     .is_err()
@@ -703,6 +708,82 @@ fn handle_server_message(
         }
         ServerMessage::ProjectRemove { path } => {
             tracing::info!(path = %path, "project removal acknowledged");
+        }
+        ServerMessage::ListDirectory { request_id, path } => {
+            let tx = outbound_tx.clone();
+            let path = path.clone();
+            let request_id = *request_id;
+            tokio::task::spawn_blocking(move || {
+                let entries_result =
+                    crate::project::settings::list_directory(std::path::Path::new(&path));
+                let msg = match entries_result {
+                    Ok(entries) => AgentMessage::DirectoryListing {
+                        request_id,
+                        path,
+                        entries,
+                        error: None,
+                    },
+                    Err(e) => AgentMessage::DirectoryListing {
+                        request_id,
+                        path,
+                        entries: vec![],
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.blocking_send(msg);
+            });
+        }
+        ServerMessage::ProjectGetSettings {
+            request_id,
+            project_path,
+        } => {
+            let tx = outbound_tx.clone();
+            let project_path = project_path.clone();
+            let request_id = *request_id;
+            tokio::task::spawn_blocking(move || {
+                let result =
+                    crate::project::settings::read_settings(std::path::Path::new(&project_path));
+                let msg = match result {
+                    Ok(settings) => AgentMessage::ProjectSettingsResult {
+                        request_id,
+                        settings,
+                        error: None,
+                    },
+                    Err(e) => AgentMessage::ProjectSettingsResult {
+                        request_id,
+                        settings: None,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.blocking_send(msg);
+            });
+        }
+        ServerMessage::ProjectSaveSettings {
+            request_id,
+            project_path,
+            settings,
+        } => {
+            let tx = outbound_tx.clone();
+            let project_path = project_path.clone();
+            let settings = settings.clone();
+            let request_id = *request_id;
+            tokio::task::spawn_blocking(move || {
+                let result = crate::project::settings::write_settings(
+                    std::path::Path::new(&project_path),
+                    &settings,
+                );
+                let msg = match result {
+                    Ok(()) => AgentMessage::ProjectSettingsSaved {
+                        request_id,
+                        error: None,
+                    },
+                    Err(e) => AgentMessage::ProjectSettingsSaved {
+                        request_id,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.blocking_send(msg);
+            });
         }
         ServerMessage::ProjectGitStatus { path } => {
             let tx = outbound_tx.clone();
@@ -936,7 +1017,7 @@ fn handle_claude_server_message(
 
             // Spawn PTY session using default shell
             let shell = default_shell();
-            match session_manager.create(*session_id, shell, 120, 40, Some(working_dir)) {
+            match session_manager.create(*session_id, shell, 120, 40, Some(working_dir), None) {
                 Ok(pid) => {
                     tracing::info!(
                         session_id = %session_id,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -96,6 +96,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::projects::trigger_scan),
         )
         .route(
+            "/api/hosts/{host_id}/browse",
+            get(routes::projects::browse_directory),
+        )
+        .route(
             "/api/projects/{project_id}",
             get(routes::projects::get_project).delete(routes::projects::delete_project),
         )
@@ -114,6 +118,10 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project_id}/worktrees/{worktree_id}",
             delete(routes::projects::delete_worktree),
+        )
+        .route(
+            "/api/projects/{project_id}/settings",
+            get(routes::projects::get_settings).put(routes::projects::save_settings),
         )
         .route(
             "/api/config/{key}",
@@ -268,6 +276,9 @@ async fn main() {
 
     let knowledge_requests = std::sync::Arc::new(dashmap::DashMap::new());
     let claude_discover_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let directory_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let settings_get_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let settings_save_requests = std::sync::Arc::new(dashmap::DashMap::new());
 
     let state = Arc::new(AppState {
         db: pool,
@@ -279,6 +290,9 @@ async fn main() {
         events: events_tx,
         knowledge_requests,
         claude_discover_requests,
+        directory_requests,
+        settings_get_requests,
+        settings_save_requests,
     });
 
     // Spawn heartbeat monitor background task
@@ -345,6 +359,9 @@ mod tests {
             events: events_tx,
             knowledge_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             claude_discover_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            directory_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

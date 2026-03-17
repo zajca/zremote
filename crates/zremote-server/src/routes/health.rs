@@ -52,6 +52,9 @@ mod tests {
             events: events_tx,
             knowledge_requests: Arc::new(dashmap::DashMap::new()),
             claude_discover_requests: Arc::new(dashmap::DashMap::new()),
+            directory_requests: Arc::new(dashmap::DashMap::new()),
+            settings_get_requests: Arc::new(dashmap::DashMap::new()),
+            settings_save_requests: Arc::new(dashmap::DashMap::new()),
         })
     }
 

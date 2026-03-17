@@ -176,6 +176,14 @@ export const ProjectItem = memo(function ProjectItem({
             .claude
           </span>
         )}
+        {project.has_zremote_config && (
+          <span
+            className="shrink-0 rounded bg-status-online/15 px-1 py-0.5 text-[9px] text-status-online"
+            title=".zremote/ config present"
+          >
+            .zremote
+          </span>
+        )}
         {totalSessions > 0 && (
           <span className="shrink-0 text-[10px] text-text-tertiary">
             {totalSessions}

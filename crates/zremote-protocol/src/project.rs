@@ -1,4 +1,14 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// A single entry in a directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+}
 
 /// Git metadata for a project or worktree.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,12 +51,52 @@ pub struct WorktreeInfo {
     pub is_locked: bool,
 }
 
+/// Per-project settings stored in .zremote/settings.json.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProjectSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub agentic: AgenticSettings,
+}
+
+/// Agentic behavior settings for a project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgenticSettings {
+    #[serde(default = "default_true")]
+    pub auto_detect: bool,
+    #[serde(default)]
+    pub default_permissions: Vec<String>,
+    #[serde(default)]
+    pub auto_approve_patterns: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AgenticSettings {
+    fn default() -> Self {
+        Self {
+            auto_detect: true,
+            default_permissions: Vec::new(),
+            auto_approve_patterns: Vec::new(),
+        }
+    }
+}
+
 /// Information about a discovered project on a remote host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectInfo {
     pub path: String,
     pub name: String,
     pub has_claude_config: bool,
+    #[serde(default)]
+    pub has_zremote_config: bool,
     pub project_type: String,
     #[serde(default)]
     pub git_info: Option<GitInfo>,
@@ -64,6 +114,7 @@ mod tests {
             path: "/home/user/myproject".to_string(),
             name: "myproject".to_string(),
             has_claude_config: true,
+            has_zremote_config: false,
             project_type: "rust".to_string(),
             git_info: None,
             worktrees: vec![],
@@ -79,6 +130,7 @@ mod tests {
             path: "/home/user/webapp".to_string(),
             name: "webapp".to_string(),
             has_claude_config: false,
+            has_zremote_config: false,
             project_type: "node".to_string(),
             git_info: None,
             worktrees: vec![],
@@ -102,6 +154,7 @@ mod tests {
             path: "/home/user/myproject".to_string(),
             name: "myproject".to_string(),
             has_claude_config: true,
+            has_zremote_config: true,
             project_type: "rust".to_string(),
             git_info: Some(GitInfo {
                 branch: Some("main".to_string()),
@@ -208,5 +261,98 @@ mod tests {
         let json = serde_json::to_string(&wt).expect("serialize");
         let parsed: WorktreeInfo = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(wt, parsed);
+    }
+
+    #[test]
+    fn directory_entry_roundtrip() {
+        let entry = DirectoryEntry {
+            name: "src".to_string(),
+            is_dir: true,
+            is_symlink: false,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let parsed: DirectoryEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn directory_entry_symlink() {
+        let entry = DirectoryEntry {
+            name: "link".to_string(),
+            is_dir: false,
+            is_symlink: true,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let parsed: DirectoryEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn project_settings_roundtrip() {
+        let settings = ProjectSettings {
+            shell: Some("/bin/zsh".to_string()),
+            working_dir: Some("/home/user/project/src".to_string()),
+            env: HashMap::from([
+                ("RUST_LOG".to_string(), "debug".to_string()),
+                ("DATABASE_URL".to_string(), "sqlite:dev.db".to_string()),
+            ]),
+            agentic: AgenticSettings {
+                auto_detect: true,
+                default_permissions: vec!["Read".to_string(), "Glob".to_string()],
+                auto_approve_patterns: vec!["cargo test*".to_string()],
+            },
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn project_settings_default() {
+        let settings = ProjectSettings::default();
+        assert!(settings.shell.is_none());
+        assert!(settings.working_dir.is_none());
+        assert!(settings.env.is_empty());
+        assert!(settings.agentic.auto_detect);
+        assert!(settings.agentic.default_permissions.is_empty());
+        assert!(settings.agentic.auto_approve_patterns.is_empty());
+    }
+
+    #[test]
+    fn project_settings_empty_json() {
+        let settings: ProjectSettings = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(settings, ProjectSettings::default());
+    }
+
+    #[test]
+    fn project_settings_skip_empty_env() {
+        let settings = ProjectSettings::default();
+        let json = serde_json::to_value(&settings).unwrap();
+        assert!(json.get("env").is_none(), "empty env should be skipped");
+    }
+
+    #[test]
+    fn agentic_settings_roundtrip() {
+        let settings = AgenticSettings {
+            auto_detect: false,
+            default_permissions: vec!["Read".to_string()],
+            auto_approve_patterns: vec!["cargo test*".to_string()],
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: AgenticSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn agentic_settings_default_auto_detect_true() {
+        let settings: AgenticSettings = serde_json::from_str("{}").expect("deserialize");
+        assert!(settings.auto_detect);
+    }
+
+    #[test]
+    fn project_info_backward_compat_without_zremote_config() {
+        let json = r#"{"path":"/p","name":"p","has_claude_config":false,"project_type":"rust"}"#;
+        let parsed: ProjectInfo = serde_json::from_str(json).expect("deserialize");
+        assert!(!parsed.has_zremote_config);
     }
 }

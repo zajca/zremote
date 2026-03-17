@@ -66,6 +66,7 @@ impl TmuxSession {
         cols: u16,
         rows: u16,
         working_dir: Option<&str>,
+        env: Option<&std::collections::HashMap<String, String>>,
         output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         let tmux_name = tmux_session_name(session_id);
@@ -73,6 +74,16 @@ impl TmuxSession {
 
         // Ensure FIFO directory exists
         fs::create_dir_all(&dir)?;
+
+        // Set environment variables on the tmux server BEFORE creating the
+        // session so the spawned shell inherits them.
+        if let Some(env_vars) = env {
+            for (key, value) in env_vars {
+                let _ = tmux_cmd()
+                    .args(["set-environment", "-g", key, value])
+                    .status();
+            }
+        }
 
         // Create tmux session
         let mut cmd = tmux_cmd();
@@ -98,6 +109,14 @@ impl TmuxSession {
         }
 
         tracing::info!(session_id = %session_id, tmux_name = %tmux_name, "tmux session created");
+
+        // Clean up global env vars after session creation to avoid leaking
+        // into other sessions.
+        if let Some(env_vars) = env {
+            for key in env_vars.keys() {
+                let _ = tmux_cmd().args(["set-environment", "-gu", key]).status();
+            }
+        }
 
         // Get shell PID
         let pid = get_pane_pid(&tmux_name)?;

@@ -88,6 +88,36 @@ pub async fn create_session(
     )
     .await?;
 
+    // Read project settings if working_dir is provided
+    let (settings, settings_warning) = if let Some(ref wd) = body.working_dir {
+        match crate::project::settings::read_settings(std::path::Path::new(wd)) {
+            Ok(s) => (s, None),
+            Err(e) => {
+                tracing::warn!(working_dir = %wd, error = %e, "failed to read project settings");
+                (None, Some(e))
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    // Apply overrides from settings
+    let effective_shell = settings
+        .as_ref()
+        .and_then(|s| s.shell.as_deref())
+        .or(body.shell.as_deref())
+        .unwrap_or(default_shell());
+
+    let effective_working_dir = settings
+        .as_ref()
+        .and_then(|s| s.working_dir.as_deref())
+        .or(body.working_dir.as_deref());
+
+    let env_vars = settings.as_ref().map(|s| &s.env).filter(|e| !e.is_empty());
+
+    let cols = body.cols.unwrap_or(80);
+    let rows = body.rows.unwrap_or(24);
+
     // Create in-memory session state
     {
         let mut sessions = state.sessions.write().await;
@@ -95,26 +125,30 @@ pub async fn create_session(
     }
 
     // Spawn PTY/tmux session directly
-    let shell = body.shell.as_deref().unwrap_or(default_shell());
-    let cols = body.cols.unwrap_or(80);
-    let rows = body.rows.unwrap_or(24);
-
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, cols, rows, body.working_dir.as_deref())
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            session_id,
+            effective_shell,
+            cols,
+            rows,
+            effective_working_dir,
+            env_vars,
+        )
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     tracing::info!(
         session_id = %session_id,
         pid = pid,
-        shell = shell,
+        shell = effective_shell,
+        env_count = env_vars.map(|e| e.len()).unwrap_or(0),
         "local session created"
     );
 
     // Update DB: status -> active, shell, pid
     sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
-        .bind(shell)
+        .bind(effective_shell)
         .bind(i64::from(pid))
         .bind(&session_id_str)
         .execute(&state.db)
@@ -134,7 +168,7 @@ pub async fn create_session(
         session: SessionInfo {
             id: session_id_str.clone(),
             host_id: host_id.clone(),
-            shell: Some(shell.to_string()),
+            shell: Some(effective_shell.to_string()),
             status: "active".to_string(),
         },
     });
@@ -142,8 +176,14 @@ pub async fn create_session(
     let response = serde_json::json!({
         "id": session_id_str,
         "status": "active",
-        "shell": shell,
+        "shell": effective_shell,
         "pid": pid,
+        "applied_settings": {
+            "shell": effective_shell,
+            "env_count": env_vars.map(|e| e.len()).unwrap_or(0),
+            "working_dir": effective_working_dir,
+        },
+        "settings_warning": settings_warning,
     });
 
     Ok((StatusCode::CREATED, Json(response)))
