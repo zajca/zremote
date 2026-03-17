@@ -472,6 +472,43 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 - **Verify after merge**: Always run the full test suite on main after merging. Migration checksum mismatches, missing files, and broken imports surface here.
 - **Team lead reviews everything**: No merge without team lead reviewing the diff or delegating to code-reviewer teammate.
 
+### Team Lead Discipline
+
+The team lead (you, the main agent) is the single point of accountability. Teammates will report success when work is incomplete, omit edge cases, and produce plausible-looking code that misses requirements. Assume every teammate deliverable has gaps until you have verified otherwise.
+
+**Verification protocol (mandatory after every teammate reports "done"):**
+- Read the actual worktree diff (`git diff main...HEAD`). Do not rely on the teammate's summary of changes.
+- Build an RFC checklist: extract every function signature, endpoint, query, struct, and test from the RFC for this phase. Grep for each in the worktree. Missing items are blocking.
+- Check test counts against the RFC test plan. If the RFC specifies 7 test scenarios and the file has 3 `#[test]` functions, that is incomplete.
+- Search for `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`. Each must be justified or replaced.
+- Check for hardcoded values that should be configurable (magic numbers, hardcoded paths, inlined strings).
+
+**Completeness -- zero tolerance for partial delivery:**
+- The RFC is the contract. If the RFC says "6 functions in queries/foo.rs", there must be exactly 6 public functions. Not 4 with a "remaining 2 are trivial" comment.
+- Test coverage must match the RFC test plan item-for-item. A teammate claiming "covered by existing tests" must cite the exact test function. Verify by reading it.
+- Frontend components must handle loading, error, and empty states unless the RFC explicitly excludes one.
+
+**No partial merges:**
+- If review finds issues, ALL must be fixed in the same worktree before merge. No "merge now, fix in next phase" or TODO comments for known gaps.
+- If a fix introduces new failures (tests, clippy, typecheck), those are also blocking. The worktree must be green.
+- Exception: cosmetic suggestions (naming preferences, comment wording) may be deferred with explicit acknowledgment in the commit message.
+
+**Scope discipline:**
+- Reject additions not in the RFC: refactors of unrelated code, "while I was here" improvements, dependency upgrades. These create unreviewed surface area.
+- Reject omissions equally: "this was harder than expected so I simplified" is not acceptable. If the RFC scope is wrong, escalate to the user for amendment -- do not silently reduce scope.
+
+**Review depth -- what to look for in diffs:**
+- Missing `mod.rs` or `lib.rs` re-exports (code exists but not wired into module tree).
+- Missing route registrations in `main.rs` (handler exists but no route points to it).
+- Deserialization mismatches: field names in Rust structs vs JSON keys vs TypeScript types vs SQL columns.
+- Off-by-one in protocol: agent sends `FooResult`, server matches on `FooResponse` -- compiles fine, silently drops messages at runtime.
+- Tests that assert `Ok(())` without checking the actual result value.
+- Frontend API calls with wrong HTTP method or path that will 404 at runtime.
+
+**Rollback protocol:**
+- Fundamental architectural problem (wrong crate boundary, security vulnerability in design): revert worktree, update RFC if needed, re-assign with corrected instructions.
+- Implementation-level issues (missing error handling, incomplete tests, wrong field names): send teammate back to fix. This is the normal path.
+
 ## Coding Conventions
 
 - Rust edition 2024, resolver v2
