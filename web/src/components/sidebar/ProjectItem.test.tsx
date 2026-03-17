@@ -35,14 +35,14 @@ const mockProject: Project = {
   git_behind: 0,
   git_remotes: null,
   parent_project_id: null,
+  git_updated_at: null,
   created_at: new Date().toISOString(),
-  updated_at: new Date().toISOString(),
 };
 
 describe("ProjectItem", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    global.fetch = vi.fn().mockResolvedValue({
+    globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ([]),
     });
@@ -57,61 +57,61 @@ describe("ProjectItem", () => {
     expect(screen.getByText("my-project")).toBeInTheDocument();
   });
 
-  test("renders git branch", () => {
+  test("renders git branch icon with tooltip", () => {
     render(
       <MemoryRouter>
         <ProjectItem project={mockProject} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.getByText("main")).toBeInTheDocument();
+    expect(screen.getByText("Branch: main")).toBeInTheDocument();
   });
 
-  test("renders .claude badge when has_claude_config", () => {
+  test("renders claude config icon when has_claude_config", () => {
     render(
       <MemoryRouter>
         <ProjectItem project={mockProject} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.getByText(".claude")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code config (.claude/)")).toBeInTheDocument();
   });
 
-  test("does not render .claude badge when config is absent", () => {
+  test("does not render claude config icon when config is absent", () => {
     const noConfig = { ...mockProject, has_claude_config: false };
     render(
       <MemoryRouter>
         <ProjectItem project={noConfig} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.queryByText(".claude")).not.toBeInTheDocument();
+    expect(screen.queryByText("Claude Code config (.claude/)")).not.toBeInTheDocument();
   });
 
-  test("renders .zremote badge when has_zremote_config", () => {
+  test("renders zremote config icon when has_zremote_config", () => {
     const withZremote = { ...mockProject, has_zremote_config: true };
     render(
       <MemoryRouter>
         <ProjectItem project={withZremote} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.getByText(".zremote")).toBeInTheDocument();
+    expect(screen.getByText("ZRemote config (.zremote/)")).toBeInTheDocument();
   });
 
-  test("does not render .zremote badge when config is absent", () => {
+  test("does not render zremote config icon when config is absent", () => {
     render(
       <MemoryRouter>
         <ProjectItem project={mockProject} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.queryByText(".zremote")).not.toBeInTheDocument();
+    expect(screen.queryByText("ZRemote config (.zremote/)")).not.toBeInTheDocument();
   });
 
-  test("renders dirty indicator when git is dirty", () => {
+  test("renders dirty indicator in branch tooltip when git is dirty", () => {
     const dirtyProject = { ...mockProject, git_is_dirty: true };
     render(
       <MemoryRouter>
         <ProjectItem project={dirtyProject} sessions={[]} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.getByText("M")).toBeInTheDocument();
+    expect(screen.getByText("Branch: main (uncommitted changes)")).toBeInTheDocument();
   });
 
   test("renders Start Claude button", () => {
