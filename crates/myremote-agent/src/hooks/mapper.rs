@@ -77,10 +77,7 @@ impl SessionMapper {
                 transcript_offset: 0,
             },
         );
-        self.loop_to_cc
-            .write()
-            .await
-            .insert(loop_id, cc_session_id);
+        self.loop_to_cc.write().await.insert(loop_id, cc_session_id);
     }
 
     /// Look up a loop_id from a CC session_id.
@@ -136,11 +133,7 @@ impl SessionMapper {
         let session_to_loop = self.session_to_loop.read().await;
         if let Some((&session_id, &loop_id)) = session_to_loop.iter().next() {
             // Check if this loop already has a CC session mapping
-            let has_mapping = self
-                .loop_to_cc
-                .read()
-                .await
-                .contains_key(&loop_id);
+            let has_mapping = self.loop_to_cc.read().await.contains_key(&loop_id);
             if !has_mapping {
                 drop(session_to_loop);
                 self.register_cc_session(cc_session_id.to_string(), loop_id, session_id)
@@ -165,10 +158,7 @@ mod tests {
         let loop_id = Uuid::new_v4();
 
         mapper.register_loop(session_id, loop_id).await;
-        assert_eq!(
-            mapper.lookup_by_session(&session_id).await,
-            Some(loop_id)
-        );
+        assert_eq!(mapper.lookup_by_session(&session_id).await, Some(loop_id));
     }
 
     #[tokio::test]
@@ -245,10 +235,7 @@ mod tests {
         assert_eq!(mapped.loop_id, loop_id);
 
         // Subsequent lookups work directly
-        let mapped2 = mapper
-            .lookup_by_cc_session("new-cc-session")
-            .await
-            .unwrap();
+        let mapped2 = mapper.lookup_by_cc_session("new-cc-session").await.unwrap();
         assert_eq!(mapped2.loop_id, loop_id);
     }
 

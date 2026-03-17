@@ -7,7 +7,9 @@ use axum::response::IntoResponse;
 use myremote_core::queries::knowledge as q;
 use myremote_core::queries::projects as pq;
 use myremote_protocol::ServerMessage;
-use myremote_protocol::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage, SearchTier, ServiceAction};
+use myremote_protocol::knowledge::{
+    KnowledgeAgentMessage, KnowledgeServerMessage, SearchTier, ServiceAction,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -212,15 +214,13 @@ pub async fn extract_memories(
 
     let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> = transcript_rows
         .into_iter()
-        .map(|(role, content, timestamp)| {
-            myremote_protocol::knowledge::TranscriptFragment {
+        .map(
+            |(role, content, timestamp)| myremote_protocol::knowledge::TranscriptFragment {
                 role,
                 content,
-                timestamp: timestamp
-                    .parse()
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-            }
-        })
+                timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
+            },
+        )
         .collect();
 
     let sender = state
@@ -344,9 +344,7 @@ pub async fn delete_memory(
 
     let rows = q::delete_memory(&state.db, &memory_id, &project_id).await?;
     if rows == 0 {
-        return Err(AppError::NotFound(format!(
-            "memory {memory_id} not found"
-        )));
+        return Err(AppError::NotFound(format!("memory {memory_id} not found")));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -414,7 +412,9 @@ pub async fn write_claude_md(
         Ok(Err(_)) => return Err(AppError::Internal("response channel closed".to_string())),
         Err(_) => {
             state.knowledge_requests.remove(&gen_request_id);
-            return Err(AppError::Internal("instruction generation timed out after 60s".to_string()));
+            return Err(AppError::Internal(
+                "instruction generation timed out after 60s".to_string(),
+            ));
         }
     };
 
@@ -437,9 +437,15 @@ pub async fn write_claude_md(
     })?;
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), write_rx).await {
-        Ok(Ok(KnowledgeAgentMessage::ClaudeMdWritten { bytes_written, error, .. })) => {
+        Ok(Ok(KnowledgeAgentMessage::ClaudeMdWritten {
+            bytes_written,
+            error,
+            ..
+        })) => {
             if let Some(err) = error {
-                Err(AppError::Internal(format!("failed to write CLAUDE.md: {err}")))
+                Err(AppError::Internal(format!(
+                    "failed to write CLAUDE.md: {err}"
+                )))
             } else {
                 Ok(Json(serde_json::json!({
                     "written": true,
@@ -451,7 +457,9 @@ pub async fn write_claude_md(
         Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
         Err(_) => {
             state.knowledge_requests.remove(&write_request_id);
-            Err(AppError::Internal("write CLAUDE.md timed out after 10s".to_string()))
+            Err(AppError::Internal(
+                "write CLAUDE.md timed out after 10s".to_string(),
+            ))
         }
     }
 }
@@ -518,19 +526,43 @@ mod tests {
 
     fn build_router(state: Arc<AppState>) -> Router {
         Router::new()
-            .route("/api/projects/{project_id}/knowledge/status", get(get_status))
-            .route("/api/projects/{project_id}/knowledge/index", post(trigger_index))
+            .route(
+                "/api/projects/{project_id}/knowledge/status",
+                get(get_status),
+            )
+            .route(
+                "/api/projects/{project_id}/knowledge/index",
+                post(trigger_index),
+            )
             .route("/api/projects/{project_id}/knowledge/search", post(search))
-            .route("/api/projects/{project_id}/knowledge/memories", get(list_memories))
+            .route(
+                "/api/projects/{project_id}/knowledge/memories",
+                get(list_memories),
+            )
             .route(
                 "/api/projects/{project_id}/knowledge/memories/{memory_id}",
                 delete(delete_memory).put(update_memory),
             )
-            .route("/api/projects/{project_id}/knowledge/extract", post(extract_memories))
-            .route("/api/projects/{project_id}/knowledge/generate-instructions", post(generate_instructions))
-            .route("/api/projects/{project_id}/knowledge/write-claude-md", post(write_claude_md))
-            .route("/api/projects/{project_id}/knowledge/bootstrap", post(bootstrap_project))
-            .route("/api/hosts/{host_id}/knowledge/service", post(control_service))
+            .route(
+                "/api/projects/{project_id}/knowledge/extract",
+                post(extract_memories),
+            )
+            .route(
+                "/api/projects/{project_id}/knowledge/generate-instructions",
+                post(generate_instructions),
+            )
+            .route(
+                "/api/projects/{project_id}/knowledge/write-claude-md",
+                post(write_claude_md),
+            )
+            .route(
+                "/api/projects/{project_id}/knowledge/bootstrap",
+                post(bootstrap_project),
+            )
+            .route(
+                "/api/hosts/{host_id}/knowledge/service",
+                post(control_service),
+            )
             .with_state(state)
     }
 
@@ -557,11 +589,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_memory(
-        state: &AppState,
-        memory_id: &str,
-        project_id: &str,
-    ) {
+    async fn insert_memory(state: &AppState, memory_id: &str, project_id: &str) {
         sqlx::query(
             "INSERT INTO knowledge_memories (id, project_id, key, content, category, confidence, created_at, updated_at) \
              VALUES (?, ?, 'test-key', 'test content', 'pattern', 0.9, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
@@ -1035,7 +1063,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::ACCEPTED, "failed for action: {action}");
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "failed for action: {action}"
+            );
         }
     }
 

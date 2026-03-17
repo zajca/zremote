@@ -164,8 +164,16 @@ pub async fn trigger_scan(
         .bind(&info.project_type)
         .bind(info.has_claude_config)
         .bind(info.git_info.as_ref().and_then(|g| g.branch.as_deref()))
-        .bind(info.git_info.as_ref().and_then(|g| g.commit_hash.as_deref()))
-        .bind(info.git_info.as_ref().and_then(|g| g.commit_message.as_deref()))
+        .bind(
+            info.git_info
+                .as_ref()
+                .and_then(|g| g.commit_hash.as_deref()),
+        )
+        .bind(
+            info.git_info
+                .as_ref()
+                .and_then(|g| g.commit_message.as_deref()),
+        )
         .bind(info.git_info.as_ref().is_some_and(|g| g.is_dirty))
         .bind(info.git_info.as_ref().map_or(0, |g| g.ahead))
         .bind(info.git_info.as_ref().map_or(0, |g| g.behind))
@@ -269,12 +277,7 @@ pub async fn trigger_git_refresh(
                 format!("{}:{}", host_id, wt.path).as_bytes(),
             )
             .to_string();
-            let wt_name = wt
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or("worktree")
-                .to_string();
+            let wt_name = wt.path.rsplit('/').next().unwrap_or("worktree").to_string();
 
             sqlx::query(
                 "INSERT OR IGNORE INTO projects (id, host_id, path, name, parent_project_id, project_type) \
@@ -290,15 +293,13 @@ pub async fn trigger_git_refresh(
             .map_err(AppError::Database)?;
 
             // Update worktree git info
-            sqlx::query(
-                "UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?",
-            )
-            .bind(&wt.branch)
-            .bind(&wt.commit_hash)
-            .bind(&wt_id)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+            sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
+                .bind(&wt.branch)
+                .bind(&wt.commit_hash)
+                .bind(&wt_id)
+                .execute(&state.db)
+                .await
+                .map_err(AppError::Database)?;
         }
     }
 
@@ -425,9 +426,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")
@@ -442,10 +441,7 @@ mod tests {
                 "/api/hosts/{host_id}/projects",
                 get(list_projects).post(add_project),
             )
-            .route(
-                "/api/hosts/{host_id}/projects/scan",
-                post(trigger_scan),
-            )
+            .route("/api/hosts/{host_id}/projects/scan", post(trigger_scan))
             .route(
                 "/api/projects/{project_id}",
                 get(get_project).delete(delete_project),
@@ -797,9 +793,15 @@ mod tests {
         let host_id = state.host_id.to_string();
         let project_id = Uuid::new_v4().to_string();
 
-        q::insert_project(&state.db, &project_id, &host_id, "/tmp/myproject", "myproject")
-            .await
-            .unwrap();
+        q::insert_project(
+            &state.db,
+            &project_id,
+            &host_id,
+            "/tmp/myproject",
+            "myproject",
+        )
+        .await
+        .unwrap();
 
         let app = build_test_router(state);
 
@@ -1051,9 +1053,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!(
-                        "/api/projects/not-a-uuid/worktrees/{worktree_id}"
-                    ))
+                    .uri(format!("/api/projects/not-a-uuid/worktrees/{worktree_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1073,9 +1073,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!(
-                        "/api/projects/{project_id}/worktrees/not-a-uuid"
-                    ))
+                    .uri(format!("/api/projects/{project_id}/worktrees/not-a-uuid"))
                     .body(Body::empty())
                     .unwrap(),
             )

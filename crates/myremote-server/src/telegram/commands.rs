@@ -3,8 +3,8 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
-use crate::state::AppState;
 use super::format;
+use crate::state::AppState;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
@@ -88,13 +88,12 @@ async fn handle_preview(state: &AppState, session_id: &str) -> String {
     };
 
     // Check session exists
-    let exists: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
-            .bind(session_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let exists: Option<(String,)> = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
     match exists {
         None => return "Session not found.".to_string(),

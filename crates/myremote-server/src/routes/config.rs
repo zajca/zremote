@@ -158,7 +158,11 @@ mod tests {
         let state = test_state().await;
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get("/api/config/missing-key").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/config/missing-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -190,7 +194,11 @@ mod tests {
         // Now GET it
         let app2 = build_router(Arc::clone(&state));
         let resp2 = app2
-            .oneshot(Request::get("/api/config/theme").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/config/theme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
@@ -233,7 +241,11 @@ mod tests {
 
         let app3 = build_router(Arc::clone(&state));
         let resp3 = app3
-            .oneshot(Request::get("/api/config/key1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/config/key1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body3 = resp3.into_body().collect().await.unwrap().to_bytes();

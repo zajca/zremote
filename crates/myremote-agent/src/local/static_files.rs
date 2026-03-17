@@ -42,10 +42,7 @@ pub async fn static_handler(uri: Uri) -> Response {
 /// Falls back to `index.html` for SPA routing, same as the embedded handler.
 /// Includes path traversal protection: resolved paths must stay within `web_dir`.
 #[cfg(feature = "local")]
-pub async fn filesystem_static_handler(
-    uri: Uri,
-    web_dir: std::path::PathBuf,
-) -> Response {
+pub async fn filesystem_static_handler(uri: Uri, web_dir: std::path::PathBuf) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file_path = web_dir.join(path);
 
@@ -58,7 +55,9 @@ pub async fn filesystem_static_handler(
     }
 
     // Try to serve the exact file
-    if file_path.is_file() && let Ok(data) = tokio::fs::read(&file_path).await {
+    if file_path.is_file()
+        && let Ok(data) = tokio::fs::read(&file_path).await
+    {
         let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
         return (
             StatusCode::OK,
@@ -125,11 +124,8 @@ mod tests {
             .await
             .unwrap();
 
-        let response = filesystem_static_handler(
-            Uri::from_static("/"),
-            dir.path().to_path_buf(),
-        )
-        .await;
+        let response =
+            filesystem_static_handler(Uri::from_static("/"), dir.path().to_path_buf()).await;
         // Root path is not a file, so SPA fallback should serve index.html
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -142,11 +138,9 @@ mod tests {
             .await
             .unwrap();
 
-        let response = filesystem_static_handler(
-            Uri::from_static("/style.css"),
-            dir.path().to_path_buf(),
-        )
-        .await;
+        let response =
+            filesystem_static_handler(Uri::from_static("/style.css"), dir.path().to_path_buf())
+                .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -189,11 +183,8 @@ mod tests {
             .await
             .unwrap();
 
-        let response = filesystem_static_handler(
-            Uri::from_static("/app.js"),
-            dir.path().to_path_buf(),
-        )
-        .await;
+        let response =
+            filesystem_static_handler(Uri::from_static("/app.js"), dir.path().to_path_buf()).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -203,9 +194,7 @@ mod tests {
         let sub_dir = dir.path().join("assets");
         std::fs::create_dir_all(&sub_dir).unwrap();
         let file_path = sub_dir.join("style.css");
-        tokio::fs::write(&file_path, "body{}")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, "body{}").await.unwrap();
 
         let response = filesystem_static_handler(
             Uri::from_static("/assets/style.css"),

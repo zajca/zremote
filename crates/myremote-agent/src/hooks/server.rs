@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::routing::post;
 use axum::Router;
+use axum::routing::post;
 use myremote_protocol::{AgentMessage, AgenticAgentMessage};
 use tokio::sync::mpsc;
 
@@ -99,9 +99,8 @@ async fn remove_port_file() -> Result<(), std::io::Error> {
 }
 
 fn port_file_path() -> Result<PathBuf, std::io::Error> {
-    let home = std::env::var("HOME").map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set")
-    })?;
+    let home = std::env::var("HOME")
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"))?;
     Ok(PathBuf::from(home).join(".myremote").join("hooks-port"))
 }
 
@@ -282,7 +281,10 @@ mod tests {
 
         // Drain messages and verify we got something
         let msg = agentic_rx.try_recv().unwrap();
-        assert!(matches!(msg, myremote_protocol::AgenticAgentMessage::LoopToolCall { .. }));
+        assert!(matches!(
+            msg,
+            myremote_protocol::AgenticAgentMessage::LoopToolCall { .. }
+        ));
 
         shutdown_tx.send(true).unwrap();
     }

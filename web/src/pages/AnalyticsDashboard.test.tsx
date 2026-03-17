@@ -22,52 +22,49 @@ vi.mock("recharts", () => ({
   Tooltip: () => null,
 }));
 
+const mockLoops = vi.fn();
+const mockSessions = vi.fn();
+const mockCost = vi.fn();
+const mockTokens = vi.fn();
+
+vi.mock("../lib/api", () => ({
+  api: {
+    analytics: {
+      loops: (...args: unknown[]) => mockLoops(...args),
+      sessions: (...args: unknown[]) => mockSessions(...args),
+      cost: (...args: unknown[]) => mockCost(...args),
+      tokens: (...args: unknown[]) => mockTokens(...args),
+    },
+  },
+}));
+
+function setupDefaultMocks() {
+  mockLoops.mockResolvedValue({
+    total_loops: 42,
+    completed: 38,
+    errored: 4,
+    avg_cost_usd: 0.15,
+    total_cost_usd: 6.3,
+    total_tokens_in: 500000,
+    total_tokens_out: 200000,
+  });
+  mockSessions.mockResolvedValue({
+    total_sessions: 10,
+    active_sessions: 3,
+    avg_duration_seconds: 3600,
+  });
+  mockCost.mockResolvedValue([
+    { period: "2026-03-10", cost: 1.5 },
+    { period: "2026-03-11", cost: 2.0 },
+  ]);
+  mockTokens.mockResolvedValue([
+    { label: "sonnet", tokens_in: 300000, tokens_out: 100000 },
+  ]);
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
-  global.fetch = vi.fn().mockImplementation((url: string) => {
-    if (url.includes("/api/analytics/loops")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          total_loops: 42,
-          completed: 38,
-          errored: 4,
-          avg_cost_usd: 0.15,
-          total_cost_usd: 6.3,
-          total_tokens_in: 500000,
-          total_tokens_out: 200000,
-        }),
-      });
-    }
-    if (url.includes("/api/analytics/sessions")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          total_sessions: 10,
-          active_sessions: 3,
-          avg_duration_seconds: 3600,
-        }),
-      });
-    }
-    if (url.includes("/api/analytics/cost")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [
-          { period: "2026-03-10", cost: 1.5 },
-          { period: "2026-03-11", cost: 2.0 },
-        ],
-      });
-    }
-    if (url.includes("/api/analytics/tokens")) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [
-          { label: "sonnet", tokens_in: 300000, tokens_out: 100000 },
-        ],
-      });
-    }
-    return Promise.resolve({ ok: true, json: async () => ({}) });
-  });
+  setupDefaultMocks();
 });
 
 describe("AnalyticsDashboard", () => {
@@ -156,49 +153,32 @@ describe("AnalyticsDashboard", () => {
       expect(screen.getByText("Total Cost")).toBeInTheDocument();
     });
 
-    const callsBefore = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    const callsBefore = mockLoops.mock.calls.length;
     await userEvent.click(screen.getByText("7 days"));
 
     await waitFor(() => {
-      const callsAfter = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+      const callsAfter = mockLoops.mock.calls.length;
       expect(callsAfter).toBeGreaterThan(callsBefore);
     });
   });
 
   test("shows empty analytics message when no chart data", async () => {
-    global.fetch = vi.fn().mockImplementation((url: string) => {
-      if (url.includes("/api/analytics/loops")) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            total_loops: 0,
-            completed: 0,
-            errored: 0,
-            avg_cost_usd: null,
-            total_cost_usd: 0,
-            total_tokens_in: 0,
-            total_tokens_out: 0,
-          }),
-        });
-      }
-      if (url.includes("/api/analytics/sessions")) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            total_sessions: 0,
-            active_sessions: 0,
-            avg_duration_seconds: null,
-          }),
-        });
-      }
-      if (url.includes("/api/analytics/cost")) {
-        return Promise.resolve({ ok: true, json: async () => [] });
-      }
-      if (url.includes("/api/analytics/tokens")) {
-        return Promise.resolve({ ok: true, json: async () => [] });
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) });
+    mockLoops.mockResolvedValue({
+      total_loops: 0,
+      completed: 0,
+      errored: 0,
+      avg_cost_usd: null,
+      total_cost_usd: 0,
+      total_tokens_in: 0,
+      total_tokens_out: 0,
     });
+    mockSessions.mockResolvedValue({
+      total_sessions: 0,
+      active_sessions: 0,
+      avg_duration_seconds: null,
+    });
+    mockCost.mockResolvedValue([]);
+    mockTokens.mockResolvedValue([]);
 
     render(<AnalyticsDashboard />);
     await waitFor(() => {

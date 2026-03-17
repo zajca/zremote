@@ -62,10 +62,7 @@ pub async fn handle_tool_call(
     server: &KnowledgeMcpServer,
     params: &serde_json::Value,
 ) -> serde_json::Value {
-    let tool_name = params
-        .get("name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("");
+    let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let arguments = params
         .get("arguments")
         .cloned()
@@ -79,14 +76,8 @@ pub async fn handle_tool_call(
     }
 }
 
-async fn handle_search(
-    server: &KnowledgeMcpServer,
-    args: &serde_json::Value,
-) -> serde_json::Value {
-    let query = args
-        .get("query")
-        .and_then(|q| q.as_str())
-        .unwrap_or("");
+async fn handle_search(server: &KnowledgeMcpServer, args: &serde_json::Value) -> serde_json::Value {
+    let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
     if query.is_empty() {
         return tool_error("query parameter is required");
     }
@@ -143,10 +134,9 @@ async fn handle_memories(
         .and_then(|q| q.as_str())
         .map(str::to_lowercase);
 
-    let cache = crate::knowledge::read_memory_cache_for_project(
-        server.project_path.to_str().unwrap_or(""),
-    )
-    .await;
+    let cache =
+        crate::knowledge::read_memory_cache_for_project(server.project_path.to_str().unwrap_or(""))
+            .await;
 
     let filtered: Vec<_> = cache
         .iter()
@@ -250,10 +240,7 @@ mod tests {
     fn tool_list_has_three_tools() {
         let tools = tool_list();
         assert_eq!(tools.len(), 3);
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"knowledge_search"));
         assert!(names.contains(&"knowledge_memories"));
         assert!(names.contains(&"knowledge_context"));
@@ -303,10 +290,12 @@ mod tests {
         let params = serde_json::json!({"name": "knowledge_context", "arguments": {}});
         let result = handle_tool_call(&server, &params).await;
         // Should not error, just return a helpful message
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("No project knowledge"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No project knowledge")
+        );
     }
 
     #[tokio::test]
@@ -315,10 +304,12 @@ mod tests {
         let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
         let params = serde_json::json!({"name": "knowledge_memories", "arguments": {}});
         let result = handle_tool_call(&server, &params).await;
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("No memories found"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No memories found")
+        );
     }
 
     #[tokio::test]
@@ -327,10 +318,12 @@ mod tests {
         let params = serde_json::json!({"name": "knowledge_search", "arguments": {"query": ""}});
         let result = handle_tool_call(&server, &params).await;
         assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("query parameter is required"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("query parameter is required")
+        );
     }
 
     #[tokio::test]
@@ -339,10 +332,12 @@ mod tests {
         let params = serde_json::json!({"arguments": {}});
         let result = handle_tool_call(&server, &params).await;
         assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Unknown tool"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool")
+        );
     }
 
     #[tokio::test]
@@ -361,7 +356,11 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let claude_md = claude_dir.join("CLAUDE.md");
-        std::fs::write(&claude_md, "# My Project\nSome documentation without marker").unwrap();
+        std::fs::write(
+            &claude_md,
+            "# My Project\nSome documentation without marker",
+        )
+        .unwrap();
 
         let server = KnowledgeMcpServer::new(dir.path().to_path_buf(), 8741);
         let params = serde_json::json!({"name": "knowledge_context", "arguments": {}});
@@ -398,9 +397,7 @@ mod tests {
             .iter()
             .find(|t| t["name"] == "knowledge_search")
             .unwrap();
-        let required = search["inputSchema"]["required"]
-            .as_array()
-            .unwrap();
+        let required = search["inputSchema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "query"));
     }
 
@@ -452,10 +449,12 @@ mod tests {
         });
         let result = handle_tool_call(&server, &params).await;
         // With no cached memories, should still return "no memories found"
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("No memories found"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No memories found")
+        );
     }
 
     #[tokio::test]
@@ -467,10 +466,12 @@ mod tests {
             "arguments": {"query": "something"}
         });
         let result = handle_tool_call(&server, &params).await;
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("No memories found"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No memories found")
+        );
     }
 
     #[tokio::test]
@@ -482,10 +483,12 @@ mod tests {
             "arguments": {"category": "decision", "query": "api"}
         });
         let result = handle_tool_call(&server, &params).await;
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("No memories found"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No memories found")
+        );
     }
 
     #[tokio::test]

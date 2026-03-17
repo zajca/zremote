@@ -291,7 +291,9 @@ mod tests {
         insert_memory(&pool, "m2", "proj-1", "key2", "content2", "decision").await;
         insert_memory(&pool, "m3", "proj-1", "key3", "content3", "pattern").await;
 
-        let memories = list_memories(&pool, "proj-1", Some("pattern")).await.unwrap();
+        let memories = list_memories(&pool, "proj-1", Some("pattern"))
+            .await
+            .unwrap();
         assert_eq!(memories.len(), 2);
         for m in &memories {
             assert_eq!(m.category, "pattern");
@@ -403,7 +405,15 @@ mod tests {
         let host_id = "host-1";
         insert_host(&pool, host_id).await;
         insert_project(&pool, "proj-1", host_id, "/proj").await;
-        insert_memory(&pool, "m1", "proj-1", "error-handling", "Always use Result", "pattern").await;
+        insert_memory(
+            &pool,
+            "m1",
+            "proj-1",
+            "error-handling",
+            "Always use Result",
+            "pattern",
+        )
+        .await;
 
         let mem = get_memory(&pool, "m1", "proj-1").await.unwrap();
         assert_eq!(mem.id, "m1");
@@ -520,14 +530,18 @@ mod tests {
         insert_memory(&pool, "m2", "proj-1", "key2", "new", "pattern").await;
 
         // Force different updated_at
-        sqlx::query("UPDATE knowledge_memories SET updated_at = '2026-01-01T00:00:00Z' WHERE id = 'm1'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE knowledge_memories SET updated_at = '2026-01-02T00:00:00Z' WHERE id = 'm2'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE knowledge_memories SET updated_at = '2026-01-01T00:00:00Z' WHERE id = 'm1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE knowledge_memories SET updated_at = '2026-01-02T00:00:00Z' WHERE id = 'm2'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let memories = list_memories(&pool, "proj-1", None).await.unwrap();
         assert_eq!(memories.len(), 2);

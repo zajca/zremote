@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use myremote_protocol::ServerMessage;
 use serde::Deserialize;
@@ -56,22 +56,21 @@ async fn handle_terminal_connection(
 
     if !session_exists {
         // Query DB for diagnostics before returning error
-        let error_message = match sqlx::query_as::<_, (String,)>(
-            "SELECT status FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_optional(&state.db)
-        .await
-        {
-            Ok(Some((status,))) if status == "active" || status == "creating" => {
-                "session is stale (agent disconnected or server restarted)".to_string()
-            }
-            Ok(Some((status,))) => {
-                format!("session is {status}")
-            }
-            Ok(None) => "session not found".to_string(),
-            Err(_) => "session not found or not active".to_string(),
-        };
+        let error_message =
+            match sqlx::query_as::<_, (String,)>("SELECT status FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_optional(&state.db)
+                .await
+            {
+                Ok(Some((status,))) if status == "active" || status == "creating" => {
+                    "session is stale (agent disconnected or server restarted)".to_string()
+                }
+                Ok(Some((status,))) => {
+                    format!("session is {status}")
+                }
+                Ok(None) => "session not found".to_string(),
+                Err(_) => "session not found or not active".to_string(),
+            };
 
         let error_msg = serde_json::json!({
             "type": "error",
@@ -101,7 +100,10 @@ async fn handle_terminal_connection(
             return;
         };
 
-        if session.status != "active" && session.status != "creating" && session.status != "suspended" {
+        if session.status != "active"
+            && session.status != "creating"
+            && session.status != "suspended"
+        {
             let error_msg = serde_json::json!({
                 "type": "error",
                 "message": format!("session is {}", session.status)

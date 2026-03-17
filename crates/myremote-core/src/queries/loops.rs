@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::error::AppError;
+use crate::state::{AgenticLoopStore, LoopInfo};
 
 /// Agentic loop response for API.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -19,6 +20,47 @@ pub struct LoopRow {
     pub estimated_cost_usd: Option<f64>,
     pub end_reason: Option<String>,
     pub summary: Option<String>,
+    pub context_used: Option<i64>,
+    pub context_max: Option<i64>,
+}
+
+/// Enrich a `LoopRow` (DB data) with in-memory state to produce a `LoopInfo`.
+pub fn enrich_loop(row: LoopRow, agentic_loops: &AgenticLoopStore) -> LoopInfo {
+    let loop_uuid: Option<uuid::Uuid> = row.id.parse().ok();
+    let (pending_tool_calls, context_used, context_max) =
+        loop_uuid.and_then(|id| agentic_loops.get(&id)).map_or(
+            (
+                0,
+                row.context_used.unwrap_or(0),
+                row.context_max.unwrap_or(0),
+            ),
+            |e| {
+                (
+                    i64::try_from(e.pending_tool_calls.len()).unwrap_or(0),
+                    i64::try_from(e.context_used).unwrap_or(0),
+                    i64::try_from(e.context_max).unwrap_or(0),
+                )
+            },
+        );
+
+    LoopInfo {
+        id: row.id,
+        session_id: row.session_id,
+        project_path: row.project_path,
+        tool_name: row.tool_name,
+        model: row.model,
+        status: row.status,
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        total_tokens_in: row.total_tokens_in.unwrap_or(0),
+        total_tokens_out: row.total_tokens_out.unwrap_or(0),
+        estimated_cost_usd: row.estimated_cost_usd.unwrap_or(0.0),
+        end_reason: row.end_reason,
+        summary: row.summary,
+        context_used,
+        context_max,
+        pending_tool_calls,
+    }
 }
 
 /// Tool call response for API.
@@ -60,7 +102,8 @@ pub async fn list_loops(
 ) -> Result<Vec<LoopRow>, AppError> {
     let mut sql = String::from(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
+         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
+         context_used, context_max \
          FROM agentic_loops WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
@@ -74,15 +117,11 @@ pub async fn list_loops(
         binds.push(session_id.clone());
     }
     if let Some(ref host_id) = filter.host_id {
-        sql.push_str(
-            " AND session_id IN (SELECT id FROM sessions WHERE host_id = ?)",
-        );
+        sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE host_id = ?)");
         binds.push(host_id.clone());
     }
     if let Some(ref project_id) = filter.project_id {
-        sql.push_str(
-            " AND session_id IN (SELECT id FROM sessions WHERE project_id = ?)",
-        );
+        sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE project_id = ?)");
         binds.push(project_id.clone());
     }
 
@@ -100,7 +139,8 @@ pub async fn list_loops(
 pub async fn get_loop(pool: &SqlitePool, loop_id: &str) -> Result<LoopRow, AppError> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
+         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
+         context_used, context_max \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -143,12 +183,11 @@ pub async fn get_loop_session_id(
     pool: &SqlitePool,
     loop_id: &str,
 ) -> Result<Option<String>, AppError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT session_id FROM agentic_loops WHERE id = ?",
-    )
-    .bind(loop_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT session_id FROM agentic_loops WHERE id = ?")
+            .bind(loop_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(row.map(|(s,)| s))
 }
 
@@ -156,12 +195,10 @@ pub async fn get_session_host_id(
     pool: &SqlitePool,
     session_id: &str,
 ) -> Result<Option<String>, AppError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT host_id FROM sessions WHERE id = ?",
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT host_id FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|(s,)| s))
 }
 
@@ -181,12 +218,10 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         sqlx::query(
             "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, started_at) \

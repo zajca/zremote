@@ -143,6 +143,9 @@ mod tests {
         )
         .execute(&pool)
         .await;
-        assert!(result.is_err(), "foreign key constraint should reject invalid host_id");
+        assert!(
+            result.is_err(),
+            "foreign key constraint should reject invalid host_id"
+        );
     }
 }

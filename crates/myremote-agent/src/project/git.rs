@@ -9,6 +9,10 @@ fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
     let child = Command::new("git")
         .args(args)
         .current_dir(path)
+        // Prevent parent repo or env vars from interfering
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -134,34 +138,42 @@ impl GitInspector {
             return None;
         }
 
-        let branch = run_git(path, &["branch", "--show-current"]).ok().filter(|s| !s.is_empty());
+        let branch = run_git(path, &["branch", "--show-current"])
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let commit_hash = run_git(path, &["rev-parse", "--short", "HEAD"]).ok();
 
-        let commit_message = run_git(path, &["log", "-1", "--format=%s"]).ok().filter(|s| !s.is_empty());
+        let commit_message = run_git(path, &["log", "-1", "--format=%s"])
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let is_dirty = run_git(path, &["status", "--porcelain"])
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
-        let (ahead, behind) = run_git(path, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
-            .ok()
-            .and_then(|s| {
-                let parts: Vec<&str> = s.split('\t').collect();
-                if parts.len() == 2 {
-                    let behind = parts[0].parse().unwrap_or(0);
-                    let ahead = parts[1].parse().unwrap_or(0);
-                    Some((ahead, behind))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((0, 0));
+        let (ahead, behind) = run_git(
+            path,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        )
+        .ok()
+        .and_then(|s| {
+            let parts: Vec<&str> = s.split('\t').collect();
+            if parts.len() == 2 {
+                let behind = parts[0].parse().unwrap_or(0);
+                let ahead = parts[1].parse().unwrap_or(0);
+                Some((ahead, behind))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0));
 
         let remotes_output = run_git(path, &["remote", "-v"]).unwrap_or_default();
         let remotes = parse_remotes(&remotes_output);
 
-        let worktree_output = run_git(path, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+        let worktree_output =
+            run_git(path, &["worktree", "list", "--porcelain"]).unwrap_or_default();
         let mut worktrees = parse_worktree_list(&worktree_output);
 
         // Remove the main worktree (first entry is always the main repo itself)
@@ -189,17 +201,14 @@ impl GitInspector {
         worktree_path: Option<&Path>,
         new_branch: bool,
     ) -> Result<WorktreeInfo, String> {
-        let default_path = repo_path
-            .parent()
-            .unwrap_or(repo_path)
-            .join(format!(
-                "{}-{}",
-                repo_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("worktree"),
-                branch.replace('/', "-")
-            ));
+        let default_path = repo_path.parent().unwrap_or(repo_path).join(format!(
+            "{}-{}",
+            repo_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("worktree"),
+            branch.replace('/', "-")
+        ));
         let wt_path = worktree_path.unwrap_or(&default_path);
 
         let mut args = vec!["worktree", "add"];
@@ -406,16 +415,13 @@ upstream\tgit@github.com:org/repo.git (push)
     #[test]
     fn create_and_remove_worktree() {
         let tmp = TempDir::new().unwrap();
-        init_git_repo(tmp.path());
+        let repo_path = tmp.path().join("repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
 
-        let wt_path = tmp.path().parent().unwrap().join("test-worktree");
-        let wt = GitInspector::create_worktree(
-            tmp.path(),
-            "test-branch",
-            Some(&wt_path),
-            true,
-        )
-        .expect("create worktree");
+        let wt_path = tmp.path().join("test-worktree");
+        let wt = GitInspector::create_worktree(&repo_path, "test-branch", Some(&wt_path), true)
+            .expect("create worktree");
 
         assert_eq!(wt.path, wt_path.to_string_lossy());
         assert_eq!(wt.branch.as_deref(), Some("test-branch"));
@@ -423,33 +429,31 @@ upstream\tgit@github.com:org/repo.git (push)
         assert!(!wt.is_locked);
 
         // Verify worktree shows up in inspect
-        let (_, worktrees) = GitInspector::inspect(tmp.path()).unwrap();
+        let (_, worktrees) = GitInspector::inspect(&repo_path).unwrap();
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch.as_deref(), Some("test-branch"));
 
         // Remove the worktree
-        GitInspector::remove_worktree(tmp.path(), &wt_path, false).expect("remove worktree");
+        GitInspector::remove_worktree(&repo_path, &wt_path, false).expect("remove worktree");
 
-        let (_, worktrees) = GitInspector::inspect(tmp.path()).unwrap();
+        let (_, worktrees) = GitInspector::inspect(&repo_path).unwrap();
         assert!(worktrees.is_empty());
     }
 
     #[test]
     fn create_worktree_existing_branch() {
         let tmp = TempDir::new().unwrap();
-        init_git_repo(tmp.path());
+        let repo_path = tmp.path().join("repo");
+        fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
 
         // Create a branch first
-        run_git(tmp.path(), &["branch", "existing-branch"]).unwrap();
+        run_git(&repo_path, &["branch", "existing-branch"]).unwrap();
 
-        let wt_path = tmp.path().parent().unwrap().join("existing-wt");
-        let wt = GitInspector::create_worktree(
-            tmp.path(),
-            "existing-branch",
-            Some(&wt_path),
-            false,
-        )
-        .expect("create worktree from existing branch");
+        let wt_path = tmp.path().join("existing-wt");
+        let wt =
+            GitInspector::create_worktree(&repo_path, "existing-branch", Some(&wt_path), false)
+                .expect("create worktree from existing branch");
 
         assert_eq!(wt.branch.as_deref(), Some("existing-branch"));
     }
@@ -461,13 +465,8 @@ upstream\tgit@github.com:org/repo.git (push)
         fs::create_dir_all(&repo_path).unwrap();
         init_git_repo(&repo_path);
 
-        let wt = GitInspector::create_worktree(
-            &repo_path,
-            "auto-branch",
-            None,
-            true,
-        )
-        .expect("create worktree with auto path");
+        let wt = GitInspector::create_worktree(&repo_path, "auto-branch", None, true)
+            .expect("create worktree with auto path");
 
         assert!(wt.path.contains("myrepo-auto-branch"));
 

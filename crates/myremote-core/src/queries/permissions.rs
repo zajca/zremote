@@ -41,12 +41,11 @@ pub async fn upsert_permission(
     .execute(pool)
     .await?;
 
-    let rule: PermissionRuleRow = sqlx::query_as(
-        "SELECT id, scope, tool_pattern, action FROM permission_rules WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await?;
+    let rule: PermissionRuleRow =
+        sqlx::query_as("SELECT id, scope, tool_pattern, action FROM permission_rules WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
     Ok(rule)
 }
 

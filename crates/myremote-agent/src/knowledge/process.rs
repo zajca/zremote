@@ -165,9 +165,11 @@ mod tests {
 
     #[test]
     fn error_display() {
-        assert!(OvProcessError::AlreadyRunning
-            .to_string()
-            .contains("already running"));
+        assert!(
+            OvProcessError::AlreadyRunning
+                .to_string()
+                .contains("already running")
+        );
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
         assert!(OvProcessError::Spawn(io_err).to_string().contains("spawn"));
     }

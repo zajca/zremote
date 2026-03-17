@@ -42,10 +42,7 @@ fn is_authorized(user_id: UserId, allowed: &[UserId]) -> bool {
 }
 
 /// Try to start the Telegram bot. Skipped if `TELEGRAM_BOT_TOKEN` is not set.
-pub fn try_start(
-    state: Arc<AppState>,
-    shutdown: CancellationToken,
-) {
+pub fn try_start(state: Arc<AppState>, shutdown: CancellationToken) {
     let token = match std::env::var("TELEGRAM_BOT_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => {
@@ -62,7 +59,9 @@ pub fn try_start(
     let allowed_users = parse_allowed_users(&allowed_users_str);
 
     if allowed_users.is_empty() {
-        tracing::warn!("TELEGRAM_ALLOWED_USERS is empty -- all messages will be rejected (fail-closed)");
+        tracing::warn!(
+            "TELEGRAM_ALLOWED_USERS is empty -- all messages will be rejected (fail-closed)"
+        );
     }
 
     let chat_ids = user_ids_to_chat_ids(&allowed_users);
@@ -123,7 +122,12 @@ async fn run_bot(
                     match user_id {
                         Some(id) if is_authorized(id, &allowed_for_commands) => true,
                         Some(id) => {
-                            let preview = msg.text().unwrap_or("<non-text>").chars().take(50).collect::<String>();
+                            let preview = msg
+                                .text()
+                                .unwrap_or("<non-text>")
+                                .chars()
+                                .take(50)
+                                .collect::<String>();
                             tracing::warn!(
                                 user_id = id.0,
                                 message_preview = %preview,

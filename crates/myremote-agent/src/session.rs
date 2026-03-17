@@ -44,7 +44,8 @@ impl SessionManager {
                 working_dir,
                 self.output_tx.clone(),
             )?;
-            self.sessions.insert(session_id, SessionBackend::Tmux(session));
+            self.sessions
+                .insert(session_id, SessionBackend::Tmux(session));
             Ok(pid)
         } else {
             let (session, pid) = PtySession::spawn(
@@ -55,7 +56,8 @@ impl SessionManager {
                 working_dir,
                 self.output_tx.clone(),
             )?;
-            self.sessions.insert(session_id, SessionBackend::Pty(session));
+            self.sessions
+                .insert(session_id, SessionBackend::Pty(session));
             Ok(pid)
         }
     }
@@ -152,7 +154,8 @@ impl SessionManager {
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "shell".to_string());
             result.push((session_id, shell, pid));
-            self.sessions.insert(session_id, SessionBackend::Tmux(session));
+            self.sessions
+                .insert(session_id, SessionBackend::Tmux(session));
         }
 
         result

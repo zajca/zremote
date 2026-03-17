@@ -198,7 +198,11 @@ mod tests {
         // Rust project
         let rust_project = tmp.path().join("myapp");
         fs::create_dir_all(&rust_project).unwrap();
-        fs::write(rust_project.join("Cargo.toml"), "[package]\nname = \"myapp\"").unwrap();
+        fs::write(
+            rust_project.join("Cargo.toml"),
+            "[package]\nname = \"myapp\"",
+        )
+        .unwrap();
         fs::create_dir_all(rust_project.join(".claude")).unwrap();
 
         // Node project
@@ -209,7 +213,11 @@ mod tests {
         // Python project
         let py_project = tmp.path().join("ml-model");
         fs::create_dir_all(&py_project).unwrap();
-        fs::write(py_project.join("pyproject.toml"), "[project]\nname = \"ml-model\"").unwrap();
+        fs::write(
+            py_project.join("pyproject.toml"),
+            "[project]\nname = \"ml-model\"",
+        )
+        .unwrap();
 
         // Git-only project (no language marker)
         let git_project = tmp.path().join("notes");
@@ -300,20 +308,47 @@ mod tests {
         let projects = scanner.scan();
 
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"myapp"), "should find rust project: {names:?}");
-        assert!(names.contains(&"webapp"), "should find node project: {names:?}");
-        assert!(names.contains(&"ml-model"), "should find python project: {names:?}");
-        assert!(names.contains(&"notes"), "should find git-only project: {names:?}");
-        assert!(names.contains(&"nested-app"), "should find nested project: {names:?}");
-        assert!(!names.contains(&"documents"), "should not find plain dir: {names:?}");
-        assert!(!names.contains(&"some-pkg"), "should not find node_modules pkg: {names:?}");
+        assert!(
+            names.contains(&"myapp"),
+            "should find rust project: {names:?}"
+        );
+        assert!(
+            names.contains(&"webapp"),
+            "should find node project: {names:?}"
+        );
+        assert!(
+            names.contains(&"ml-model"),
+            "should find python project: {names:?}"
+        );
+        assert!(
+            names.contains(&"notes"),
+            "should find git-only project: {names:?}"
+        );
+        assert!(
+            names.contains(&"nested-app"),
+            "should find nested project: {names:?}"
+        );
+        assert!(
+            !names.contains(&"documents"),
+            "should not find plain dir: {names:?}"
+        );
+        assert!(
+            !names.contains(&"some-pkg"),
+            "should not find node_modules pkg: {names:?}"
+        );
     }
 
     #[test]
     fn scan_respects_depth_limit() {
         let tmp = TempDir::new().unwrap();
         // Create project at depth 5
-        let deep = tmp.path().join("a").join("b").join("c").join("d").join("deep-proj");
+        let deep = tmp
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("d")
+            .join("deep-proj");
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("Cargo.toml"), "[package]").unwrap();
 
@@ -325,7 +360,10 @@ mod tests {
 
         let projects = scanner.scan();
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        assert!(!names.contains(&"deep-proj"), "should not find project beyond depth limit");
+        assert!(
+            !names.contains(&"deep-proj"),
+            "should not find project beyond depth limit"
+        );
     }
 
     #[test]

@@ -132,9 +132,7 @@ pub async fn parse_transcript_file(
                 }
                 serde_json::Value::Array(blocks) => {
                     for block in blocks {
-                        if let Ok(cb) =
-                            serde_json::from_value::<ContentBlock>(block.clone())
-                        {
+                        if let Ok(cb) = serde_json::from_value::<ContentBlock>(block.clone()) {
                             match cb {
                                 ContentBlock::Text { text } => {
                                     if !text.is_empty() {
@@ -146,20 +144,17 @@ pub async fn parse_transcript_file(
                                     }
                                 }
                                 ContentBlock::ToolUse { id, name, input } => {
-                                    let tool_call_id = id.as_deref().map(|s| {
-                                        Uuid::new_v5(
-                                            &Uuid::NAMESPACE_URL,
-                                            s.as_bytes(),
-                                        )
-                                    });
+                                    let tool_call_id = id
+                                        .as_deref()
+                                        .map(|s| Uuid::new_v5(&Uuid::NAMESPACE_URL, s.as_bytes()));
                                     let desc = format!(
                                         "Tool: {} | Input: {}",
                                         name.as_deref().unwrap_or("unknown"),
                                         input
                                             .as_ref()
                                             .map(|v| {
-                                                let s = serde_json::to_string(v)
-                                                    .unwrap_or_default();
+                                                let s =
+                                                    serde_json::to_string(v).unwrap_or_default();
                                                 if s.len() > 200 {
                                                     format!("{}...", &s[..200])
                                                 } else {
@@ -178,18 +173,13 @@ pub async fn parse_transcript_file(
                                     tool_use_id,
                                     content,
                                 } => {
-                                    let tool_call_id =
-                                        tool_use_id.as_deref().map(|s| {
-                                            Uuid::new_v5(
-                                                &Uuid::NAMESPACE_URL,
-                                                s.as_bytes(),
-                                            )
-                                        });
+                                    let tool_call_id = tool_use_id
+                                        .as_deref()
+                                        .map(|s| Uuid::new_v5(&Uuid::NAMESPACE_URL, s.as_bytes()));
                                     let result_text = content
                                         .as_ref()
                                         .map(|v| {
-                                            let s = serde_json::to_string(v)
-                                                .unwrap_or_default();
+                                            let s = serde_json::to_string(v).unwrap_or_default();
                                             if s.len() > 500 {
                                                 format!("{}...", &s[..500])
                                             } else {
@@ -301,7 +291,8 @@ mod tests {
 
     #[test]
     fn parse_content_array_with_text() {
-        let jsonl = r#"{"role":"assistant","content":[{"type":"text","text":"Let me read the file."}]}"#;
+        let jsonl =
+            r#"{"role":"assistant","content":[{"type":"text","text":"Let me read the file."}]}"#;
 
         let (entries, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
@@ -349,18 +340,16 @@ mod tests {
         tokio::fs::write(&path, content).await.unwrap();
 
         // Parse from beginning
-        let (entries, new_offset, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, new_offset, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(new_offset, content.len() as u64);
 
         // Parse from offset (should return nothing new)
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), new_offset)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), new_offset)
+            .await
+            .unwrap();
         assert!(entries.is_empty());
     }
 
@@ -470,10 +459,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (entries, offset, token_data) =
-            parse_transcript_file(path.to_str().unwrap(), 99999)
-                .await
-                .unwrap();
+        let (entries, offset, token_data) = parse_transcript_file(path.to_str().unwrap(), 99999)
+            .await
+            .unwrap();
         assert!(entries.is_empty());
         assert!(token_data.is_empty());
         // offset should be total file length
@@ -490,10 +478,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, first).await.unwrap();
 
-        let (entries, offset1, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, offset1, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "first");
 
@@ -505,10 +492,9 @@ mod tests {
         tokio::fs::write(&path, &full).await.unwrap();
 
         // Parse from offset - should only get new entry
-        let (entries, offset2, _) =
-            parse_transcript_file(path.to_str().unwrap(), offset1)
-                .await
-                .unwrap();
+        let (entries, offset2, _) = parse_transcript_file(path.to_str().unwrap(), offset1)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "second");
         assert!(offset2 > offset1);
@@ -523,10 +509,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         // Should have: text block, tool_use block, tool_result block
         assert!(entries.len() >= 2);
@@ -550,10 +535,9 @@ mod tests {
         );
         tokio::fs::write(&path, &content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::Tool);
@@ -591,10 +575,9 @@ mod tests {
         );
         tokio::fs::write(&path, &content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0].content.contains("Write"));
@@ -612,10 +595,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::Tool);
@@ -631,10 +613,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::Tool);
@@ -650,10 +631,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::Tool);
@@ -668,10 +648,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         // "image" type is Other and ignored, only text block kept
         assert_eq!(entries.len(), 1);
@@ -686,10 +665,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "real text");
@@ -705,10 +683,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         // None of these should produce entries
         assert!(entries.is_empty());
@@ -723,10 +700,9 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, token_data) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(token_data.len(), 2);
@@ -750,10 +726,9 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content, "first");
@@ -768,10 +743,9 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) =
-            parse_transcript_file(path.to_str().unwrap(), 0)
-                .await
-                .unwrap();
+        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::Tool);

@@ -271,10 +271,10 @@ pub async fn delete_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{delete, get, post};
-    use axum::Router;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -325,12 +325,27 @@ mod tests {
 
     fn build_router(state: Arc<AppState>) -> Router {
         Router::new()
-            .route("/api/hosts/{host_id}/projects", get(list_projects).post(add_project))
+            .route(
+                "/api/hosts/{host_id}/projects",
+                get(list_projects).post(add_project),
+            )
             .route("/api/hosts/{host_id}/projects/scan", post(trigger_scan))
-            .route("/api/projects/{project_id}", get(get_project).delete(delete_project))
-            .route("/api/projects/{project_id}/sessions", get(list_project_sessions))
-            .route("/api/projects/{project_id}/git/refresh", post(trigger_git_refresh))
-            .route("/api/projects/{project_id}/worktrees", get(list_worktrees).post(create_worktree))
+            .route(
+                "/api/projects/{project_id}",
+                get(get_project).delete(delete_project),
+            )
+            .route(
+                "/api/projects/{project_id}/sessions",
+                get(list_project_sessions),
+            )
+            .route(
+                "/api/projects/{project_id}/git/refresh",
+                post(trigger_git_refresh),
+            )
+            .route(
+                "/api/projects/{project_id}/worktrees",
+                get(list_worktrees).post(create_worktree),
+            )
             .route(
                 "/api/projects/{project_id}/worktrees/{worktree_id}",
                 delete(delete_worktree),
@@ -346,7 +361,11 @@ mod tests {
 
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get(&format!("/api/hosts/{host_id}/projects")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/projects"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -365,7 +384,11 @@ mod tests {
 
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get(&format!("/api/hosts/{host_id}/projects")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(&format!("/api/hosts/{host_id}/projects"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -380,7 +403,11 @@ mod tests {
         let state = test_state().await;
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get("/api/hosts/bad-id/projects").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/hosts/bad-id/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -396,7 +423,11 @@ mod tests {
 
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(&format!("/api/projects/{proj_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -412,7 +443,11 @@ mod tests {
         let proj_id = Uuid::new_v4().to_string();
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(&format!("/api/projects/{proj_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -423,7 +458,11 @@ mod tests {
         let state = test_state().await;
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get("/api/projects/not-uuid").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/projects/not-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -439,7 +478,11 @@ mod tests {
 
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::delete(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::delete(&format!("/api/projects/{proj_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -451,7 +494,11 @@ mod tests {
         let proj_id = Uuid::new_v4().to_string();
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::delete(&format!("/api/projects/{proj_id}")).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::delete(&format!("/api/projects/{proj_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -94,7 +94,10 @@ async fn main() {
 }
 
 async fn run_agent() {
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "myremote-agent starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "myremote-agent starting"
+    );
 
     let config = match config::AgentConfig::from_env() {
         Ok(c) => c,

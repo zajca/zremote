@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 mod auth;
@@ -34,8 +34,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/hosts/{host_id}/sessions",
-            post(routes::sessions::create_session)
-                .get(routes::sessions::list_sessions),
+            post(routes::sessions::create_session).get(routes::sessions::list_sessions),
         )
         .route(
             "/api/sessions/{session_id}",
@@ -52,10 +51,7 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::terminal::ws_handler),
         )
         .route("/api/loops", get(routes::agentic::list_loops))
-        .route(
-            "/api/loops/{loop_id}",
-            get(routes::agentic::get_loop),
-        )
+        .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
         .route(
             "/api/loops/{loop_id}/tools",
             get(routes::agentic::get_loop_tools),
@@ -74,37 +70,26 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/permissions",
-            get(routes::permissions::list_permissions)
-                .put(routes::permissions::upsert_permission),
+            get(routes::permissions::list_permissions).put(routes::permissions::upsert_permission),
         )
         .route(
             "/api/permissions/{rule_id}",
             delete(routes::permissions::delete_permission),
         )
-        .route(
-            "/api/analytics/tokens",
-            get(routes::analytics::get_tokens),
-        )
-        .route(
-            "/api/analytics/cost",
-            get(routes::analytics::get_cost),
-        )
+        .route("/api/analytics/tokens", get(routes::analytics::get_tokens))
+        .route("/api/analytics/cost", get(routes::analytics::get_cost))
         .route(
             "/api/analytics/sessions",
             get(routes::analytics::get_sessions),
         )
-        .route(
-            "/api/analytics/loops",
-            get(routes::analytics::get_loops),
-        )
+        .route("/api/analytics/loops", get(routes::analytics::get_loops))
         .route(
             "/api/search/transcripts",
             get(routes::search::search_transcripts),
         )
         .route(
             "/api/hosts/{host_id}/projects",
-            get(routes::projects::list_projects)
-                .post(routes::projects::add_project),
+            get(routes::projects::list_projects).post(routes::projects::add_project),
         )
         .route(
             "/api/hosts/{host_id}/projects/scan",
@@ -112,8 +97,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/projects/{project_id}",
-            get(routes::projects::get_project)
-                .delete(routes::projects::delete_project),
+            get(routes::projects::get_project).delete(routes::projects::delete_project),
         )
         .route(
             "/api/projects/{project_id}/sessions",
@@ -125,8 +109,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/projects/{project_id}/worktrees",
-            get(routes::projects::list_worktrees)
-                .post(routes::projects::create_worktree),
+            get(routes::projects::list_worktrees).post(routes::projects::create_worktree),
         )
         .route(
             "/api/projects/{project_id}/worktrees/{worktree_id}",
@@ -134,13 +117,11 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/config/{key}",
-            get(routes::config::get_global_config)
-                .put(routes::config::set_global_config),
+            get(routes::config::get_global_config).put(routes::config::set_global_config),
         )
         .route(
             "/api/hosts/{host_id}/config/{key}",
-            get(routes::config::get_host_config)
-                .put(routes::config::set_host_config),
+            get(routes::config::get_host_config).put(routes::config::set_host_config),
         )
         // Knowledge routes
         .route(
@@ -161,8 +142,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/projects/{project_id}/knowledge/memories/{memory_id}",
-            delete(routes::knowledge::delete_memory)
-                .put(routes::knowledge::update_memory),
+            delete(routes::knowledge::delete_memory).put(routes::knowledge::update_memory),
         )
         .route(
             "/api/projects/{project_id}/knowledge/extract",
@@ -268,12 +248,11 @@ async fn main() {
     {
         tracing::error!(error = %e, "failed to mark stale claude sessions as error at startup");
     }
-    if let Err(e) = sqlx::query(
-        "UPDATE hosts SET status = 'offline', updated_at = ? WHERE status = 'online'",
-    )
-    .bind(&startup_now)
-    .execute(&pool)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE hosts SET status = 'offline', updated_at = ? WHERE status = 'online'")
+            .bind(&startup_now)
+            .execute(&pool)
+            .await
     {
         tracing::error!(error = %e, "failed to mark hosts offline at startup");
     }
@@ -484,8 +463,20 @@ mod tests {
     #[tokio::test]
     async fn list_hosts_returns_hosts_when_present() {
         let state = test_state().await;
-        insert_test_host(&state, "11111111-1111-1111-1111-111111111111", "alpha", "alpha-host").await;
-        insert_test_host(&state, "22222222-2222-2222-2222-222222222222", "beta", "beta-host").await;
+        insert_test_host(
+            &state,
+            "11111111-1111-1111-1111-111111111111",
+            "alpha",
+            "alpha-host",
+        )
+        .await;
+        insert_test_host(
+            &state,
+            "22222222-2222-2222-2222-222222222222",
+            "beta",
+            "beta-host",
+        )
+        .await;
 
         let app = create_router(state);
         let response = app
@@ -849,14 +840,12 @@ mod tests {
 
         // Insert a session directly
         let session_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')",
-        )
-        .bind(&session_id)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')")
+            .bind(&session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = create_router(state);
         let response = app
@@ -882,14 +871,12 @@ mod tests {
         insert_test_host(&state, &host_id, "host", "host").await;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
-        )
-        .bind(&session_id)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = create_router(state);
         let response = app
@@ -935,14 +922,12 @@ mod tests {
         insert_test_host(&state, &host_id_str, "host", "host").await;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
-        )
-        .bind(&session_id)
-        .bind(&host_id_str)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&session_id)
+            .bind(&host_id_str)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         // Register connection so the agent can receive the close message
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -989,14 +974,12 @@ mod tests {
         insert_test_host(&state, &host_id, "host", "host").await;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')",
-        )
-        .bind(&session_id)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')")
+            .bind(&session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = create_router(state);
         let response = app
@@ -1050,17 +1033,21 @@ mod tests {
 
     // --- Session-project linking tests ---
 
-    async fn insert_test_project(state: &AppState, id: &str, host_id: &str, path: &str, name: &str) {
-        sqlx::query(
-            "INSERT INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(host_id)
-        .bind(path)
-        .bind(name)
-        .execute(&state.db)
-        .await
-        .unwrap();
+    async fn insert_test_project(
+        state: &AppState,
+        id: &str,
+        host_id: &str,
+        path: &str,
+        name: &str,
+    ) {
+        sqlx::query("INSERT INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(host_id)
+            .bind(path)
+            .bind(name)
+            .execute(&state.db)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1070,11 +1057,21 @@ mod tests {
         let host_id_str = host_id.to_string();
         let project_id = uuid::Uuid::new_v4().to_string();
         insert_test_host(&state, &host_id_str, "host", "host").await;
-        insert_test_project(&state, &project_id, &host_id_str, "/home/user/project", "project").await;
+        insert_test_project(
+            &state,
+            &project_id,
+            &host_id_str,
+            "/home/user/project",
+            "project",
+        )
+        .await;
 
         // Register connection
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx, false).await;
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx, false)
+            .await;
 
         let app = create_router(state.clone());
         let response = app
@@ -1118,10 +1115,20 @@ mod tests {
         let host_id_str = host_id.to_string();
         let project_id = uuid::Uuid::new_v4().to_string();
         insert_test_host(&state, &host_id_str, "host", "host").await;
-        insert_test_project(&state, &project_id, &host_id_str, "/home/user/project", "project").await;
+        insert_test_project(
+            &state,
+            &project_id,
+            &host_id_str,
+            "/home/user/project",
+            "project",
+        )
+        .await;
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx, false).await;
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx, false)
+            .await;
 
         let app = create_router(state.clone());
         let response = app
@@ -1165,7 +1172,10 @@ mod tests {
         insert_test_host(&state, &host_id_str, "host", "host").await;
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.connections.register(host_id, "host".to_string(), tx, false).await;
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx, false)
+            .await;
 
         let app = create_router(state.clone());
         let response = app
@@ -1207,18 +1217,27 @@ mod tests {
         let host_id = uuid::Uuid::new_v4().to_string();
         let project_id = uuid::Uuid::new_v4().to_string();
         insert_test_host(&state, &host_id, "host", "host").await;
-        insert_test_project(&state, &project_id, &host_id, "/home/user/project", "project").await;
+        insert_test_project(
+            &state,
+            &project_id,
+            &host_id,
+            "/home/user/project",
+            "project",
+        )
+        .await;
 
         // Insert sessions: one linked, one not
         let linked_session_id = uuid::Uuid::new_v4().to_string();
         let orphan_session_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)")
-            .bind(&linked_session_id)
-            .bind(&host_id)
-            .bind(&project_id)
-            .execute(&state.db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&linked_session_id)
+        .bind(&host_id)
+        .bind(&project_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
             .bind(&orphan_session_id)
             .bind(&host_id)
@@ -1250,15 +1269,24 @@ mod tests {
         let project_id = uuid::Uuid::new_v4().to_string();
         let session_id = uuid::Uuid::new_v4().to_string();
         insert_test_host(&state, &host_id, "host", "host").await;
-        insert_test_project(&state, &project_id, &host_id, "/home/user/project", "project").await;
+        insert_test_project(
+            &state,
+            &project_id,
+            &host_id,
+            "/home/user/project",
+            "project",
+        )
+        .await;
 
-        sqlx::query("INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)")
-            .bind(&session_id)
-            .bind(&host_id)
-            .bind(&project_id)
-            .execute(&state.db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&session_id)
+        .bind(&host_id)
+        .bind(&project_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
 
         let app = create_router(state.clone());
         let response = app

@@ -41,7 +41,9 @@ fn validate_update_host(body: &UpdateHostRequest) -> Result<(), AppError> {
         return Err(AppError::BadRequest("name must not be empty".to_string()));
     }
     if body.name.len() > 255 {
-        return Err(AppError::BadRequest("name must not exceed 255 characters".to_string()));
+        return Err(AppError::BadRequest(
+            "name must not exceed 255 characters".to_string(),
+        ));
     }
     Ok(())
 }
@@ -84,10 +86,9 @@ pub async fn delete_host(
     let parsed_id = parse_host_id(&host_id)?;
 
     if let Some(sender) = state.connections.get_sender(&parsed_id).await {
-        let _ = sender
-            .try_send(myremote_protocol::ServerMessage::Error {
-                message: "host deleted".to_string(),
-            });
+        let _ = sender.try_send(myremote_protocol::ServerMessage::Error {
+            message: "host deleted".to_string(),
+        });
         state.connections.unregister(&parsed_id).await;
     }
 

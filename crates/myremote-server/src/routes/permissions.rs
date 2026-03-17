@@ -47,11 +47,20 @@ pub async fn upsert_permission(
     validate_action(&body.action)?;
 
     if body.tool_pattern.is_empty() {
-        return Err(AppError::BadRequest("tool_pattern must not be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "tool_pattern must not be empty".to_string(),
+        ));
     }
 
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let rule = q::upsert_permission(&state.db, &id, &body.scope, &body.tool_pattern, &body.action).await?;
+    let rule = q::upsert_permission(
+        &state.db,
+        &id,
+        &body.scope,
+        &body.tool_pattern,
+        &body.action,
+    )
+    .await?;
     Ok(Json(rule))
 }
 
@@ -62,7 +71,9 @@ pub async fn delete_permission(
 ) -> Result<impl IntoResponse, AppError> {
     let rows = q::delete_permission(&state.db, &rule_id).await?;
     if rows == 0 {
-        return Err(AppError::NotFound(format!("permission rule {rule_id} not found")));
+        return Err(AppError::NotFound(format!(
+            "permission rule {rule_id} not found"
+        )));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -98,7 +109,10 @@ mod tests {
 
     fn build_router(state: Arc<AppState>) -> Router {
         Router::new()
-            .route("/api/permissions", get(list_permissions).put(upsert_permission))
+            .route(
+                "/api/permissions",
+                get(list_permissions).put(upsert_permission),
+            )
             .route("/api/permissions/{rule_id}", delete(delete_permission))
             .with_state(state)
     }
@@ -108,7 +122,11 @@ mod tests {
         let state = test_state().await;
         let app = build_router(state);
         let resp = app
-            .oneshot(Request::get("/api/permissions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -148,7 +166,11 @@ mod tests {
         // List should return one rule
         let app2 = build_router(Arc::clone(&state));
         let resp2 = app2
-            .oneshot(Request::get("/api/permissions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body2 = resp2.into_body().collect().await.unwrap().to_bytes();
@@ -336,7 +358,11 @@ mod tests {
         // List should still have 1 rule
         let app3 = build_router(Arc::clone(&state));
         let resp3 = app3
-            .oneshot(Request::get("/api/permissions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body3 = resp3.into_body().collect().await.unwrap().to_bytes();

@@ -30,39 +30,41 @@ impl AgentConfig {
     ///
     /// Returns an error if either variable is missing or if the URL is invalid.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let server_url_str = std::env::var("MYREMOTE_SERVER_URL").map_err(|_| {
-            ConfigError::MissingVar("MYREMOTE_SERVER_URL")
-        })?;
+        let server_url_str = std::env::var("MYREMOTE_SERVER_URL")
+            .map_err(|_| ConfigError::MissingVar("MYREMOTE_SERVER_URL"))?;
 
-        let server_url = Url::parse(&server_url_str).map_err(|e| {
-            ConfigError::InvalidUrl(server_url_str, e)
-        })?;
+        let server_url =
+            Url::parse(&server_url_str).map_err(|e| ConfigError::InvalidUrl(server_url_str, e))?;
 
-        let token = std::env::var("MYREMOTE_TOKEN").map_err(|_| {
-            ConfigError::MissingVar("MYREMOTE_TOKEN")
-        })?;
+        let token = std::env::var("MYREMOTE_TOKEN")
+            .map_err(|_| ConfigError::MissingVar("MYREMOTE_TOKEN"))?;
 
         if server_url.scheme() == "ws" {
-            tracing::warn!("Using unencrypted WebSocket connection (ws://). Use wss:// for production.");
+            tracing::warn!(
+                "Using unencrypted WebSocket connection (ws://). Use wss:// for production."
+            );
         }
 
         let openviking_enabled = std::env::var("OPENVIKING_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let openviking_binary = std::env::var("OPENVIKING_BINARY")
-            .unwrap_or_else(|_| "openviking-server".to_string());
+        let openviking_binary =
+            std::env::var("OPENVIKING_BINARY").unwrap_or_else(|_| "openviking-server".to_string());
 
         let openviking_port = std::env::var("OPENVIKING_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1933);
 
-        let openviking_config_dir = std::env::var("OPENVIKING_CONFIG_DIR")
-            .map_or_else(
-                |_| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp")).join(".openviking"),
-                std::path::PathBuf::from,
-            );
+        let openviking_config_dir = std::env::var("OPENVIKING_CONFIG_DIR").map_or_else(
+            |_| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(".openviking")
+            },
+            std::path::PathBuf::from,
+        );
 
         let openviking_api_key = std::env::var("OPENROUTER_API_KEY").ok();
 
@@ -91,16 +93,25 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingVar("MYREMOTE_SERVER_URL") => {
-                write!(f, "MYREMOTE_SERVER_URL environment variable is required (e.g., ws://your-server:3000 or wss://your-server:3000)")
+                write!(
+                    f,
+                    "MYREMOTE_SERVER_URL environment variable is required (e.g., ws://your-server:3000 or wss://your-server:3000)"
+                )
             }
             Self::MissingVar("MYREMOTE_TOKEN") => {
-                write!(f, "MYREMOTE_TOKEN environment variable is required — set the same value on both server and agent")
+                write!(
+                    f,
+                    "MYREMOTE_TOKEN environment variable is required — set the same value on both server and agent"
+                )
             }
             Self::MissingVar(var) => {
                 write!(f, "missing required environment variable: {var}")
             }
             Self::InvalidUrl(_url, _err) => {
-                write!(f, "MYREMOTE_SERVER_URL must be a valid URL (e.g., ws://your-server:3000)")
+                write!(
+                    f,
+                    "MYREMOTE_SERVER_URL must be a valid URL (e.g., ws://your-server:3000)"
+                )
             }
         }
     }

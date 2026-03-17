@@ -71,7 +71,7 @@ pub async fn search_transcripts(
          FROM transcript_fts fts \
          JOIN transcript_entries te ON te.id = fts.rowid \
          JOIN agentic_loops al ON al.id = te.loop_id \
-         WHERE transcript_fts MATCH ?"
+         WHERE transcript_fts MATCH ?",
     );
     let mut binds: Vec<String> = vec![search_term.to_string()];
 
@@ -83,8 +83,7 @@ pub async fn search_transcripts(
          JOIN transcript_entries te ON te.id = fts.rowid \
          JOIN agentic_loops al ON al.id = te.loop_id \
          WHERE transcript_fts MATCH ?{}",
-        &sql[sql.find(" AND ").map_or(sql.len(), |p| p)..sql.len()]
-            .replace(" ORDER BY", "")
+        &sql[sql.find(" AND ").map_or(sql.len(), |p| p)..sql.len()].replace(" ORDER BY", "")
     );
 
     sql.push_str(" ORDER BY te.timestamp DESC LIMIT ? OFFSET ?");
@@ -118,7 +117,7 @@ async fn search_without_fts(
          al.tool_name, al.project_path, al.status as loop_status, al.model, al.estimated_cost_usd \
          FROM transcript_entries te \
          JOIN agentic_loops al ON al.id = te.loop_id \
-         WHERE 1=1"
+         WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
 
@@ -159,18 +158,16 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
-             VALUES ('h1', 'test', 'test-host', 'hash', 'online')"
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
         )
         .execute(&pool)
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')"
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         sqlx::query(
             "INSERT INTO agentic_loops (id, session_id, tool_name, model, status, project_path, started_at) \
@@ -190,7 +187,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO transcript_entries (loop_id, role, content, timestamp) \
-             VALUES ('l1', 'user', 'Can you fix the bug in the parser?', '2026-03-10T10:01:00Z')"
+             VALUES ('l1', 'user', 'Can you fix the bug in the parser?', '2026-03-10T10:01:00Z')",
         )
         .execute(&pool)
         .await
@@ -203,12 +200,11 @@ mod tests {
     async fn fts_finds_matching_content() {
         let pool = setup_db().await;
 
-        let results: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'function'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let results: Vec<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM transcript_fts WHERE content MATCH 'function'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(results.len(), 1);
     }
@@ -217,12 +213,11 @@ mod tests {
     async fn fts_finds_multiple_words() {
         let pool = setup_db().await;
 
-        let results: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'bug parser'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let results: Vec<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM transcript_fts WHERE content MATCH 'bug parser'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(results.len(), 1);
     }
@@ -232,7 +227,7 @@ mod tests {
         let pool = setup_db().await;
 
         let results: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'nonexistent_xyz'"
+            "SELECT rowid FROM transcript_fts WHERE content MATCH 'nonexistent_xyz'",
         )
         .fetch_all(&pool)
         .await
@@ -428,12 +423,11 @@ mod tests {
             .unwrap();
 
         // The FTS entry should also be removed
-        let results: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'parser'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let results: Vec<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM transcript_fts WHERE content MATCH 'parser'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert!(results.is_empty());
     }

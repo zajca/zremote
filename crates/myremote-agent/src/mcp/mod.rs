@@ -115,15 +115,24 @@ async fn handle_jsonrpc_message(
                 }
             }),
         )),
-        "tools/list" => Some(jsonrpc_ok(id, serde_json::json!({ "tools": tools::tool_list() }))),
+        "tools/list" => Some(jsonrpc_ok(
+            id,
+            serde_json::json!({ "tools": tools::tool_list() }),
+        )),
         "tools/call" => {
-            let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let params = parsed
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let result = tools::handle_tool_call(server, &params).await;
             Some(jsonrpc_ok(id, result))
         }
         "resources/list" => {
             let resources = resource_list(server);
-            Some(jsonrpc_ok(id, serde_json::json!({ "resources": resources })))
+            Some(jsonrpc_ok(
+                id,
+                serde_json::json!({ "resources": resources }),
+            ))
         }
         "resources/read" => {
             let uri = parsed
@@ -135,12 +144,22 @@ async fn handle_jsonrpc_message(
             Some(jsonrpc_ok(id, result))
         }
         "ping" => Some(jsonrpc_ok(id, serde_json::json!({}))),
-        _ => Some(jsonrpc_error(id, -32601, &format!("Method not found: {method}"))),
+        _ => Some(jsonrpc_error(
+            id,
+            -32601,
+            &format!("Method not found: {method}"),
+        )),
     }
 }
 
 fn resource_list(_server: &KnowledgeMcpServer) -> Vec<serde_json::Value> {
-    let categories = ["pattern", "decision", "pitfall", "architecture", "convention"];
+    let categories = [
+        "pattern",
+        "decision",
+        "pitfall",
+        "architecture",
+        "convention",
+    ];
     let mut resources = vec![serde_json::json!({
         "uri": "myremote://context",
         "name": "Project Context",
@@ -199,7 +218,14 @@ async fn read_resource(server: &KnowledgeMcpServer, uri: &str) -> serde_json::Va
         } else {
             filtered
                 .iter()
-                .map(|m| format!("## {}\n{}\n(confidence: {:.0}%)", m.key, m.content, m.confidence * 100.0))
+                .map(|m| {
+                    format!(
+                        "## {}\n{}\n(confidence: {:.0}%)",
+                        m.key,
+                        m.content,
+                        m.confidence * 100.0
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n")
         };
@@ -323,10 +349,12 @@ mod tests {
         let msg = "not valid json at all {{{";
         let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
         assert_eq!(resp["error"]["code"], -32700);
-        assert!(resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Parse error"));
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Parse error")
+        );
     }
 
     #[tokio::test]
@@ -335,10 +363,12 @@ mod tests {
         let msg = r#"{"jsonrpc":"2.0","id":10,"method":"initialize","params":{}}"#;
         let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
         assert_eq!(resp["id"], 10);
-        assert!(resp["result"]["serverInfo"]["name"]
-            .as_str()
-            .unwrap()
-            .contains("myremote"));
+        assert!(
+            resp["result"]["serverInfo"]["name"]
+                .as_str()
+                .unwrap()
+                .contains("myremote")
+        );
         assert!(resp["result"]["serverInfo"]["version"].is_string());
         assert!(resp["result"]["capabilities"]["resources"].is_object());
     }
@@ -353,7 +383,10 @@ mod tests {
         // First resource should be the context resource
         assert_eq!(resources[0]["uri"], "myremote://context");
         // Check that category resources exist
-        let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
         assert!(uris.contains(&"myremote://memories/pattern"));
         assert!(uris.contains(&"myremote://memories/decision"));
         assert!(uris.contains(&"myremote://memories/pitfall"));
@@ -474,10 +507,12 @@ mod tests {
         let msg = r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"knowledge_search","arguments":{}}}"#;
         let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
         assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("query parameter is required"));
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("query parameter is required")
+        );
     }
 
     #[tokio::test]
@@ -557,10 +592,12 @@ mod tests {
         let msg = r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"nonexistent_tool","arguments":{}}}"#;
         let resp = handle_jsonrpc_message(&server, msg).await.unwrap();
         assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Unknown tool"));
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool")
+        );
     }
 
     #[tokio::test]

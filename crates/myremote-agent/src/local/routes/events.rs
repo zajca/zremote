@@ -65,9 +65,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_broadcast_channel_works() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);

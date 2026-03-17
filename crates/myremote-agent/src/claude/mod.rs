@@ -38,7 +38,9 @@ impl CommandBuilder {
 
         // Validate model if provided: only alphanumeric, dots, and hyphens
         if let Some(m) = model
-            && !m.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && !m
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         {
             return Err(format!("invalid model name: {m}"));
         }
@@ -260,16 +262,9 @@ fn parse_session_file(path: &Path, project_path: &str) -> Option<ClaudeSessionIn
         .or_else(|| obj.get("sessionId"))
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        })?;
+        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))?;
 
-    let model = obj
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let model = obj.get("model").and_then(|v| v.as_str()).map(String::from);
 
     let last_active = obj
         .get("lastActive")
@@ -590,7 +585,10 @@ mod tests {
 
     #[test]
     fn encode_project_path_replaces_slashes() {
-        assert_eq!(encode_project_path("/home/user/project"), "-home-user-project");
+        assert_eq!(
+            encode_project_path("/home/user/project"),
+            "-home-user-project"
+        );
     }
 
     #[test]
@@ -624,10 +622,7 @@ mod tests {
         assert_eq!(info.session_id, "abc123");
         assert_eq!(info.project_path, "/home/user/project");
         assert_eq!(info.model, Some("claude-sonnet-4-20250514".to_string()));
-        assert_eq!(
-            info.last_active,
-            Some("2026-03-16T10:00:00Z".to_string())
-        );
+        assert_eq!(info.last_active, Some("2026-03-16T10:00:00Z".to_string()));
         assert_eq!(info.message_count, Some(42));
         assert_eq!(info.summary, Some("Working on tests".to_string()));
     }

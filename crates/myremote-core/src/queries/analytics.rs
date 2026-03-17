@@ -36,7 +36,13 @@ pub struct LoopStats {
     pub total_tokens_out: i64,
 }
 
-fn date_filter(sql: &mut String, binds: &mut Vec<String>, from: Option<&String>, to: Option<&String>, date_col: &str) {
+fn date_filter(
+    sql: &mut String,
+    binds: &mut Vec<String>,
+    from: Option<&String>,
+    to: Option<&String>,
+    date_col: &str,
+) {
     if let Some(f) = from {
         write!(sql, " AND {date_col} >= ?").unwrap();
         binds.push(f.clone());
@@ -122,7 +128,7 @@ pub async fn get_session_stats(
          SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_sessions, \
          AVG(CASE WHEN ss.duration_seconds > 0 THEN ss.duration_seconds ELSE NULL END) as avg_duration_seconds \
          FROM sessions LEFT JOIN session_stats ss ON ss.session_id = sessions.id \
-         WHERE 1=1"
+         WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
     date_filter(&mut sql, &mut binds, from, to, "sessions.created_at");
@@ -150,7 +156,7 @@ pub async fn get_loop_stats(
          COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost_usd, \
          COALESCE(SUM(total_tokens_in), 0) as total_tokens_in, \
          COALESCE(SUM(total_tokens_out), 0) as total_tokens_out \
-         FROM agentic_loops WHERE 1=1"
+         FROM agentic_loops WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
     date_filter(&mut sql, &mut binds, from, to, "started_at");
@@ -175,18 +181,16 @@ mod tests {
         // Insert a host and session for FK constraints
         sqlx::query(
             "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
-             VALUES ('h1', 'test', 'test-host', 'hash', 'online')"
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
         )
         .execute(&pool)
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')"
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         pool
     }
@@ -386,7 +390,9 @@ mod tests {
 
         let from = "2026-03-01".to_string();
         let to = "2026-03-15".to_string();
-        let rows = get_cost(&pool, "day", Some(&from), Some(&to)).await.unwrap();
+        let rows = get_cost(&pool, "day", Some(&from), Some(&to))
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert!((rows[0].cost - 0.50).abs() < 0.001);
     }
@@ -397,7 +403,9 @@ mod tests {
 
         let from = "2026-01-01".to_string();
         let to = "2026-12-31".to_string();
-        let stats = get_session_stats(&pool, Some(&from), Some(&to)).await.unwrap();
+        let stats = get_session_stats(&pool, Some(&from), Some(&to))
+            .await
+            .unwrap();
         // The session we inserted in setup has no explicit created_at, so it should still be within range
         assert!(stats.total_sessions >= 0);
     }
@@ -427,7 +435,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO agentic_loops (id, session_id, tool_name, status) \
-             VALUES ('l1', 's1', 'claude', 'completed')"
+             VALUES ('l1', 's1', 'claude', 'completed')",
         )
         .execute(&pool)
         .await
@@ -441,12 +449,11 @@ mod tests {
         .await
         .unwrap();
 
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'function'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM transcript_fts WHERE content MATCH 'function'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(rows.len(), 1);
     }

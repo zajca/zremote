@@ -68,7 +68,10 @@ mod tests {
         };
         let cloned = event.clone();
         match cloned {
-            AgenticEvent::StatusChanged { status, current_step } => {
+            AgenticEvent::StatusChanged {
+                status,
+                current_step,
+            } => {
                 assert_eq!(status, AgenticStatus::Working);
                 assert_eq!(current_step.as_deref(), Some("Reading files"));
             }

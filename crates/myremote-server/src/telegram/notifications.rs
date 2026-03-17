@@ -5,8 +5,8 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant};
 
-use crate::state::ServerEvent;
 use super::format;
+use crate::state::ServerEvent;
 
 /// Minimum interval between notifications per chat.
 const RATE_LIMIT_INTERVAL: Duration = Duration::from_secs(5);
@@ -95,9 +95,10 @@ fn format_event(event: &ServerEvent) -> Option<(String, Option<InlineKeyboardMar
         } => {
             // Only notify on notable status changes
             match loop_info.status.as_str() {
-                "waiting_for_input" | "error" | "paused" => {
-                    Some((format::format_loop_status(hostname, &loop_info.tool_name, &loop_info.status), None))
-                }
+                "waiting_for_input" | "error" | "paused" => Some((
+                    format::format_loop_status(hostname, &loop_info.tool_name, &loop_info.status),
+                    None,
+                )),
                 _ => None,
             }
         }
@@ -121,7 +122,8 @@ fn format_event(event: &ServerEvent) -> Option<(String, Option<InlineKeyboardMar
             ..
         } => {
             let arguments_preview = tool_call.arguments_json.as_deref().unwrap_or("{}");
-            let text = format::format_tool_call_pending(hostname, &tool_call.tool_name, arguments_preview);
+            let text =
+                format::format_tool_call_pending(hostname, &tool_call.tool_name, arguments_preview);
             let keyboard = InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback(
                     "Approve",

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use myremote_protocol::{AgenticAgentMessage, AgenticLoopId, PermissionAction, PermissionRule};
-use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, mpsc};
 
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(55);
 
@@ -78,10 +78,12 @@ impl PermissionManager {
         let key = (loop_id, tool_name.to_string());
         let notify = {
             let mut pending = self.pending.write().await;
-            let entry = pending.entry(key.clone()).or_insert_with(|| PendingPermission {
-                decision: None,
-                notify: Arc::new(Notify::new()),
-            });
+            let entry = pending
+                .entry(key.clone())
+                .or_insert_with(|| PendingPermission {
+                    decision: None,
+                    notify: Arc::new(Notify::new()),
+                });
             entry.notify.clone()
         };
 
@@ -119,11 +121,7 @@ impl PermissionManager {
     }
 
     /// Resolve any pending permission for a loop (by loop_id only, any tool).
-    pub async fn resolve_any_pending(
-        &self,
-        loop_id: AgenticLoopId,
-        decision: PermissionDecision,
-    ) {
+    pub async fn resolve_any_pending(&self, loop_id: AgenticLoopId, decision: PermissionDecision) {
         let mut pending = self.pending.write().await;
         let keys: Vec<_> = pending
             .keys()
@@ -233,9 +231,8 @@ mod tests {
         let tool_name = "Bash";
 
         let pm_clone = pm.clone();
-        let handle = tokio::spawn(async move {
-            pm_clone.wait_for_decision(loop_id, tool_name).await
-        });
+        let handle =
+            tokio::spawn(async move { pm_clone.wait_for_decision(loop_id, tool_name).await });
 
         // Small delay to ensure wait_for_decision is waiting
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -271,9 +268,8 @@ mod tests {
         let loop_id = uuid::Uuid::new_v4();
 
         let pm_clone = pm.clone();
-        let handle = tokio::spawn(async move {
-            pm_clone.wait_for_decision(loop_id, "SomeTool").await
-        });
+        let handle =
+            tokio::spawn(async move { pm_clone.wait_for_decision(loop_id, "SomeTool").await });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 

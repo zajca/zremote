@@ -84,10 +84,7 @@ where
 {
     type Rejection = AppError;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(AppError::BadRequest(rejection.body_text())),
@@ -110,9 +107,8 @@ mod tests {
 
     #[tokio::test]
     async fn not_found_returns_404_with_message() {
-        let (status, json) = extract_error_response(
-            AppError::NotFound("host 123 not found".to_string()),
-        ).await;
+        let (status, json) =
+            extract_error_response(AppError::NotFound("host 123 not found".to_string())).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(json["error"]["code"], "NOT_FOUND");
         assert_eq!(json["error"]["message"], "host 123 not found");
@@ -120,9 +116,8 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_returns_401_with_message() {
-        let (status, json) = extract_error_response(
-            AppError::Unauthorized("invalid token".to_string()),
-        ).await;
+        let (status, json) =
+            extract_error_response(AppError::Unauthorized("invalid token".to_string())).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(json["error"]["code"], "UNAUTHORIZED");
         assert_eq!(json["error"]["message"], "invalid token");
@@ -130,9 +125,8 @@ mod tests {
 
     #[tokio::test]
     async fn bad_request_returns_400_with_message() {
-        let (status, json) = extract_error_response(
-            AppError::BadRequest("invalid host ID".to_string()),
-        ).await;
+        let (status, json) =
+            extract_error_response(AppError::BadRequest("invalid host ID".to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "BAD_REQUEST");
         assert_eq!(json["error"]["message"], "invalid host ID");
@@ -140,9 +134,8 @@ mod tests {
 
     #[tokio::test]
     async fn internal_returns_500_with_generic_message() {
-        let (status, json) = extract_error_response(
-            AppError::Internal("secret details".to_string()),
-        ).await;
+        let (status, json) =
+            extract_error_response(AppError::Internal("secret details".to_string())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
         // Should NOT leak the internal message

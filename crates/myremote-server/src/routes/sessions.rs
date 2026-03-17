@@ -44,9 +44,7 @@ pub async fn create_session(
         .connections
         .get_sender(&parsed_host_id)
         .await
-        .ok_or_else(|| {
-            AppError::Conflict("host is offline, cannot create session".to_string())
-        })?;
+        .ok_or_else(|| AppError::Conflict("host is offline, cannot create session".to_string()))?;
 
     let session_id = Uuid::new_v4();
     let session_id_str = session_id.to_string();
@@ -154,7 +152,9 @@ pub async fn close_session(
 
     let (_id, host_id_str) = q::find_session_for_close(&state.db, &session_id)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found or already closed")))?;
+        .ok_or_else(|| {
+            AppError::NotFound(format!("session {session_id} not found or already closed"))
+        })?;
 
     let host_id: Uuid = host_id_str
         .parse()
@@ -182,7 +182,11 @@ pub async fn purge_session(
 
     // Only allow purging closed sessions
     match q::get_session_status(&state.db, &session_id).await? {
-        None => return Err(AppError::NotFound(format!("session {session_id} not found"))),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "session {session_id} not found"
+            )));
+        }
         Some(ref s) if s != "closed" => {
             return Err(AppError::Conflict(format!(
                 "session {session_id} is not closed (status: {s}), cannot purge"
@@ -244,15 +248,13 @@ mod tests {
     }
 
     async fn insert_test_session(state: &AppState, session_id: &str, host_id: &str, status: &str) {
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, ?)",
-        )
-        .bind(session_id)
-        .bind(host_id)
-        .bind(status)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, ?)")
+            .bind(session_id)
+            .bind(host_id)
+            .bind(status)
+            .execute(&state.db)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

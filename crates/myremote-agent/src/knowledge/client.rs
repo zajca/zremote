@@ -1,9 +1,9 @@
 use std::time::Duration;
 
+use myremote_protocol::AgenticLoopId;
 use myremote_protocol::knowledge::{
     ExtractedMemory, MemoryCategory, SearchResult, SearchTier, TranscriptFragment,
 };
-use myremote_protocol::AgenticLoopId;
 
 /// HTTP client for the local `OpenViking` API.
 pub struct OvClient {
@@ -45,11 +45,7 @@ impl OvClient {
     }
 
     /// Trigger indexing of a project.
-    pub async fn index_project(
-        &self,
-        namespace: &str,
-        path: &str,
-    ) -> Result<(), OvClientError> {
+    pub async fn index_project(&self, namespace: &str, path: &str) -> Result<(), OvClientError> {
         let body = serde_json::json!({
             "path": path,
             "to": namespace,
@@ -104,8 +100,7 @@ impl OvClient {
             return Err(OvClientError::Api(format!("{status}: {text}")));
         }
 
-        let ov_response: OvSearchResponse =
-            resp.json().await.map_err(OvClientError::Request)?;
+        let ov_response: OvSearchResponse = resp.json().await.map_err(OvClientError::Request)?;
 
         Ok(ov_response
             .results
@@ -159,10 +154,7 @@ impl OvClient {
             let resp = self
                 .request(
                     reqwest::Method::POST,
-                    format!(
-                        "{}/api/v1/sessions/{session_id}/messages",
-                        self.base_url
-                    ),
+                    format!("{}/api/v1/sessions/{session_id}/messages", self.base_url),
                 )
                 .json(&body)
                 .send()
@@ -182,10 +174,7 @@ impl OvClient {
         let resp = self
             .request(
                 reqwest::Method::POST,
-                format!(
-                    "{}/api/v1/sessions/{session_id}/extract",
-                    self.base_url
-                ),
+                format!("{}/api/v1/sessions/{session_id}/extract", self.base_url),
             )
             .send()
             .await

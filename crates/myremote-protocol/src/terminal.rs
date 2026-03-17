@@ -181,7 +181,11 @@ mod tests {
         // Backward compat: older agents won't send supports_persistent_sessions
         let json = r#"{"type":"Register","payload":{"hostname":"h","agent_version":"0.1","os":"linux","arch":"x86_64","token":"t"}}"#;
         let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
-        if let AgentMessage::Register { supports_persistent_sessions, .. } = msg {
+        if let AgentMessage::Register {
+            supports_persistent_sessions,
+            ..
+        } = msg
+        {
             assert!(!supports_persistent_sessions, "should default to false");
         } else {
             panic!("expected Register variant");
@@ -204,9 +208,7 @@ mod tests {
                 },
             ],
         });
-        roundtrip_agent(&AgentMessage::SessionsRecovered {
-            sessions: vec![],
-        });
+        roundtrip_agent(&AgentMessage::SessionsRecovered { sessions: vec![] });
     }
 
     #[test]

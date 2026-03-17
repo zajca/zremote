@@ -153,7 +153,11 @@ mod tests {
         adapter.parse_output(b">>> Working");
         let events = adapter.parse_output(b"Task completed successfully");
         assert_eq!(adapter.state(), ClaudeCodeState::Completed);
-        assert!(events.iter().any(|e| matches!(e, AgenticEvent::Ended { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgenticEvent::Ended { .. }))
+        );
     }
 
     #[test]

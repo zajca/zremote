@@ -22,15 +22,10 @@ pub async fn handle_callback(
         .text(&answer_text)
         .await?;
 
-    if should_edit
-        && let Some(msg) = &query.message
-    {
+    if should_edit && let Some(msg) = &query.message {
         let chat_id = msg.chat().id;
         let msg_id = msg.id();
-        let original_text = msg
-            .regular_message()
-            .and_then(|m| m.text())
-            .unwrap_or("");
+        let original_text = msg.regular_message().and_then(|m| m.text()).unwrap_or("");
 
         let updated = format!("{original_text}\n\n<i>{answer_text}</i>");
         let _ = bot
@@ -38,9 +33,7 @@ pub async fn handle_callback(
             .parse_mode(teloxide::types::ParseMode::Html)
             .await;
 
-        let _ = bot
-            .edit_message_reply_markup(chat_id, msg_id)
-            .await;
+        let _ = bot.edit_message_reply_markup(chat_id, msg_id).await;
     }
 
     Ok(())
@@ -90,25 +83,21 @@ async fn process_callback(
     }
 
     // Find which host this loop belongs to
-    let session_id: (String,) = sqlx::query_as(
-        "SELECT session_id FROM agentic_loops WHERE id = ?",
-    )
-    .bind(loop_id_str)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .ok_or("Loop not found")?;
+    let session_id: (String,) = sqlx::query_as("SELECT session_id FROM agentic_loops WHERE id = ?")
+        .bind(loop_id_str)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .ok_or("Loop not found")?;
 
-    let host_id: (String,) = sqlx::query_as(
-        "SELECT host_id FROM sessions WHERE id = ?",
-    )
-    .bind(&session_id.0)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .ok_or("Session not found")?;
+    let host_id: (String,) = sqlx::query_as("SELECT host_id FROM sessions WHERE id = ?")
+        .bind(&session_id.0)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .ok_or("Session not found")?;
 
     let parsed_host_id: uuid::Uuid = host_id
         .0
