@@ -61,9 +61,12 @@ fn calculate_cost(data: &TokenUsageData) -> f64 {
 
     let input_cost = data.input_tokens as f64 * pricing.input_per_m / 1_000_000.0;
     let output_cost = data.output_tokens as f64 * pricing.output_per_m / 1_000_000.0;
-    let cache_cost = data.cache_read_input_tokens as f64 * pricing.cache_read_per_m / 1_000_000.0;
+    let cache_read_cost =
+        data.cache_read_input_tokens as f64 * pricing.cache_read_per_m / 1_000_000.0;
+    let cache_write_cost =
+        data.cache_creation_input_tokens as f64 * pricing.input_per_m / 1_000_000.0;
 
-    input_cost + output_cost + cache_cost
+    input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
 /// Aggregate token usage data into a single metrics struct.
@@ -253,5 +256,42 @@ mod tests {
             ..Default::default()
         }];
         assert_eq!(aggregate_metrics(&sonnet).unwrap().context_max, 200_000);
+    }
+
+    #[test]
+    fn cost_calculation_includes_cache_creation() {
+        let data = TokenUsageData {
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 200_000,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+        };
+
+        let cost = calculate_cost(&data);
+        // input: 100k * $3/M = $0.30
+        // output: 50k * $15/M = $0.75
+        // cache_write: 200k * $3/M = $0.60 (billed at input rate)
+        // total = $1.65
+        assert!((cost - 1.65).abs() < 0.01);
+    }
+
+    #[test]
+    fn cost_calculation_with_all_token_types() {
+        let data = TokenUsageData {
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            cache_read_input_tokens: 500_000,
+            cache_creation_input_tokens: 200_000,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+        };
+
+        let cost = calculate_cost(&data);
+        // input: 100k * $3/M = $0.30
+        // output: 50k * $15/M = $0.75
+        // cache_read: 500k * $0.30/M = $0.15
+        // cache_write: 200k * $3/M = $0.60
+        // total = $1.80
+        assert!((cost - 1.80).abs() < 0.01);
     }
 }

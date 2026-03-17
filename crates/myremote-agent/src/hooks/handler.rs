@@ -32,7 +32,7 @@ pub struct HooksState {
 }
 
 /// The JSON payload received from Claude Code hooks via stdin.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HookPayload {
     pub session_id: String,
     pub hook_event_name: String,
@@ -73,6 +73,10 @@ pub async fn handle_hook(
         cc_session = %payload.session_id,
         tool = ?payload.tool_name,
         "hook event received"
+    );
+    tracing::trace!(
+        payload = ?serde_json::to_string(&payload).ok(),
+        "raw hook payload"
     );
 
     // Update transcript path if provided
@@ -263,13 +267,24 @@ async fn emit_incremental_metrics(
     } else if let Some(ref path) = mapped.transcript_path {
         path.clone()
     } else {
+        tracing::debug!(cc_session = %payload.session_id, "no transcript_path available");
         return;
     };
+    tracing::debug!(
+        cc_session = %payload.session_id,
+        path = %transcript_path,
+        "resolved transcript_path for metrics"
+    );
 
     // Read new transcript entries from last offset (incremental)
     let offset = mapped.transcript_offset;
     match parse_transcript_file(&transcript_path, offset).await {
         Ok((entries, new_offset, _)) => {
+            tracing::debug!(
+                entries = entries.len(),
+                new_offset,
+                "incremental transcript parse"
+            );
             // Emit any new transcript entries
             for entry in entries {
                 let msg = AgenticAgentMessage::LoopTranscript {
@@ -303,6 +318,10 @@ async fn emit_incremental_metrics(
     // Read entire transcript from the start (offset 0) to aggregate total metrics
     match parse_transcript_file(&transcript_path, 0).await {
         Ok((_, _, token_data)) => {
+            tracing::debug!(
+                token_data_count = token_data.len(),
+                "metrics aggregation parse"
+            );
             if let Some(metrics) = aggregate_metrics(&token_data) {
                 let msg = AgenticAgentMessage::LoopMetrics {
                     loop_id: mapped.loop_id,
@@ -340,7 +359,11 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
     // Parse transcript file for conversation entries
-    if let Some(ref transcript_path) = payload.transcript_path {
+    let transcript_path = payload
+        .transcript_path
+        .as_ref()
+        .or(mapped.transcript_path.as_ref());
+    if let Some(transcript_path) = transcript_path {
         let offset = mapped.transcript_offset;
         match parse_transcript_file(transcript_path, offset).await {
             Ok((entries, new_offset, token_data)) => {
