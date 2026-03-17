@@ -3,6 +3,7 @@ import { AlertTriangle } from "lucide-react";
 interface ContextUsageBarProps {
   used: number;
   max: number;
+  compact?: boolean;
 }
 
 function formatTokenCount(n: number): string {
@@ -11,7 +12,7 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function ContextUsageBar({ used, max }: ContextUsageBarProps) {
+export function ContextUsageBar({ used, max, compact = false }: ContextUsageBarProps) {
   const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
 
   const barColor =
@@ -20,6 +21,23 @@ export function ContextUsageBar({ used, max }: ContextUsageBarProps) {
       : pct >= 70
         ? "bg-status-warning"
         : "bg-status-online";
+
+  if (compact) {
+    return (
+      <div
+        className="flex items-center gap-1.5"
+        title={`${formatTokenCount(used)} / ${formatTokenCount(max)}`}
+      >
+        <div className="h-1.5 w-16 rounded-full bg-bg-tertiary">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${barColor}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <span className="text-[10px] text-text-tertiary">{Math.round(pct)}%</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-2">

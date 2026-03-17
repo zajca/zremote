@@ -27,7 +27,7 @@ describe("ToolCallQueue", () => {
     expect(screen.getByText("No tool calls yet")).toBeInTheDocument();
   });
 
-  test("renders pending tool calls with Approve/Reject buttons", () => {
+  test("renders pending tool calls with Approve/Reject icon buttons", () => {
     const toolCalls = [makeToolCall({ status: "pending", tool_name: "Edit" })];
     render(
       <ToolCallQueue
@@ -38,8 +38,8 @@ describe("ToolCallQueue", () => {
     );
     expect(screen.getByText("Pending (1)")).toBeInTheDocument();
     expect(screen.getByText("Edit")).toBeInTheDocument();
-    expect(screen.getByText("Approve")).toBeInTheDocument();
-    expect(screen.getByText("Reject")).toBeInTheDocument();
+    expect(screen.getByTitle("Approve")).toBeInTheDocument();
+    expect(screen.getByTitle("Reject")).toBeInTheDocument();
   });
 
   test("calls onApprove with tool call id", async () => {
@@ -52,7 +52,7 @@ describe("ToolCallQueue", () => {
         onReject={vi.fn()}
       />,
     );
-    await userEvent.click(screen.getByText("Approve").closest("button")!);
+    await userEvent.click(screen.getByTitle("Approve"));
     expect(onApprove).toHaveBeenCalledWith("tc-42");
   });
 
@@ -66,7 +66,7 @@ describe("ToolCallQueue", () => {
         onReject={onReject}
       />,
     );
-    await userEvent.click(screen.getByText("Reject").closest("button")!);
+    await userEvent.click(screen.getByTitle("Reject"));
     expect(onReject).toHaveBeenCalledWith("tc-42");
   });
 

@@ -50,12 +50,6 @@ describe("AgenticLoopPanel", () => {
     expect(screen.getByText("claude-code")).toBeInTheDocument();
   });
 
-  test("renders model name", () => {
-    render(<AgenticLoopPanel loopId="loop-1" />);
-    // "sonnet" appears in header and CostTracker, so use getAllByText
-    expect(screen.getAllByText("sonnet").length).toBeGreaterThanOrEqual(1);
-  });
-
   test("renders status badge", () => {
     render(<AgenticLoopPanel loopId="loop-1" />);
     expect(screen.getByText("working")).toBeInTheDocument();
@@ -63,7 +57,6 @@ describe("AgenticLoopPanel", () => {
 
   test("renders tab buttons", () => {
     render(<AgenticLoopPanel loopId="loop-1" />);
-    expect(screen.getByText("Terminal")).toBeInTheDocument();
     expect(screen.getByText("Tool Queue")).toBeInTheDocument();
     expect(screen.getByText("Transcript")).toBeInTheDocument();
   });

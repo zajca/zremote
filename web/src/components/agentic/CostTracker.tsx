@@ -2,7 +2,7 @@ interface CostTrackerProps {
   costUsd: number;
   tokensIn: number;
   tokensOut: number;
-  model: string | null;
+  compact?: boolean;
 }
 
 function formatTokens(n: number): string {
@@ -19,23 +19,28 @@ export function CostTracker({
   costUsd,
   tokensIn,
   tokensOut,
-  model,
+  compact = false,
 }: CostTrackerProps) {
+  if (compact) {
+    return (
+      <span
+        className="text-xs font-medium text-text-primary"
+        title={`${formatTokens(tokensIn)} in / ${formatTokens(tokensOut)} out`}
+      >
+        {formatCost(costUsd)}
+      </span>
+    );
+  }
+
   return (
     <div className="flex items-center gap-1.5 text-xs text-text-secondary">
       <span className="font-medium text-text-primary">
         {formatCost(costUsd)}
       </span>
-      <span className="text-text-tertiary">|</span>
+      <span className="text-text-tertiary">&middot;</span>
       <span>
         {formatTokens(tokensIn)} in / {formatTokens(tokensOut)} out
       </span>
-      {model && (
-        <>
-          <span className="text-text-tertiary">|</span>
-          <span className="text-text-tertiary">{model}</span>
-        </>
-      )}
     </div>
   );
 }
