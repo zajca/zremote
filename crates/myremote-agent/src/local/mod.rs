@@ -28,7 +28,9 @@ fn expand_tilde(path: &str) -> PathBuf {
         if let Some(home) = dirs::home_dir() {
             return home.join(rest);
         }
-    } else if path == "~" && let Some(home) = dirs::home_dir() {
+    } else if path == "~"
+        && let Some(home) = dirs::home_dir()
+    {
         return home;
     }
     PathBuf::from(path)
@@ -56,9 +58,14 @@ pub async fn run_local(
     let database_url = format!("sqlite:{}", db_file.display());
 
     // Initialize database with migrations
-    let pool = myremote_core::db::init_db(&database_url).await.map_err(|e| {
-        format!("failed to initialize database at {}: {e}", db_file.display())
-    })?;
+    let pool = myremote_core::db::init_db(&database_url)
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to initialize database at {}: {e}",
+                db_file.display()
+            )
+        })?;
 
     // Generate deterministic host_id from hostname
     let hostname = hostname::get()
@@ -72,9 +79,8 @@ pub async fn run_local(
     let shutdown_for_signal = shutdown.clone();
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => tracing::info!("received Ctrl+C, shutting down"),
             _ = sigterm.recv() => tracing::info!("received SIGTERM, shutting down"),
@@ -91,7 +97,13 @@ pub async fn run_local(
     }
 
     // Create application state
-    let state = LocalAppState::new(pool.clone(), hostname.clone(), host_id, shutdown.clone(), use_tmux);
+    let state = LocalAppState::new(
+        pool.clone(),
+        hostname.clone(),
+        host_id,
+        shutdown.clone(),
+        use_tmux,
+    );
 
     // Spawn the PTY output routing loop (includes agentic output processing)
     spawn_pty_output_loop(state.clone());
@@ -122,10 +134,7 @@ pub async fn run_local(
     // Bind and serve
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    tracing::info!(
-        url = format!("http://{addr}"),
-        "local mode ready"
-    );
+    tracing::info!(url = format!("http://{addr}"), "local mode ready");
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown.cancelled_owned())
@@ -303,7 +312,10 @@ fn build_router(
             get(routes::claude_sessions::discover_claude_sessions),
         )
         // Terminal WebSocket
-        .route("/ws/terminal/{session_id}", get(routes::terminal::ws_handler))
+        .route(
+            "/ws/terminal/{session_id}",
+            get(routes::terminal::ws_handler),
+        )
         // Events WebSocket
         .route("/ws/events", get(routes::events::ws_handler));
 
@@ -391,7 +403,10 @@ fn spawn_hooks_message_consumer(
                     session_id,
                     ..
                 } => {
-                    state.session_mapper.register_loop(*session_id, *loop_id).await;
+                    state
+                        .session_mapper
+                        .register_loop(*session_id, *loop_id)
+                        .await;
                 }
                 AgenticAgentMessage::LoopEnded { loop_id, .. } => {
                     state.session_mapper.remove_loop(loop_id).await;
@@ -518,13 +533,13 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                     if let Some(session_state) = sessions.get_mut(&session_id) {
                         session_state.status = "closed".to_string();
                         let msg = myremote_core::state::BrowserMessage::SessionClosed { exit_code };
-                        session_state.browser_senders.retain(|tx| {
-                            match tx.try_send(msg.clone()) {
+                        session_state
+                            .browser_senders
+                            .retain(|tx| match tx.try_send(msg.clone()) {
                                 Ok(()) => true,
                                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
                                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                            }
-                        });
+                            });
                     }
                 }
 
@@ -535,10 +550,12 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                 }
 
                 // Broadcast event
-                let _ = state.events.send(myremote_core::state::ServerEvent::SessionClosed {
-                    session_id: session_id.to_string(),
-                    exit_code,
-                });
+                let _ = state
+                    .events
+                    .send(myremote_core::state::ServerEvent::SessionClosed {
+                        session_id: session_id.to_string(),
+                        exit_code,
+                    });
             } else {
                 // Feed output to agentic manager for state detection
                 let agentic_msgs = {
@@ -556,13 +573,13 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                 if let Some(session_state) = sessions.get_mut(&session_id) {
                     session_state.append_scrollback(data.clone());
                     let msg = myremote_core::state::BrowserMessage::Output { data };
-                    session_state.browser_senders.retain(|tx| {
-                        match tx.try_send(msg.clone()) {
+                    session_state
+                        .browser_senders
+                        .retain(|tx| match tx.try_send(msg.clone()) {
                             Ok(()) => true,
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                        }
-                    });
+                        });
                 }
             }
         }
@@ -636,9 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_local_host_creates_row() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let host_id = Uuid::new_v4();
         upsert_local_host(&pool, &host_id, "test-host")
             .await
@@ -654,9 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_local_host_updates_on_conflict() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let host_id = Uuid::new_v4();
 
         // First insert
@@ -679,9 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_router_with_embedded_assets() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
@@ -704,9 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_router_with_invalid_web_dir_fails() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
@@ -717,9 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_api_mode_endpoint() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
@@ -746,9 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_health_endpoint() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
@@ -777,9 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_loops_endpoint() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);

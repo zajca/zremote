@@ -151,9 +151,7 @@ impl TmuxSession {
         create_fifo(&fifo_path)?;
 
         // Stop any existing pipe-pane, then set up fresh
-        let _ = tmux_cmd()
-            .args(["pipe-pane", "-t", &tmux_name])
-            .output();
+        let _ = tmux_cmd().args(["pipe-pane", "-t", &tmux_name]).output();
         setup_pipe_pane(&tmux_name, &fifo_path)?;
 
         // Spawn async reader task on FIFO
@@ -198,9 +196,9 @@ impl TmuxSession {
         let output = cmd.output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(std::io::Error::other(
-                format!("tmux send-keys failed: {stderr}"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "tmux send-keys failed: {stderr}"
+            )));
         }
         Ok(())
     }
@@ -301,9 +299,7 @@ impl Drop for TmuxSession {
 
 /// Discover all existing myremote tmux sessions and reattach to them.
 /// Sessions that fail to reattach are logged and skipped.
-pub fn discover_sessions(
-    output_tx: mpsc::Sender<(SessionId, Vec<u8>)>,
-) -> Vec<TmuxSession> {
+pub fn discover_sessions(output_tx: mpsc::Sender<(SessionId, Vec<u8>)>) -> Vec<TmuxSession> {
     let names = match list_myremote_sessions() {
         Ok(names) => names,
         Err(e) => {
@@ -352,17 +348,11 @@ pub fn discover_sessions(
 pub fn cleanup_stale() {
     // List all myremote sessions with their creation timestamps
     let output = tmux_cmd()
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}:#{session_created}",
-        ])
+        .args(["list-sessions", "-F", "#{session_name}:#{session_created}"])
         .output();
 
     let entries = match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(_) => {
             // No tmux server running or no sessions - that's fine
             tracing::debug!("no tmux sessions found for cleanup");
@@ -441,7 +431,6 @@ pub fn cleanup_stale() {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-
 /// Get the shell PID for a tmux session's pane.
 fn get_pane_pid(tmux_name: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let output = tmux_cmd()
@@ -476,9 +465,7 @@ fn create_fifo(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Syn
         .to_str()
         .ok_or_else(|| format!("non-UTF8 FIFO path: {}", path.display()))?;
 
-    let output = Command::new("mkfifo")
-        .arg(path_str)
-        .output()?;
+    let output = Command::new("mkfifo").arg(path_str).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -622,11 +609,10 @@ mod tests {
             "fifo_dir should start with {FIFO_DIR_PREFIX}, got: {dir_str}"
         );
         // Should be /tmp/myremote-tmux-{some_uid}
-        let suffix = dir_str.strip_prefix(&format!("{FIFO_DIR_PREFIX}-")).unwrap();
-        assert!(
-            !suffix.is_empty(),
-            "fifo_dir should have a UID suffix"
-        );
+        let suffix = dir_str
+            .strip_prefix(&format!("{FIFO_DIR_PREFIX}-"))
+            .unwrap();
+        assert!(!suffix.is_empty(), "fifo_dir should have a UID suffix");
         // UID should be numeric
         assert!(
             suffix.chars().all(|c| c.is_ascii_digit()),

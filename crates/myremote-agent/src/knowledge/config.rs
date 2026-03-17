@@ -48,7 +48,13 @@ mod tests {
 
     #[test]
     fn generate_conf_custom_port() {
-        let conf = generate_ov_conf("openai", "sk-test", "text-embedding-3-small", "gpt-4o", 8080);
+        let conf = generate_ov_conf(
+            "openai",
+            "sk-test",
+            "text-embedding-3-small",
+            "gpt-4o",
+            8080,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&conf).unwrap();
 
         assert_eq!(parsed["server"]["port"], 8080);

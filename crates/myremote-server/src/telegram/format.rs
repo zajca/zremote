@@ -45,12 +45,7 @@ pub fn format_loop_status(hostname: &str, tool_name: &str, status: &str) -> Stri
 }
 
 /// Format a loop-ended notification.
-pub fn format_loop_ended(
-    hostname: &str,
-    reason: &str,
-    summary: Option<&str>,
-    cost: f64,
-) -> String {
+pub fn format_loop_ended(hostname: &str, reason: &str, summary: Option<&str>, cost: f64) -> String {
     let summary_line = summary
         .map(|s| format!("\nSummary: {}", escape_html(s)))
         .unwrap_or_default();
@@ -316,10 +311,7 @@ mod tests {
 
     #[test]
     fn format_preview_message() {
-        let msg = format_preview(
-            "abcdef12-3456-7890-abcd-ef1234567890",
-            "$ ls\nfile.txt\n",
-        );
+        let msg = format_preview("abcdef12-3456-7890-abcd-ef1234567890", "$ ls\nfile.txt\n");
         assert!(msg.contains("<b>Preview: abcdef12</b>"));
         assert!(msg.contains("file.txt"));
     }

@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use myremote_protocol::claude::ClaudeAgentMessage;
 use myremote_protocol::{AgentMessage, AgenticAgentMessage, SessionId, ToolCallStatus};
@@ -106,11 +106,7 @@ pub async fn handle_hook(
         }
     }
 
-    (
-        StatusCode::OK,
-        Json(HookResponse { decision: None }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
 }
 
 /// If this CC session belongs to a Claude task and we haven't sent its ID yet,
@@ -165,15 +161,9 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
-    let tool_use_id = payload
-        .tool_use_id
-        .as_deref()
-        .unwrap_or("unknown");
+    let tool_use_id = payload.tool_use_id.as_deref().unwrap_or("unknown");
 
-    let tool_call_id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        tool_use_id.as_bytes(),
-    );
+    let tool_call_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, tool_use_id.as_bytes());
 
     let tool_name = payload
         .tool_name
@@ -217,15 +207,9 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
-    let tool_use_id = payload
-        .tool_use_id
-        .as_deref()
-        .unwrap_or("unknown");
+    let tool_use_id = payload.tool_use_id.as_deref().unwrap_or("unknown");
 
-    let tool_call_id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        tool_use_id.as_bytes(),
-    );
+    let tool_call_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, tool_use_id.as_bytes());
 
     // Calculate duration from PreToolUse
     let duration_ms = state
@@ -258,6 +242,89 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
 
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopToolResult dropped");
+    }
+
+    // Incrementally parse transcript to emit live metrics after each tool call
+    emit_incremental_metrics(state, payload, &mapped).await;
+}
+
+/// Parse the transcript file incrementally and emit updated LoopMetrics.
+/// Called after each PostToolUse to provide real-time token/cost updates.
+///
+/// Reads new transcript entries from the last offset (to avoid duplicates),
+/// but aggregates metrics from the **entire** file (offset 0) to get correct totals.
+async fn emit_incremental_metrics(
+    state: &HooksState,
+    payload: &HookPayload,
+    mapped: &super::mapper::MappedSession,
+) {
+    let transcript_path = if let Some(ref path) = payload.transcript_path {
+        path.clone()
+    } else if let Some(ref path) = mapped.transcript_path {
+        path.clone()
+    } else {
+        return;
+    };
+
+    // Read new transcript entries from last offset (incremental)
+    let offset = mapped.transcript_offset;
+    match parse_transcript_file(&transcript_path, offset).await {
+        Ok((entries, new_offset, _)) => {
+            // Emit any new transcript entries
+            for entry in entries {
+                let msg = AgenticAgentMessage::LoopTranscript {
+                    loop_id: mapped.loop_id,
+                    role: entry.role,
+                    content: entry.content,
+                    tool_call_id: entry.tool_call_id,
+                    timestamp: Utc::now(),
+                };
+                if state.agentic_tx.try_send(msg).is_err() {
+                    tracing::warn!("agentic channel full, LoopTranscript dropped");
+                    break;
+                }
+            }
+
+            // Update offset for next incremental parse
+            state
+                .mapper
+                .set_transcript_offset(&payload.session_id, new_offset)
+                .await;
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %transcript_path,
+                error = %e,
+                "failed to parse transcript for incremental entries"
+            );
+        }
+    }
+
+    // Read entire transcript from the start (offset 0) to aggregate total metrics
+    match parse_transcript_file(&transcript_path, 0).await {
+        Ok((_, _, token_data)) => {
+            if let Some(metrics) = aggregate_metrics(&token_data) {
+                let msg = AgenticAgentMessage::LoopMetrics {
+                    loop_id: mapped.loop_id,
+                    tokens_in: metrics.tokens_in,
+                    tokens_out: metrics.tokens_out,
+                    model: metrics.model,
+                    context_used: metrics.context_used,
+                    context_max: metrics.context_max,
+                    estimated_cost_usd: metrics.estimated_cost_usd,
+                };
+                if state.agentic_tx.try_send(msg).is_err() {
+                    tracing::warn!("agentic channel full, LoopMetrics dropped");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %transcript_path,
+                error = %e,
+                "failed to parse transcript for metrics aggregation"
+            );
+        }
     }
 }
 
@@ -335,11 +402,7 @@ async fn handle_permission_request(
         .await
     else {
         // No loop mapping - pass through (exit 0 equivalent)
-        return (
-            StatusCode::OK,
-            Json(HookResponse { decision: None }),
-        )
-            .into_response();
+        return (StatusCode::OK, Json(HookResponse { decision: None })).into_response();
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
@@ -381,10 +444,7 @@ async fn handle_permission_request(
         }
         super::permission::PermissionDecision::Ask => {
             // Emit pending tool call and wait for user decision
-            let tool_use_id = payload
-                .tool_use_id
-                .as_deref()
-                .unwrap_or("unknown");
+            let tool_use_id = payload.tool_use_id.as_deref().unwrap_or("unknown");
             let tool_call_id =
                 uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, tool_use_id.as_bytes());
 
@@ -422,11 +482,7 @@ async fn handle_permission_request(
                     .into_response(),
                 super::permission::PermissionDecision::Ask => {
                     // Timeout - pass through to terminal
-                    (
-                        StatusCode::OK,
-                        Json(HookResponse { decision: None }),
-                    )
-                        .into_response()
+                    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
                 }
             }
         }
@@ -577,7 +633,10 @@ mod tests {
         let payload: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(payload.session_id, "sess-full");
         assert_eq!(payload.hook_event_name, "PreToolUse");
-        assert_eq!(payload.transcript_path.as_deref(), Some("/tmp/transcript.jsonl"));
+        assert_eq!(
+            payload.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
         assert_eq!(payload.cwd.as_deref(), Some("/home/user/project"));
         assert_eq!(payload.tool_name.as_deref(), Some("Bash"));
         assert!(payload.tool_input.is_some());
@@ -634,9 +693,7 @@ mod tests {
             agentic_tx,
             mapper: SessionMapper::new(),
             permission_manager: Arc::new(PermissionManager::new()),
-            tool_call_starts: Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
+            tool_call_starts: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             outbound_tx,
             sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
         };
@@ -671,10 +728,7 @@ mod tests {
         // Set up a mapping
         let session_id = uuid::Uuid::new_v4();
         let loop_id = uuid::Uuid::new_v4();
-        state
-            .mapper
-            .register_loop(session_id, loop_id)
-            .await;
+        state.mapper.register_loop(session_id, loop_id).await;
         state
             .mapper
             .register_cc_session("cc-123".to_string(), loop_id, session_id)
@@ -1049,7 +1103,9 @@ mod tests {
             message: None,
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let msg = agentic_rx.try_recv().unwrap();
@@ -1080,7 +1136,9 @@ mod tests {
             message: None,
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let msg = agentic_rx.try_recv().unwrap();
@@ -1103,7 +1161,9 @@ mod tests {
             message: None,
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -1123,7 +1183,9 @@ mod tests {
             message: Some("Build finished".to_string()),
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -1167,7 +1229,9 @@ mod tests {
             message: None,
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -1187,7 +1251,9 @@ mod tests {
             message: None,
         };
 
-        let resp = handle_hook(State(state), Json(payload)).await.into_response();
+        let resp = handle_hook(State(state), Json(payload))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use myremote_protocol::SessionId;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -100,7 +100,11 @@ impl PtySession {
     }
 
     /// Resize the PTY terminal.
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.master.resize(PtySize {
             rows,
             cols,
@@ -139,15 +143,7 @@ mod tests {
     async fn spawn_and_get_pid() {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, pid) = PtySession::spawn(
-            session_id,
-            "/bin/sh",
-            80,
-            24,
-            None,
-            tx,
-        )
-        .unwrap();
+        let (session, pid) = PtySession::spawn(session_id, "/bin/sh", 80, 24, None, tx).unwrap();
 
         assert!(pid > 0);
         assert_eq!(session.pid(), pid);
@@ -181,15 +177,8 @@ mod tests {
     async fn write_and_read_output() {
         let (tx, mut rx) = mpsc::channel(256);
         let session_id = uuid::Uuid::new_v4();
-        let (mut session, _pid) = PtySession::spawn(
-            session_id,
-            "/bin/sh",
-            80,
-            24,
-            None,
-            tx,
-        )
-        .unwrap();
+        let (mut session, _pid) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, tx).unwrap();
 
         // Write a command to the PTY
         session.write(b"echo hello_from_pty\n").unwrap();
@@ -218,15 +207,7 @@ mod tests {
     async fn resize_session() {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, _pid) = PtySession::spawn(
-            session_id,
-            "/bin/sh",
-            80,
-            24,
-            None,
-            tx,
-        )
-        .unwrap();
+        let (session, _pid) = PtySession::spawn(session_id, "/bin/sh", 80, 24, None, tx).unwrap();
 
         // Resize should succeed
         let result = session.resize(120, 40);
@@ -239,15 +220,8 @@ mod tests {
     async fn kill_and_try_wait() {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (mut session, _pid) = PtySession::spawn(
-            session_id,
-            "/bin/sh",
-            80,
-            24,
-            None,
-            tx,
-        )
-        .unwrap();
+        let (mut session, _pid) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, tx).unwrap();
 
         session.kill();
 
@@ -266,15 +240,7 @@ mod tests {
     async fn drop_kills_child() {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (_session, pid) = PtySession::spawn(
-            session_id,
-            "/bin/sh",
-            80,
-            24,
-            None,
-            tx,
-        )
-        .unwrap();
+        let (_session, pid) = PtySession::spawn(session_id, "/bin/sh", 80, 24, None, tx).unwrap();
 
         assert!(pid > 0);
 

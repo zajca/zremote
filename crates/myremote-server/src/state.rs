@@ -47,9 +47,7 @@ impl ConnectionManager {
     ) -> (Option<mpsc::Sender<ServerMessage>>, u64) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let mut conns = self.connections.write().await;
-        let previous = conns
-            .remove(&host_id)
-            .map(|old| old.sender);
+        let previous = conns.remove(&host_id).map(|old| old.sender);
         conns.insert(
             host_id,
             AgentConnection {
@@ -141,8 +139,18 @@ pub struct AppState {
     pub agent_token_hash: String,
     pub shutdown: CancellationToken,
     pub events: broadcast::Sender<ServerEvent>,
-    pub knowledge_requests: Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<myremote_protocol::knowledge::KnowledgeAgentMessage>>>,
-    pub claude_discover_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<Vec<myremote_protocol::claude::ClaudeSessionInfo>>>>,
+    pub knowledge_requests: Arc<
+        DashMap<
+            uuid::Uuid,
+            tokio::sync::oneshot::Sender<myremote_protocol::knowledge::KnowledgeAgentMessage>,
+        >,
+    >,
+    pub claude_discover_requests: Arc<
+        DashMap<
+            String,
+            tokio::sync::oneshot::Sender<Vec<myremote_protocol::claude::ClaudeSessionInfo>>,
+        >,
+    >,
 }
 
 #[cfg(test)]
@@ -177,11 +185,15 @@ mod tests {
         let host_id = Uuid::new_v4();
 
         let (tx1, _rx1) = make_sender();
-        let (prev, _generation1) = mgr.register(host_id, "host-a".to_string(), tx1, false).await;
+        let (prev, _generation1) = mgr
+            .register(host_id, "host-a".to_string(), tx1, false)
+            .await;
         assert!(prev.is_none());
 
         let (tx2, _rx2) = make_sender();
-        let (prev, _generation2) = mgr.register(host_id, "host-a".to_string(), tx2, false).await;
+        let (prev, _generation2) = mgr
+            .register(host_id, "host-a".to_string(), tx2, false)
+            .await;
         assert!(prev.is_some(), "should return old sender on re-register");
         assert_eq!(mgr.connected_count().await, 1, "count should stay at 1");
     }
@@ -191,8 +203,12 @@ mod tests {
         let mgr = ConnectionManager::new();
         let (tx1, _rx1) = make_sender();
         let (tx2, _rx2) = make_sender();
-        let (_, generation1) = mgr.register(Uuid::new_v4(), "a".to_string(), tx1, false).await;
-        let (_, generation2) = mgr.register(Uuid::new_v4(), "b".to_string(), tx2, false).await;
+        let (_, generation1) = mgr
+            .register(Uuid::new_v4(), "a".to_string(), tx1, false)
+            .await;
+        let (_, generation2) = mgr
+            .register(Uuid::new_v4(), "b".to_string(), tx2, false)
+            .await;
         assert!(generation2 > generation1);
     }
 
@@ -308,7 +324,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         for _ in 0..5 {
             let (tx, _rx) = make_sender();
-            mgr.register(Uuid::new_v4(), "host".to_string(), tx, false).await;
+            mgr.register(Uuid::new_v4(), "host".to_string(), tx, false)
+                .await;
         }
         assert_eq!(mgr.connected_count().await, 5);
     }

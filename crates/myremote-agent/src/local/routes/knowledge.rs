@@ -69,13 +69,14 @@ async fn send_knowledge_msg(
     state: &LocalAppState,
     msg: KnowledgeServerMessage,
 ) -> Result<(), AppError> {
-    let tx = state.knowledge_tx.as_ref().ok_or_else(|| {
-        AppError::Conflict("knowledge service is not configured".to_string())
-    })?;
+    let tx = state
+        .knowledge_tx
+        .as_ref()
+        .ok_or_else(|| AppError::Conflict("knowledge service is not configured".to_string()))?;
 
-    tx.send(msg).await.map_err(|_| {
-        AppError::Internal("knowledge service channel closed".to_string())
-    })
+    tx.send(msg)
+        .await
+        .map_err(|_| AppError::Internal("knowledge service channel closed".to_string()))
 }
 
 // --- Endpoints ---
@@ -180,15 +181,13 @@ pub async fn extract_memories(
 
     let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> = transcript_rows
         .into_iter()
-        .map(|(role, content, timestamp)| {
-            myremote_protocol::knowledge::TranscriptFragment {
+        .map(
+            |(role, content, timestamp)| myremote_protocol::knowledge::TranscriptFragment {
                 role,
                 content,
-                timestamp: timestamp
-                    .parse()
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-            }
-        })
+                timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
+            },
+        )
         .collect();
 
     send_knowledge_msg(
@@ -214,9 +213,7 @@ pub async fn generate_instructions(
 
     send_knowledge_msg(
         &state,
-        KnowledgeServerMessage::GenerateInstructions {
-            project_path: path,
-        },
+        KnowledgeServerMessage::GenerateInstructions { project_path: path },
     )
     .await?;
 
@@ -274,9 +271,7 @@ pub async fn generate_skills(
 
     send_knowledge_msg(
         &state,
-        KnowledgeServerMessage::GenerateSkills {
-            project_path: path,
-        },
+        KnowledgeServerMessage::GenerateSkills { project_path: path },
     )
     .await?;
 
@@ -316,9 +311,7 @@ pub async fn delete_memory(
 
     let rows = q::delete_memory(&state.db, &memory_id, &project_id).await?;
     if rows == 0 {
-        return Err(AppError::NotFound(format!(
-            "memory {memory_id} not found"
-        )));
+        return Err(AppError::NotFound(format!("memory {memory_id} not found")));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -360,9 +353,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")
@@ -381,10 +372,7 @@ mod tests {
                 "/api/projects/{project_id}/knowledge/index",
                 post(trigger_index),
             )
-            .route(
-                "/api/projects/{project_id}/knowledge/search",
-                post(search),
-            )
+            .route("/api/projects/{project_id}/knowledge/search", post(search))
             .route(
                 "/api/projects/{project_id}/knowledge/memories",
                 get(list_memories),
@@ -788,9 +776,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/api/projects/{project_id}/knowledge/bootstrap"
-                    ))
+                    .uri(format!("/api/projects/{project_id}/knowledge/bootstrap"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1310,9 +1296,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!(
-                        "/api/projects/{project_id}/knowledge/bootstrap"
-                    ))
+                    .uri(format!("/api/projects/{project_id}/knowledge/bootstrap"))
                     .body(Body::empty())
                     .unwrap(),
             )

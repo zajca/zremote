@@ -6,6 +6,7 @@ import {
   Hash,
   Layers,
 } from "lucide-react";
+import { api } from "../lib/api";
 import { format, subDays } from "date-fns";
 import {
   Area,
@@ -107,18 +108,13 @@ export function AnalyticsDashboard() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     const { from, to } = getDateRange(range);
-    const params = new URLSearchParams();
-    if (from) params.set("from", from);
-    if (to) params.set("to", to);
-    const qs = params.toString();
-    const suffix = qs ? `?${qs}` : "";
 
     try {
       const [loops, sessions, cost, tokens] = await Promise.all([
-        fetch(`/api/analytics/loops${suffix}`).then((r) => r.json()) as Promise<LoopStats>,
-        fetch(`/api/analytics/sessions${suffix}`).then((r) => r.json()) as Promise<SessionStats>,
-        fetch(`/api/analytics/cost${suffix}`).then((r) => r.json()) as Promise<CostPoint[]>,
-        fetch(`/api/analytics/tokens?by=model${suffix ? `&${qs}` : ""}`).then((r) => r.json()) as Promise<TokenBreakdown[]>,
+        api.analytics.loops({ from, to }) as Promise<LoopStats>,
+        api.analytics.sessions({ from, to }) as Promise<SessionStats>,
+        api.analytics.cost({ from, to }) as Promise<CostPoint[]>,
+        api.analytics.tokens({ by: "model", from, to }) as Promise<TokenBreakdown[]>,
       ]);
       setLoopStats(loops);
       setSessionStats(sessions);

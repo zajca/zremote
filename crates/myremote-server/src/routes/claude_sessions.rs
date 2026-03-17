@@ -13,7 +13,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson};
-use crate::state::{AppState, SessionState, ServerEvent};
+use crate::state::{AppState, ServerEvent, SessionState};
 
 pub type ClaudeTaskResponse = q::ClaudeTaskRow;
 
@@ -239,7 +239,10 @@ pub async fn resume_claude_task(
 
     {
         let mut sessions = state.sessions.write().await;
-        sessions.insert(new_session_id, SessionState::new(new_session_id, parsed_host_id));
+        sessions.insert(
+            new_session_id,
+            SessionState::new(new_session_id, parsed_host_id),
+        );
     }
 
     let (allowed_tools, skip_permissions, output_format, custom_flags) =
@@ -313,7 +316,9 @@ pub async fn discover_claude_sessions(
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let request_key = format!("{host_id}:{}", params.project_path);
-    state.claude_discover_requests.insert(request_key.clone(), tx);
+    state
+        .claude_discover_requests
+        .insert(request_key.clone(), tx);
 
     let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::DiscoverSessions {
         project_path: params.project_path,
@@ -326,9 +331,7 @@ pub async fn discover_claude_sessions(
 
     match tokio::time::timeout(DISCOVER_TIMEOUT, rx).await {
         Ok(Ok(sessions)) => Ok(Json(sessions)),
-        Ok(Err(_)) => {
-            Err(AppError::Internal("discover request cancelled".to_string()))
-        }
+        Ok(Err(_)) => Err(AppError::Internal("discover request cancelled".to_string())),
         Err(_) => {
             state.claude_discover_requests.remove(&request_key);
             Err(AppError::Internal("discover request timed out".to_string()))
@@ -378,7 +381,10 @@ mod tests {
                 get(list_claude_tasks).post(create_claude_task),
             )
             .route("/api/claude-tasks/{task_id}", get(get_claude_task))
-            .route("/api/claude-tasks/{task_id}/resume", post(resume_claude_task))
+            .route(
+                "/api/claude-tasks/{task_id}/resume",
+                post(resume_claude_task),
+            )
             .route(
                 "/api/hosts/{host_id}/claude-tasks/discover",
                 get(discover_claude_sessions),

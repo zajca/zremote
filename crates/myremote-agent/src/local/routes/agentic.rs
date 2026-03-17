@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use myremote_core::error::AppError;
 use myremote_core::queries::loops as q;
+use myremote_core::state::LoopInfo;
 use myremote_protocol::agentic::{AgenticStatus, UserAction};
 use serde::{Deserialize, Serialize};
 
@@ -45,14 +46,18 @@ fn parse_loop_id(loop_id: &str) -> Result<uuid::Uuid, AppError> {
 pub async fn list_loops(
     State(state): State<Arc<LocalAppState>>,
     Query(query): Query<ListLoopsQuery>,
-) -> Result<Json<Vec<q::LoopRow>>, AppError> {
+) -> Result<Json<Vec<LoopInfo>>, AppError> {
     let filter = q::ListLoopsFilter {
         status: query.status,
         host_id: Some(state.host_id.to_string()),
         session_id: query.session_id,
         project_id: query.project_id,
     };
-    let loops = q::list_loops(&state.db, &filter).await?;
+    let rows = q::list_loops(&state.db, &filter).await?;
+    let loops = rows
+        .into_iter()
+        .map(|r| q::enrich_loop(r, &state.agentic_loops))
+        .collect();
     Ok(Json(loops))
 }
 
@@ -60,10 +65,10 @@ pub async fn list_loops(
 pub async fn get_loop(
     State(state): State<Arc<LocalAppState>>,
     Path(loop_id): Path<String>,
-) -> Result<Json<q::LoopRow>, AppError> {
+) -> Result<Json<LoopInfo>, AppError> {
     let _parsed = parse_loop_id(&loop_id)?;
     let row = q::get_loop(&state.db, &loop_id).await?;
-    Ok(Json(row))
+    Ok(Json(q::enrich_loop(row, &state.agentic_loops)))
 }
 
 /// `GET /api/loops/:id/tools` - tool calls for a loop.
@@ -164,12 +169,8 @@ pub async fn post_loop_action(
         .resolve_any_pending(
             parsed_loop_id,
             match body.action {
-                UserAction::Approve => {
-                    crate::hooks::permission::PermissionDecision::Allow
-                }
-                UserAction::Reject => {
-                    crate::hooks::permission::PermissionDecision::Deny
-                }
+                UserAction::Approve => crate::hooks::permission::PermissionDecision::Allow,
+                UserAction::Reject => crate::hooks::permission::PermissionDecision::Deny,
                 _ => crate::hooks::permission::PermissionDecision::Ask,
             },
         )
@@ -192,9 +193,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")
@@ -208,10 +207,7 @@ mod tests {
             .route("/api/loops", get(list_loops))
             .route("/api/loops/{loop_id}", get(get_loop))
             .route("/api/loops/{loop_id}/tools", get(get_loop_tools))
-            .route(
-                "/api/loops/{loop_id}/transcript",
-                get(get_loop_transcript),
-            )
+            .route("/api/loops/{loop_id}/transcript", get(get_loop_transcript))
             .route("/api/loops/{loop_id}/metrics", get(get_loop_metrics))
             .route("/api/loops/{loop_id}/action", post(post_loop_action))
             .with_state(state)
@@ -709,6 +705,8 @@ mod tests {
                 tokens_in: 2000,
                 tokens_out: 800,
                 estimated_cost_usd: 0.55,
+                context_used: 0,
+                context_max: 0,
                 last_updated: tokio::time::Instant::now(),
             },
         );

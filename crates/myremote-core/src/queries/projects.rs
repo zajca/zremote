@@ -31,26 +31,20 @@ const PROJECT_COLUMNS: &str = "id, host_id, path, name, has_claude_config, proje
      parent_project_id, git_branch, git_commit_hash, git_commit_message, \
      git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at";
 
-pub async fn list_projects(
-    pool: &SqlitePool,
-    host_id: &str,
-) -> Result<Vec<ProjectRow>, AppError> {
-    let projects: Vec<ProjectRow> = sqlx::query_as(
-        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? ORDER BY name"),
-    )
+pub async fn list_projects(pool: &SqlitePool, host_id: &str) -> Result<Vec<ProjectRow>, AppError> {
+    let projects: Vec<ProjectRow> = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? ORDER BY name"
+    ))
     .bind(host_id)
     .fetch_all(pool)
     .await?;
     Ok(projects)
 }
 
-pub async fn get_project(
-    pool: &SqlitePool,
-    project_id: &str,
-) -> Result<ProjectRow, AppError> {
-    let project: ProjectRow = sqlx::query_as(
-        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?"),
-    )
+pub async fn get_project(pool: &SqlitePool, project_id: &str) -> Result<ProjectRow, AppError> {
+    let project: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?"
+    ))
     .bind(project_id)
     .fetch_optional(pool)
     .await?
@@ -63,9 +57,9 @@ pub async fn get_project_by_host_and_path(
     host_id: &str,
     path: &str,
 ) -> Result<ProjectRow, AppError> {
-    let project: ProjectRow = sqlx::query_as(
-        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? AND path = ?"),
-    )
+    let project: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? AND path = ?"
+    ))
     .bind(host_id)
     .bind(path)
     .fetch_one(pool)
@@ -80,15 +74,13 @@ pub async fn insert_project(
     path: &str,
     name: &str,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)",
-    )
-    .bind(project_id)
-    .bind(host_id)
-    .bind(path)
-    .bind(name)
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT OR IGNORE INTO projects (id, host_id, path, name) VALUES (?, ?, ?, ?)")
+        .bind(project_id)
+        .bind(host_id)
+        .bind(path)
+        .bind(name)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -116,9 +108,9 @@ pub async fn list_worktrees(
     pool: &SqlitePool,
     project_id: &str,
 ) -> Result<Vec<ProjectRow>, AppError> {
-    let worktrees: Vec<ProjectRow> = sqlx::query_as(
-        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE parent_project_id = ? ORDER BY name"),
-    )
+    let worktrees: Vec<ProjectRow> = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE parent_project_id = ? ORDER BY name"
+    ))
     .bind(project_id)
     .fetch_all(pool)
     .await?;
@@ -246,7 +238,9 @@ mod tests {
     #[tokio::test]
     async fn get_project_host_and_path_not_found() {
         let pool = setup_db().await;
-        let result = get_project_host_and_path(&pool, "nonexistent").await.unwrap();
+        let result = get_project_host_and_path(&pool, "nonexistent")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -333,7 +327,9 @@ mod tests {
         .unwrap();
 
         // Query with wrong parent ID
-        let path = get_worktree_path(&pool, "wt1", "wrong-parent").await.unwrap();
+        let path = get_worktree_path(&pool, "wt1", "wrong-parent")
+            .await
+            .unwrap();
         assert!(path.is_none());
     }
 

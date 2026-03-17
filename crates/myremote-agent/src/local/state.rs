@@ -89,9 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_app_state_creates_successfully() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
@@ -102,9 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_app_state_has_empty_stores() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
@@ -119,9 +115,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_app_state_event_channel_works() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
@@ -139,9 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_app_state_has_agentic_components() {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
@@ -150,11 +142,12 @@ mod tests {
         let _mgr = state.agentic_manager.lock().await;
 
         // Permission manager should be accessible
-        assert!(state.hooks_permission_manager.check_permission(
-            "SomeTool",
-            Uuid::new_v4(),
-            "{}",
-            &mpsc::channel(1).0,
-        ).await == crate::hooks::permission::PermissionDecision::Ask);
+        assert!(
+            state
+                .hooks_permission_manager
+                .check_permission("SomeTool", Uuid::new_v4(), "{}", &mpsc::channel(1).0,)
+                .await
+                == crate::hooks::permission::PermissionDecision::Ask
+        );
     }
 }

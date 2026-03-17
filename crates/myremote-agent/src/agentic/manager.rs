@@ -439,9 +439,7 @@ mod tests {
         };
         let msg = translate_event(loop_id, event).unwrap();
         match msg {
-            AgenticAgentMessage::LoopTranscript {
-                tool_call_id, ..
-            } => {
+            AgenticAgentMessage::LoopTranscript { tool_call_id, .. } => {
                 assert_eq!(tool_call_id, Some(tc_id));
             }
             _ => panic!("expected LoopTranscript"),
@@ -619,9 +617,11 @@ mod tests {
 
         // Then complete
         let messages = manager.process_output(&session_id, b"Task completed successfully");
-        assert!(messages
-            .iter()
-            .any(|m| matches!(m, AgenticAgentMessage::LoopEnded { .. })));
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, AgenticAgentMessage::LoopEnded { .. }))
+        );
     }
 
     #[test]

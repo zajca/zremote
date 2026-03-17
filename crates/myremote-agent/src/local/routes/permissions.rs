@@ -53,9 +53,14 @@ pub async fn upsert_permission(
     }
 
     let id = body.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let rule =
-        q::upsert_permission(&state.db, &id, &body.scope, &body.tool_pattern, &body.action)
-            .await?;
+    let rule = q::upsert_permission(
+        &state.db,
+        &id,
+        &body.scope,
+        &body.tool_pattern,
+        &body.action,
+    )
+    .await?;
     Ok(Json(rule))
 }
 
@@ -86,9 +91,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")

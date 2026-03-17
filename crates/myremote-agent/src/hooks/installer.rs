@@ -59,10 +59,7 @@ exit 0
     .to_string()
 }
 
-async fn update_claude_settings(
-    home: &Path,
-    script_path: &Path,
-) -> Result<(), InstallError> {
+async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), InstallError> {
     let settings_path = home.join(".claude").join("settings.json");
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -98,9 +95,7 @@ async fn update_claude_settings(
         .entry("hooks")
         .or_insert(serde_json::json!({}));
 
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or(InstallError::InvalidSettings)?;
+    let hooks_obj = hooks.as_object_mut().ok_or(InstallError::InvalidSettings)?;
 
     for event in &[
         "PreToolUse",
@@ -109,9 +104,7 @@ async fn update_claude_settings(
         "PermissionRequest",
         "Notification",
     ] {
-        let event_hooks = hooks_obj
-            .entry(*event)
-            .or_insert(serde_json::json!([]));
+        let event_hooks = hooks_obj.entry(*event).or_insert(serde_json::json!([]));
 
         if let Some(arr) = event_hooks.as_array_mut() {
             // Check if myremote hook is already present
@@ -326,9 +319,11 @@ mod tests {
     #[test]
     fn install_error_display() {
         assert!(InstallError::HomeNotSet.to_string().contains("HOME"));
-        assert!(InstallError::InvalidSettings
-            .to_string()
-            .contains("settings.json"));
+        assert!(
+            InstallError::InvalidSettings
+                .to_string()
+                .contains("settings.json")
+        );
     }
 
     #[test]
@@ -408,10 +403,12 @@ mod tests {
         let settings_path = home.join(".claude/settings.json");
         let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
         let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(!settings["hooks"]["PreToolUse"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            !settings["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
 
         // Uninstall using the testable function
         let result = uninstall_hooks_at(home).await;
@@ -428,7 +425,10 @@ mod tests {
             "Notification",
         ] {
             let arr = settings["hooks"][event].as_array().unwrap();
-            assert!(arr.is_empty(), "hook {event} should be empty after uninstall");
+            assert!(
+                arr.is_empty(),
+                "hook {event} should be empty after uninstall"
+            );
         }
 
         // Verify script was removed
@@ -477,10 +477,12 @@ mod tests {
         let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
         let pre_tool = updated["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool.len(), 1, "user hook should be preserved");
-        assert!(pre_tool[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("my-hook.sh"));
+        assert!(
+            pre_tool[0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("my-hook.sh")
+        );
     }
 
     #[tokio::test]
@@ -497,7 +499,10 @@ mod tests {
         let metadata = std::fs::metadata(&script).unwrap();
         let mode = metadata.permissions().mode();
         // Check that the executable bit is set
-        assert!(mode & 0o111 != 0, "script should be executable, mode: {mode:o}");
+        assert!(
+            mode & 0o111 != 0,
+            "script should be executable, mode: {mode:o}"
+        );
     }
 
     #[test]

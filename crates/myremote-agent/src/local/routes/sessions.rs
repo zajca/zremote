@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use myremote_core::error::AppError;
 use myremote_core::queries::sessions as q;
-use myremote_core::state::{SessionInfo, SessionState, ServerEvent};
+use myremote_core::state::{ServerEvent, SessionInfo, SessionState};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -17,9 +17,8 @@ use crate::local::state::LocalAppState;
 fn default_shell() -> &'static str {
     static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHELL.get_or_init(|| {
-        login_shell_from_passwd().unwrap_or_else(|| {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-        })
+        login_shell_from_passwd()
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
     })
 }
 
@@ -102,14 +101,8 @@ pub async fn create_session(
 
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(
-            session_id,
-            shell,
-            cols,
-            rows,
-            body.working_dir.as_deref(),
-        )
-        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(session_id, shell, cols, rows, body.working_dir.as_deref())
+            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     tracing::info!(
@@ -215,9 +208,7 @@ pub async fn close_session(
     let (_id, _host_id_str) = q::find_session_for_close(&state.db, &session_id)
         .await?
         .ok_or_else(|| {
-            AppError::NotFound(format!(
-                "session {session_id} not found or already closed"
-            ))
+            AppError::NotFound(format!("session {session_id} not found or already closed"))
         })?;
 
     // Close session in session manager
@@ -247,13 +238,13 @@ pub async fn close_session(
         let mut sessions = state.sessions.write().await;
         if let Some(session_state) = sessions.get_mut(&parsed_session_id) {
             let msg = myremote_core::state::BrowserMessage::SessionClosed { exit_code };
-            session_state.browser_senders.retain(|tx| {
-                match tx.try_send(msg.clone()) {
+            session_state
+                .browser_senders
+                .retain(|tx| match tx.try_send(msg.clone()) {
                     Ok(()) => true,
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                }
-            });
+                });
         }
         sessions.remove(&parsed_session_id);
     }
@@ -278,7 +269,11 @@ pub async fn purge_session(
 
     // Only allow purging closed sessions
     match q::get_session_status(&state.db, &session_id).await? {
-        None => return Err(AppError::NotFound(format!("session {session_id} not found"))),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "session {session_id} not found"
+            )));
+        }
         Some(ref s) if s != "closed" => {
             return Err(AppError::Conflict(format!(
                 "session {session_id} is not closed (status: {s}), cannot purge"
@@ -305,9 +300,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")
@@ -324,14 +317,9 @@ mod tests {
             )
             .route(
                 "/api/sessions/{session_id}",
-                get(get_session)
-                    .patch(update_session)
-                    .delete(close_session),
+                get(get_session).patch(update_session).delete(close_session),
             )
-            .route(
-                "/api/sessions/{session_id}/purge",
-                delete(purge_session),
-            )
+            .route("/api/sessions/{session_id}/purge", delete(purge_session))
             .with_state(state)
     }
 
@@ -490,14 +478,12 @@ mod tests {
         let session_id_str = session_id.to_string();
 
         // Insert a session with active status directly
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 
@@ -523,14 +509,12 @@ mod tests {
         let session_id_str = session_id.to_string();
 
         // Insert a closed session directly
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 
@@ -556,14 +540,12 @@ mod tests {
         let session_id_str = session_id.to_string();
 
         // Insert a session directly
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 
@@ -794,14 +776,12 @@ mod tests {
         let session_id = Uuid::new_v4();
         let session_id_str = session_id.to_string();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 
@@ -827,14 +807,12 @@ mod tests {
         let session_id = Uuid::new_v4();
         let session_id_str = session_id.to_string();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'creating')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 
@@ -1261,14 +1239,12 @@ mod tests {
         let session_id = Uuid::new_v4();
         let session_id_str = session_id.to_string();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'suspended')",
-        )
-        .bind(&session_id_str)
-        .bind(&host_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'suspended')")
+            .bind(&session_id_str)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         let app = build_test_router(state);
 

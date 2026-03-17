@@ -31,9 +31,7 @@ pub struct CreateClaudeTaskRequest {
 /// Resolve the default shell (same logic as sessions.rs).
 fn default_shell() -> &'static str {
     static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    })
+    SHELL.get_or_init(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
 }
 
 /// `POST /api/claude-tasks` - Create and start a Claude task.
@@ -291,14 +289,8 @@ pub async fn resume_claude_task(
     let shell = default_shell();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(
-            new_session_id,
-            shell,
-            120,
-            40,
-            Some(&original.project_path),
-        )
-        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(new_session_id, shell, 120, 40, Some(&original.project_path))
+            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     // Update session status in DB
@@ -364,9 +356,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")
@@ -470,9 +460,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(
-                        "/api/hosts/not-a-uuid/claude-tasks/discover?project_path=/tmp",
-                    )
+                    .uri("/api/hosts/not-a-uuid/claude-tasks/discover?project_path=/tmp")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -639,10 +627,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/claude-tasks?project_id={}",
-                        Uuid::new_v4()
-                    ))
+                    .uri(format!("/api/claude-tasks?project_id={}", Uuid::new_v4()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -894,9 +879,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/hosts/{host_id}/claude-tasks/discover"
-                    ))
+                    .uri(format!("/api/hosts/{host_id}/claude-tasks/discover"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1082,7 +1065,8 @@ mod tests {
 
         let session_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
-        let options = r#"{"allowed_tools":["bash"],"output_format":"json","custom_flags":"--verbose"}"#;
+        let options =
+            r#"{"allowed_tools":["bash"],"output_format":"json","custom_flags":"--verbose"}"#;
 
         myremote_core::queries::claude_sessions::insert_session_for_task(
             &state.db,

@@ -5,7 +5,10 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use myremote_protocol::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use myremote_protocol::knowledge::KnowledgeServerMessage;
-use myremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId, UserAction};
+use myremote_protocol::{
+    AgentMessage, AgenticAgentMessage, AgenticServerMessage, HostId, ServerMessage, SessionId,
+    UserAction,
+};
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -16,8 +19,8 @@ use crate::hooks::mapper::SessionMapper;
 use crate::hooks::permission::{PermissionDecision, PermissionManager};
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
-use crate::project::git::GitInspector;
 use crate::project::ProjectScanner;
+use crate::project::git::GitInspector;
 use crate::session::SessionManager;
 
 fn default_shell() -> &'static str {
@@ -27,9 +30,8 @@ fn default_shell() -> &'static str {
         // $SHELL can be overridden by nix develop to a non-interactive bash
         // (without readline), which breaks PS1 escape processing in PTY sessions.
         // The passwd entry always has the user's actual login shell.
-        login_shell_from_passwd().unwrap_or_else(|| {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-        })
+        login_shell_from_passwd()
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
     })
 }
 
@@ -127,7 +129,11 @@ async fn send_message(ws: &mut WsStream, msg: &AgentMessage) -> Result<(), Conne
 }
 
 /// Register with the server and return the assigned host ID.
-async fn register(ws: &mut WsStream, config: &AgentConfig, use_tmux: bool) -> Result<HostId, ConnectionError> {
+async fn register(
+    ws: &mut WsStream,
+    config: &AgentConfig,
+    use_tmux: bool,
+) -> Result<HostId, ConnectionError> {
     let hostname = hostname::get()
         .map_err(ConnectionError::Hostname)?
         .to_string_lossy()
@@ -203,20 +209,26 @@ fn handle_session_create(
     match session_manager.create(session_id, shell, cols, rows, working_dir) {
         Ok(pid) => {
             tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
-            if outbound_tx.try_send(AgentMessage::SessionCreated {
-                session_id,
-                shell: shell.to_string(),
-                pid,
-            }).is_err() {
+            if outbound_tx
+                .try_send(AgentMessage::SessionCreated {
+                    session_id,
+                    shell: shell.to_string(),
+                    pid,
+                })
+                .is_err()
+            {
                 tracing::warn!("outbound channel full, message dropped");
             }
         }
         Err(e) => {
             tracing::error!(session_id = %session_id, error = %e, "failed to create PTY session");
-            if outbound_tx.try_send(AgentMessage::Error {
-                session_id: Some(session_id),
-                message: format!("failed to spawn PTY: {e}"),
-            }).is_err() {
+            if outbound_tx
+                .try_send(AgentMessage::Error {
+                    session_id: Some(session_id),
+                    message: format!("failed to spawn PTY: {e}"),
+                })
+                .is_err()
+            {
                 tracing::warn!("outbound channel full, message dropped");
             }
         }
@@ -258,14 +270,19 @@ pub async fn run_connection(
         if !recovered.is_empty() {
             let sessions: Vec<myremote_protocol::RecoveredSession> = recovered
                 .iter()
-                .map(|(session_id, shell, pid)| myremote_protocol::RecoveredSession {
-                    session_id: *session_id,
-                    shell: shell.clone(),
-                    pid: *pid,
-                })
+                .map(
+                    |(session_id, shell, pid)| myremote_protocol::RecoveredSession {
+                        session_id: *session_id,
+                        shell: shell.clone(),
+                        pid: *pid,
+                    },
+                )
                 .collect();
             tracing::info!(count = sessions.len(), "reporting recovered tmux sessions");
-            if outbound_tx.try_send(AgentMessage::SessionsRecovered { sessions }).is_err() {
+            if outbound_tx
+                .try_send(AgentMessage::SessionsRecovered { sessions })
+                .is_err()
+            {
                 tracing::warn!("outbound channel full, SessionsRecovered dropped");
             }
         }
@@ -285,7 +302,11 @@ pub async fn run_connection(
             let projects = tokio::task::spawn_blocking(move || scanner.scan())
                 .await
                 .unwrap_or_default();
-            if tx.send(AgentMessage::ProjectList { projects }).await.is_err() {
+            if tx
+                .send(AgentMessage::ProjectList { projects })
+                .await
+                .is_err()
+            {
                 tracing::warn!("outbound channel closed, initial project list dropped");
             }
         });
@@ -590,10 +611,13 @@ fn handle_server_message(
             }
             let exit_code = session_manager.close(session_id);
             tracing::info!(session_id = %session_id, exit_code = ?exit_code, "session closed by server");
-            if outbound_tx.try_send(AgentMessage::SessionClosed {
-                session_id: *session_id,
-                exit_code,
-            }).is_err() {
+            if outbound_tx
+                .try_send(AgentMessage::SessionClosed {
+                    session_id: *session_id,
+                    exit_code,
+                })
+                .is_err()
+            {
                 tracing::warn!("outbound channel full, message dropped");
             }
         }
@@ -618,7 +642,12 @@ fn handle_server_message(
             tracing::warn!(host_id = %host_id, "received unexpected RegisterAck after registration");
         }
         ServerMessage::AgenticAction(agentic_msg) => {
-            handle_agentic_server_message(agentic_msg, session_manager, agentic_manager, permission_manager);
+            handle_agentic_server_message(
+                agentic_msg,
+                session_manager,
+                agentic_manager,
+                permission_manager,
+            );
         }
         ServerMessage::ProjectScan => {
             if project_scanner.should_debounce() {
@@ -635,7 +664,11 @@ fn handle_server_message(
                 .await
                 {
                     Ok(Ok(projects)) => {
-                        if tx.send(AgentMessage::ProjectList { projects }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::ProjectList { projects })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, project list dropped");
                         }
                     }
@@ -653,12 +686,15 @@ fn handle_server_message(
         ServerMessage::ProjectRegister { path } => {
             tracing::info!(path = %path, "registering project path from server");
             if let Some(info) = ProjectScanner::detect_at(std::path::Path::new(path)) {
-                if outbound_tx.try_send(AgentMessage::ProjectDiscovered {
-                    path: info.path,
-                    name: info.name,
-                    has_claude_config: info.has_claude_config,
-                    project_type: info.project_type,
-                }).is_err() {
+                if outbound_tx
+                    .try_send(AgentMessage::ProjectDiscovered {
+                        path: info.path,
+                        name: info.name,
+                        has_claude_config: info.has_claude_config,
+                        project_type: info.project_type,
+                    })
+                    .is_err()
+                {
                     tracing::warn!("outbound channel full, ProjectDiscovered dropped");
                 }
             } else {
@@ -675,14 +711,19 @@ fn handle_server_message(
                 let p = path.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     GitInspector::inspect(std::path::Path::new(&p))
-                }).await;
+                })
+                .await;
                 match result {
                     Ok(Some((git_info, worktrees))) => {
-                        if tx.send(AgentMessage::GitStatusUpdate {
-                            path,
-                            git_info,
-                            worktrees,
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::GitStatusUpdate {
+                                path,
+                                git_info,
+                                worktrees,
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, GitStatusUpdate dropped");
                         }
                     }
@@ -695,7 +736,12 @@ fn handle_server_message(
                 }
             });
         }
-        ServerMessage::WorktreeCreate { project_path, branch, path, new_branch } => {
+        ServerMessage::WorktreeCreate {
+            project_path,
+            branch,
+            path,
+            new_branch,
+        } => {
             let tx = outbound_tx.clone();
             let project_path = project_path.clone();
             let branch = branch.clone();
@@ -712,36 +758,53 @@ fn handle_server_message(
                         wp.as_ref().map(|p| std::path::Path::new(p.as_str())),
                         new_branch,
                     )
-                }).await;
+                })
+                .await;
                 match result {
                     Ok(Ok(worktree)) => {
-                        if tx.send(AgentMessage::WorktreeCreated {
-                            project_path,
-                            worktree,
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeCreated {
+                                project_path,
+                                worktree,
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeCreated dropped");
                         }
                     }
                     Ok(Err(msg)) => {
-                        if tx.send(AgentMessage::WorktreeError {
-                            project_path,
-                            message: msg,
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: msg,
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeError dropped");
                         }
                     }
                     Err(e) => {
-                        if tx.send(AgentMessage::WorktreeError {
-                            project_path,
-                            message: format!("worktree create task panicked: {e}"),
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: format!("worktree create task panicked: {e}"),
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeError dropped");
                         }
                     }
                 }
             });
         }
-        ServerMessage::WorktreeDelete { project_path, worktree_path, force } => {
+        ServerMessage::WorktreeDelete {
+            project_path,
+            worktree_path,
+            force,
+        } => {
             let tx = outbound_tx.clone();
             let project_path = project_path.clone();
             let worktree_path = worktree_path.clone();
@@ -755,29 +818,42 @@ fn handle_server_message(
                         std::path::Path::new(&wp),
                         force,
                     )
-                }).await;
+                })
+                .await;
                 match result {
                     Ok(Ok(())) => {
-                        if tx.send(AgentMessage::WorktreeDeleted {
-                            project_path,
-                            worktree_path,
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeDeleted {
+                                project_path,
+                                worktree_path,
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeDeleted dropped");
                         }
                     }
                     Ok(Err(msg)) => {
-                        if tx.send(AgentMessage::WorktreeError {
-                            project_path,
-                            message: msg,
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: msg,
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeError dropped");
                         }
                     }
                     Err(e) => {
-                        if tx.send(AgentMessage::WorktreeError {
-                            project_path,
-                            message: format!("worktree delete task panicked: {e}"),
-                        }).await.is_err() {
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: format!("worktree delete task panicked: {e}"),
+                            })
+                            .await
+                            .is_err()
+                        {
                             tracing::warn!("outbound channel closed, WorktreeError dropped");
                         }
                     }
@@ -785,12 +861,7 @@ fn handle_server_message(
             });
         }
         ServerMessage::ClaudeAction(claude_msg) => {
-            handle_claude_server_message(
-                claude_msg,
-                session_manager,
-                outbound_tx,
-                session_mapper,
-            );
+            handle_claude_server_message(claude_msg, session_manager, outbound_tx, session_mapper);
         }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {
@@ -1116,7 +1187,18 @@ mod tests {
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
     }
 
     #[tokio::test]
@@ -1126,7 +1208,18 @@ mod tests {
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
     }
 
     #[tokio::test]
@@ -1136,16 +1229,39 @@ mod tests {
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
     }
 
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, pm, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, pm, mapper) =
+            make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
 
         // Should send SessionClosed with exit_code = None
         let sent = orx.try_recv().unwrap();
@@ -1169,7 +1285,18 @@ mod tests {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
     }
 
     #[tokio::test]
@@ -1181,7 +1308,18 @@ mod tests {
             cols: 120,
             rows: 40,
         };
-        handle_server_message(&msg, &host_id, &mut sm, &mut am, &mut ps, &otx, &atx, ktx.as_ref(), &pm, &mapper);
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &pm,
+            &mapper,
+        );
     }
 
     #[tokio::test]
@@ -1199,9 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn handle_agentic_permission_rules_update() {
         let (mut sm, mut am, _ps, _otx, _orx, _atx, _arx, _ktx, pm, _mapper) = make_test_context();
-        let msg = AgenticServerMessage::PermissionRulesUpdate {
-            rules: vec![],
-        };
+        let msg = AgenticServerMessage::PermissionRulesUpdate { rules: vec![] };
         handle_agentic_server_message(&msg, &mut sm, &mut am, &pm);
     }
 

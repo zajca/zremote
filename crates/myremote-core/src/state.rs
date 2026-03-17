@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use myremote_protocol::{AgenticLoopId, HostId, SessionId};
 use myremote_protocol::agentic::AgenticStatus;
+use myremote_protocol::{AgenticLoopId, HostId, SessionId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
@@ -95,6 +95,8 @@ pub struct AgenticLoopState {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub estimated_cost_usd: f64,
+    pub context_used: u64,
+    pub context_max: u64,
     pub last_updated: Instant,
 }
 
@@ -173,13 +175,9 @@ pub enum ServerEvent {
         exit_code: Option<i32>,
     },
     #[serde(rename = "session_suspended")]
-    SessionSuspended {
-        session_id: String,
-    },
+    SessionSuspended { session_id: String },
     #[serde(rename = "session_resumed")]
-    SessionResumed {
-        session_id: String,
-    },
+    SessionResumed { session_id: String },
     #[serde(rename = "agentic_loop_detected")]
     LoopDetected {
         #[serde(rename = "loop")]
@@ -372,9 +370,7 @@ mod tests {
 
     #[test]
     fn browser_message_session_closed_serialization() {
-        let msg = BrowserMessage::SessionClosed {
-            exit_code: Some(0),
-        };
+        let msg = BrowserMessage::SessionClosed { exit_code: Some(0) };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "session_closed");
         assert_eq!(json["exit_code"], 0);

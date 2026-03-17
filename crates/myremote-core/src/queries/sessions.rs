@@ -64,10 +64,7 @@ pub async fn insert_session(
     Ok(())
 }
 
-pub async fn list_sessions(
-    pool: &SqlitePool,
-    host_id: &str,
-) -> Result<Vec<SessionRow>, AppError> {
+pub async fn list_sessions(pool: &SqlitePool, host_id: &str) -> Result<Vec<SessionRow>, AppError> {
     let sessions: Vec<SessionRow> = sqlx::query_as(
         "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
@@ -78,10 +75,7 @@ pub async fn list_sessions(
     Ok(sessions)
 }
 
-pub async fn get_session(
-    pool: &SqlitePool,
-    session_id: &str,
-) -> Result<SessionRow, AppError> {
+pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<SessionRow, AppError> {
     let session: SessionRow = sqlx::query_as(
         "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE id = ?",
@@ -122,11 +116,10 @@ pub async fn get_session_status(
     pool: &SqlitePool,
     session_id: &str,
 ) -> Result<Option<String>, AppError> {
-    let status: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
-            .bind(session_id)
-            .fetch_optional(pool)
-            .await?;
+    let status: Option<(String,)> = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(status.map(|(s,)| s))
 }
 

@@ -535,18 +535,9 @@ mod tests {
 
     #[test]
     fn search_tier_serialization() {
-        assert_eq!(
-            serde_json::to_string(&SearchTier::L0).unwrap(),
-            r#""l0""#
-        );
-        assert_eq!(
-            serde_json::to_string(&SearchTier::L1).unwrap(),
-            r#""l1""#
-        );
-        assert_eq!(
-            serde_json::to_string(&SearchTier::L2).unwrap(),
-            r#""l2""#
-        );
+        assert_eq!(serde_json::to_string(&SearchTier::L0).unwrap(), r#""l0""#);
+        assert_eq!(serde_json::to_string(&SearchTier::L1).unwrap(), r#""l1""#);
+        assert_eq!(serde_json::to_string(&SearchTier::L2).unwrap(), r#""l2""#);
     }
 
     #[test]

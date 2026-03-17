@@ -8,7 +8,10 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, PendingToolCall, ServerEvent, ToolCallInfo, TranscriptEntryInfo};
+use crate::state::{
+    AgenticLoopState, AgenticLoopStore, LoopInfo, PendingToolCall, ServerEvent, ToolCallInfo,
+    TranscriptEntryInfo,
+};
 
 /// DB row for an agentic loop, matching the `agentic_loops` table columns.
 #[derive(sqlx::FromRow)]
@@ -26,6 +29,8 @@ struct LoopRow {
     estimated_cost_usd: Option<f64>,
     end_reason: Option<String>,
     summary: Option<String>,
+    context_used: Option<i64>,
+    context_max: Option<i64>,
 }
 
 /// Processor for agentic loop messages from agents.
@@ -43,7 +48,8 @@ impl AgenticProcessor {
     async fn fetch_loop_info(&self, loop_id: &str) -> Option<LoopInfo> {
         let row: LoopRow = sqlx::query_as(
             "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-             ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
+             ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
+             context_used, context_max \
              FROM agentic_loops WHERE id = ?",
         )
         .bind(loop_id)
@@ -53,10 +59,21 @@ impl AgenticProcessor {
 
         // Supplement with in-memory state for real-time fields
         let loop_uuid: Uuid = row.id.parse().ok()?;
-        let pending_tool_calls = self
-            .agentic_loops
-            .get(&loop_uuid)
-            .map_or(0, |e| i64::try_from(e.pending_tool_calls.len()).unwrap_or(0));
+        let (pending_tool_calls, context_used, context_max) =
+            self.agentic_loops.get(&loop_uuid).map_or(
+                (
+                    0,
+                    row.context_used.unwrap_or(0),
+                    row.context_max.unwrap_or(0),
+                ),
+                |e| {
+                    (
+                        i64::try_from(e.pending_tool_calls.len()).unwrap_or(0),
+                        i64::try_from(e.context_used).unwrap_or(0),
+                        i64::try_from(e.context_max).unwrap_or(0),
+                    )
+                },
+            );
 
         Some(LoopInfo {
             id: row.id,
@@ -72,8 +89,8 @@ impl AgenticProcessor {
             estimated_cost_usd: row.estimated_cost_usd.unwrap_or(0.0),
             end_reason: row.end_reason,
             summary: row.summary,
-            context_used: 0,
-            context_max: 0,
+            context_used,
+            context_max,
             pending_tool_calls,
         })
     }
@@ -89,12 +106,11 @@ impl AgenticProcessor {
                 tool_name,
                 model,
             } => {
-                self.handle_loop_detected(loop_id, session_id, project_path, tool_name, model).await?;
+                self.handle_loop_detected(loop_id, session_id, project_path, tool_name, model)
+                    .await?;
             }
             AgenticAgentMessage::LoopStateUpdate {
-                loop_id,
-                status,
-                ..
+                loop_id, status, ..
             } => {
                 self.handle_loop_state_update(loop_id, status).await?;
             }
@@ -105,7 +121,14 @@ impl AgenticProcessor {
                 arguments_json,
                 status,
             } => {
-                self.handle_loop_tool_call(loop_id, tool_call_id, tool_name, arguments_json, status).await?;
+                self.handle_loop_tool_call(
+                    loop_id,
+                    tool_call_id,
+                    tool_name,
+                    arguments_json,
+                    status,
+                )
+                .await?;
             }
             AgenticAgentMessage::LoopToolResult {
                 loop_id,
@@ -113,7 +136,8 @@ impl AgenticProcessor {
                 result_preview,
                 duration_ms,
             } => {
-                self.handle_loop_tool_result(loop_id, tool_call_id, result_preview, duration_ms).await?;
+                self.handle_loop_tool_result(loop_id, tool_call_id, result_preview, duration_ms)
+                    .await?;
             }
             AgenticAgentMessage::LoopTranscript {
                 loop_id,
@@ -122,16 +146,28 @@ impl AgenticProcessor {
                 tool_call_id,
                 timestamp,
             } => {
-                self.handle_loop_transcript(loop_id, role, content, tool_call_id, timestamp).await?;
+                self.handle_loop_transcript(loop_id, role, content, tool_call_id, timestamp)
+                    .await?;
             }
             AgenticAgentMessage::LoopMetrics {
                 loop_id,
                 tokens_in,
                 tokens_out,
                 estimated_cost_usd,
-                ..
+                context_used,
+                context_max,
+                model,
             } => {
-                self.handle_loop_metrics(loop_id, tokens_in, tokens_out, estimated_cost_usd).await?;
+                self.handle_loop_metrics(
+                    loop_id,
+                    tokens_in,
+                    tokens_out,
+                    estimated_cost_usd,
+                    context_used,
+                    context_max,
+                    model,
+                )
+                .await?;
             }
             AgenticAgentMessage::LoopEnded {
                 loop_id,
@@ -153,8 +189,16 @@ impl AgenticProcessor {
         tool_name: String,
         model: String,
     ) -> Result<(), AppError> {
-        let project_path_opt: Option<String> = if project_path.is_empty() { None } else { Some(project_path.clone()) };
-        let model_opt: Option<String> = if model.is_empty() { None } else { Some(model.clone()) };
+        let project_path_opt: Option<String> = if project_path.is_empty() {
+            None
+        } else {
+            Some(project_path.clone())
+        };
+        let model_opt: Option<String> = if model.is_empty() {
+            None
+        } else {
+            Some(model.clone())
+        };
         let loop_id_str = loop_id.to_string();
         let session_id_str = session_id.to_string();
 
@@ -181,6 +225,8 @@ impl AgenticProcessor {
                 tokens_in: 0,
                 tokens_out: 0,
                 estimated_cost_usd: 0.0,
+                context_used: 0,
+                context_max: 0,
                 last_updated: Instant::now(),
             },
         );
@@ -198,14 +244,13 @@ impl AgenticProcessor {
 
         let linked_task_id = match link_result {
             Ok(result) if result.rows_affected() > 0 => {
-                let row: Option<(String,)> = sqlx::query_as(
-                    "SELECT id FROM claude_sessions WHERE loop_id = ?",
-                )
-                .bind(&loop_id_str)
-                .fetch_optional(&self.db)
-                .await
-                .ok()
-                .flatten();
+                let row: Option<(String,)> =
+                    sqlx::query_as("SELECT id FROM claude_sessions WHERE loop_id = ?")
+                        .bind(&loop_id_str)
+                        .fetch_optional(&self.db)
+                        .await
+                        .ok()
+                        .flatten();
                 row.map(|(id,)| id)
             }
             _ => {
@@ -286,13 +331,11 @@ impl AgenticProcessor {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| format!("{status:?}").to_lowercase());
 
-        if let Err(e) = sqlx::query(
-            "UPDATE agentic_loops SET status = ? WHERE id = ?",
-        )
-        .bind(&status_str)
-        .bind(&loop_id_str)
-        .execute(&self.db)
-        .await
+        if let Err(e) = sqlx::query("UPDATE agentic_loops SET status = ? WHERE id = ?")
+            .bind(&status_str)
+            .bind(&loop_id_str)
+            .execute(&self.db)
+            .await
         {
             tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
         }
@@ -401,7 +444,9 @@ impl AgenticProcessor {
         }
 
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
-            entry.pending_tool_calls.retain(|tc| tc.tool_call_id != tool_call_id);
+            entry
+                .pending_tool_calls
+                .retain(|tc| tc.tool_call_id != tool_call_id);
             entry.last_updated = Instant::now();
         }
 
@@ -467,28 +512,39 @@ impl AgenticProcessor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_loop_metrics(
         &self,
         loop_id: AgenticLoopId,
         tokens_in: u64,
         tokens_out: u64,
         estimated_cost_usd: f64,
+        context_used: u64,
+        context_max: u64,
+        model: String,
     ) -> Result<(), AppError> {
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
             entry.tokens_in = tokens_in;
             entry.tokens_out = tokens_out;
             entry.estimated_cost_usd = estimated_cost_usd;
+            entry.context_used = context_used;
+            entry.context_max = context_max;
             entry.last_updated = Instant::now();
         }
 
         let loop_id_str = loop_id.to_string();
+        let model_opt: Option<&str> = if model.is_empty() { None } else { Some(&model) };
         if let Err(e) = sqlx::query(
             "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
-             estimated_cost_usd = ? WHERE id = ?",
+             estimated_cost_usd = ?, context_used = ?, context_max = ?, \
+             model = COALESCE(?, model) WHERE id = ?",
         )
         .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
         .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
         .bind(estimated_cost_usd)
+        .bind(i64::try_from(context_used).unwrap_or(i64::MAX))
+        .bind(i64::try_from(context_max).unwrap_or(i64::MAX))
+        .bind(model_opt)
         .bind(&loop_id_str)
         .execute(&self.db)
         .await
@@ -527,12 +583,11 @@ impl AgenticProcessor {
         }
 
         // Update linked claude_session if any
-        if let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
-            "SELECT id FROM claude_sessions WHERE loop_id = ?",
-        )
-        .bind(&loop_id_str)
-        .fetch_optional(&self.db)
-        .await
+        if let Ok(Some((task_id,))) =
+            sqlx::query_as::<_, (String,)>("SELECT id FROM claude_sessions WHERE loop_id = ?")
+                .bind(&loop_id_str)
+                .fetch_optional(&self.db)
+                .await
         {
             let now_str = chrono::Utc::now().to_rfc3339();
             let _ = sqlx::query(
@@ -584,23 +639,21 @@ impl AgenticProcessor {
         // Auto-extract memories if configured
         {
             let auto_extract: Option<(String,)> = sqlx::query_as(
-                "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'"
+                "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'",
             )
             .fetch_optional(&self.db)
             .await
             .unwrap_or(None);
 
-            let should_extract = auto_extract
-                .is_none_or(|(v,)| v != "false" && v != "0");
+            let should_extract = auto_extract.is_none_or(|(v,)| v != "false" && v != "0");
 
             if should_extract {
-                let project_path: Option<(Option<String>,)> = sqlx::query_as(
-                    "SELECT project_path FROM agentic_loops WHERE id = ?"
-                )
-                .bind(&loop_id_str)
-                .fetch_optional(&self.db)
-                .await
-                .unwrap_or(None);
+                let project_path: Option<(Option<String>,)> =
+                    sqlx::query_as("SELECT project_path FROM agentic_loops WHERE id = ?")
+                        .bind(&loop_id_str)
+                        .fetch_optional(&self.db)
+                        .await
+                        .unwrap_or(None);
 
                 if let Some((Some(ref path),)) = project_path
                     && !path.is_empty()
@@ -614,14 +667,19 @@ impl AgenticProcessor {
                     .unwrap_or_default();
 
                     if !transcript_rows.is_empty() {
-                        let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> = transcript_rows
-                            .into_iter()
-                            .map(|(role, content, timestamp)| myremote_protocol::knowledge::TranscriptFragment {
-                                role,
-                                content,
-                                timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
-                            })
-                            .collect();
+                        let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> =
+                            transcript_rows
+                                .into_iter()
+                                .map(|(role, content, timestamp)| {
+                                    myremote_protocol::knowledge::TranscriptFragment {
+                                        role,
+                                        content,
+                                        timestamp: timestamp
+                                            .parse()
+                                            .unwrap_or_else(|_| chrono::Utc::now()),
+                                    }
+                                })
+                                .collect();
 
                         // Return the extract request for the caller to send
                         // This is logged but the actual sending happens in the server's agents.rs
@@ -702,13 +760,12 @@ mod tests {
         proc.handle_message(msg).await.unwrap();
 
         // Verify DB insert
-        let row: (String, String, String) = sqlx::query_as(
-            "SELECT id, session_id, tool_name FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let row: (String, String, String) =
+            sqlx::query_as("SELECT id, session_id, tool_name FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(row.0, loop_id.to_string());
         assert_eq!(row.1, session_id.to_string());
         assert_eq!(row.2, "claude-code");
@@ -741,13 +798,12 @@ mod tests {
         proc.handle_message(msg).await.unwrap();
 
         // project_path and model should be NULL when empty
-        let row: (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT project_path, model FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let row: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT project_path, model FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert!(row.0.is_none());
         assert!(row.1.is_none());
     }
@@ -792,13 +848,12 @@ mod tests {
         assert_eq!(entry.status, AgenticStatus::WaitingForInput);
 
         // Verify DB changed
-        let (status_str,): (String,) = sqlx::query_as(
-            "SELECT status FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status_str,): (String,) =
+            sqlx::query_as("SELECT status FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status_str, "waiting_for_input");
     }
 
@@ -837,13 +892,12 @@ mod tests {
         .unwrap();
 
         // Verify DB insert
-        let (name, status): (String, String) = sqlx::query_as(
-            "SELECT tool_name, status FROM tool_calls WHERE id = ?",
-        )
-        .bind(tool_call_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (name, status): (String, String) =
+            sqlx::query_as("SELECT tool_name, status FROM tool_calls WHERE id = ?")
+                .bind(tool_call_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(name, "Bash");
         assert_eq!(status, "pending");
 
@@ -887,13 +941,12 @@ mod tests {
         .unwrap();
 
         // Verify the arguments_json was replaced with "{}"
-        let (args,): (Option<String>,) = sqlx::query_as(
-            "SELECT arguments_json FROM tool_calls WHERE id = ?",
-        )
-        .bind(tool_call_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (args,): (Option<String>,) =
+            sqlx::query_as("SELECT arguments_json FROM tool_calls WHERE id = ?")
+                .bind(tool_call_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(args.unwrap(), "{}");
     }
 
@@ -929,7 +982,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 1);
+        assert_eq!(
+            proc.agentic_loops
+                .get(&loop_id)
+                .unwrap()
+                .pending_tool_calls
+                .len(),
+            1
+        );
 
         // Send result
         proc.handle_message(AgenticAgentMessage::LoopToolResult {
@@ -942,7 +1002,14 @@ mod tests {
         .unwrap();
 
         // Verify pending removed
-        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 0);
+        assert_eq!(
+            proc.agentic_loops
+                .get(&loop_id)
+                .unwrap()
+                .pending_tool_calls
+                .len(),
+            0
+        );
 
         // Verify DB updated
         let (status, preview, dur): (String, Option<String>, Option<i64>) = sqlx::query_as(
@@ -989,13 +1056,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (role, content): (String, String) = sqlx::query_as(
-            "SELECT role, content FROM transcript_entries WHERE loop_id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (role, content): (String, String) =
+            sqlx::query_as("SELECT role, content FROM transcript_entries WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(role, "assistant");
         assert_eq!(content, "Hello, I will help you.");
     }
@@ -1032,13 +1098,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (role, tc): (String, Option<String>) = sqlx::query_as(
-            "SELECT role, tool_call_id FROM transcript_entries WHERE loop_id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (role, tc): (String, Option<String>) =
+            sqlx::query_as("SELECT role, tool_call_id FROM transcript_entries WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(role, "tool");
         assert_eq!(tc.unwrap(), tc_id.to_string());
     }
@@ -1129,13 +1194,12 @@ mod tests {
         assert!(!proc.agentic_loops.contains_key(&loop_id));
 
         // Verify DB update
-        let (status, reason, summary): (String, Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT status, end_reason, summary FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status, reason, summary): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, end_reason, summary FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status, "completed");
         assert_eq!(reason.unwrap(), "completed");
         assert_eq!(summary.unwrap(), "Fixed the bug");
@@ -1170,13 +1234,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, summary): (String, Option<String>) = sqlx::query_as(
-            "SELECT status, summary FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status, summary): (String, Option<String>) =
+            sqlx::query_as("SELECT status, summary FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status, "completed");
         assert!(summary.is_none());
     }
@@ -1226,13 +1289,12 @@ mod tests {
         .unwrap();
 
         // Verify claude_session was completed
-        let (cs_status,): (String,) = sqlx::query_as(
-            "SELECT status FROM claude_sessions WHERE loop_id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (cs_status,): (String,) =
+            sqlx::query_as("SELECT status FROM claude_sessions WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(cs_status, "completed");
     }
 
@@ -1266,13 +1328,15 @@ mod tests {
         .unwrap();
 
         // Add a pending tool call to memory
-        proc.agentic_loops.get_mut(&loop_id).unwrap().pending_tool_calls.push_back(
-            PendingToolCall {
+        proc.agentic_loops
+            .get_mut(&loop_id)
+            .unwrap()
+            .pending_tool_calls
+            .push_back(PendingToolCall {
                 tool_call_id: Uuid::new_v4(),
                 tool_name: "Bash".to_string(),
                 arguments_json: "{}".to_string(),
-            },
-        );
+            });
 
         let info = proc.fetch_loop_info(&loop_id.to_string()).await.unwrap();
         assert_eq!(info.id, loop_id.to_string());
@@ -1449,13 +1513,12 @@ mod tests {
         .unwrap();
 
         // The existing claude_session should have been linked
-        let (cs_status, cs_loop_id): (String, Option<String>) = sqlx::query_as(
-            "SELECT status, loop_id FROM claude_sessions WHERE id = ?",
-        )
-        .bind(&task_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (cs_status, cs_loop_id): (String, Option<String>) =
+            sqlx::query_as("SELECT status, loop_id FROM claude_sessions WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(cs_status, "active");
         assert_eq!(cs_loop_id.unwrap(), loop_id.to_string());
     }
@@ -1468,10 +1531,12 @@ mod tests {
         insert_host(&db, &host_id_str).await;
 
         // Disable auto-extract
-        sqlx::query("INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', 'false')")
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', 'false')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
 
         let session_id = Uuid::new_v4();
         let loop_id = Uuid::new_v4();
@@ -1554,13 +1619,11 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify loop was completed
-        let (status,): (String,) = sqlx::query_as(
-            "SELECT status FROM agentic_loops WHERE id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM agentic_loops WHERE id = ?")
+            .bind(loop_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(status, "completed");
     }
 
@@ -1572,10 +1635,12 @@ mod tests {
         let host_id_str = proc.host_id.to_string();
         insert_host(&db, &host_id_str).await;
 
-        sqlx::query("INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', '0')")
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO config_global (key, value) VALUES ('openviking.auto_extract', '0')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
 
         let session_id = Uuid::new_v4();
         let loop_id = Uuid::new_v4();
@@ -1701,7 +1766,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 2);
+        assert_eq!(
+            proc.agentic_loops
+                .get(&loop_id)
+                .unwrap()
+                .pending_tool_calls
+                .len(),
+            2
+        );
 
         // 5. Tool call 1 result
         proc.handle_message(AgenticAgentMessage::LoopToolResult {
@@ -1712,7 +1784,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 1);
+        assert_eq!(
+            proc.agentic_loops
+                .get(&loop_id)
+                .unwrap()
+                .pending_tool_calls
+                .len(),
+            1
+        );
 
         // 6. Tool call 2 result
         proc.handle_message(AgenticAgentMessage::LoopToolResult {
@@ -1723,7 +1802,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(proc.agentic_loops.get(&loop_id).unwrap().pending_tool_calls.len(), 0);
+        assert_eq!(
+            proc.agentic_loops
+                .get(&loop_id)
+                .unwrap()
+                .pending_tool_calls
+                .len(),
+            0
+        );
 
         // 7. Metrics
         proc.handle_message(AgenticAgentMessage::LoopMetrics {
@@ -1763,23 +1849,21 @@ mod tests {
         assert_eq!(tokens_in.unwrap(), 10_000);
 
         // Verify transcript entry count
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM transcript_entries WHERE loop_id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM transcript_entries WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
 
         // Verify tool calls count
-        let (tc_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM tool_calls WHERE loop_id = ?",
-        )
-        .bind(loop_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (tc_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tool_calls WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(tc_count, 2);
     }
 }

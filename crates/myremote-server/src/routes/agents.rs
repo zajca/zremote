@@ -6,15 +6,18 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
-use myremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 use myremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
+use myremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::auth;
-use crate::state::{AgenticLoopState, AppState, HostInfo, LoopInfo, PendingToolCall, ServerEvent, SessionInfo, ToolCallInfo, TranscriptEntryInfo};
+use crate::state::{
+    AgenticLoopState, AppState, HostInfo, LoopInfo, PendingToolCall, ServerEvent, SessionInfo,
+    ToolCallInfo, TranscriptEntryInfo,
+};
 
 /// Timeout for the first message (Register) after WebSocket upgrade.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -53,14 +56,12 @@ struct RegisteredAgent {
 async fn recv_terminal_message(socket: &mut WebSocket) -> Option<AgentMessage> {
     loop {
         match socket.recv().await {
-            Some(Ok(Message::Text(text))) => {
-                match serde_json::from_str::<AgentMessage>(&text) {
-                    Ok(msg) => return Some(msg),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize register message");
-                    }
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<AgentMessage>(&text) {
+                Ok(msg) => return Some(msg),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to deserialize register message");
                 }
-            }
+            },
             Some(Ok(Message::Close(_))) | None => return None,
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
             Some(Ok(Message::Binary(_))) => {
@@ -77,31 +78,27 @@ async fn recv_terminal_message(socket: &mut WebSocket) -> Option<AgentMessage> {
 /// Perform the registration handshake: wait for Register message, validate
 /// token, upsert host, register connection, and send `RegisterAck`.
 /// Returns `None` if any step fails (errors are sent to the agent).
-async fn register_agent(
-    socket: &mut WebSocket,
-    state: &Arc<AppState>,
-) -> Option<RegisteredAgent> {
+async fn register_agent(socket: &mut WebSocket, state: &Arc<AppState>) -> Option<RegisteredAgent> {
     // 1. Wait for Register message with timeout
-    let register_msg = match tokio::time::timeout(REGISTER_TIMEOUT, recv_terminal_message(socket))
-        .await
-    {
-        Ok(Some(msg)) => msg,
-        Ok(None) => {
-            tracing::warn!("agent disconnected before sending Register");
-            return None;
-        }
-        Err(_) => {
-            tracing::warn!("agent did not send Register within timeout");
-            let _ = send_server_message(
-                socket,
-                &ServerMessage::Error {
-                    message: "registration timeout".to_string(),
-                },
-            )
-            .await;
-            return None;
-        }
-    };
+    let register_msg =
+        match tokio::time::timeout(REGISTER_TIMEOUT, recv_terminal_message(socket)).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                tracing::warn!("agent disconnected before sending Register");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("agent did not send Register within timeout");
+                let _ = send_server_message(
+                    socket,
+                    &ServerMessage::Error {
+                        message: "registration timeout".to_string(),
+                    },
+                )
+                .await;
+                return None;
+            }
+        };
 
     // 2. Validate that first message is Register
     let AgentMessage::Register {
@@ -158,7 +155,10 @@ async fn register_agent(
     // 5. Create outbound channel and register connection
     let (tx, rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_SIZE);
 
-    let (old_sender, generation) = state.connections.register(host_id, hostname.clone(), tx, supports_persistent_sessions).await;
+    let (old_sender, generation) = state
+        .connections
+        .register(host_id, hostname.clone(), tx, supports_persistent_sessions)
+        .await;
     if let Some(old_sender) = old_sender {
         drop(old_sender);
         tracing::info!(host_id = %host_id, "replaced existing agent connection");
@@ -270,16 +270,32 @@ enum InboundMessage {
 
 /// Known `AgentMessage` type tags.
 const TERMINAL_MSG_TYPES: &[&str] = &[
-    "Register", "Heartbeat", "TerminalOutput", "SessionCreated", "SessionClosed", "Error",
-    "ProjectDiscovered", "ProjectList", "KnowledgeAction", "ClaudeAction",
-    "GitStatusUpdate", "WorktreeCreated", "WorktreeDeleted", "WorktreeError",
+    "Register",
+    "Heartbeat",
+    "TerminalOutput",
+    "SessionCreated",
+    "SessionClosed",
+    "Error",
+    "ProjectDiscovered",
+    "ProjectList",
+    "KnowledgeAction",
+    "ClaudeAction",
+    "GitStatusUpdate",
+    "WorktreeCreated",
+    "WorktreeDeleted",
+    "WorktreeError",
     "SessionsRecovered",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
 const AGENTIC_MSG_TYPES: &[&str] = &[
-    "LoopDetected", "LoopStateUpdate", "LoopToolCall", "LoopToolResult",
-    "LoopTranscript", "LoopMetrics", "LoopEnded",
+    "LoopDetected",
+    "LoopStateUpdate",
+    "LoopToolCall",
+    "LoopToolResult",
+    "LoopTranscript",
+    "LoopMetrics",
+    "LoopEnded",
 ];
 
 /// Receive and deserialize an agent message from the WebSocket.
@@ -296,7 +312,11 @@ async fn recv_agent_message(socket: &mut WebSocket) -> Option<InboundMessage> {
                     }
                 };
 
-                let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let msg_type = value
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
 
                 if TERMINAL_MSG_TYPES.contains(&msg_type.as_str()) {
                     match serde_json::from_value::<AgentMessage>(value) {
@@ -338,13 +358,10 @@ async fn send_server_message(
         tracing::error!(error = %e, "failed to serialize server message");
         axum::Error::new(e)
     })?;
-    socket
-        .send(Message::Text(text.into()))
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to send WebSocket message");
-            axum::Error::new(e)
-        })
+    socket.send(Message::Text(text.into())).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to send WebSocket message");
+        axum::Error::new(e)
+    })
 }
 
 /// Handle a single agent message.
@@ -362,11 +379,12 @@ async fn handle_agent_message(
             // Update last_seen_at in database
             let now = Utc::now().to_rfc3339();
             let host_id_str = host_id.to_string();
-            if let Err(e) = sqlx::query("UPDATE hosts SET last_seen_at = ?, status = 'online' WHERE id = ?")
-                .bind(&now)
-                .bind(&host_id_str)
-                .execute(&state.db)
-                .await
+            if let Err(e) =
+                sqlx::query("UPDATE hosts SET last_seen_at = ?, status = 'online' WHERE id = ?")
+                    .bind(&now)
+                    .bind(&host_id_str)
+                    .execute(&state.db)
+                    .await
             {
                 tracing::warn!(host_id = %host_id, error = %e, "failed to update last_seen_at in database");
             }
@@ -551,10 +569,8 @@ async fn handle_agent_message(
                     .collect()
             };
 
-            let recovered_ids: HashSet<uuid::Uuid> = sessions
-                .iter()
-                .map(|s| s.session_id)
-                .collect();
+            let recovered_ids: HashSet<uuid::Uuid> =
+                sessions.iter().map(|s| s.session_id).collect();
 
             // Resume recovered sessions
             for recovered in &sessions {
@@ -597,9 +613,11 @@ async fn handle_agent_message(
                 }
 
                 // Emit SessionResumed event
-                let _ = state.events.send(crate::state::ServerEvent::SessionResumed {
-                    session_id: recovered.session_id.to_string(),
-                });
+                let _ = state
+                    .events
+                    .send(crate::state::ServerEvent::SessionResumed {
+                        session_id: recovered.session_id.to_string(),
+                    });
 
                 tracing::info!(
                     session_id = %recovered.session_id,
@@ -628,7 +646,8 @@ async fn handle_agent_message(
                     // Remove from memory + notify browsers
                     let mut sessions_store = state.sessions.write().await;
                     if let Some(session) = sessions_store.remove(sid) {
-                        let close_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                        let close_msg =
+                            crate::state::BrowserMessage::SessionClosed { exit_code: None };
                         for sender in &session.browser_senders {
                             let _ = sender.try_send(close_msg.clone());
                         }
@@ -674,7 +693,8 @@ async fn handle_agent_message(
                 // Notify browser senders and remove from store
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.remove(&session_id) {
-                    let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                    let browser_msg =
+                        crate::state::BrowserMessage::SessionClosed { exit_code: None };
                     for sender in &session.browser_senders {
                         let _ = sender.try_send(browser_msg.clone());
                     }
@@ -768,15 +788,14 @@ async fn handle_agent_message(
             let host_id_str = host_id.to_string();
 
             // Find parent project id
-            let parent: Option<(String,)> = sqlx::query_as(
-                "SELECT id FROM projects WHERE host_id = ? AND path = ?",
-            )
-            .bind(&host_id_str)
-            .bind(&project_path)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+            let parent: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+                    .bind(&host_id_str)
+                    .bind(&project_path)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
 
             if let Some((parent_id,)) = parent {
                 let wt_id = Uuid::new_v4().to_string();
@@ -853,9 +872,10 @@ async fn handle_agent_message(
             let now = chrono::Utc::now().to_rfc3339();
             for project in &projects {
                 let project_id = Uuid::new_v4().to_string();
-                let remotes_json = project.git_info.as_ref().map(|gi| {
-                    serde_json::to_string(&gi.remotes).unwrap_or_default()
-                });
+                let remotes_json = project
+                    .git_info
+                    .as_ref()
+                    .map(|gi| serde_json::to_string(&gi.remotes).unwrap_or_default());
                 let git_updated = project.git_info.as_ref().map(|_| now.clone());
                 if let Err(e) = sqlx::query(
                     "INSERT INTO projects (id, host_id, path, name, has_claude_config, project_type, \
@@ -892,7 +912,13 @@ async fn handle_agent_message(
 
                 // Upsert worktree children
                 if !project.worktrees.is_empty() {
-                    upsert_worktree_children(state, &host_id_str, &project.path, &project.worktrees).await;
+                    upsert_worktree_children(
+                        state,
+                        &host_id_str,
+                        &project.path,
+                        &project.worktrees,
+                    )
+                    .await;
                 }
             }
             let _ = state.events.send(ServerEvent::ProjectsUpdated {
@@ -916,15 +942,14 @@ async fn upsert_worktree_children(
     worktrees: &[myremote_protocol::project::WorktreeInfo],
 ) {
     // Find parent project id
-    let parent: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM projects WHERE host_id = ? AND path = ?",
-    )
-    .bind(host_id_str)
-    .bind(project_path)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let parent: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+            .bind(host_id_str)
+            .bind(project_path)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let Some((parent_id,)) = parent else {
         return;
@@ -965,24 +990,21 @@ async fn upsert_worktree_children(
     let current_paths: Vec<&str> = worktrees.iter().map(|wt| wt.path.as_str()).collect();
     if current_paths.is_empty() {
         // Delete all worktree children for this parent
-        if let Err(e) = sqlx::query(
-            "DELETE FROM projects WHERE parent_project_id = ?",
-        )
-        .bind(&parent_id)
-        .execute(&state.db)
-        .await
+        if let Err(e) = sqlx::query("DELETE FROM projects WHERE parent_project_id = ?")
+            .bind(&parent_id)
+            .execute(&state.db)
+            .await
         {
             tracing::warn!(parent_id = %parent_id, error = %e, "failed to clean up worktree children");
         }
     } else {
         // Fetch existing child paths and delete those not in current list
-        let existing: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, path FROM projects WHERE parent_project_id = ?",
-        )
-        .bind(&parent_id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        let existing: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, path FROM projects WHERE parent_project_id = ?")
+                .bind(&parent_id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default();
 
         for (child_id, child_path) in &existing {
             if !current_paths.contains(&child_path.as_str())
@@ -1013,6 +1035,8 @@ struct LoopRow {
     estimated_cost_usd: Option<f64>,
     end_reason: Option<String>,
     summary: Option<String>,
+    context_used: Option<i64>,
+    context_max: Option<i64>,
 }
 
 /// Fetch a full `LoopInfo` from the DB, supplementing with in-memory state
@@ -1020,7 +1044,8 @@ struct LoopRow {
 async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary \
+         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
+         context_used, context_max \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -1030,10 +1055,21 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
 
     // Supplement with in-memory state for real-time fields
     let loop_uuid: uuid::Uuid = row.id.parse().ok()?;
-    let pending_tool_calls = state
-        .agentic_loops
-        .get(&loop_uuid)
-        .map_or(0, |e| i64::try_from(e.pending_tool_calls.len()).unwrap_or(0));
+    let (pending_tool_calls, context_used, context_max) =
+        state.agentic_loops.get(&loop_uuid).map_or(
+            (
+                0,
+                row.context_used.unwrap_or(0),
+                row.context_max.unwrap_or(0),
+            ),
+            |e| {
+                (
+                    i64::try_from(e.pending_tool_calls.len()).unwrap_or(0),
+                    i64::try_from(e.context_used).unwrap_or(0),
+                    i64::try_from(e.context_max).unwrap_or(0),
+                )
+            },
+        );
 
     Some(LoopInfo {
         id: row.id,
@@ -1049,8 +1085,8 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
         estimated_cost_usd: row.estimated_cost_usd.unwrap_or(0.0),
         end_reason: row.end_reason,
         summary: row.summary,
-        context_used: 0,
-        context_max: 0,
+        context_used,
+        context_max,
         pending_tool_calls,
     })
 }
@@ -1099,6 +1135,8 @@ async fn handle_agentic_message(
                     tokens_in: 0,
                     tokens_out: 0,
                     estimated_cost_usd: 0.0,
+                    context_used: 0,
+                    context_max: 0,
                     last_updated: Instant::now(),
                 },
             );
@@ -1117,14 +1155,13 @@ async fn handle_agentic_message(
             let linked_task_id = match link_result {
                 Ok(result) if result.rows_affected() > 0 => {
                     // Successfully linked to an existing dialog-started task
-                    let row: Option<(String,)> = sqlx::query_as(
-                        "SELECT id FROM claude_sessions WHERE loop_id = ?",
-                    )
-                    .bind(&loop_id_str)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten();
+                    let row: Option<(String,)> =
+                        sqlx::query_as("SELECT id FROM claude_sessions WHERE loop_id = ?")
+                            .bind(&loop_id_str)
+                            .fetch_optional(&state.db)
+                            .await
+                            .ok()
+                            .flatten();
                     row.map(|(id,)| id)
                 }
                 _ => {
@@ -1183,7 +1220,11 @@ async fn handle_agentic_message(
             }
 
             // Broadcast event to browser clients
-            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
             if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
                 let _ = state.events.send(ServerEvent::LoopDetected {
                     loop_info,
@@ -1193,9 +1234,7 @@ async fn handle_agentic_message(
             }
         }
         AgenticAgentMessage::LoopStateUpdate {
-            loop_id,
-            status,
-            ..
+            loop_id, status, ..
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
@@ -1210,19 +1249,21 @@ async fn handle_agentic_message(
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| format!("{status:?}").to_lowercase());
 
-            if let Err(e) = sqlx::query(
-                "UPDATE agentic_loops SET status = ? WHERE id = ?",
-            )
-            .bind(&status_str)
-            .bind(&loop_id_str)
-            .execute(&state.db)
-            .await
+            if let Err(e) = sqlx::query("UPDATE agentic_loops SET status = ? WHERE id = ?")
+                .bind(&status_str)
+                .bind(&loop_id_str)
+                .execute(&state.db)
+                .await
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
             }
 
             // Broadcast event with full loop info
-            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
             if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
                 let _ = state.events.send(ServerEvent::LoopStatusChanged {
                     loop_info,
@@ -1281,7 +1322,11 @@ async fn handle_agentic_message(
                 }
 
                 let now = chrono::Utc::now().to_rfc3339();
-                let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+                let hostname = state
+                    .connections
+                    .get_hostname(&host_id)
+                    .await
+                    .unwrap_or_default();
                 let _ = state.events.send(ServerEvent::ToolCallPending {
                     loop_id: loop_id_str,
                     tool_call: ToolCallInfo {
@@ -1325,7 +1370,9 @@ async fn handle_agentic_message(
 
             // Remove from pending queue
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
-                entry.pending_tool_calls.retain(|tc| tc.tool_call_id != tool_call_id);
+                entry
+                    .pending_tool_calls
+                    .retain(|tc| tc.tool_call_id != tool_call_id);
                 entry.last_updated = Instant::now();
             }
 
@@ -1393,25 +1440,34 @@ async fn handle_agentic_message(
             tokens_in,
             tokens_out,
             estimated_cost_usd,
-            ..
+            context_used,
+            context_max,
+            model,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
                 entry.tokens_in = tokens_in;
                 entry.tokens_out = tokens_out;
                 entry.estimated_cost_usd = estimated_cost_usd;
+                entry.context_used = context_used;
+                entry.context_max = context_max;
                 entry.last_updated = Instant::now();
             }
 
             // Update DB
             let loop_id_str = loop_id.to_string();
+            let model_opt: Option<&str> = if model.is_empty() { None } else { Some(&model) };
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
-                 estimated_cost_usd = ? WHERE id = ?",
+                 estimated_cost_usd = ?, context_used = ?, context_max = ?, \
+                 model = COALESCE(?, model) WHERE id = ?",
             )
             .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
             .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
             .bind(estimated_cost_usd)
+            .bind(i64::try_from(context_used).unwrap_or(i64::MAX))
+            .bind(i64::try_from(context_max).unwrap_or(i64::MAX))
+            .bind(model_opt)
             .bind(&loop_id_str)
             .execute(&state.db)
             .await
@@ -1447,12 +1503,11 @@ async fn handle_agentic_message(
             }
 
             // Update linked claude_session if any
-            if let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
-                "SELECT id FROM claude_sessions WHERE loop_id = ?",
-            )
-            .bind(&loop_id_str)
-            .fetch_optional(&state.db)
-            .await
+            if let Ok(Some((task_id,))) =
+                sqlx::query_as::<_, (String,)>("SELECT id FROM claude_sessions WHERE loop_id = ?")
+                    .bind(&loop_id_str)
+                    .fetch_optional(&state.db)
+                    .await
             {
                 let now_str = chrono::Utc::now().to_rfc3339();
                 let _ = sqlx::query(
@@ -1494,7 +1549,11 @@ async fn handle_agentic_message(
             // Remove from in-memory state
             state.agentic_loops.remove(&loop_id);
 
-            let hostname = state.connections.get_hostname(&host_id).await.unwrap_or_default();
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
             if let Some(loop_info) = loop_info {
                 let _ = state.events.send(ServerEvent::LoopEnded {
                     loop_info,
@@ -1508,24 +1567,22 @@ async fn handle_agentic_message(
             // Auto-extract memories if configured
             {
                 let auto_extract: Option<(String,)> = sqlx::query_as(
-                    "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'"
+                    "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'",
                 )
                 .fetch_optional(&state.db)
                 .await
                 .unwrap_or(None);
 
-                let should_extract = auto_extract
-                    .is_none_or(|(v,)| v != "false" && v != "0");
+                let should_extract = auto_extract.is_none_or(|(v,)| v != "false" && v != "0");
 
                 if should_extract {
                     // Fetch project_path for this loop
-                    let project_path: Option<(Option<String>,)> = sqlx::query_as(
-                        "SELECT project_path FROM agentic_loops WHERE id = ?"
-                    )
-                    .bind(&loop_id_str)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
+                    let project_path: Option<(Option<String>,)> =
+                        sqlx::query_as("SELECT project_path FROM agentic_loops WHERE id = ?")
+                            .bind(&loop_id_str)
+                            .fetch_optional(&state.db)
+                            .await
+                            .unwrap_or(None);
 
                     if let Some((Some(ref path),)) = project_path
                         && !path.is_empty()
@@ -1540,14 +1597,19 @@ async fn handle_agentic_message(
                         .unwrap_or_default();
 
                         if !transcript_rows.is_empty() {
-                            let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> = transcript_rows
-                                .into_iter()
-                                .map(|(role, content, timestamp)| myremote_protocol::knowledge::TranscriptFragment {
-                                    role,
-                                    content,
-                                    timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
-                                })
-                                .collect();
+                            let transcript: Vec<myremote_protocol::knowledge::TranscriptFragment> =
+                                transcript_rows
+                                    .into_iter()
+                                    .map(|(role, content, timestamp)| {
+                                        myremote_protocol::knowledge::TranscriptFragment {
+                                            role,
+                                            content,
+                                            timestamp: timestamp
+                                                .parse()
+                                                .unwrap_or_else(|_| chrono::Utc::now()),
+                                        }
+                                    })
+                                    .collect();
 
                             if let Some(sender) = state.connections.get_sender(&host_id).await {
                                 let _ = sender.send(myremote_protocol::ServerMessage::KnowledgeAction(
@@ -1641,13 +1703,12 @@ async fn handle_claude_message(
                 "claude session ID captured"
             );
 
-            if let Err(e) = sqlx::query(
-                "UPDATE claude_sessions SET claude_session_id = ? WHERE id = ?",
-            )
-            .bind(&cc_session_id)
-            .bind(&task_id_str)
-            .execute(&state.db)
-            .await
+            if let Err(e) =
+                sqlx::query("UPDATE claude_sessions SET claude_session_id = ? WHERE id = ?")
+                    .bind(&cc_session_id)
+                    .bind(&task_id_str)
+                    .execute(&state.db)
+                    .await
             {
                 tracing::error!(
                     task_id = %task_id_str,
@@ -1710,11 +1771,13 @@ async fn handle_knowledge_message(
                 tracing::warn!(host_id = %host_id, error = %e, "failed to upsert knowledge base status");
             }
 
-            let _ = state.events.send(crate::state::ServerEvent::KnowledgeStatusChanged {
-                host_id: host_id_str,
-                status: status_str,
-                error,
-            });
+            let _ = state
+                .events
+                .send(crate::state::ServerEvent::KnowledgeStatusChanged {
+                    host_id: host_id_str,
+                    status: status_str,
+                    error,
+                });
         }
         KnowledgeAgentMessage::KnowledgeBaseReady {
             project_path,
@@ -1742,14 +1805,13 @@ async fn handle_knowledge_message(
                 .unwrap_or_else(|| format!("{status:?}").to_lowercase());
 
             // Find project_id from path + host
-            let project: Option<(String,)> = sqlx::query_as(
-                "SELECT id FROM projects WHERE host_id = ? AND path = ?",
-            )
-            .bind(&host_id_str)
-            .bind(&project_path)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
+            let project: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+                    .bind(&host_id_str)
+                    .bind(&project_path)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
 
             if let Some((project_id,)) = project {
                 let indexing_id = Uuid::new_v4().to_string();
@@ -1778,13 +1840,15 @@ async fn handle_knowledge_message(
                     tracing::warn!(error = %e, "failed to upsert indexing status");
                 }
 
-                let _ = state.events.send(crate::state::ServerEvent::IndexingProgress {
-                    project_id,
-                    project_path: project_path.clone(),
-                    status: status_str,
-                    files_processed,
-                    files_total,
-                });
+                let _ = state
+                    .events
+                    .send(crate::state::ServerEvent::IndexingProgress {
+                        project_id,
+                        project_path: project_path.clone(),
+                        status: status_str,
+                        files_processed,
+                        files_total,
+                    });
             } else {
                 tracing::warn!(
                     host_id = %host_id,
@@ -1815,23 +1879,21 @@ async fn handle_knowledge_message(
             let loop_id_str = loop_id.to_string();
 
             // Find project from loop's project_path
-            let project_path: Option<(String,)> = sqlx::query_as(
-                "SELECT project_path FROM agentic_loops WHERE id = ?",
-            )
-            .bind(&loop_id_str)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
+            let project_path: Option<(String,)> =
+                sqlx::query_as("SELECT project_path FROM agentic_loops WHERE id = ?")
+                    .bind(&loop_id_str)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
 
             if let Some((ref path,)) = project_path {
-                let project: Option<(String,)> = sqlx::query_as(
-                    "SELECT id FROM projects WHERE host_id = ? AND path = ?",
-                )
-                .bind(&host_id_str)
-                .bind(path)
-                .fetch_optional(&state.db)
-                .await
-                .unwrap_or(None);
+                let project: Option<(String,)> =
+                    sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+                        .bind(&host_id_str)
+                        .bind(path)
+                        .fetch_optional(&state.db)
+                        .await
+                        .unwrap_or(None);
 
                 if let Some((project_id,)) = project {
                     let memory_count = u32::try_from(memories.len()).unwrap_or(u32::MAX);
@@ -1854,7 +1916,9 @@ async fn handle_knowledge_message(
                         .unwrap_or(None);
 
                         match existing {
-                            Some((existing_id, existing_conf)) if memory.confidence > existing_conf => {
+                            Some((existing_id, existing_conf))
+                                if memory.confidence > existing_conf =>
+                            {
                                 // Update existing memory with higher confidence
                                 if let Err(e) = sqlx::query(
                                     "UPDATE knowledge_memories SET content = ?, confidence = ?, loop_id = ?, \
@@ -1895,11 +1959,13 @@ async fn handle_knowledge_message(
                         }
                     }
 
-                    let _ = state.events.send(crate::state::ServerEvent::MemoryExtracted {
-                        project_id,
-                        loop_id: loop_id_str,
-                        memory_count,
-                    });
+                    let _ = state
+                        .events
+                        .send(crate::state::ServerEvent::MemoryExtracted {
+                            project_id,
+                            loop_id: loop_id_str,
+                            memory_count,
+                        });
 
                     // Phase 3: Increment memories_since_regen and check auto-regeneration threshold
                     if let Err(e) = sqlx::query(
@@ -1924,7 +1990,7 @@ async fn handle_knowledge_message(
                     .unwrap_or(5);
 
                     let current_count: Option<(i64,)> = sqlx::query_as(
-                        "SELECT memories_since_regen FROM knowledge_bases WHERE host_id = ?"
+                        "SELECT memories_since_regen FROM knowledge_bases WHERE host_id = ?",
                     )
                     .bind(&host_id_str)
                     .fetch_optional(&state.db)
@@ -2069,12 +2135,11 @@ async fn upsert_host(
     let now = Utc::now().to_rfc3339();
 
     // Look up existing host by hostname only
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM hosts WHERE hostname = ?")
-            .bind(hostname)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| format!("database query failed: {e}"))?;
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE hostname = ?")
+        .bind(hostname)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| format!("database query failed: {e}"))?;
 
     let host_id = if let Some((id_str,)) = existing {
         let host_id: HostId = id_str
@@ -2131,8 +2196,14 @@ async fn upsert_host(
 /// Clean up after an agent disconnects: close sessions, clean agentic loops,
 /// remove from connection manager (only if generation matches), and mark as offline.
 async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
-    let supports_persistent = state.connections.supports_persistent_sessions(host_id).await;
-    let removed = state.connections.unregister_if_generation(host_id, generation).await;
+    let supports_persistent = state
+        .connections
+        .supports_persistent_sessions(host_id)
+        .await;
+    let removed = state
+        .connections
+        .unregister_if_generation(host_id, generation)
+        .await;
 
     let now = Utc::now().to_rfc3339();
     let host_id_str = host_id.to_string();
@@ -2143,7 +2214,9 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
             let mut sessions = state.sessions.write().await;
             let session_ids: Vec<_> = sessions
                 .iter()
-                .filter(|(_, s)| s.host_id == *host_id && s.status != "closed" && s.status != "suspended")
+                .filter(|(_, s)| {
+                    s.host_id == *host_id && s.status != "closed" && s.status != "suspended"
+                })
                 .map(|(id, _)| *id)
                 .collect();
 
@@ -2201,7 +2274,8 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
 
             for &sid in &session_ids {
                 if let Some(session) = sessions.remove(&sid) {
-                    let browser_msg = crate::state::BrowserMessage::SessionClosed { exit_code: None };
+                    let browser_msg =
+                        crate::state::BrowserMessage::SessionClosed { exit_code: None };
                     for sender in &session.browser_senders {
                         let _ = sender.try_send(browser_msg.clone());
                     }
@@ -2276,12 +2350,11 @@ async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
     }
 
     // Mark host offline in DB
-    let result =
-        sqlx::query("UPDATE hosts SET status = 'offline', updated_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(&host_id_str)
-            .execute(&state.db)
-            .await;
+    let result = sqlx::query("UPDATE hosts SET status = 'offline', updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await;
 
     if let Err(e) = result {
         tracing::error!(host_id = %host_id, error = %e, "failed to mark host offline in database");

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use myremote_core::queries::loops as q;
+use myremote_core::state::LoopInfo;
 use myremote_protocol::agentic::{AgenticServerMessage, AgenticStatus, UserAction};
 use serde::{Deserialize, Serialize};
 
@@ -18,8 +19,6 @@ pub struct ListLoopsQuery {
     pub project_id: Option<String>,
 }
 
-// Re-export core row types as response types.
-pub type LoopResponse = q::LoopRow;
 pub type ToolCallResponse = q::ToolCallRow;
 pub type TranscriptEntryResponse = q::TranscriptEntryRow;
 
@@ -51,14 +50,18 @@ fn parse_loop_id(loop_id: &str) -> Result<uuid::Uuid, AppError> {
 pub async fn list_loops(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListLoopsQuery>,
-) -> Result<Json<Vec<LoopResponse>>, AppError> {
+) -> Result<Json<Vec<LoopInfo>>, AppError> {
     let filter = q::ListLoopsFilter {
         status: query.status,
         host_id: query.host_id,
         session_id: query.session_id,
         project_id: query.project_id,
     };
-    let loops = q::list_loops(&state.db, &filter).await?;
+    let rows = q::list_loops(&state.db, &filter).await?;
+    let loops = rows
+        .into_iter()
+        .map(|r| q::enrich_loop(r, &state.agentic_loops))
+        .collect();
     Ok(Json(loops))
 }
 
@@ -66,10 +69,10 @@ pub async fn list_loops(
 pub async fn get_loop(
     State(state): State<Arc<AppState>>,
     Path(loop_id): Path<String>,
-) -> Result<Json<LoopResponse>, AppError> {
+) -> Result<Json<LoopInfo>, AppError> {
     let _parsed = parse_loop_id(&loop_id)?;
     let row = q::get_loop(&state.db, &loop_id).await?;
-    Ok(Json(row))
+    Ok(Json(q::enrich_loop(row, &state.agentic_loops)))
 }
 
 /// `GET /api/loops/:id/tools` - tool calls for a loop.
@@ -568,6 +571,8 @@ mod tests {
                 tokens_in: 500,
                 tokens_out: 1000,
                 estimated_cost_usd: 0.05,
+                context_used: 0,
+                context_max: 0,
                 last_updated: tokio::time::Instant::now(),
             },
         );
@@ -713,6 +718,8 @@ mod tests {
                 tokens_in: 0,
                 tokens_out: 0,
                 estimated_cost_usd: 0.0,
+                context_used: 0,
+                context_max: 0,
                 last_updated: tokio::time::Instant::now(),
             },
         );

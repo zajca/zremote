@@ -80,12 +80,14 @@ pub fn aggregate_metrics(token_data: &[TokenUsageData]) -> Option<AggregatedMetr
     let mut model = String::new();
 
     for data in token_data {
-        total_in += data.input_tokens + data.cache_read_input_tokens
-            + data.cache_creation_input_tokens;
+        total_in +=
+            data.input_tokens + data.cache_read_input_tokens + data.cache_creation_input_tokens;
         total_out += data.output_tokens;
         total_cost += calculate_cost(data);
 
-        if model.is_empty() && let Some(ref m) = data.model {
+        if model.is_empty()
+            && let Some(ref m) = data.model
+        {
             model.clone_from(m);
         }
     }

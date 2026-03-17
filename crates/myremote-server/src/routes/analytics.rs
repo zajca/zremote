@@ -44,7 +44,13 @@ pub async fn get_cost(
     Query(query): Query<CostQuery>,
 ) -> Result<Json<Vec<q::CostPoint>>, AppError> {
     let granularity = query.granularity.as_deref().unwrap_or("day");
-    let rows = q::get_cost(&state.db, granularity, query.from.as_ref(), query.to.as_ref()).await?;
+    let rows = q::get_cost(
+        &state.db,
+        granularity,
+        query.from.as_ref(),
+        query.to.as_ref(),
+    )
+    .await?;
     Ok(Json(rows))
 }
 
@@ -76,18 +82,16 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
-             VALUES ('h1', 'test', 'test-host', 'hash', 'online')"
+             VALUES ('h1', 'test', 'test-host', 'hash', 'online')",
         )
         .execute(&pool)
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')"
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES ('s1', 'h1', 'active')")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         pool
     }
@@ -99,7 +103,7 @@ mod tests {
             "SELECT date(started_at) as label, \
              COALESCE(SUM(total_tokens_in), 0) as tokens_in, \
              COALESCE(SUM(total_tokens_out), 0) as tokens_out \
-             FROM agentic_loops GROUP BY date(started_at)"
+             FROM agentic_loops GROUP BY date(started_at)",
         )
         .fetch_all(&pool)
         .await
@@ -119,7 +123,7 @@ mod tests {
              COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost_usd, \
              COALESCE(SUM(total_tokens_in), 0) as total_tokens_in, \
              COALESCE(SUM(total_tokens_out), 0) as total_tokens_out \
-             FROM agentic_loops"
+             FROM agentic_loops",
         )
         .fetch_one(&pool)
         .await
@@ -157,7 +161,7 @@ mod tests {
              COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost_usd, \
              COALESCE(SUM(total_tokens_in), 0) as total_tokens_in, \
              COALESCE(SUM(total_tokens_out), 0) as total_tokens_out \
-             FROM agentic_loops"
+             FROM agentic_loops",
         )
         .fetch_one(&pool)
         .await
@@ -194,11 +198,9 @@ mod tests {
 
     async fn test_state() -> std::sync::Arc<crate::state::AppState> {
         let pool = db::init_db("sqlite::memory:").await.unwrap();
-        let connections =
-            std::sync::Arc::new(crate::state::ConnectionManager::new());
-        let sessions = std::sync::Arc::new(
-            tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        );
+        let connections = std::sync::Arc::new(crate::state::ConnectionManager::new());
+        let sessions =
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
         let (events_tx, _) = tokio::sync::broadcast::channel(1024);
         std::sync::Arc::new(crate::state::AppState {
@@ -406,11 +408,9 @@ mod tests {
         // Filter to a date range that excludes the session
         let response = app
             .oneshot(
-                axum::http::Request::get(
-                    "/api/analytics/sessions?from=2027-01-01T00:00:00Z",
-                )
-                .body(axum::body::Body::empty())
-                .unwrap(),
+                axum::http::Request::get("/api/analytics/sessions?from=2027-01-01T00:00:00Z")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -458,11 +458,9 @@ mod tests {
         let app = crate::create_router(app_state);
         let response = app
             .oneshot(
-                axum::http::Request::get(
-                    "/api/analytics/loops?from=2026-03-11T00:00:00Z",
-                )
-                .body(axum::body::Body::empty())
-                .unwrap(),
+                axum::http::Request::get("/api/analytics/loops?from=2026-03-11T00:00:00Z")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -483,7 +481,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO agentic_loops (id, session_id, tool_name, status) \
-             VALUES ('l1', 's1', 'claude', 'completed')"
+             VALUES ('l1', 's1', 'claude', 'completed')",
         )
         .execute(&pool)
         .await
@@ -497,12 +495,11 @@ mod tests {
         .await
         .unwrap();
 
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT rowid FROM transcript_fts WHERE content MATCH 'function'"
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT rowid FROM transcript_fts WHERE content MATCH 'function'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(rows.len(), 1);
     }

@@ -5,23 +5,21 @@ pub mod process;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use myremote_protocol::AgentMessage;
 use myremote_protocol::knowledge::{
     CachedMemory, ExtractedMemory, KnowledgeAgentMessage, KnowledgeServerMessage, MemoryCategory,
     ServiceAction, WriteMdMode,
 };
-use myremote_protocol::AgentMessage;
 use tokio::sync::mpsc;
 
 use self::client::OvClient;
 use self::process::OvProcess;
 
 /// Marker line separating user content from auto-generated content in CLAUDE.md.
-const CLAUDE_MD_MARKER: &str =
-    "<!-- MyRemote Knowledge (auto-generated, do not edit below) -->";
+const CLAUDE_MD_MARKER: &str = "<!-- MyRemote Knowledge (auto-generated, do not edit below) -->";
 
 /// Minimum confidence threshold for including memories in CLAUDE.md and skills.
 const MIN_CONFIDENCE: f64 = 0.6;
-
 
 /// Minimum number of memories in a category to generate a skill file.
 const MIN_MEMORIES_FOR_SKILL: usize = 3;
@@ -207,11 +205,7 @@ impl KnowledgeManager {
             "viking://resources/{}/",
             project_name_from_path(project_path)
         );
-        match self
-            .client
-            .index_project(&namespace, project_path)
-            .await
-        {
+        match self.client.index_project(&namespace, project_path).await {
             Ok(()) => {
                 tracing::info!(project_path, "indexing started");
             }
@@ -316,7 +310,9 @@ impl KnowledgeManager {
             tracing::warn!("OpenViking not running, cannot generate instructions");
             self.send_knowledge_msg(KnowledgeAgentMessage::InstructionsGenerated {
                 project_path: project_path.to_string(),
-                content: "# Project Knowledge\n\nOpenViking service is not running. Start it first.\n".to_string(),
+                content:
+                    "# Project Knowledge\n\nOpenViking service is not running. Start it first.\n"
+                        .to_string(),
                 memories_used: 0,
             });
             return;
@@ -386,11 +382,7 @@ impl KnowledgeManager {
         );
 
         // Step 1: Index project files
-        if let Err(e) = self
-            .client
-            .index_project(&namespace, project_path)
-            .await
-        {
+        if let Err(e) = self.client.index_project(&namespace, project_path).await {
             tracing::error!(project_path, error = %e, "bootstrap: failed to index");
             self.send_knowledge_msg(KnowledgeAgentMessage::BootstrapComplete {
                 project_path: project_path.to_string(),
@@ -407,9 +399,7 @@ impl KnowledgeManager {
         let claude_md = match existing_claude_md {
             Some(content) => Some(content.to_string()),
             None => {
-                let path = Path::new(project_path)
-                    .join(".claude")
-                    .join("CLAUDE.md");
+                let path = Path::new(project_path).join(".claude").join("CLAUDE.md");
                 tokio::fs::read_to_string(&path).await.ok()
             }
         };
@@ -501,7 +491,6 @@ impl KnowledgeManager {
             skills_written,
         });
     }
-
 }
 
 /// Synthesize knowledge locally from the memory cache.
@@ -634,11 +623,12 @@ async fn sync_memories_to_cache(project_path: &str, memories: &[ExtractedMemory]
     let now = chrono::Utc::now();
 
     // Load existing cache and merge
-    let mut cached: Vec<CachedMemory> = if let Ok(data) = tokio::fs::read_to_string(&cache_path).await {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut cached: Vec<CachedMemory> =
+        if let Ok(data) = tokio::fs::read_to_string(&cache_path).await {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
     for mem in memories {
         if let Some(existing) = cached.iter_mut().find(|c| c.key == mem.key) {
@@ -733,12 +723,36 @@ async fn write_skill_files(project_path: &str, memories: &[CachedMemory]) -> u32
 
     // Category -> label mapping
     let categories: &[(MemoryCategory, &str, &str)] = &[
-        (MemoryCategory::Architecture, "architecture", "Project architecture decisions and component relationships"),
-        (MemoryCategory::Pattern, "patterns", "Common patterns and implementation approaches"),
-        (MemoryCategory::Pitfall, "pitfalls", "Known pitfalls and common mistakes to avoid"),
-        (MemoryCategory::Convention, "conventions", "Code conventions and style guidelines"),
-        (MemoryCategory::Decision, "decisions", "Key technical decisions and their rationale"),
-        (MemoryCategory::Preference, "preferences", "Team and project preferences"),
+        (
+            MemoryCategory::Architecture,
+            "architecture",
+            "Project architecture decisions and component relationships",
+        ),
+        (
+            MemoryCategory::Pattern,
+            "patterns",
+            "Common patterns and implementation approaches",
+        ),
+        (
+            MemoryCategory::Pitfall,
+            "pitfalls",
+            "Known pitfalls and common mistakes to avoid",
+        ),
+        (
+            MemoryCategory::Convention,
+            "conventions",
+            "Code conventions and style guidelines",
+        ),
+        (
+            MemoryCategory::Decision,
+            "decisions",
+            "Key technical decisions and their rationale",
+        ),
+        (
+            MemoryCategory::Preference,
+            "preferences",
+            "Team and project preferences",
+        ),
     ];
 
     let mut active_categories = std::collections::HashSet::new();
@@ -757,7 +771,8 @@ async fn write_skill_files(project_path: &str, memories: &[CachedMemory]) -> u32
                 continue;
             }
 
-            let mut content = format!("---\nname: myremote-{name}\ndescription: {description}\n---\n\n");
+            let mut content =
+                format!("---\nname: myremote-{name}\ndescription: {description}\n---\n\n");
             for mem in &cat_memories {
                 let _ = write!(content, "## {}\n{}\n\n", mem.key, mem.content);
             }
@@ -834,9 +849,8 @@ mod tests {
         tokio::fs::create_dir_all(&claude_dir).await.unwrap();
 
         // Write existing file with marker
-        let existing = format!(
-            "# User Content\nDo not delete\n\n{CLAUDE_MD_MARKER}\n\nOld generated stuff"
-        );
+        let existing =
+            format!("# User Content\nDo not delete\n\n{CLAUDE_MD_MARKER}\n\nOld generated stuff");
         tokio::fs::write(claude_dir.join("CLAUDE.md"), &existing)
             .await
             .unwrap();
@@ -962,9 +976,7 @@ mod tests {
         let written = write_skill_files(project_path, &memories).await;
         assert_eq!(written, 1);
 
-        let skill_path = dir
-            .path()
-            .join(".claude/skills/myremote-patterns/SKILL.md");
+        let skill_path = dir.path().join(".claude/skills/myremote-patterns/SKILL.md");
         let content = tokio::fs::read_to_string(skill_path).await.unwrap();
         assert!(content.contains("name: myremote-patterns"));
         assert!(content.contains("pattern-0"));
@@ -1004,9 +1016,7 @@ mod tests {
         let project_path = dir.path().to_str().unwrap();
 
         // Create an old skill directory that should be cleaned up
-        let old_skill = dir
-            .path()
-            .join(".claude/skills/myremote-obsolete");
+        let old_skill = dir.path().join(".claude/skills/myremote-obsolete");
         tokio::fs::create_dir_all(&old_skill).await.unwrap();
         tokio::fs::write(old_skill.join("SKILL.md"), "old")
             .await

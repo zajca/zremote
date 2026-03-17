@@ -28,14 +28,11 @@ pub fn verify_token(provided: &str, stored_hash: &str) -> bool {
 /// Simple hex encoding for SHA-256 output (avoids adding hex crate dependency).
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .fold(String::new(), |mut acc, b| {
-                use std::fmt::Write;
-                let _ = write!(acc, "{b:02x}");
-                acc
-            })
+        bytes.as_ref().iter().fold(String::new(), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
     }
 }
 

@@ -40,9 +40,7 @@ pub async fn list_claude_tasks(
     pool: &SqlitePool,
     filter: &ListClaudeTasksFilter,
 ) -> Result<Vec<ClaudeTaskRow>, AppError> {
-    let mut sql = format!(
-        "SELECT {TASK_COLUMNS} FROM claude_sessions WHERE 1=1",
-    );
+    let mut sql = format!("SELECT {TASK_COLUMNS} FROM claude_sessions WHERE 1=1",);
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(ref host_id) = filter.host_id {
@@ -69,13 +67,10 @@ pub async fn list_claude_tasks(
     Ok(tasks)
 }
 
-pub async fn get_claude_task(
-    pool: &SqlitePool,
-    task_id: &str,
-) -> Result<ClaudeTaskRow, AppError> {
-    let task: ClaudeTaskRow = sqlx::query_as(
-        &format!("SELECT {TASK_COLUMNS} FROM claude_sessions WHERE id = ?"),
-    )
+pub async fn get_claude_task(pool: &SqlitePool, task_id: &str) -> Result<ClaudeTaskRow, AppError> {
+    let task: ClaudeTaskRow = sqlx::query_as(&format!(
+        "SELECT {TASK_COLUMNS} FROM claude_sessions WHERE id = ?"
+    ))
     .bind(task_id)
     .fetch_optional(pool)
     .await?
@@ -88,13 +83,12 @@ pub async fn resolve_project_id_by_path(
     host_id: &str,
     project_path: &str,
 ) -> Result<Option<String>, AppError> {
-    let id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM projects WHERE host_id = ? AND path = ? LIMIT 1",
-    )
-    .bind(host_id)
-    .bind(project_path)
-    .fetch_optional(pool)
-    .await?;
+    let id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM projects WHERE host_id = ? AND path = ? LIMIT 1")
+            .bind(host_id)
+            .bind(project_path)
+            .fetch_optional(pool)
+            .await?;
     Ok(id)
 }
 
@@ -351,9 +345,19 @@ mod tests {
         insert_session(&pool, s1, host_id).await;
         insert_session(&pool, s2, host_id).await;
 
-        insert_claude_task(&pool, "t1", s1, host_id, "/proj1", Some("proj-1"), None, None, None)
-            .await
-            .unwrap();
+        insert_claude_task(
+            &pool,
+            "t1",
+            s1,
+            host_id,
+            "/proj1",
+            Some("proj-1"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         insert_claude_task(&pool, "t2", s2, host_id, "/proj2", None, None, None, None)
             .await
             .unwrap();
@@ -383,17 +387,21 @@ mod tests {
             .await
             .unwrap();
         // Manually set created_at to ensure ordering
-        sqlx::query("UPDATE claude_sessions SET created_at = '2026-01-01T00:00:00Z' WHERE id = 't1'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE claude_sessions SET created_at = '2026-01-01T00:00:00Z' WHERE id = 't1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         insert_claude_task(&pool, "t2", s2, host_id, "/proj", None, None, None, None)
             .await
             .unwrap();
-        sqlx::query("UPDATE claude_sessions SET created_at = '2026-01-02T00:00:00Z' WHERE id = 't2'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE claude_sessions SET created_at = '2026-01-02T00:00:00Z' WHERE id = 't2'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let filter = ListClaudeTasksFilter {
             host_id: None,
@@ -442,12 +450,11 @@ mod tests {
             .await
             .unwrap();
 
-        let (status, working_dir): (String, Option<String>) = sqlx::query_as(
-            "SELECT status, working_dir FROM sessions WHERE id = 'sess-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (status, working_dir): (String, Option<String>) =
+            sqlx::query_as("SELECT status, working_dir FROM sessions WHERE id = 'sess-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status, "creating");
         assert_eq!(working_dir.unwrap(), "/home/user/project");
     }
@@ -463,12 +470,11 @@ mod tests {
             .await
             .unwrap();
 
-        let (project_id,): (Option<String>,) = sqlx::query_as(
-            "SELECT project_id FROM sessions WHERE id = 'sess-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (project_id,): (Option<String>,) =
+            sqlx::query_as("SELECT project_id FROM sessions WHERE id = 'sess-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(project_id, Some("proj-1".to_string()));
     }
 
@@ -497,7 +503,10 @@ mod tests {
         let task = get_claude_task(&pool, "task-1").await.unwrap();
         assert_eq!(task.project_id, Some("proj-1".to_string()));
         assert_eq!(task.model, Some("opus".to_string()));
-        assert_eq!(task.initial_prompt, Some("Refactor the auth module".to_string()));
+        assert_eq!(
+            task.initial_prompt,
+            Some("Refactor the auth module".to_string())
+        );
         assert_eq!(
             task.options_json,
             Some(r#"{"allowedTools":["Read","Edit"]}"#.to_string())
@@ -514,9 +523,19 @@ mod tests {
         insert_session(&pool, "sess-resumed", host_id).await;
 
         // Original task
-        insert_claude_task(&pool, "task-orig", "sess-orig", host_id, "/proj", None, None, Some("original prompt"), None)
-            .await
-            .unwrap();
+        insert_claude_task(
+            &pool,
+            "task-orig",
+            "sess-orig",
+            host_id,
+            "/proj",
+            None,
+            None,
+            Some("original prompt"),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Resumed task
         insert_resumed_claude_task(
@@ -550,11 +569,16 @@ mod tests {
         insert_session(&pool, "sess-1", host_id).await;
         insert_session(&pool, "sess-2", host_id).await;
 
-        insert_claude_task(&pool, "task-1", "sess-1", host_id, "/proj", None, None, None, None)
-            .await
-            .unwrap();
+        insert_claude_task(
+            &pool, "task-1", "sess-1", host_id, "/proj", None, None, None, None,
+        )
+        .await
+        .unwrap();
 
-        let result = insert_claude_task(&pool, "task-1", "sess-2", host_id, "/proj", None, None, None, None).await;
+        let result = insert_claude_task(
+            &pool, "task-1", "sess-2", host_id, "/proj", None, None, None, None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -572,12 +596,32 @@ mod tests {
         insert_session(&pool, s2, host_id).await;
         insert_session(&pool, s3, host_id).await;
 
-        insert_claude_task(&pool, "t1", s1, host_id, "/proj1", Some("proj-1"), None, None, None)
-            .await
-            .unwrap();
-        insert_claude_task(&pool, "t2", s2, host_id, "/proj1", Some("proj-1"), None, None, None)
-            .await
-            .unwrap();
+        insert_claude_task(
+            &pool,
+            "t1",
+            s1,
+            host_id,
+            "/proj1",
+            Some("proj-1"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        insert_claude_task(
+            &pool,
+            "t2",
+            s2,
+            host_id,
+            "/proj1",
+            Some("proj-1"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         insert_claude_task(&pool, "t3", s3, host_id, "/proj2", None, None, None, None)
             .await
             .unwrap();

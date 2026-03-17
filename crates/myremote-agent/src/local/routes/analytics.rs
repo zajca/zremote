@@ -44,8 +44,13 @@ pub async fn get_cost(
     Query(query): Query<CostQuery>,
 ) -> Result<Json<Vec<q::CostPoint>>, AppError> {
     let granularity = query.granularity.as_deref().unwrap_or("day");
-    let rows =
-        q::get_cost(&state.db, granularity, query.from.as_ref(), query.to.as_ref()).await?;
+    let rows = q::get_cost(
+        &state.db,
+        granularity,
+        query.from.as_ref(),
+        query.to.as_ref(),
+    )
+    .await?;
     Ok(Json(rows))
 }
 
@@ -81,9 +86,7 @@ mod tests {
     use crate::local::upsert_local_host;
 
     async fn test_state() -> Arc<LocalAppState> {
-        let pool = myremote_core::db::init_db("sqlite::memory:")
-            .await
-            .unwrap();
+        let pool = myremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
         upsert_local_host(&pool, &host_id, "test-host")

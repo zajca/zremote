@@ -14,12 +14,7 @@ pub struct TerminalProcessor {
 
 impl TerminalProcessor {
     /// Update session status to active in DB after agent creates it.
-    pub async fn handle_session_created(
-        &self,
-        session_id: SessionId,
-        shell: &str,
-        pid: u32,
-    ) {
+    pub async fn handle_session_created(&self, session_id: SessionId, shell: &str, pid: u32) {
         let session_id_str = session_id.to_string();
         let now = chrono::Utc::now().to_rfc3339();
         if let Err(e) = sqlx::query(
@@ -53,11 +48,7 @@ impl TerminalProcessor {
     }
 
     /// Close session in DB and memory, notify browsers.
-    pub async fn handle_session_closed(
-        &self,
-        session_id: SessionId,
-        exit_code: Option<i32>,
-    ) {
+    pub async fn handle_session_closed(&self, session_id: SessionId, exit_code: Option<i32>) {
         let session_id_str = session_id.to_string();
         let now = chrono::Utc::now().to_rfc3339();
         if let Err(e) = sqlx::query(
@@ -145,21 +136,21 @@ mod tests {
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
         // Add session to in-memory store
-        sessions.write().await.insert(
-            session_id,
-            SessionState::new(session_id, proc.host_id),
-        );
+        sessions
+            .write()
+            .await
+            .insert(session_id, SessionState::new(session_id, proc.host_id));
 
-        proc.handle_session_created(session_id, "/bin/bash", 12345).await;
+        proc.handle_session_created(session_id, "/bin/bash", 12345)
+            .await;
 
         // Verify DB update
-        let (status, shell, pid): (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, shell, pid FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status, shell, pid): (String, Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT status, shell, pid FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status, "active");
         assert_eq!(shell.unwrap(), "/bin/bash");
         assert_eq!(pid.unwrap(), 12345);
@@ -181,7 +172,8 @@ mod tests {
         let session_id = Uuid::new_v4();
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
-        proc.handle_session_created(session_id, "/bin/zsh", 999).await;
+        proc.handle_session_created(session_id, "/bin/zsh", 999)
+            .await;
 
         let event = rx.try_recv().unwrap();
         match event {
@@ -208,15 +200,14 @@ mod tests {
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
         // No panic expected
-        proc.handle_session_created(session_id, "/bin/bash", 100).await;
+        proc.handle_session_created(session_id, "/bin/bash", 100)
+            .await;
 
-        let (status,): (String,) = sqlx::query_as(
-            "SELECT status FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(status, "active");
     }
 
@@ -232,21 +223,20 @@ mod tests {
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
         // Add to in-memory store
-        sessions.write().await.insert(
-            session_id,
-            SessionState::new(session_id, proc.host_id),
-        );
+        sessions
+            .write()
+            .await
+            .insert(session_id, SessionState::new(session_id, proc.host_id));
 
         proc.handle_session_closed(session_id, Some(0)).await;
 
         // Verify DB update
-        let (status, exit_code): (String, Option<i32>) = sqlx::query_as(
-            "SELECT status, exit_code FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status, exit_code): (String, Option<i32>) =
+            sqlx::query_as("SELECT status, exit_code FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status, "closed");
         assert_eq!(exit_code, Some(0));
 
@@ -268,13 +258,12 @@ mod tests {
 
         proc.handle_session_closed(session_id, None).await;
 
-        let (status, exit_code): (String, Option<i32>) = sqlx::query_as(
-            "SELECT status, exit_code FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (status, exit_code): (String, Option<i32>) =
+            sqlx::query_as("SELECT status, exit_code FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(status, "closed");
         assert!(exit_code.is_none());
     }
