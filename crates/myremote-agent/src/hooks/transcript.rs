@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use myremote_protocol::TranscriptRole;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -41,7 +43,28 @@ enum ContentBlock {
     Other,
 }
 
+/// The nested `message` object found in Claude Code's JSONL format.
+///
+/// Claude Code writes lines like:
+/// ```json
+/// {"type":"assistant","message":{"role":"assistant","content":[...],"usage":{...},"model":"..."},"requestId":"..."}
+/// ```
+#[derive(Debug, Deserialize)]
+struct MessagePayload {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+    #[serde(default)]
+    usage: Option<UsageBlock>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
 /// A message entry in the transcript JSONL.
+///
+/// Supports both flat format (`{"role":"...", "usage":{...}}`) and
+/// nested format (`{"type":"...", "message":{"role":"...", "usage":{...}}}`).
 #[derive(Debug, Deserialize)]
 struct TranscriptLine {
     #[serde(default)]
@@ -55,6 +78,43 @@ struct TranscriptLine {
     // type field to distinguish different line types
     #[serde(rename = "type", default)]
     line_type: Option<String>,
+    /// Nested message object (Claude Code's actual format).
+    #[serde(default)]
+    message: Option<MessagePayload>,
+    /// Request ID for deduplication (multiple lines per API turn share the same ID).
+    #[serde(default, alias = "request_id")]
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+}
+
+impl TranscriptLine {
+    fn role(&self) -> Option<&str> {
+        self.message
+            .as_ref()
+            .and_then(|m| m.role.as_deref())
+            .or(self.role.as_deref())
+    }
+
+    fn content(&self) -> Option<&serde_json::Value> {
+        self.message
+            .as_ref()
+            .and_then(|m| m.content.as_ref())
+            .or(self.content.as_ref())
+    }
+
+    fn usage(&self) -> Option<&UsageBlock> {
+        self.message
+            .as_ref()
+            .and_then(|m| m.usage.as_ref())
+            .or(self.usage.as_ref())
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.message
+            .as_ref()
+            .and_then(|m| m.model.as_deref())
+            .or(self.model.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +151,7 @@ pub async fn parse_transcript_file(
 
     let mut entries = Vec::new();
     let mut token_data = Vec::new();
+    let mut seen_request_ids: HashSet<String> = HashSet::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -102,26 +163,33 @@ pub async fn parse_transcript_file(
             continue;
         };
 
-        // Extract token usage
-        if let Some(usage) = &parsed.usage {
-            token_data.push(TokenUsageData {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_input_tokens: usage.cache_read_input_tokens,
-                cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                model: parsed.model.clone(),
-            });
+        // Extract token usage (deduplicate by requestId)
+        if let Some(usage) = parsed.usage() {
+            let is_duplicate = parsed
+                .request_id
+                .as_ref()
+                .is_some_and(|id| !seen_request_ids.insert(id.clone()));
+
+            if !is_duplicate {
+                token_data.push(TokenUsageData {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    model: parsed.model().map(String::from),
+                });
+            }
         }
 
         // Extract message content
-        let role = match parsed.role.as_deref() {
+        let role = match parsed.role() {
             Some("assistant") => TranscriptRole::Assistant,
             Some("user") => TranscriptRole::User,
             Some("system") => TranscriptRole::System,
             _ => continue,
         };
 
-        if let Some(content) = &parsed.content {
+        if let Some(content) = parsed.content() {
             match content {
                 serde_json::Value::String(s) => {
                     entries.push(TranscriptEntry {
@@ -210,6 +278,7 @@ pub async fn parse_transcript_file(
 pub fn parse_transcript_str(text: &str) -> (Vec<TranscriptEntry>, Vec<TokenUsageData>) {
     let mut entries = Vec::new();
     let mut token_data = Vec::new();
+    let mut seen_request_ids: HashSet<String> = HashSet::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -221,30 +290,37 @@ pub fn parse_transcript_str(text: &str) -> (Vec<TranscriptEntry>, Vec<TokenUsage
             continue;
         };
 
-        if let Some(usage) = &parsed.usage {
-            token_data.push(TokenUsageData {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_input_tokens: usage.cache_read_input_tokens,
-                cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                model: parsed.model.clone(),
-            });
+        if let Some(usage) = parsed.usage() {
+            let is_duplicate = parsed
+                .request_id
+                .as_ref()
+                .is_some_and(|id| !seen_request_ids.insert(id.clone()));
+
+            if !is_duplicate {
+                token_data.push(TokenUsageData {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    model: parsed.model().map(String::from),
+                });
+            }
         }
 
-        let role = match parsed.role.as_deref() {
+        let role = match parsed.role() {
             Some("assistant") => TranscriptRole::Assistant,
             Some("user") => TranscriptRole::User,
             Some("system") => TranscriptRole::System,
             _ => continue,
         };
 
-        if let Some(serde_json::Value::String(s)) = &parsed.content {
+        if let Some(serde_json::Value::String(s)) = parsed.content() {
             entries.push(TranscriptEntry {
                 role,
                 content: s.clone(),
                 tool_call_id: None,
             });
-        } else if let Some(serde_json::Value::Array(blocks)) = &parsed.content {
+        } else if let Some(serde_json::Value::Array(blocks)) = parsed.content() {
             for block in blocks {
                 if let Ok(ContentBlock::Text { text }) =
                     serde_json::from_value::<ContentBlock>(block.clone())
@@ -792,5 +868,126 @@ not json at all
         assert_eq!(cloned.role, entry.role);
         assert_eq!(cloned.content, entry.content);
         assert_eq!(cloned.tool_call_id, entry.tool_call_id);
+    }
+
+    #[test]
+    fn parse_nested_claude_code_format() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello, help me refactor"}]},"requestId":"req-1","timestamp":"2025-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help you refactor."}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5},"model":"claude-sonnet-4-20250514"},"requestId":"req-2","timestamp":"2025-01-01T00:00:01Z"}"#;
+
+        let (entries, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].role, TranscriptRole::User);
+        assert_eq!(entries[0].content, "Hello, help me refactor");
+        assert_eq!(entries[1].role, TranscriptRole::Assistant);
+        assert_eq!(entries[1].content, "I'll help you refactor.");
+
+        assert_eq!(token_data.len(), 1);
+        assert_eq!(token_data[0].input_tokens, 100);
+        assert_eq!(token_data[0].output_tokens, 50);
+        assert_eq!(token_data[0].cache_read_input_tokens, 10);
+        assert_eq!(token_data[0].cache_creation_input_tokens, 5);
+        assert_eq!(
+            token_data[0].model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+    }
+
+    #[test]
+    fn parse_nested_format_with_tool_use() {
+        let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me read it."},{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"/src/main.rs"}}],"usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-3"}"#;
+
+        let (entries, token_data) = parse_transcript_str(jsonl);
+        // parse_transcript_str only extracts Text blocks
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "Let me read it.");
+
+        assert_eq!(token_data.len(), 1);
+        assert_eq!(token_data[0].input_tokens, 200);
+    }
+
+    #[test]
+    fn parse_deduplicates_by_request_id() {
+        // Multiple lines with the same requestId should only produce one TokenUsageData
+        let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first part"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-dup"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second part"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-dup"}"#;
+
+        let (entries, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 2); // both text entries appear
+        assert_eq!(token_data.len(), 1); // usage deduplicated to one
+        assert_eq!(token_data[0].input_tokens, 100);
+    }
+
+    #[test]
+    fn parse_different_request_ids_not_deduplicated() {
+        let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-2"}"#;
+
+        let (_, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(token_data.len(), 2);
+        assert_eq!(token_data[0].input_tokens, 100);
+        assert_eq!(token_data[1].input_tokens, 200);
+    }
+
+    #[test]
+    fn parse_no_request_id_not_deduplicated() {
+        // Lines without requestId are never considered duplicates (backward compat)
+        let jsonl = r#"{"role":"assistant","content":"a","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}
+{"role":"assistant","content":"b","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}"#;
+
+        let (_, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(token_data.len(), 2);
+    }
+
+    #[test]
+    fn parse_nested_format_without_usage() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"requestId":"req-no-usage"}"#;
+
+        let (entries, token_data) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "hello");
+        assert!(token_data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_file_nested_claude_code_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"refactor this"}]},"requestId":"req-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure, I'll refactor."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/main.rs"}}],"usage":{"input_tokens":500,"output_tokens":200,"cache_read_input_tokens":100,"cache_creation_input_tokens":50},"model":"claude-sonnet-4-20250514"},"requestId":"req-2"}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
+
+        // user text + assistant text + tool_use
+        assert!(entries.len() >= 2);
+        assert_eq!(entries[0].role, TranscriptRole::User);
+        assert_eq!(entries[0].content, "refactor this");
+        assert_eq!(entries[1].role, TranscriptRole::Assistant);
+        assert_eq!(entries[1].content, "Sure, I'll refactor.");
+
+        assert_eq!(token_data.len(), 1);
+        assert_eq!(token_data[0].input_tokens, 500);
+        assert_eq!(token_data[0].cache_creation_input_tokens, 50);
+    }
+
+    #[tokio::test]
+    async fn parse_file_deduplicates_by_request_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dedup.jsonl");
+        let content = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"part 1"}],"usage":{"input_tokens":300,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"dup-req"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"part 2"}],"usage":{"input_tokens":300,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"dup-req"}
+"#;
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+            .await
+            .unwrap();
+
+        assert_eq!(entries.len(), 2); // both entries present
+        assert_eq!(token_data.len(), 1); // usage deduplicated
     }
 }
