@@ -56,11 +56,41 @@ export interface AgenticSettings {
   auto_approve_patterns: string[];
 }
 
+export interface ProjectAction {
+  name: string;
+  command: string;
+  description?: string;
+  icon?: string;
+  working_dir?: string;
+  env: Record<string, string>;
+  worktree_scoped: boolean;
+}
+
+export interface WorktreeSettings {
+  on_create?: string;
+  on_delete?: string;
+}
+
+export interface HookResult {
+  success: boolean;
+  output?: string;
+  duration_ms: number;
+}
+
+export interface RunActionRequest {
+  worktree_path?: string;
+  branch?: string;
+  cols?: number;
+  rows?: number;
+}
+
 export interface ProjectSettings {
   shell?: string;
   working_dir?: string;
   env: Record<string, string>;
   agentic: AgenticSettings;
+  actions?: ProjectAction[];
+  worktree?: WorktreeSettings;
 }
 
 export interface ConfigValue {
@@ -249,6 +279,13 @@ export const api = {
       request<void>(`/api/projects/${projectId}/settings`, {
         method: "PUT",
         body: JSON.stringify(settings),
+      }),
+    actions: (projectId: string) =>
+      request<{ actions: ProjectAction[] }>(`/api/projects/${projectId}/actions`),
+    runAction: (projectId: string, actionName: string, body?: RunActionRequest) =>
+      request<Session>(`/api/projects/${projectId}/actions/${encodeURIComponent(actionName)}/run`, {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
       }),
   },
   analytics: {

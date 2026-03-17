@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { api, type Project, type Session } from "../lib/api";
+import { api, type Project, type ProjectAction, type Session } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -18,9 +18,11 @@ import { SessionItem } from "../components/sidebar/SessionItem";
 import { KnowledgePanel } from "../components/knowledge/KnowledgePanel";
 import { ProjectLoopsTab } from "../components/agentic/ProjectLoopsTab";
 import { ProjectSettingsTab } from "../components/ProjectSettingsTab";
+import { ActionsTab } from "../components/project/ActionsTab";
+import { WorktreeCard } from "../components/project/WorktreeCard";
 import { showToast } from "../components/layout/Toast";
 
-type Tab = "sessions" | "loops" | "knowledge" | "settings" | "git";
+type Tab = "sessions" | "actions" | "loops" | "knowledge" | "settings" | "git";
 
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -36,6 +38,7 @@ export function ProjectPage() {
   const [newPath, setNewPath] = useState("");
   const [isNewBranch, setIsNewBranch] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [worktreeActions, setWorktreeActions] = useState<ProjectAction[]>([]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -71,6 +74,10 @@ export function ProjectPage() {
   useEffect(() => {
     if (activeTab === "git" && projectId) {
       loadWorktrees();
+      void api.projects.actions(projectId).then(
+        (res) => setWorktreeActions(res.actions.filter((a) => a.worktree_scoped)),
+        () => setWorktreeActions([]),
+      );
     }
   }, [activeTab, projectId, loadWorktrees]);
 
@@ -95,7 +102,7 @@ export function ProjectPage() {
     if (!projectId || !newBranch.trim()) return;
     setCreating(true);
     try {
-      await api.projects.createWorktree(projectId, {
+      const response = await api.projects.createWorktree(projectId, {
         branch: newBranch.trim(),
         path: newPath.trim() || undefined,
         new_branch: isNewBranch || undefined,
@@ -105,7 +112,21 @@ export function ProjectPage() {
       setIsNewBranch(false);
       setShowCreateWorktree(false);
       loadWorktrees();
-      showToast("Worktree created", "success");
+      const hook = (response as Record<string, unknown> | undefined)?.hook as
+        | { success: boolean; duration_ms: number }
+        | undefined;
+      if (hook) {
+        if (hook.success) {
+          showToast(
+            `Worktree created. Setup hook completed (${(hook.duration_ms / 1000).toFixed(1)}s)`,
+            "success",
+          );
+        } else {
+          showToast("Worktree created. Setup hook failed", "info");
+        }
+      } else {
+        showToast("Worktree created", "success");
+      }
     } catch (e) {
       console.error("failed to create worktree", e);
       showToast("Failed to create worktree", "error");
@@ -258,6 +279,7 @@ export function ProjectPage() {
           {(
             [
               "sessions",
+              "actions",
               "loops",
               ...(project.git_branch !== null ? ["git" as const] : []),
               "knowledge",
@@ -298,6 +320,13 @@ export function ProjectPage() {
               </div>
             )}
           </div>
+        )}
+        {activeTab === "actions" && (
+          <ActionsTab
+            projectId={project.id}
+            projectPath={project.path}
+            hostId={project.host_id}
+          />
         )}
         {activeTab === "loops" && (
           <ProjectLoopsTab projectId={project.id} hostId={project.host_id} />
@@ -483,54 +512,19 @@ export function ProjectPage() {
               ) : (
                 <div className="space-y-2">
                   {worktrees.map((wt) => (
-                    <div
+                    <WorktreeCard
                       key={wt.id}
-                      className="flex items-center justify-between rounded-md border border-border bg-bg-secondary px-4 py-3"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <GitBranch
-                            size={14}
-                            className="shrink-0 text-text-tertiary"
-                          />
-                          <span className="truncate text-sm font-medium text-text-primary">
-                            {wt.name}
-                          </span>
-                          {wt.git_branch && (
-                            <span className="shrink-0 rounded bg-bg-active px-1.5 py-0.5 text-xs text-text-tertiary">
-                              {wt.git_branch}
-                            </span>
-                          )}
-                          {wt.git_is_dirty && (
-                            <span
-                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-warning"
-                              title="Uncommitted changes"
-                            />
-                          )}
-                        </div>
-                        <div className="mt-1 truncate font-mono text-xs text-text-tertiary">
-                          {wt.path}
-                        </div>
-                      </div>
-                      <div className="ml-4 flex shrink-0 items-center gap-1">
-                        <Button
-                          onClick={() => void handleOpenWorktreeTerminal(wt)}
-                          variant="ghost"
-                          size="sm"
-                        >
-                          <Terminal size={14} />
-                        </Button>
-                        <Button
-                          onClick={() =>
-                            void handleDeleteWorktree(wt.id, wt.name)
-                          }
-                          variant="ghost"
-                          size="sm"
-                        >
-                          <Trash2 size={14} />
-                        </Button>
-                      </div>
-                    </div>
+                      worktree={wt}
+                      parentProjectId={projectId!}
+                      hostId={project.host_id}
+                      worktreeActions={worktreeActions}
+                      onDelete={() =>
+                        void handleDeleteWorktree(wt.id, wt.name)
+                      }
+                      onOpenTerminal={() =>
+                        void handleOpenWorktreeTerminal(wt)
+                      }
+                    />
                   ))}
                 </div>
               )}
