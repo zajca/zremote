@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Pencil, X } from "lucide-react";
+import { ArrowLeft, Bot, Pencil, SquareTerminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useHosts } from "../hooks/useHosts";
@@ -61,6 +61,15 @@ export function SessionPage() {
 
   // Determine the loop to show in overlay
   const overlayLoopId = claudeTask?.loop_id ?? activeLoop?.id;
+
+  const handleCopyTmuxCommand = useCallback(() => {
+    if (!session?.tmux_name) return;
+    const command = `tmux -L zremote attach-session -t ${session.tmux_name}`;
+    void navigator.clipboard.writeText(command).then(
+      () => showToast("Tmux attach command copied", "success"),
+      () => showToast("Failed to copy to clipboard", "error"),
+    );
+  }, [session?.tmux_name]);
 
   const handleClose = useCallback(async () => {
     if (!hostId || !sessionId || closing) return;
@@ -198,6 +207,14 @@ export function SessionPage() {
           {session.status}
         </Badge>
         <div className="ml-auto flex items-center gap-1">
+          {session.tmux_name && (session.status === "active" || session.status === "suspended") && (
+            <IconButton
+              icon={SquareTerminal}
+              tooltip={`Copy: tmux -L zremote attach-session -t ${session.tmux_name}`}
+              onClick={handleCopyTmuxCommand}
+              aria-label="Copy tmux attach command"
+            />
+          )}
           <IconButton
             icon={X}
             tooltip="Close session"

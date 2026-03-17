@@ -22,6 +22,7 @@ export interface Session {
   exit_code: number | null;
   working_dir: string | null;
   project_id: string | null;
+  tmux_name: string | null;
 }
 
 export interface Project {
