@@ -132,6 +132,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::projects::run_action),
         )
         .route(
+            "/api/projects/{project_id}/configure",
+            post(routes::projects::configure_with_claude),
+        )
+        .route(
             "/api/config/{key}",
             get(routes::config::get_global_config).put(routes::config::set_global_config),
         )
