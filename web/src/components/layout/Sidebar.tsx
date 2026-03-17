@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { BarChart3, Clock, Laptop, Monitor, PanelLeftClose, Settings } from "lucide-react";
+import { BarChart3, Clock, Laptop, Monitor, PanelLeftClose, Pin, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
@@ -9,10 +9,12 @@ import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { HostItem } from "../sidebar/HostItem";
 
 interface SidebarProps {
-  onCollapse?: () => void;
+  pinned: boolean;
+  onPin: () => void;
+  onUnpin: () => void;
 }
 
-export function Sidebar({ onCollapse }: SidebarProps) {
+export function Sidebar({ pinned, onPin, onUnpin }: SidebarProps) {
   const { hosts, loading, refetch: refetchHosts } = useHosts();
   const { isLocal } = useMode();
 
@@ -43,15 +45,14 @@ export function Sidebar({ onCollapse }: SidebarProps) {
             Local
           </span>
         )}
-        {onCollapse && (
-          <button
-            onClick={onCollapse}
-            className={`${isLocal ? "" : "ml-auto "}inline-flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-primary`}
-            title="Hide sidebar (Ctrl+B)"
-          >
-            <PanelLeftClose size={16} />
-          </button>
-        )}
+        <button
+          onClick={pinned ? onUnpin : onPin}
+          className={`${isLocal ? "" : "ml-auto "}inline-flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-primary`}
+          title={pinned ? "Unpin sidebar (Ctrl+B)" : "Pin sidebar (Ctrl+B)"}
+          aria-label={pinned ? "Unpin sidebar" : "Pin sidebar"}
+        >
+          {pinned ? <PanelLeftClose size={16} /> : <Pin size={16} />}
+        </button>
       </div>
 
       <nav className="sidebar-scroll flex-1 overflow-y-auto py-2">
