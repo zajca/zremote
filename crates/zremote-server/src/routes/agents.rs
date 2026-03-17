@@ -1037,6 +1037,7 @@ struct LoopRow {
     summary: Option<String>,
     context_used: Option<i64>,
     context_max: Option<i64>,
+    task_name: Option<String>,
 }
 
 /// Fetch a full `LoopInfo` from the DB, supplementing with in-memory state
@@ -1045,7 +1046,7 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
          ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
-         context_used, context_max \
+         context_used, context_max, task_name \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -1088,6 +1089,7 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
         context_used,
         context_max,
         pending_tool_calls,
+        task_name: row.task_name,
     })
 }
 
@@ -1443,6 +1445,7 @@ async fn handle_agentic_message(
             context_used,
             context_max,
             model,
+            task_name,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
@@ -1460,7 +1463,7 @@ async fn handle_agentic_message(
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
                  estimated_cost_usd = ?, context_used = ?, context_max = ?, \
-                 model = COALESCE(?, model) WHERE id = ?",
+                 model = COALESCE(?, model), task_name = COALESCE(?, task_name) WHERE id = ?",
             )
             .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
             .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
@@ -1468,11 +1471,22 @@ async fn handle_agentic_message(
             .bind(i64::try_from(context_used).unwrap_or(i64::MAX))
             .bind(i64::try_from(context_max).unwrap_or(i64::MAX))
             .bind(model_opt)
+            .bind(task_name.as_deref())
             .bind(&loop_id_str)
             .execute(&state.db)
             .await
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
+            }
+
+            if task_name.is_some() {
+                let _ = sqlx::query(
+                    "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
+                )
+                .bind(task_name.as_deref())
+                .bind(&loop_id_str)
+                .execute(&state.db)
+                .await;
             }
 
             // Broadcast metrics event with full loop info

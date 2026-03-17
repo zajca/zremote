@@ -130,6 +130,7 @@ pub struct LoopInfo {
     pub context_used: i64,
     pub context_max: i64,
     pub pending_tool_calls: i64,
+    pub task_name: Option<String>,
 }
 
 /// Tool call information matching the frontend `ToolCall` interface.
@@ -755,6 +756,7 @@ mod tests {
                     context_used: 0,
                     context_max: 0,
                     pending_tool_calls: 0,
+                    task_name: None,
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
@@ -777,6 +779,7 @@ mod tests {
                     context_used: 0,
                     context_max: 0,
                     pending_tool_calls: 0,
+                    task_name: None,
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
@@ -799,6 +802,7 @@ mod tests {
                     context_used: 0,
                     context_max: 0,
                     pending_tool_calls: 0,
+                    task_name: None,
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
@@ -862,6 +866,7 @@ mod tests {
                     context_used: 5000,
                     context_max: 200_000,
                     pending_tool_calls: 0,
+                    task_name: None,
                 },
             },
             ServerEvent::ProjectsUpdated {

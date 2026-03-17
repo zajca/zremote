@@ -199,6 +199,7 @@ mod tests {
             context_used: 0,
             context_max: 0,
             pending_tool_calls: 0,
+            task_name: None,
         }
     }
 

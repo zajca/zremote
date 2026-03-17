@@ -355,8 +355,11 @@ export function AgenticOverlay({ loopId }: AgenticOverlayProps) {
         {/* Status dot + tool name + badge + duration */}
         <div className={`h-2 w-2 shrink-0 rounded-full ${statusDotColor(loop.status)}`} />
         <span className="text-xs font-medium text-text-primary">
-          {loop.tool_name}
+          {loop.task_name || loop.tool_name}
         </span>
+        {loop.task_name && (
+          <span className="text-[11px] text-text-tertiary">{loop.tool_name}</span>
+        )}
         <Badge variant={statusBadgeVariant(loop.status)}>
           {loop.status === "waiting_for_input" ? "waiting" : loop.status}
         </Badge>

@@ -85,6 +85,9 @@ struct TranscriptLine {
     #[serde(default, alias = "request_id")]
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    /// Task slug (e.g. "rename-myremote-to-zremote") present in Claude Code JSONL.
+    #[serde(default)]
+    slug: Option<String>,
 }
 
 impl TranscriptLine {
@@ -135,15 +138,24 @@ struct UsageBlock {
 /// - Vec of transcript entries (messages)
 /// - New byte offset (for incremental parsing)
 /// - Vec of token usage data (for metrics aggregation)
+/// - Optional slug (first non-None slug found in the transcript)
 pub async fn parse_transcript_file(
     path: &str,
     offset: u64,
-) -> Result<(Vec<TranscriptEntry>, u64, Vec<TokenUsageData>), std::io::Error> {
+) -> Result<
+    (
+        Vec<TranscriptEntry>,
+        u64,
+        Vec<TokenUsageData>,
+        Option<String>,
+    ),
+    std::io::Error,
+> {
     let data = tokio::fs::read(path).await?;
     let total_len = data.len() as u64;
 
     if offset >= total_len {
-        return Ok((Vec::new(), total_len, Vec::new()));
+        return Ok((Vec::new(), total_len, Vec::new(), None));
     }
 
     let slice = &data[offset as usize..];
@@ -152,6 +164,7 @@ pub async fn parse_transcript_file(
     let mut entries = Vec::new();
     let mut token_data = Vec::new();
     let mut seen_request_ids: HashSet<String> = HashSet::new();
+    let mut slug_found: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -162,6 +175,10 @@ pub async fn parse_transcript_file(
         let Ok(parsed) = serde_json::from_str::<TranscriptLine>(line) else {
             continue;
         };
+
+        if slug_found.is_none() {
+            slug_found = parsed.slug.clone();
+        }
 
         // Extract token usage (deduplicate by requestId)
         if let Some(usage) = parsed.usage() {
@@ -271,14 +288,17 @@ pub async fn parse_transcript_file(
         }
     }
 
-    Ok((entries, total_len, token_data))
+    Ok((entries, total_len, token_data, slug_found))
 }
 
 /// Parse transcript content from a string (for testing).
-pub fn parse_transcript_str(text: &str) -> (Vec<TranscriptEntry>, Vec<TokenUsageData>) {
+pub fn parse_transcript_str(
+    text: &str,
+) -> (Vec<TranscriptEntry>, Vec<TokenUsageData>, Option<String>) {
     let mut entries = Vec::new();
     let mut token_data = Vec::new();
     let mut seen_request_ids: HashSet<String> = HashSet::new();
+    let mut slug_found: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -289,6 +309,10 @@ pub fn parse_transcript_str(text: &str) -> (Vec<TranscriptEntry>, Vec<TokenUsage
         let Ok(parsed) = serde_json::from_str::<TranscriptLine>(line) else {
             continue;
         };
+
+        if slug_found.is_none() {
+            slug_found = parsed.slug.clone();
+        }
 
         if let Some(usage) = parsed.usage() {
             let is_duplicate = parsed
@@ -336,7 +360,7 @@ pub fn parse_transcript_str(text: &str) -> (Vec<TranscriptEntry>, Vec<TokenUsage
         }
     }
 
-    (entries, token_data)
+    (entries, token_data, slug_found)
 }
 
 #[cfg(test)]
@@ -349,7 +373,7 @@ mod tests {
 {"role":"assistant","content":"I'll help you refactor the code.","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}
 {"role":"user","content":"Thanks!"}"#;
 
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].role, TranscriptRole::User);
         assert_eq!(entries[0].content, "Hello, help me refactor");
@@ -370,7 +394,7 @@ mod tests {
         let jsonl =
             r#"{"role":"assistant","content":[{"type":"text","text":"Let me read the file."}]}"#;
 
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Let me read the file.");
     }
@@ -379,7 +403,7 @@ mod tests {
     fn parse_skips_invalid_lines() {
         let jsonl = "not valid json\n{\"role\":\"user\",\"content\":\"ok\"}\n{broken";
 
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "ok");
     }
@@ -389,7 +413,7 @@ mod tests {
         let jsonl = r#"{"type":"metadata","session_id":"abc"}
 {"role":"user","content":"hello"}"#;
 
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
     }
 
@@ -398,7 +422,7 @@ mod tests {
         let jsonl = r#"{"role":"assistant","content":"a","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5},"model":"claude-sonnet-4-20250514"}
 {"role":"assistant","content":"b","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":20,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}"#;
 
-        let (_, token_data) = parse_transcript_str(jsonl);
+        let (_, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(token_data.len(), 2);
         assert_eq!(token_data[0].input_tokens, 100);
         assert_eq!(token_data[0].cache_read_input_tokens, 10);
@@ -416,14 +440,14 @@ mod tests {
         tokio::fs::write(&path, content).await.unwrap();
 
         // Parse from beginning
-        let (entries, new_offset, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, new_offset, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(new_offset, content.len() as u64);
 
         // Parse from offset (should return nothing new)
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), new_offset)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), new_offset)
             .await
             .unwrap();
         assert!(entries.is_empty());
@@ -432,7 +456,7 @@ mod tests {
     #[test]
     fn parse_system_role() {
         let jsonl = r#"{"role":"system","content":"You are an assistant."}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, TranscriptRole::System);
         assert_eq!(entries[0].content, "You are an assistant.");
@@ -443,14 +467,14 @@ mod tests {
         let jsonl = r#"{"role":"tool","content":"some output"}
 {"role":"unknown_role","content":"skip me"}
 {"role":"user","content":"keep me"}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "keep me");
     }
 
     #[test]
     fn parse_empty_input() {
-        let (entries, token_data) = parse_transcript_str("");
+        let (entries, token_data, _) = parse_transcript_str("");
         assert!(entries.is_empty());
         assert!(token_data.is_empty());
     }
@@ -458,14 +482,14 @@ mod tests {
     #[test]
     fn parse_only_whitespace_lines() {
         let jsonl = "   \n  \n\n   ";
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert!(entries.is_empty());
     }
 
     #[test]
     fn parse_content_array_with_tool_use() {
         let jsonl = r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"/src/main.rs"}}]}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         // parse_transcript_str only extracts Text blocks from arrays, not tool_use
         assert!(entries.is_empty());
     }
@@ -473,7 +497,7 @@ mod tests {
     #[test]
     fn parse_content_array_with_empty_text() {
         let jsonl = r#"{"role":"assistant","content":[{"type":"text","text":""}]}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         // Empty text blocks should be skipped
         assert!(entries.is_empty());
     }
@@ -481,7 +505,7 @@ mod tests {
     #[test]
     fn parse_content_array_mixed_blocks() {
         let jsonl = r#"{"role":"assistant","content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}},{"type":"text","text":"World"}]}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         // parse_transcript_str extracts only Text blocks
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content, "Hello");
@@ -491,7 +515,7 @@ mod tests {
     #[test]
     fn parse_usage_with_no_model() {
         let jsonl = r#"{"role":"assistant","content":"text","usage":{"input_tokens":50,"output_tokens":25,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(token_data.len(), 1);
         assert_eq!(token_data[0].input_tokens, 50);
@@ -502,21 +526,21 @@ mod tests {
     fn parse_content_as_non_string_non_array() {
         // Content is a number - should be skipped
         let jsonl = r#"{"role":"user","content":42}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert!(entries.is_empty());
     }
 
     #[test]
     fn parse_line_without_content() {
         let jsonl = r#"{"role":"user"}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert!(entries.is_empty());
     }
 
     #[test]
     fn parse_line_with_type_field() {
         let jsonl = r#"{"type":"summary","role":"assistant","content":"Summary text"}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Summary text");
     }
@@ -535,7 +559,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (entries, offset, token_data) = parse_transcript_file(path.to_str().unwrap(), 99999)
+        let (entries, offset, token_data, _) = parse_transcript_file(path.to_str().unwrap(), 99999)
             .await
             .unwrap();
         assert!(entries.is_empty());
@@ -554,7 +578,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, first).await.unwrap();
 
-        let (entries, offset1, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, offset1, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -568,7 +592,7 @@ mod tests {
         tokio::fs::write(&path, &full).await.unwrap();
 
         // Parse from offset - should only get new entry
-        let (entries, offset2, _) = parse_transcript_file(path.to_str().unwrap(), offset1)
+        let (entries, offset2, _, _) = parse_transcript_file(path.to_str().unwrap(), offset1)
             .await
             .unwrap();
         assert_eq!(entries.len(), 1);
@@ -585,7 +609,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -611,7 +635,7 @@ mod tests {
         );
         tokio::fs::write(&path, &content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -635,7 +659,7 @@ mod tests {
     #[test]
     fn parse_content_array_with_other_block_type() {
         let jsonl = r#"{"role":"assistant","content":[{"type":"image","source":"base64data"},{"type":"text","text":"visible"}]}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "visible");
     }
@@ -651,7 +675,7 @@ mod tests {
         );
         tokio::fs::write(&path, &content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -671,7 +695,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -689,7 +713,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -707,7 +731,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -724,7 +748,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -741,7 +765,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -759,7 +783,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -776,7 +800,7 @@ mod tests {
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, token_data, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -802,7 +826,7 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -819,7 +843,7 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, _, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -834,7 +858,7 @@ not json at all
         let jsonl = r#"{"role":"system","content":"System prompt here"}
 {"role":"user","content":"User message"}
 {"role":"assistant","content":"Response"}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].role, TranscriptRole::System);
         assert_eq!(entries[1].role, TranscriptRole::User);
@@ -845,7 +869,7 @@ not json at all
     fn parse_str_content_array_skips_non_text_blocks() {
         // parse_transcript_str only extracts Text blocks from arrays
         let jsonl = r#"{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}},{"type":"text","text":"explanation"},{"type":"tool_result","tool_use_id":"t1","content":"result"}]}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "explanation");
     }
@@ -853,7 +877,7 @@ not json at all
     #[test]
     fn parse_str_content_null_is_skipped() {
         let jsonl = r#"{"role":"user","content":null}"#;
-        let (entries, _) = parse_transcript_str(jsonl);
+        let (entries, _, _) = parse_transcript_str(jsonl);
         assert!(entries.is_empty());
     }
 
@@ -875,7 +899,7 @@ not json at all
         let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello, help me refactor"}]},"requestId":"req-1","timestamp":"2025-01-01T00:00:00Z"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help you refactor."}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":5},"model":"claude-sonnet-4-20250514"},"requestId":"req-2","timestamp":"2025-01-01T00:00:01Z"}"#;
 
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].role, TranscriptRole::User);
         assert_eq!(entries[0].content, "Hello, help me refactor");
@@ -897,7 +921,7 @@ not json at all
     fn parse_nested_format_with_tool_use() {
         let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me read it."},{"type":"tool_use","id":"toolu_abc","name":"Read","input":{"file_path":"/src/main.rs"}}],"usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-3"}"#;
 
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         // parse_transcript_str only extracts Text blocks
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "Let me read it.");
@@ -912,7 +936,7 @@ not json at all
         let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first part"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-dup"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second part"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-dup"}"#;
 
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 2); // both text entries appear
         assert_eq!(token_data.len(), 1); // usage deduplicated to one
         assert_eq!(token_data[0].input_tokens, 100);
@@ -923,7 +947,7 @@ not json at all
         let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-1"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"},"requestId":"req-2"}"#;
 
-        let (_, token_data) = parse_transcript_str(jsonl);
+        let (_, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(token_data.len(), 2);
         assert_eq!(token_data[0].input_tokens, 100);
         assert_eq!(token_data[1].input_tokens, 200);
@@ -935,7 +959,7 @@ not json at all
         let jsonl = r#"{"role":"assistant","content":"a","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}
 {"role":"assistant","content":"b","usage":{"input_tokens":200,"output_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model":"claude-sonnet-4-20250514"}"#;
 
-        let (_, token_data) = parse_transcript_str(jsonl);
+        let (_, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(token_data.len(), 2);
     }
 
@@ -943,7 +967,7 @@ not json at all
     fn parse_nested_format_without_usage() {
         let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"requestId":"req-no-usage"}"#;
 
-        let (entries, token_data) = parse_transcript_str(jsonl);
+        let (entries, token_data, _) = parse_transcript_str(jsonl);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "hello");
         assert!(token_data.is_empty());
@@ -958,7 +982,7 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, token_data, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
@@ -983,11 +1007,27 @@ not json at all
 "#;
         tokio::fs::write(&path, content).await.unwrap();
 
-        let (entries, _, token_data) = parse_transcript_file(path.to_str().unwrap(), 0)
+        let (entries, _, token_data, _) = parse_transcript_file(path.to_str().unwrap(), 0)
             .await
             .unwrap();
 
         assert_eq!(entries.len(), 2); // both entries present
         assert_eq!(token_data.len(), 1); // usage deduplicated
+    }
+
+    #[test]
+    fn parse_extracts_slug() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"slug":"rename-myremote-to-zremote","requestId":"req-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"slug":"rename-myremote-to-zremote","requestId":"req-2"}"#;
+        let (entries, _, slug) = parse_transcript_str(jsonl);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(slug.as_deref(), Some("rename-myremote-to-zremote"));
+    }
+
+    #[test]
+    fn parse_no_slug_returns_none() {
+        let jsonl = r#"{"role":"user","content":"hello"}"#;
+        let (_, _, slug) = parse_transcript_str(jsonl);
+        assert!(slug.is_none());
     }
 }
