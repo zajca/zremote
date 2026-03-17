@@ -126,6 +126,7 @@ describe("ProjectPage", () => {
     renderProjectPage();
     await waitFor(() => {
       expect(screen.getByText("sessions")).toBeInTheDocument();
+      expect(screen.getByText("actions")).toBeInTheDocument();
       expect(screen.getByText("loops")).toBeInTheDocument();
       expect(screen.getByText("knowledge")).toBeInTheDocument();
       expect(screen.getByText("settings")).toBeInTheDocument();

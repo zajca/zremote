@@ -1,6 +1,12 @@
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type AgenticSettings, type ProjectSettings } from "../lib/api";
+import {
+  api,
+  type AgenticSettings,
+  type ProjectAction,
+  type ProjectSettings,
+  type WorktreeSettings,
+} from "../lib/api";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { showToast } from "./layout/Toast";
@@ -18,6 +24,18 @@ interface EnvVar {
 
 const ENV_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+function emptyAction(): ProjectAction {
+  return {
+    name: "",
+    command: "",
+    description: undefined,
+    icon: undefined,
+    working_dir: undefined,
+    env: {},
+    worktree_scoped: false,
+  };
+}
+
 function defaultSettings(): ProjectSettings {
   return {
     env: {},
@@ -26,6 +44,7 @@ function defaultSettings(): ProjectSettings {
       default_permissions: [],
       auto_approve_patterns: [],
     },
+    actions: [],
   };
 }
 
@@ -57,6 +76,10 @@ export function ProjectSettingsTab({
   const [autoDetect, setAutoDetect] = useState(true);
   const [defaultPermissions, setDefaultPermissions] = useState("");
   const [autoApprovePatterns, setAutoApprovePatterns] = useState("");
+  const [actions, setActions] = useState<ProjectAction[]>([]);
+  const [expandedActions, setExpandedActions] = useState<Set<number>>(new Set());
+  const [worktreeOnCreate, setWorktreeOnCreate] = useState("");
+  const [worktreeOnDelete, setWorktreeOnDelete] = useState("");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const initialRef = useRef<string>("");
@@ -68,6 +91,9 @@ export function ProjectSettingsTab({
     setAutoDetect(settings.agentic.auto_detect);
     setDefaultPermissions(settings.agentic.default_permissions.join(", "));
     setAutoApprovePatterns(settings.agentic.auto_approve_patterns.join(", "));
+    setActions(settings.actions ?? []);
+    setWorktreeOnCreate(settings.worktree?.on_create ?? "");
+    setWorktreeOnDelete(settings.worktree?.on_delete ?? "");
     initialRef.current = JSON.stringify(settings);
     setDirty(false);
   }, []);
@@ -84,13 +110,23 @@ export function ProjectSettingsTab({
         .map((s) => s.trim())
         .filter(Boolean),
     };
+    const validActions = actions.filter((a) => a.name.trim() && a.command.trim());
+    const worktree: WorktreeSettings | undefined =
+      worktreeOnCreate.trim() || worktreeOnDelete.trim()
+        ? {
+            on_create: worktreeOnCreate.trim() || undefined,
+            on_delete: worktreeOnDelete.trim() || undefined,
+          }
+        : undefined;
     return {
       shell: shell.trim() || undefined,
       working_dir: workingDir.trim() || undefined,
       env: envVarsToRecord(envVars),
       agentic,
+      actions: validActions.length > 0 ? validActions : undefined,
+      worktree,
     };
-  }, [shell, workingDir, envVars, autoDetect, defaultPermissions, autoApprovePatterns]);
+  }, [shell, workingDir, envVars, autoDetect, defaultPermissions, autoApprovePatterns, actions, worktreeOnCreate, worktreeOnDelete]);
 
   const checkDirty = useCallback(() => {
     const current = JSON.stringify(buildSettings());
@@ -183,6 +219,40 @@ export function ProjectSettingsTab({
       setSaving(false);
     }
   }, [projectId, applySettings]);
+
+  const handleAddAction = useCallback(() => {
+    setActions((prev) => [...prev, emptyAction()]);
+  }, []);
+
+  const handleRemoveAction = useCallback((index: number) => {
+    setActions((prev) => prev.filter((_, i) => i !== index));
+    setExpandedActions((prev) => {
+      const next = new Set(prev);
+      next.delete(index);
+      return next;
+    });
+  }, []);
+
+  const handleActionChange = useCallback(
+    (index: number, field: keyof ProjectAction, val: unknown) => {
+      setActions((prev) =>
+        prev.map((a, i) => (i === index ? { ...a, [field]: val } : a)),
+      );
+    },
+    [],
+  );
+
+  const toggleActionExpanded = useCallback((index: number) => {
+    setExpandedActions((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  }, []);
 
   const handleAddEnvVar = useCallback(() => {
     setEnvVars((prev) => [...prev, { key: "", value: "" }]);
@@ -352,6 +422,174 @@ export function ProjectSettingsTab({
             onChange={(e) => setAutoApprovePatterns(e.target.value)}
             placeholder="cargo test*, bun run test*"
           />
+        </div>
+      </section>
+
+      {/* Actions */}
+      <section>
+        <h2 className="mb-3 text-sm font-medium text-text-primary">Actions</h2>
+        <div className="space-y-3 rounded-md border border-border bg-bg-secondary p-4">
+          {actions.length === 0 && (
+            <p className="text-xs text-text-tertiary">
+              No actions configured.
+            </p>
+          )}
+          {actions.map((action, i) => (
+            <div
+              key={i}
+              className="rounded-md border border-border bg-bg-tertiary p-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={action.name}
+                      onChange={(e) =>
+                        handleActionChange(i, "name", e.target.value)
+                      }
+                      placeholder="Action name"
+                      className="h-8 flex-1 rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                      aria-label="Action name"
+                    />
+                    <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+                      <input
+                        type="checkbox"
+                        checked={action.worktree_scoped}
+                        onChange={(e) =>
+                          handleActionChange(
+                            i,
+                            "worktree_scoped",
+                            e.target.checked,
+                          )
+                        }
+                        className="rounded border-border"
+                      />
+                      Worktree
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={action.command}
+                    onChange={(e) =>
+                      handleActionChange(i, "command", e.target.value)
+                    }
+                    placeholder="Command to run"
+                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 font-mono text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                    aria-label="Action command"
+                  />
+                  <input
+                    type="text"
+                    value={action.description ?? ""}
+                    onChange={(e) =>
+                      handleActionChange(
+                        i,
+                        "description",
+                        e.target.value || undefined,
+                      )
+                    }
+                    placeholder="Description (optional)"
+                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                    aria-label="Action description"
+                  />
+                </div>
+                <button
+                  onClick={() => handleRemoveAction(i)}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-status-error"
+                  aria-label="Remove action"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              {/* Advanced fields toggle */}
+              <button
+                type="button"
+                onClick={() => toggleActionExpanded(i)}
+                className="mt-2 flex items-center gap-1 text-xs text-text-tertiary transition-colors duration-150 hover:text-text-secondary"
+              >
+                {expandedActions.has(i) ? (
+                  <ChevronDown size={12} />
+                ) : (
+                  <ChevronRight size={12} />
+                )}
+                Advanced
+              </button>
+              {expandedActions.has(i) && (
+                <div className="mt-2 space-y-2 border-t border-border pt-2">
+                  <input
+                    type="text"
+                    value={action.icon ?? ""}
+                    onChange={(e) =>
+                      handleActionChange(
+                        i,
+                        "icon",
+                        e.target.value || undefined,
+                      )
+                    }
+                    placeholder="Icon (e.g. play, rocket, git-branch)"
+                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                    aria-label="Action icon"
+                  />
+                  <input
+                    type="text"
+                    value={action.working_dir ?? ""}
+                    onChange={(e) =>
+                      handleActionChange(
+                        i,
+                        "working_dir",
+                        e.target.value || undefined,
+                      )
+                    }
+                    placeholder="Working directory (optional)"
+                    className="h-8 w-full rounded-md border border-border bg-bg-secondary px-2 font-mono text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
+                    aria-label="Action working directory"
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+          <Button onClick={handleAddAction} variant="ghost" size="sm">
+            <Plus size={14} />
+            Add action
+          </Button>
+        </div>
+      </section>
+
+      {/* Worktree Hooks */}
+      <section>
+        <h2 className="mb-3 text-sm font-medium text-text-primary">
+          Worktree Hooks
+        </h2>
+        <div className="space-y-3 rounded-md border border-border bg-bg-secondary p-4">
+          <Input
+            label="On Create Hook"
+            value={worktreeOnCreate}
+            onChange={(e) => setWorktreeOnCreate(e.target.value)}
+            placeholder="e.g. bun install"
+            className="font-mono"
+          />
+          <Input
+            label="On Delete Hook"
+            value={worktreeOnDelete}
+            onChange={(e) => setWorktreeOnDelete(e.target.value)}
+            placeholder="e.g. cleanup.sh"
+            className="font-mono"
+          />
+          <p className="text-xs text-text-tertiary">
+            Template variables:{" "}
+            <code className="rounded bg-bg-active px-1 py-0.5">
+              {"{{project_path}}"}
+            </code>
+            ,{" "}
+            <code className="rounded bg-bg-active px-1 py-0.5">
+              {"{{worktree_path}}"}
+            </code>
+            ,{" "}
+            <code className="rounded bg-bg-active px-1 py-0.5">
+              {"{{branch}}"}
+            </code>
+          </p>
         </div>
       </section>
 
