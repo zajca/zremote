@@ -48,6 +48,8 @@ pub enum AgentMessage {
         session_id: SessionId,
         shell: String,
         pid: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tmux_name: Option<String>,
     },
     SessionClosed {
         session_id: SessionId,
@@ -358,7 +360,26 @@ mod tests {
             session_id: Uuid::new_v4(),
             shell: "/bin/bash".to_string(),
             pid: 12345,
+            tmux_name: None,
         });
+        roundtrip_agent(&AgentMessage::SessionCreated {
+            session_id: Uuid::new_v4(),
+            shell: "/bin/zsh".to_string(),
+            pid: 999,
+            tmux_name: Some("zremote-abc123".to_string()),
+        });
+    }
+
+    #[test]
+    fn session_created_without_tmux_name_deserializes() {
+        // Backward compat: older agents won't send tmux_name
+        let json = r#"{"type":"SessionCreated","payload":{"session_id":"550e8400-e29b-41d4-a716-446655440000","shell":"/bin/bash","pid":12345}}"#;
+        let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
+        if let AgentMessage::SessionCreated { tmux_name, .. } = msg {
+            assert!(tmux_name.is_none(), "tmux_name should default to None");
+        } else {
+            panic!("expected SessionCreated variant");
+        }
     }
 
     #[test]

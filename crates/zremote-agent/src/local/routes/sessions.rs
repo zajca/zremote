@@ -148,14 +148,27 @@ pub async fn create_session(
         "local session created"
     );
 
-    // Update DB: status -> active, shell, pid
-    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
-        .bind(effective_shell)
-        .bind(i64::from(pid))
-        .bind(&session_id_str)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+    // Compute tmux_name if tmux backend is active
+    let tmux_name: Option<String> = {
+        let mgr = state.session_manager.lock().await;
+        if mgr.use_tmux() {
+            Some(format!("zremote-{session_id}"))
+        } else {
+            None
+        }
+    };
+
+    // Update DB: status -> active, shell, pid, tmux_name
+    sqlx::query(
+        "UPDATE sessions SET status = 'active', shell = ?, pid = ?, tmux_name = ? WHERE id = ?",
+    )
+    .bind(effective_shell)
+    .bind(i64::from(pid))
+    .bind(&tmux_name)
+    .bind(&session_id_str)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Database)?;
 
     // Update in-memory status
     {

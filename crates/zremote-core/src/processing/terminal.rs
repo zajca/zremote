@@ -14,14 +14,21 @@ pub struct TerminalProcessor {
 
 impl TerminalProcessor {
     /// Update session status to active in DB after agent creates it.
-    pub async fn handle_session_created(&self, session_id: SessionId, shell: &str, pid: u32) {
+    pub async fn handle_session_created(
+        &self,
+        session_id: SessionId,
+        shell: &str,
+        pid: u32,
+        tmux_name: Option<&str>,
+    ) {
         let session_id_str = session_id.to_string();
         let now = chrono::Utc::now().to_rfc3339();
         if let Err(e) = sqlx::query(
-            "UPDATE sessions SET status = 'active', shell = ?, pid = ?, created_at = ? WHERE id = ?",
+            "UPDATE sessions SET status = 'active', shell = ?, pid = ?, tmux_name = ?, created_at = ? WHERE id = ?",
         )
         .bind(shell)
         .bind(i64::from(pid))
+        .bind(tmux_name)
         .bind(&now)
         .bind(&session_id_str)
         .execute(&self.db)
@@ -141,12 +148,12 @@ mod tests {
             .await
             .insert(session_id, SessionState::new(session_id, proc.host_id));
 
-        proc.handle_session_created(session_id, "/bin/bash", 12345)
+        proc.handle_session_created(session_id, "/bin/bash", 12345, Some("zremote-test"))
             .await;
 
         // Verify DB update
-        let (status, shell, pid): (String, Option<String>, Option<i64>) =
-            sqlx::query_as("SELECT status, shell, pid FROM sessions WHERE id = ?")
+        let (status, shell, pid, tmux_name): (String, Option<String>, Option<i64>, Option<String>) =
+            sqlx::query_as("SELECT status, shell, pid, tmux_name FROM sessions WHERE id = ?")
                 .bind(session_id.to_string())
                 .fetch_one(&db)
                 .await
@@ -154,6 +161,7 @@ mod tests {
         assert_eq!(status, "active");
         assert_eq!(shell.unwrap(), "/bin/bash");
         assert_eq!(pid.unwrap(), 12345);
+        assert_eq!(tmux_name.unwrap(), "zremote-test");
 
         // Verify in-memory status
         let store = sessions.read().await;
@@ -172,7 +180,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
-        proc.handle_session_created(session_id, "/bin/zsh", 999)
+        proc.handle_session_created(session_id, "/bin/zsh", 999, None)
             .await;
 
         let event = rx.try_recv().unwrap();
@@ -200,7 +208,7 @@ mod tests {
         insert_session_row(&db, &session_id.to_string(), &host_id_str).await;
 
         // No panic expected
-        proc.handle_session_created(session_id, "/bin/bash", 100)
+        proc.handle_session_created(session_id, "/bin/bash", 100, None)
             .await;
 
         let (status,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")

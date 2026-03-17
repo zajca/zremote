@@ -251,12 +251,18 @@ fn handle_session_create(
     let shell = shell.unwrap_or(default_shell());
     match session_manager.create(session_id, shell, cols, rows, working_dir, env) {
         Ok(pid) => {
+            let tmux_name = if session_manager.use_tmux() {
+                Some(format!("zremote-{session_id}"))
+            } else {
+                None
+            };
             tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
             if outbound_tx
                 .try_send(AgentMessage::SessionCreated {
                     session_id,
                     shell: shell.to_string(),
                     pid,
+                    tmux_name,
                 })
                 .is_err()
             {
@@ -1124,11 +1130,17 @@ fn handle_claude_server_message(
                     );
 
                     // Notify that the PTY session is created
+                    let tmux_name = if session_manager.use_tmux() {
+                        Some(format!("zremote-{session_id}"))
+                    } else {
+                        None
+                    };
                     if outbound_tx
                         .try_send(AgentMessage::SessionCreated {
                             session_id: *session_id,
                             shell: shell.to_string(),
                             pid,
+                            tmux_name,
                         })
                         .is_err()
                     {
