@@ -250,6 +250,21 @@ impl TmuxSession {
 
         tracing::info!(session_id = %session_id, pane_id = %pane_id, "pane ID captured on reattach");
 
+        // Capture the current visible pane content so the browser gets
+        // an immediate snapshot after recovery (scrollback is lost on restart).
+        if let Ok(cap) = tmux_cmd()
+            .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
+            .output()
+        {
+            if cap.status.success() && !cap.stdout.is_empty() {
+                let _ = output_tx.try_send(PtyOutput {
+                    session_id,
+                    pane_id: None,
+                    data: cap.stdout,
+                });
+            }
+        }
+
         let mut known_pane_ids = HashSet::new();
         known_pane_ids.insert(pane_id.clone());
 
