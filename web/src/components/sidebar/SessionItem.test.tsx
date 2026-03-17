@@ -8,14 +8,15 @@ import type { AgenticLoop } from "../../types/agentic";
 
 let mockLoops: AgenticLoop[] = [];
 let mockSessionTaskIndex = new Map<string, string>();
+let mockTasks = new Map<string, { task_name?: string }>();
 
 vi.mock("../../hooks/useAgenticLoops", () => ({
   useAgenticLoops: () => ({ loops: mockLoops, loading: false }),
 }));
 
 vi.mock("../../stores/claude-task-store", () => ({
-  useClaudeTaskStore: (selector: (s: { sessionTaskIndex: Map<string, string> }) => unknown) =>
-    selector({ sessionTaskIndex: mockSessionTaskIndex }),
+  useClaudeTaskStore: (selector: (s: { sessionTaskIndex: Map<string, string>; tasks: Map<string, { task_name?: string }> }) => unknown) =>
+    selector({ sessionTaskIndex: mockSessionTaskIndex, tasks: mockTasks }),
 }));
 
 const baseSession: Session = {
@@ -58,6 +59,7 @@ describe("SessionItem", () => {
     vi.restoreAllMocks();
     mockLoops = [];
     mockSessionTaskIndex = new Map();
+    mockTasks = new Map();
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({}),
@@ -217,14 +219,26 @@ describe("SessionItem", () => {
 
   test("shows Bot icon when session is a Claude task", () => {
     mockSessionTaskIndex = new Map([["sess-1", "task-1"]]);
+    mockTasks = new Map([["task-1", { task_name: undefined }]]);
     render(
       <MemoryRouter>
         <SessionItem session={baseSession} hostId="host-1" />
       </MemoryRouter>,
     );
-    // Bot icon should be rendered (Claude task indicator)
-    // The component renders Bot icon when isClaudeTask is true
+    // Without task_name, falls back to session name
     expect(screen.getByText("dev-session")).toBeInTheDocument();
+  });
+
+  test("shows task_name instead of session name when Claude task has task_name", () => {
+    mockSessionTaskIndex = new Map([["sess-1", "task-1"]]);
+    mockTasks = new Map([["task-1", { task_name: "rfc-project-actions" }]]);
+    render(
+      <MemoryRouter>
+        <SessionItem session={baseSession} hostId="host-1" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("rfc-project-actions")).toBeInTheDocument();
+    expect(screen.queryByText("dev-session")).not.toBeInTheDocument();
   });
 
   test("close button calls api and dispatches event", async () => {
