@@ -354,18 +354,35 @@ Unchanged. `detector.rs` does BFS from shell PID. With tmux, shell PID is a chil
 ## Testing
 
 ```bash
-cargo test --workspace          # 549 Rust tests (312 agent + 55 core + 94 protocol + 88 server)
+cargo test --workspace          # 1117 Rust tests (610 agent + 176 core + 94 protocol + 237 server)
 cargo clippy --workspace        # Lint (all=deny, pedantic=warn)
-cd web && bun run test          # Vitest
+cd web && bun run test          # Vitest (515 tests)
 cd web && bun run typecheck     # tsc --noEmit
 
 # Coverage
 cargo llvm-cov --workspace --html    # Rust coverage → target/llvm-cov/html/
 cargo llvm-cov --workspace           # Rust coverage text summary
 cd web && bun run test:coverage       # Frontend coverage → web/coverage/
+
+# Full coverage gate check (tests + thresholds)
+./scripts/check-coverage.sh          # Backend ≥80%, Frontend ≥75%
+./scripts/check-coverage.sh --quick  # Tests only, skip coverage measurement
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.
+
+### Coverage Thresholds
+
+| Target | Threshold | Current |
+|--------|-----------|---------|
+| Backend (lines) | 80% | ~84% |
+| Frontend (statements) | 75% | ~82% |
+
+**Enforcement:**
+- **Pre-commit hook** (`.git/hooks/pre-commit`): runs `cargo fmt --check`, `cargo clippy`, `cargo test`, and frontend `typecheck` + `test` (when web/ files changed). Does NOT run coverage (too slow).
+- **Frontend thresholds** in `vite.config.ts`: `bun run test:coverage` fails if coverage drops below 75% statements/lines or 70% branches/functions.
+- **Manual gate**: `./scripts/check-coverage.sh` runs full coverage for both backend and frontend, fails on regression below thresholds.
+- Run `./scripts/check-coverage.sh` before merging significant changes.
 
 ## Build
 
