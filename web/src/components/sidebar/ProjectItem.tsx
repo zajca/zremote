@@ -1,4 +1,4 @@
-import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus, RotateCcw } from "lucide-react";
+import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus, RotateCcw, Settings, Sparkles } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
@@ -7,6 +7,18 @@ import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import { SessionItem } from "./SessionItem";
+
+// CSS-only tooltip — no JS state, instant hover
+function Tooltip({ children, label }: { children: React.ReactNode; label: string }) {
+  return (
+    <span className="group/tip relative flex items-center">
+      {children}
+      <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded bg-bg-primary px-2 py-1 text-[11px] text-text-primary opacity-0 shadow-lg ring-1 ring-white/10 transition-opacity duration-150 group-hover/tip:opacity-100">
+        {label}
+      </span>
+    </span>
+  );
+}
 
 interface ProjectItemProps {
   project: Project;
@@ -115,7 +127,11 @@ export const ProjectItem = memo(function ProjectItem({
   return (
     <div>
       <div
-        className={`group flex h-7 w-full items-center gap-1.5 rounded-sm px-2 text-left text-[12px] transition-colors duration-150 hover:bg-bg-hover ${
+        role="button"
+        tabIndex={0}
+        onClick={handleClick}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(); } }}
+        className={`group flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-sm px-2 text-left text-[12px] transition-colors duration-150 hover:bg-bg-hover ${
           isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"
         }`}
       >
@@ -135,60 +151,47 @@ export const ProjectItem = memo(function ProjectItem({
         ) : (
           <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
         )}
-        <button
-          onClick={handleClick}
-          className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left"
-        >
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
           {(sessions.length > 0 || worktreeChildren.length > 0) && (
             project.project_type === "worktree"
               ? <GitBranch size={13} className="shrink-0 text-text-tertiary" />
               : <FolderGit2 size={13} className="shrink-0 text-text-tertiary" />
           )}
           <span className="truncate">{project.name}</span>
-        </button>
-        {project.git_branch && (
-          <span
-            className="flex shrink-0 items-center gap-0.5 rounded bg-bg-active px-1 py-0.5 text-[9px] text-text-tertiary"
-            title={`Branch: ${project.git_branch}${project.git_ahead > 0 ? ` (+${project.git_ahead})` : ""}${project.git_behind > 0 ? ` (-${project.git_behind})` : ""}`}
-          >
-            <GitBranch size={9} />
-            <span className="max-w-[60px] truncate">{project.git_branch}</span>
-          </span>
-        )}
-        {project.git_is_dirty && (
-          <span
-            className="shrink-0 rounded bg-status-warning/15 px-1 py-0.5 text-[9px] text-status-warning"
-            title="Uncommitted changes"
-          >
-            M
-          </span>
-        )}
-        {knowledgeStatus === "ready" && (
-          <span title="Knowledge base active">
-            <Brain size={11} className="shrink-0 text-accent" />
-          </span>
-        )}
-        {project.has_claude_config && (
-          <span
-            className="shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] text-accent"
-            title=".claude/ config present"
-          >
-            .claude
-          </span>
-        )}
-        {project.has_zremote_config && (
-          <span
-            className="shrink-0 rounded bg-status-online/15 px-1 py-0.5 text-[9px] text-status-online"
-            title=".zremote/ config present"
-          >
-            .zremote
-          </span>
-        )}
-        {totalSessions > 0 && (
-          <span className="shrink-0 text-[10px] text-text-tertiary">
-            {totalSessions}
-          </span>
-        )}
+        </span>
+        <span className="flex shrink-0 items-center gap-1">
+          {project.git_branch && (
+            <Tooltip label={`Branch: ${project.git_branch}${project.git_is_dirty ? " (uncommitted changes)" : ""}${project.git_ahead > 0 ? ` +${project.git_ahead} ahead` : ""}${project.git_behind > 0 ? ` ${project.git_behind} behind` : ""}`}>
+              <GitBranch
+                size={10}
+                className={project.git_is_dirty ? "text-status-warning" : "text-text-tertiary"}
+              />
+            </Tooltip>
+          )}
+          {!project.git_branch && project.git_is_dirty && (
+            <Tooltip label="Uncommitted changes">
+              <span className="inline-flex h-2 w-2 rounded-full bg-status-warning" />
+            </Tooltip>
+          )}
+          {knowledgeStatus === "ready" && (
+            <Tooltip label="Knowledge base active">
+              <Brain size={10} className="text-accent" />
+            </Tooltip>
+          )}
+          {project.has_claude_config && (
+            <Tooltip label="Claude Code config (.claude/)">
+              <Sparkles size={10} className="text-accent" />
+            </Tooltip>
+          )}
+          {project.has_zremote_config && (
+            <Tooltip label="ZRemote config (.zremote/)">
+              <Settings size={10} className="text-status-online" />
+            </Tooltip>
+          )}
+          {totalSessions > 0 && (
+            <span className="text-[10px] text-text-tertiary">{totalSessions}</span>
+          )}
+        </span>
         {lastResumableTaskId && (
           <button
             onClick={(e) => void handleResume(e)}
