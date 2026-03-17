@@ -31,6 +31,7 @@ struct LoopRow {
     summary: Option<String>,
     context_used: Option<i64>,
     context_max: Option<i64>,
+    task_name: Option<String>,
 }
 
 /// Processor for agentic loop messages from agents.
@@ -49,7 +50,7 @@ impl AgenticProcessor {
         let row: LoopRow = sqlx::query_as(
             "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
              ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
-             context_used, context_max \
+             context_used, context_max, task_name \
              FROM agentic_loops WHERE id = ?",
         )
         .bind(loop_id)
@@ -92,6 +93,7 @@ impl AgenticProcessor {
             context_used,
             context_max,
             pending_tool_calls,
+            task_name: row.task_name,
         })
     }
 
@@ -157,6 +159,7 @@ impl AgenticProcessor {
                 context_used,
                 context_max,
                 model,
+                task_name,
             } => {
                 self.handle_loop_metrics(
                     loop_id,
@@ -166,6 +169,7 @@ impl AgenticProcessor {
                     context_used,
                     context_max,
                     model,
+                    task_name,
                 )
                 .await?;
             }
@@ -522,6 +526,7 @@ impl AgenticProcessor {
         context_used: u64,
         context_max: u64,
         model: String,
+        task_name: Option<String>,
     ) -> Result<(), AppError> {
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
             entry.tokens_in = tokens_in;
@@ -537,7 +542,7 @@ impl AgenticProcessor {
         if let Err(e) = sqlx::query(
             "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
              estimated_cost_usd = ?, context_used = ?, context_max = ?, \
-             model = COALESCE(?, model) WHERE id = ?",
+             model = COALESCE(?, model), task_name = COALESCE(?, task_name) WHERE id = ?",
         )
         .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
         .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
@@ -545,11 +550,22 @@ impl AgenticProcessor {
         .bind(i64::try_from(context_used).unwrap_or(i64::MAX))
         .bind(i64::try_from(context_max).unwrap_or(i64::MAX))
         .bind(model_opt)
+        .bind(task_name.as_deref())
         .bind(&loop_id_str)
         .execute(&self.db)
         .await
         {
             tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
+        }
+
+        if task_name.is_some() {
+            let _ = sqlx::query(
+                "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
+            )
+            .bind(task_name.as_deref())
+            .bind(&loop_id_str)
+            .execute(&self.db)
+            .await;
         }
 
         if let Some(loop_info) = self.fetch_loop_info(&loop_id_str).await {
@@ -1137,6 +1153,7 @@ mod tests {
             context_used: 5000,
             context_max: 200_000,
             estimated_cost_usd: 0.42,
+            task_name: None,
         })
         .await
         .unwrap();
@@ -1275,6 +1292,7 @@ mod tests {
             context_used: 1000,
             context_max: 200_000,
             estimated_cost_usd: 0.10,
+            task_name: None,
         })
         .await
         .unwrap();
@@ -1820,6 +1838,7 @@ mod tests {
             context_used: 10_000,
             context_max: 200_000,
             estimated_cost_usd: 0.50,
+            task_name: None,
         })
         .await
         .unwrap();

@@ -113,6 +113,7 @@ pub enum AgenticAgentMessage {
         context_used: u64,
         context_max: u64,
         estimated_cost_usd: f64,
+        task_name: Option<String>,
     },
     LoopEnded {
         loop_id: AgenticLoopId,
@@ -225,6 +226,17 @@ mod tests {
             context_used: 45231,
             context_max: 100000,
             estimated_cost_usd: 0.42,
+            task_name: Some("test-task-name".to_string()),
+        });
+        roundtrip_agent(&AgenticAgentMessage::LoopMetrics {
+            loop_id: Uuid::new_v4(),
+            tokens_in: 45231,
+            tokens_out: 3100,
+            model: "claude-sonnet-4".to_string(),
+            context_used: 45231,
+            context_max: 100000,
+            estimated_cost_usd: 0.42,
+            task_name: None,
         });
     }
 

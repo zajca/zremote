@@ -279,7 +279,7 @@ async fn emit_incremental_metrics(
     // Read new transcript entries from last offset (incremental)
     let offset = mapped.transcript_offset;
     match parse_transcript_file(&transcript_path, offset).await {
-        Ok((entries, new_offset, _)) => {
+        Ok((entries, new_offset, _, _)) => {
             tracing::debug!(
                 entries = entries.len(),
                 new_offset,
@@ -317,7 +317,7 @@ async fn emit_incremental_metrics(
 
     // Read entire transcript from the start (offset 0) to aggregate total metrics
     match parse_transcript_file(&transcript_path, 0).await {
-        Ok((_, _, token_data)) => {
+        Ok((_, _, token_data, slug)) => {
             tracing::debug!(
                 token_data_count = token_data.len(),
                 "metrics aggregation parse"
@@ -331,6 +331,7 @@ async fn emit_incremental_metrics(
                     context_used: metrics.context_used,
                     context_max: metrics.context_max,
                     estimated_cost_usd: metrics.estimated_cost_usd,
+                    task_name: slug,
                 };
                 if state.agentic_tx.try_send(msg).is_err() {
                     tracing::warn!("agentic channel full, LoopMetrics dropped");
@@ -366,7 +367,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     if let Some(transcript_path) = transcript_path {
         let offset = mapped.transcript_offset;
         match parse_transcript_file(transcript_path, offset).await {
-            Ok((entries, new_offset, token_data)) => {
+            Ok((entries, new_offset, token_data, slug)) => {
                 // Emit transcript entries
                 for entry in entries {
                     let msg = AgenticAgentMessage::LoopTranscript {
@@ -392,6 +393,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
                         context_used: metrics.context_used,
                         context_max: metrics.context_max,
                         estimated_cost_usd: metrics.estimated_cost_usd,
+                        task_name: slug.clone(),
                     };
                     if state.agentic_tx.try_send(msg).is_err() {
                         tracing::warn!("agentic channel full, LoopMetrics dropped");

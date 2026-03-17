@@ -22,6 +22,7 @@ pub struct LoopRow {
     pub summary: Option<String>,
     pub context_used: Option<i64>,
     pub context_max: Option<i64>,
+    pub task_name: Option<String>,
 }
 
 /// Enrich a `LoopRow` (DB data) with in-memory state to produce a `LoopInfo`.
@@ -60,6 +61,7 @@ pub fn enrich_loop(row: LoopRow, agentic_loops: &AgenticLoopStore) -> LoopInfo {
         context_used,
         context_max,
         pending_tool_calls,
+        task_name: row.task_name,
     }
 }
 
@@ -103,7 +105,7 @@ pub async fn list_loops(
     let mut sql = String::from(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
          ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
-         context_used, context_max \
+         context_used, context_max, task_name \
          FROM agentic_loops WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
@@ -140,7 +142,7 @@ pub async fn get_loop(pool: &SqlitePool, loop_id: &str) -> Result<LoopRow, AppEr
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
          ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
-         context_used, context_max \
+         context_used, context_max, task_name \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)

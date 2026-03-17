@@ -21,6 +21,7 @@ export interface ClaudeTask {
   total_tokens_in: number;
   total_tokens_out: number;
   summary: string | null;
+  task_name: string | null;
   created_at: string;
 }
 

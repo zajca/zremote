@@ -233,6 +233,7 @@ fn translate_event(loop_id: AgenticLoopId, event: AgenticEvent) -> Option<Agenti
             context_used,
             context_max,
             estimated_cost_usd: estimated_cost,
+            task_name: None,
         }),
         AgenticEvent::Ended { reason, summary } => Some(AgenticAgentMessage::LoopEnded {
             loop_id,
@@ -467,6 +468,7 @@ mod tests {
                 context_used,
                 context_max,
                 estimated_cost_usd,
+                task_name,
             } => {
                 assert_eq!(lid, loop_id);
                 assert_eq!(tokens_in, 1000);
@@ -475,6 +477,7 @@ mod tests {
                 assert_eq!(context_used, 5000);
                 assert_eq!(context_max, 200_000);
                 assert!((estimated_cost_usd - 0.05).abs() < f64::EPSILON);
+                assert!(task_name.is_none());
             }
             _ => panic!("expected LoopMetrics"),
         }

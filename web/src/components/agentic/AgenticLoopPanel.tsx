@@ -167,8 +167,11 @@ export function AgenticLoopPanel({ loopId }: AgenticLoopPanelProps) {
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
         <Bot size={18} className="shrink-0 text-accent" />
         <span className="text-sm font-semibold text-text-primary">
-          {loop.tool_name}
+          {loop.task_name || loop.tool_name}
         </span>
+        {loop.task_name && (
+          <span className="text-xs text-text-tertiary">{loop.tool_name}</span>
+        )}
         <Badge variant={statusBadgeVariant(loop.status)}>{loop.status}</Badge>
         <div className="flex items-center gap-1 text-xs text-text-tertiary">
           <Clock size={12} />

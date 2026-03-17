@@ -42,6 +42,7 @@ export interface AgenticLoop {
   context_used: number;
   context_max: number;
   pending_tool_calls: number;
+  task_name: string | null;
 }
 
 export interface ToolCall {
