@@ -124,6 +124,14 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::projects::get_settings).put(routes::projects::save_settings),
         )
         .route(
+            "/api/projects/{project_id}/actions",
+            get(routes::projects::list_actions),
+        )
+        .route(
+            "/api/projects/{project_id}/actions/{action_name}/run",
+            post(routes::projects::run_action),
+        )
+        .route(
             "/api/config/{key}",
             get(routes::config::get_global_config).put(routes::config::set_global_config),
         )
@@ -519,7 +527,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/hosts/{host_id}"))
+                Request::get(format!("/api/hosts/{host_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -548,7 +556,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/hosts/{host_id}"))
+                    .uri(format!("/api/hosts/{host_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name": "new-name"}"#))
                     .unwrap(),
@@ -592,7 +600,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/hosts/{host_id}"))
+                    .uri(format!("/api/hosts/{host_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"invalid_field": 123}"#))
                     .unwrap(),
@@ -615,7 +623,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/hosts/{host_id}"))
+                    .uri(format!("/api/hosts/{host_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name": ""}"#))
                     .unwrap(),
@@ -640,7 +648,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(&format!("/api/hosts/{host_id}"))
+                    .uri(format!("/api/hosts/{host_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -679,7 +687,7 @@ mod tests {
         let app = create_router(state.clone());
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/hosts/{host_id}"))
+                Request::delete(format!("/api/hosts/{host_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -768,7 +776,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .uri(format!("/api/hosts/{host_id_str}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
                     .unwrap(),
@@ -793,7 +801,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id}/sessions"))
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
                     .unwrap(),
@@ -816,7 +824,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id}/sessions"))
+                    .uri(format!("/api/hosts/{host_id}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"cols": 80, "rows": 24}"#))
                     .unwrap(),
@@ -836,7 +844,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/hosts/{host_id}/sessions"))
+                Request::get(format!("/api/hosts/{host_id}/sessions"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -867,7 +875,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/hosts/{host_id}/sessions"))
+                Request::get(format!("/api/hosts/{host_id}/sessions"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -898,7 +906,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -921,7 +929,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -956,7 +964,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/sessions/{session_id}"))
+                Request::delete(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -974,7 +982,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/sessions/{session_id}"))
+                Request::delete(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1001,7 +1009,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/sessions/{session_id}"))
+                Request::delete(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1028,7 +1036,7 @@ mod tests {
         let app = create_router(state.clone());
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/hosts/{host_id_str}"))
+                Request::delete(format!("/api/hosts/{host_id_str}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1095,7 +1103,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .uri(format!("/api/hosts/{host_id_str}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"cols": 80, "rows": 24, "working_dir": "/home/user/project"}"#,
@@ -1114,7 +1122,7 @@ mod tests {
         let app2 = create_router(state);
         let get_resp = app2
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1152,7 +1160,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .uri(format!("/api/hosts/{host_id_str}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"cols": 80, "rows": 24, "working_dir": "/home/user/project/src"}"#,
@@ -1170,7 +1178,7 @@ mod tests {
         let app2 = create_router(state);
         let get_resp = app2
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1199,7 +1207,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/hosts/{host_id_str}/sessions"))
+                    .uri(format!("/api/hosts/{host_id_str}/sessions"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"cols": 80, "rows": 24, "working_dir": "/tmp/random"}"#,
@@ -1217,7 +1225,7 @@ mod tests {
         let app2 = create_router(state);
         let get_resp = app2
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1265,7 +1273,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/projects/{project_id}/sessions"))
+                Request::get(format!("/api/projects/{project_id}/sessions"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1308,7 +1316,7 @@ mod tests {
         let app = create_router(state.clone());
         let response = app
             .oneshot(
-                Request::delete(&format!("/api/projects/{project_id}"))
+                Request::delete(format!("/api/projects/{project_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1343,7 +1351,7 @@ mod tests {
         let app = create_router(state);
         let response = app
             .oneshot(
-                Request::get(&format!("/api/sessions/{session_id}"))
+                Request::get(format!("/api/sessions/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )

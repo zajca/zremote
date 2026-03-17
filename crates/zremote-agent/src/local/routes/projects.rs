@@ -384,7 +384,33 @@ pub async fn create_worktree(
         .await
         .map_err(AppError::Database)?;
 
-    let project = q::get_project(&state.db, &wt_id).await?;
+    // Run on_create hook if configured
+    let hook_result = run_worktree_hook(
+        &project_path,
+        &result.path,
+        result.branch.as_deref().unwrap_or_default(),
+        |wt_settings| wt_settings.on_create.as_deref(),
+    )
+    .await;
+
+    if let Some(ref hr) = hook_result {
+        if hr.success {
+            tracing::info!(worktree = %result.path, "on_create hook succeeded");
+        } else {
+            tracing::warn!(worktree = %result.path, output = %hr.output.as_deref().unwrap_or(""), "on_create hook failed");
+        }
+    }
+
+    let mut project = serde_json::to_value(q::get_project(&state.db, &wt_id).await?)
+        .map_err(|e| AppError::Internal(format!("serialization error: {e}")))?;
+    if let Some(ref hr) = hook_result {
+        project["hook_result"] = serde_json::json!({
+            "success": hr.success,
+            "output": hr.output,
+            "duration_ms": hr.duration_ms,
+        });
+    }
+
     Ok((StatusCode::CREATED, Json(project)))
 }
 
@@ -403,6 +429,20 @@ pub async fn delete_worktree(
     let worktree_path = q::get_worktree_path(&state.db, &worktree_id, &project_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("worktree {worktree_id} not found")))?;
+
+    // Run on_delete hook before removing worktree
+    let hook_result = run_worktree_hook(&project_path, &worktree_path, "", |wt_settings| {
+        wt_settings.on_delete.as_deref()
+    })
+    .await;
+
+    if let Some(ref hr) = hook_result {
+        if hr.success {
+            tracing::info!(worktree = %worktree_path, "on_delete hook succeeded");
+        } else {
+            tracing::warn!(worktree = %worktree_path, output = %hr.output.as_deref().unwrap_or(""), "on_delete hook failed");
+        }
+    }
 
     let repo = project_path.clone();
     let wt = worktree_path.clone();
@@ -498,6 +538,216 @@ pub async fn browse_directory(
     }
 }
 
+/// Run a worktree lifecycle hook (on_create or on_delete) if configured in settings.
+///
+/// Returns `Some(HookResultInfo)` if a hook was executed, `None` if no hook is configured.
+async fn run_worktree_hook(
+    project_path: &str,
+    worktree_path: &str,
+    branch: &str,
+    hook_selector: impl FnOnce(&zremote_protocol::project::WorktreeSettings) -> Option<&str>,
+) -> Option<zremote_protocol::HookResultInfo> {
+    let pp = project_path.to_string();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&pp))
+    })
+    .await
+    .ok()?
+    .ok()
+    .flatten()?;
+
+    let wt_settings = settings.worktree.as_ref()?;
+    let template = hook_selector(wt_settings)?;
+
+    let cmd =
+        crate::project::hooks::expand_hook_template(template, project_path, worktree_path, branch);
+    let result = crate::project::hooks::execute_hook_async(
+        cmd,
+        std::path::PathBuf::from(worktree_path),
+        vec![],
+        None,
+    )
+    .await;
+
+    Some(zremote_protocol::HookResultInfo {
+        success: result.success,
+        output: if result.output.is_empty() {
+            None
+        } else {
+            Some(result.output)
+        },
+        duration_ms: result.duration.as_millis() as u64,
+    })
+}
+
+/// Request body for running a project action.
+#[derive(Debug, Deserialize)]
+pub struct RunActionRequest {
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+}
+
+/// `GET /api/projects/:project_id/actions` - list available actions for a project.
+pub async fn list_actions(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath(project_id): AxumPath<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (_, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&project_path))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?;
+
+    let actions = match result {
+        Ok(Some(settings)) => settings.actions,
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(AppError::Internal(e)),
+    };
+
+    Ok(Json(serde_json::json!({ "actions": actions })))
+}
+
+/// `POST /api/projects/:project_id/actions/:action_name/run` - run a project action.
+pub async fn run_action(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath((project_id, action_name)): AxumPath<(String, String)>,
+    AppJson(body): AppJson<RunActionRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let path_for_settings = project_path.clone();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&path_for_settings))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?
+    .map_err(AppError::Internal)?
+    .ok_or_else(|| AppError::NotFound("no project settings found".to_string()))?;
+
+    let action = crate::project::actions::find_action(&settings.actions, &action_name)
+        .ok_or_else(|| AppError::NotFound(format!("action '{action_name}' not found")))?
+        .clone();
+
+    let ctx = crate::project::actions::TemplateContext {
+        project_path: project_path.clone(),
+        worktree_path: body.worktree_path.clone(),
+        branch: body.branch.clone(),
+    };
+
+    let expanded_command = crate::project::actions::expand_template(&action.command, &ctx);
+    let working_dir = crate::project::actions::resolve_working_dir(&action, &ctx);
+    let env = crate::project::actions::build_action_env(&settings.env, &action, &ctx);
+
+    let session_id = Uuid::new_v4();
+    let session_id_str = session_id.to_string();
+    let name = format!("action: {action_name}");
+    let cols = body.cols.unwrap_or(80);
+    let rows = body.rows.unwrap_or(24);
+
+    let project_id_ref = sq::resolve_project_id(&state.db, &host_id_str, &working_dir).await?;
+
+    sq::insert_session(
+        &state.db,
+        &session_id_str,
+        &host_id_str,
+        Some(&name),
+        Some(&working_dir),
+        project_id_ref.as_deref(),
+    )
+    .await?;
+
+    let shell = super::sessions::default_shell();
+    let env_map: std::collections::HashMap<String, String> = env.into_iter().collect();
+    let env_ref = if env_map.is_empty() {
+        None
+    } else {
+        Some(&env_map)
+    };
+
+    {
+        let parsed_host_id: Uuid = host_id_str
+            .parse()
+            .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(
+            session_id,
+            zremote_core::state::SessionState::new(session_id, parsed_host_id),
+        );
+    }
+
+    let pid = {
+        let mut mgr = state.session_manager.lock().await;
+        mgr.create(session_id, shell, cols, rows, Some(&working_dir), env_ref)
+            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+    };
+
+    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
+        .bind(shell)
+        .bind(i64::from(pid))
+        .bind(&session_id_str)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
+
+    {
+        let mut sessions = state.sessions.write().await;
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.status = "active".to_string();
+        }
+    }
+
+    let _ = state.events.send(ServerEvent::SessionCreated {
+        session: zremote_core::state::SessionInfo {
+            id: session_id_str.clone(),
+            host_id: host_id_str.clone(),
+            shell: Some(shell.to_string()),
+            status: "active".to_string(),
+        },
+    });
+
+    {
+        let cmd_with_newline = format!("{expanded_command}\n");
+        let state_clone = state.clone();
+        let sid = session_id;
+        let cmd_bytes = cmd_with_newline.into_bytes();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let mut mgr = state_clone.session_manager.lock().await;
+            if let Err(e) = mgr.write_to(&sid, &cmd_bytes) {
+                tracing::warn!(session_id = %sid, error = %e, "failed to write action command to PTY");
+            }
+        });
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "session_id": session_id_str,
+            "action": action_name,
+            "command": expanded_command,
+            "working_dir": working_dir,
+            "status": "active",
+            "pid": pid,
+        })),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +796,11 @@ mod tests {
             .route(
                 "/api/projects/{project_id}/worktrees/{worktree_id}",
                 delete(delete_worktree),
+            )
+            .route("/api/projects/{project_id}/actions", get(list_actions))
+            .route(
+                "/api/projects/{project_id}/actions/{action_name}/run",
+                post(run_action),
             )
             .with_state(state)
     }
@@ -1682,6 +1937,306 @@ mod tests {
     fn parse_project_id_invalid() {
         let result = parse_project_id("invalid");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_actions_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/actions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_actions_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/not-a-uuid/actions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_actions_no_settings_file() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        // Create a temp dir without .zremote/settings.json
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/actions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["actions"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_actions_with_settings() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        // Create .zremote/settings.json with actions
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{
+                "actions": [
+                    {"name": "build", "command": "cargo build"},
+                    {"name": "test", "command": "cargo test"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/actions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let actions = json["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["name"], "build");
+        assert_eq!(actions[1]["name"], "test");
+    }
+
+    #[tokio::test]
+    async fn run_action_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/actions/build/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn run_action_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/not-a-uuid/actions/build/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn run_action_no_settings() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        // Temp dir without settings file
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/actions/build/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // No settings file => 404 "no project settings found"
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn run_action_not_found() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"actions": [{"name": "build", "command": "cargo build"}]}"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/actions/nonexistent/run"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn run_action_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"actions": [{"name": "echo-test", "command": "echo hello"}]}"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/actions/echo-test/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["action"], "echo-test");
+        assert_eq!(json["command"], "echo hello");
+        assert_eq!(json["status"], "active");
+        assert!(json["session_id"].is_string());
+        assert!(json["pid"].is_number());
+    }
+
+    #[test]
+    fn run_action_request_deserialize_empty() {
+        let req: RunActionRequest = serde_json::from_str("{}").unwrap();
+        assert!(req.worktree_path.is_none());
+        assert!(req.branch.is_none());
+        assert!(req.cols.is_none());
+        assert!(req.rows.is_none());
+    }
+
+    #[test]
+    fn run_action_request_deserialize_full() {
+        let json = r#"{"worktree_path": "/tmp/wt", "branch": "feat", "cols": 120, "rows": 40}"#;
+        let req: RunActionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.worktree_path.as_deref(), Some("/tmp/wt"));
+        assert_eq!(req.branch.as_deref(), Some("feat"));
+        assert_eq!(req.cols, Some(120));
+        assert_eq!(req.rows, Some(40));
     }
 
     #[test]
