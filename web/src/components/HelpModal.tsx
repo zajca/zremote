@@ -112,7 +112,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
                 description="Open settings"
               />
               <ShortcutRow
-                keys={<Kbd>{mod}+N</Kbd>}
+                keys={<Kbd>Alt+N</Kbd>}
                 description="New terminal session"
               />
               <ShortcutRow

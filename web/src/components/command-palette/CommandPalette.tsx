@@ -11,7 +11,7 @@ import type { Project, ProjectAction, Session } from "../../lib/api";
 import type { AgenticLoop } from "../../types/agentic";
 import type { PromptTemplate } from "../../types/prompt";
 import { resolveActions, type ResolveData } from "./actions/registry";
-import type { ActionDeps, PaletteAction, PaletteContext } from "./types";
+import type { ActionDeps, ContextLevel, PaletteAction, PaletteContext } from "./types";
 import { CommandPaletteInput } from "./CommandPaletteInput";
 import { CommandPaletteItem } from "./CommandPaletteItem";
 import { CommandPaletteFooter } from "./CommandPaletteFooter";
@@ -77,6 +77,16 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
   const [loop, setLoop] = useState<AgenticLoop | null>(null);
   const [hasRecentClaudeTask, setHasRecentClaudeTask] = useState(false);
 
+  // Ancestor entity state
+  const [ancestorProject, setAncestorProject] = useState<Project | null>(null);
+  const [ancestorProjectSessions, setAncestorProjectSessions] = useState<Session[]>([]);
+  const [ancestorProjectWorktrees, setAncestorProjectWorktrees] = useState<Project[]>([]);
+  const [ancestorProjectActions, setAncestorProjectActions] = useState<ProjectAction[]>([]);
+  const [ancestorProjectTemplates, setAncestorProjectTemplates] = useState<PromptTemplate[]>([]);
+  const [ancestorProjectHasRecentClaude, setAncestorProjectHasRecentClaude] = useState(false);
+  const [ancestorHostProjects, setAncestorHostProjects] = useState<Project[]>([]);
+  const [ancestorHostSessions, setAncestorHostSessions] = useState<Session[]>([]);
+
   // Ctrl+K handler
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -123,11 +133,11 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       },
     });
 
-    // Ctrl+N → New session (on first online host)
+    // Alt+N → New session (on first online host)
     const targetHost = hosts.find((h) => h.status === "online");
     if (targetHost) {
       sa.push({
-        shortcut: { mod: true, key: "n" },
+        shortcut: { alt: true, key: "n" },
         onSelect: () => {
           void (async () => {
             try {
@@ -166,6 +176,59 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
 
     let cancelled = false;
 
+    /** Reset all state to defaults */
+    function resetAllState() {
+      setProjects([]);
+      setSessions([]);
+      setLoops([]);
+      setCustomActions([]);
+      setPromptTemplates([]);
+      setProject(null);
+      setParentProject(null);
+      setSession(null);
+      setLoop(null);
+      setHasRecentClaudeTask(false);
+      // Reset ancestor state
+      setAncestorProject(null);
+      setAncestorProjectSessions([]);
+      setAncestorProjectWorktrees([]);
+      setAncestorProjectActions([]);
+      setAncestorProjectTemplates([]);
+      setAncestorProjectHasRecentClaude(false);
+      setAncestorHostProjects([]);
+      setAncestorHostSessions([]);
+    }
+
+    /** Fetch ancestor project data for a given project_id */
+    async function fetchAncestorProjectData(projectId: string): Promise<{
+      project: Project | null;
+      sessions: Session[];
+      worktrees: Project[];
+      actions: ProjectAction[];
+      templates: PromptTemplate[];
+      hasRecentClaude: boolean;
+    }> {
+      try {
+        const [proj, projSessions, projWorktrees, projActions, claudeTasks] = await Promise.all([
+          api.projects.get(projectId),
+          api.projects.sessions(projectId).catch(() => [] as Session[]),
+          api.projects.worktrees(projectId).catch(() => [] as Project[]),
+          api.projects.actions(projectId).catch(() => ({ actions: [] as ProjectAction[], prompts: [] as PromptTemplate[] })),
+          api.claudeTasks.list({ project_id: projectId, status: "completed" }).catch(() => []),
+        ]);
+        return {
+          project: proj,
+          sessions: projSessions,
+          worktrees: projWorktrees,
+          actions: projActions.actions,
+          templates: projActions.prompts ?? [],
+          hasRecentClaude: claudeTasks.length > 0,
+        };
+      } catch {
+        return { project: null, sessions: [], worktrees: [], actions: [], templates: [], hasRecentClaude: false };
+      }
+    }
+
     async function fetchContextData() {
       // Determine effective context
       let effectiveCtx = ctx;
@@ -178,20 +241,13 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         }
       }
 
+      // Reset all state at start of each fetch
+      resetAllState();
+
       try {
         switch (effectiveCtx.level) {
           case "global":
             // Just needs hosts, which come from useHosts()
-            setProjects([]);
-            setSessions([]);
-            setLoops([]);
-            setCustomActions([]);
-            setPromptTemplates([]);
-            setProject(null);
-            setParentProject(null);
-            setSession(null);
-            setLoop(null);
-            setHasRecentClaudeTask(false);
             break;
 
           case "host": {
@@ -203,14 +259,6 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             if (cancelled) return;
             setProjects(hostProjects);
             setSessions(hostSessions);
-            setLoops([]);
-            setCustomActions([]);
-            setPromptTemplates([]);
-            setProject(null);
-            setParentProject(null);
-            setSession(null);
-            setLoop(null);
-            setHasRecentClaudeTask(false);
             break;
           }
 
@@ -253,9 +301,6 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setSessions(pSessions);
             setCustomActions(pActions.actions);
             setPromptTemplates(pActions.prompts ?? []);
-            setLoops([]);
-            setSession(null);
-            setLoop(null);
             setHasRecentClaudeTask(hasRecent);
 
             // Update context level if we resolved worktree
@@ -271,27 +316,47 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
               // Directly set state to avoid clearing query
               useCommandPaletteStore.setState({ contextStack: stack });
             }
+
+            // Fetch host ancestor data
+            const hostId = p.host_id ?? effectiveCtx.hostId;
+            if (hostId) {
+              const [ancHostProjects, ancHostSessions] = await Promise.all([
+                api.projects.list(hostId).catch(() => [] as Project[]),
+                api.sessions.list(hostId).catch(() => [] as Session[]),
+              ]);
+              if (cancelled) return;
+              setAncestorHostProjects(ancHostProjects);
+              setAncestorHostSessions(ancHostSessions);
+            }
             break;
           }
 
           case "session": {
             if (!effectiveCtx.sessionId || !effectiveCtx.hostId) break;
-            const [s, sLoops, sibSessions] = await Promise.all([
+            const [s, sLoops, sibSessions, ancHostProjects] = await Promise.all([
               api.sessions.get(effectiveCtx.sessionId),
               api.loops.list({ session_id: effectiveCtx.sessionId }),
               api.sessions.list(effectiveCtx.hostId),
+              api.projects.list(effectiveCtx.hostId).catch(() => [] as Project[]),
             ]);
             if (cancelled) return;
             setSession(s);
             setLoops(sLoops);
-            setProjects([]);
             setSessions(sibSessions);
-            setCustomActions([]);
-            setPromptTemplates([]);
-            setProject(null);
-            setParentProject(null);
-            setLoop(null);
-            setHasRecentClaudeTask(false);
+            setAncestorHostProjects(ancHostProjects);
+            setAncestorHostSessions(sibSessions);
+
+            // Fetch project ancestor data if session has a project
+            if (s.project_id) {
+              const projData = await fetchAncestorProjectData(s.project_id);
+              if (cancelled) return;
+              setAncestorProject(projData.project);
+              setAncestorProjectSessions(projData.sessions);
+              setAncestorProjectWorktrees(projData.worktrees);
+              setAncestorProjectActions(projData.actions);
+              setAncestorProjectTemplates(projData.templates);
+              setAncestorProjectHasRecentClaude(projData.hasRecentClaude);
+            }
             break;
           }
 
@@ -300,15 +365,43 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             const l = await api.loops.get(effectiveCtx.loopId);
             if (cancelled) return;
             setLoop(l);
-            setProjects([]);
-            setSessions([]);
-            setLoops([]);
-            setCustomActions([]);
-            setPromptTemplates([]);
-            setProject(null);
-            setParentProject(null);
-            setSession(null);
-            setHasRecentClaudeTask(false);
+
+            // Fetch session for ancestor data
+            if (effectiveCtx.sessionId) {
+              const [s, sLoops] = await Promise.all([
+                api.sessions.get(effectiveCtx.sessionId).catch(() => null),
+                api.loops.list({ session_id: effectiveCtx.sessionId }).catch(() => []),
+              ]);
+              if (cancelled) return;
+              if (s) {
+                setSession(s);
+                setLoops(sLoops);
+
+                // Fetch sibling sessions as ancestor host sessions
+                if (effectiveCtx.hostId) {
+                  const [ancHostProjects, ancHostSessions] = await Promise.all([
+                    api.projects.list(effectiveCtx.hostId).catch(() => [] as Project[]),
+                    api.sessions.list(effectiveCtx.hostId).catch(() => [] as Session[]),
+                  ]);
+                  if (cancelled) return;
+                  setAncestorHostProjects(ancHostProjects);
+                  setAncestorHostSessions(ancHostSessions);
+                  setSessions(ancHostSessions);
+                }
+
+                // Fetch project ancestor data if session has a project
+                if (s.project_id) {
+                  const projData = await fetchAncestorProjectData(s.project_id);
+                  if (cancelled) return;
+                  setAncestorProject(projData.project);
+                  setAncestorProjectSessions(projData.sessions);
+                  setAncestorProjectWorktrees(projData.worktrees);
+                  setAncestorProjectActions(projData.actions);
+                  setAncestorProjectTemplates(projData.templates);
+                  setAncestorProjectHasRecentClaude(projData.hasRecentClaude);
+                }
+              }
+            }
             break;
           }
         }
@@ -366,8 +459,16 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       loop,
       hasRecentClaudeTask,
       globalSessions: shortcutSessions,
+      ancestorProject,
+      ancestorProjectSessions,
+      ancestorProjectWorktrees,
+      ancestorProjectActions,
+      ancestorProjectTemplates,
+      ancestorProjectHasRecentClaude,
+      ancestorHostProjects,
+      ancestorHostSessions,
     }),
-    [hosts, projects, sessions, loops, customActions, promptTemplates, project, parentProject, session, loop, hasRecentClaudeTask, shortcutSessions],
+    [hosts, projects, sessions, loops, customActions, promptTemplates, project, parentProject, session, loop, hasRecentClaudeTask, shortcutSessions, ancestorProject, ancestorProjectSessions, ancestorProjectWorktrees, ancestorProjectActions, ancestorProjectTemplates, ancestorProjectHasRecentClaude, ancestorHostProjects, ancestorHostSessions],
   );
 
   // In local mode at global level, resolve as host level with the online host
@@ -398,10 +499,23 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
 
   const hasDrillDownItems = actions.some((a) => a.drillDown);
 
-  // Group actions
-  const actionGroup = actions.filter((a) => a.group === "actions");
-  const navigateGroup = actions.filter((a) => a.group === "navigate");
+  // Group actions: current level items (no sourceLevel)
+  const currentActions = actions.filter((a) => !a.sourceLevel && a.group === "actions");
+  const currentNavigate = actions.filter((a) => !a.sourceLevel && a.group === "navigate");
+
+  // Ancestor level items (sourceLevel is set), ordered
+  const levelOrder: ContextLevel[] = ["session", "project", "worktree", "host"];
+  const ancestorLevels = levelOrder.filter((level) =>
+    actions.some((a) => a.sourceLevel === level),
+  );
+
+  // Global items
   const globalGroup = actions.filter((a) => a.group === "global");
+
+  /** Capitalize the first letter of a level name */
+  function capitalizeLevel(level: string): string {
+    return level.charAt(0).toUpperCase() + level.slice(1);
+  }
 
   return (
     <>
@@ -456,21 +570,34 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             No results found
           </Command.Empty>
 
-          {actionGroup.length > 0 && (
+          {currentActions.length > 0 && (
             <Command.Group heading="Actions" className={GROUP_HEADING_CLASS}>
-              {actionGroup.map((action) => (
+              {currentActions.map((action) => (
                 <CommandPaletteItem key={action.id} action={action} />
               ))}
             </Command.Group>
           )}
 
-          {navigateGroup.length > 0 && (
+          {currentNavigate.length > 0 && (
             <Command.Group heading="Navigate" className={GROUP_HEADING_CLASS}>
-              {navigateGroup.map((action) => (
+              {currentNavigate.map((action) => (
                 <CommandPaletteItem key={action.id} action={action} />
               ))}
             </Command.Group>
           )}
+
+          {ancestorLevels.map((level) => {
+            const levelActions = actions.filter((a) => a.sourceLevel === level);
+            const sourceLabel = levelActions[0]?.sourceLabel ?? "";
+            const heading = `${capitalizeLevel(level)} \u00B7 ${sourceLabel}`;
+            return (
+              <Command.Group key={`ancestor-${level}`} heading={heading} className={GROUP_HEADING_CLASS}>
+                {levelActions.map((action) => (
+                  <CommandPaletteItem key={action.id} action={action} />
+                ))}
+              </Command.Group>
+            );
+          })}
 
           {globalGroup.length > 0 && (
             <Command.Group heading="Global" className={GROUP_HEADING_CLASS}>
