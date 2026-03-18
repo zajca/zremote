@@ -242,11 +242,14 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
 
     // Let global shortcuts pass through xterm to document handlers
     term.attachCustomKeyEventHandler((e) => {
+      // Alt+N → New session shortcut
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "n") {
+        return false;
+      }
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const key = e.key.toLowerCase();
         if (
           (key >= "1" && key <= "9") ||
-          key === "n" ||
           key === "," ||
           key === "k" ||
           key === "b"

@@ -32,6 +32,10 @@ export interface PaletteAction {
   drillDown?: PaletteContext;
   dangerous?: boolean;
   shortcut?: KeyboardShortcut;
+  /** Which ancestor context level generated this action */
+  sourceLevel?: ContextLevel;
+  /** Display name for the source context (e.g., "MyProject", "my-server") */
+  sourceLabel?: string;
 }
 
 export interface ActionDeps {

@@ -2,7 +2,7 @@ import type { Host, Project, ProjectAction, Session } from "../../../lib/api";
 import type { AgenticLoop } from "../../../types/agentic";
 import type { PromptTemplate } from "../../../types/prompt";
 import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
-import type { ActionDeps, PaletteAction, PaletteContext } from "../types";
+import type { ActionDeps, ContextLevel, PaletteAction, PaletteContext } from "../types";
 import { getGlobalActions } from "./global-actions";
 import { getHostActions } from "./host-actions";
 import { getLoopActions } from "./loop-actions";
@@ -24,6 +24,30 @@ export interface ResolveData {
   loop: AgenticLoop | null;
   hasRecentClaudeTask: boolean;
   globalSessions: ShortcutSession[];
+  // Ancestor data
+  ancestorProject: Project | null;
+  ancestorProjectSessions: Session[];
+  ancestorProjectWorktrees: Project[];
+  ancestorProjectActions: ProjectAction[];
+  ancestorProjectTemplates: PromptTemplate[];
+  ancestorProjectHasRecentClaude: boolean;
+  ancestorHostProjects: Project[];
+  ancestorHostSessions: Session[];
+}
+
+/**
+ * Tag actions from an ancestor level: keep only "actions" group items, set sourceLevel/sourceLabel.
+ * Navigate/drill-down items from ancestors are intentionally excluded to avoid clutter
+ * and duplication with the current level's navigation items.
+ */
+function tagAncestorActions(
+  actions: PaletteAction[],
+  sourceLevel: ContextLevel,
+  sourceLabel: string,
+): PaletteAction[] {
+  return actions
+    .filter((a) => a.group === "actions")
+    .map((a) => ({ ...a, sourceLevel, sourceLabel }));
 }
 
 export function resolveActions(
@@ -61,7 +85,17 @@ export function resolveActions(
         data.hasRecentClaudeTask,
         deps,
       );
-      return [...projectActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
+
+      // Host ancestor actions
+      const hostAncestorActions = context.hostId
+        ? tagAncestorActions(
+            getHostActions(context.hostId, context.hostName, data.ancestorHostProjects, data.ancestorHostSessions, deps),
+            "host",
+            context.hostName ?? "Host",
+          )
+        : [];
+
+      return [...projectActions, ...hostAncestorActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
     }
 
     case "worktree": {
@@ -76,7 +110,17 @@ export function resolveActions(
         data.hasRecentClaudeTask,
         deps,
       );
-      return [...worktreeActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
+
+      // Host ancestor actions
+      const hostAncestorActions = context.hostId
+        ? tagAncestorActions(
+            getHostActions(context.hostId, context.hostName, data.ancestorHostProjects, data.ancestorHostSessions, deps),
+            "host",
+            context.hostName ?? "Host",
+          )
+        : [];
+
+      return [...worktreeActions, ...hostAncestorActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
     }
 
     case "session": {
@@ -89,7 +133,35 @@ export function resolveActions(
         data.sessions,
         deps,
       );
-      return [...sessionActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
+
+      // Project ancestor actions (only if session has a project)
+      const projectAncestorActions = data.ancestorProject
+        ? tagAncestorActions(
+            getProjectActions(
+              data.ancestorProject.id,
+              data.ancestorProject,
+              data.ancestorProjectSessions,
+              data.ancestorProjectWorktrees,
+              data.ancestorProjectActions,
+              data.ancestorProjectTemplates,
+              data.ancestorProjectHasRecentClaude,
+              deps,
+            ),
+            "project",
+            data.ancestorProject.name,
+          )
+        : [];
+
+      // Host ancestor actions
+      const hostAncestorActions = context.hostId
+        ? tagAncestorActions(
+            getHostActions(context.hostId, context.hostName, data.ancestorHostProjects, data.ancestorHostSessions, deps),
+            "host",
+            context.hostName ?? "Host",
+          )
+        : [];
+
+      return [...sessionActions, ...projectAncestorActions, ...hostAncestorActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
     }
 
     case "loop": {
@@ -101,7 +173,51 @@ export function resolveActions(
         context.hostId,
         deps,
       );
-      return [...loopActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
+
+      // Session ancestor actions (if we have session data)
+      const sessionAncestorActions = data.session
+        ? tagAncestorActions(
+            getSessionActions(
+              context.sessionId,
+              data.session,
+              context.hostId,
+              data.loops,
+              data.sessions,
+              deps,
+            ),
+            "session",
+            data.session.name ?? `Session ${context.sessionId.slice(0, 8)}`,
+          )
+        : [];
+
+      // Project ancestor actions (only if session has a project)
+      const projectAncestorActions = data.ancestorProject
+        ? tagAncestorActions(
+            getProjectActions(
+              data.ancestorProject.id,
+              data.ancestorProject,
+              data.ancestorProjectSessions,
+              data.ancestorProjectWorktrees,
+              data.ancestorProjectActions,
+              data.ancestorProjectTemplates,
+              data.ancestorProjectHasRecentClaude,
+              deps,
+            ),
+            "project",
+            data.ancestorProject.name,
+          )
+        : [];
+
+      // Host ancestor actions
+      const hostAncestorActions = context.hostId
+        ? tagAncestorActions(
+            getHostActions(context.hostId, context.hostName, data.ancestorHostProjects, data.ancestorHostSessions, deps),
+            "host",
+            context.hostName ?? "Host",
+          )
+        : [];
+
+      return [...loopActions, ...sessionAncestorActions, ...projectAncestorActions, ...hostAncestorActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
     }
 
     default:

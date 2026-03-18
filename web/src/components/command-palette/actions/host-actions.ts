@@ -26,7 +26,7 @@ export function getHostActions(
     icon: Terminal,
     keywords: ["terminal", "session", "new", "shell"],
     group: "actions",
-    shortcut: { mod: true, key: "n" },
+    shortcut: { alt: true, key: "n" },
     onSelect: async () => {
       try {
         const session = await api.sessions.create(hostId);
