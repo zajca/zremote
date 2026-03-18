@@ -161,11 +161,9 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Notifications")).toBeInTheDocument();
     });
 
-    // Find all toggle buttons - there are 2 global settings
+    // Find all toggle switches - there are 2 global settings
     // Click the second toggle (auto_approve) to avoid browser permission flow
-    const toggleButtons = screen.getAllByRole("button").filter(
-      (btn) => btn.className.includes("rounded-full"),
-    );
+    const toggleButtons = screen.getAllByRole("switch");
     expect(toggleButtons.length).toBeGreaterThan(1);
 
     await userEvent.click(toggleButtons[1]);
