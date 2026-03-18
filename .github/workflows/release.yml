@@ -219,6 +219,7 @@ jobs:
 
       - name: Create latest tag
         run: |
+          git tag -d latest || true
           git tag latest
           git push origin latest
 
