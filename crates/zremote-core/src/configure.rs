@@ -70,8 +70,7 @@ pub fn build_configure_prompt(
     prompt.push_str("2. Identify common development workflows (build, test, lint, format, run)\n");
     prompt.push_str("3. Create actions for each identified workflow\n");
     prompt.push_str("4. Set appropriate environment variables if needed\n");
-    prompt
-        .push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
+    prompt.push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
     prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns). If found, configure `create_command` and `delete_command` to use them.\n");
     prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), create `worktree_scoped: true` actions for common operations (start, stop, expose).\n\n");
 
