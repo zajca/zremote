@@ -71,6 +71,38 @@ cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :30
 cargo run -p zremote-agent -- mcp-serve --project /path/to/project
 ```
 
+## Development Workflow
+
+```bash
+./scripts/dev-setup.sh       # First-time setup (checks tools, installs deps, builds)
+./scripts/dev.sh             # Full hot-reload: agent :3000 + Vite :5173
+./scripts/dev.sh 3001        # Override agent port
+./scripts/dev-backend.sh     # Backend only: agent :3000 with embedded UI
+```
+
+**Full dev** (`dev.sh`): Open `http://localhost:5173` -- Vite proxies API/WS to agent, frontend hot-reloads on save.
+**Backend only** (`dev-backend.sh`): Open `http://localhost:3000` -- embedded UI, no Vite needed.
+
+### Simultaneous Dev + Production
+
+Local mode dev runs on a separate port with its own DB (`~/.zremote/local.db`), no conflict with production agent on the same host.
+
+### Protocol Compatibility
+
+| Change type | Safe? | Rule |
+|---|---|---|
+| New optional field (`#[serde(default)]`) | Yes | Always use for new fields |
+| New message type | Yes* | Silently ignored by old version |
+| New required field | **NO** | Use `Option<T>` + `#[serde(default)]` |
+| Rename/remove field | **NO** | Add new, deprecate old |
+
+*Safe only if old version uses `#[serde(other)]` or ignores unknown variants.
+
+### Deployment Order
+
+1. **Server first** -- agents auto-reconnect with backoff, tmux sessions survive
+2. **Agents rolling** -- one at a time, verify reconnection before next
+
 ## Environment Variables
 
 ### Server Mode
