@@ -11,6 +11,7 @@ export interface ActionNotification {
   status: "waiting_for_input" | "tool_pending";
   pendingToolCount: number;
   latestToolName: string | null;
+  argumentsPreview: string | null;
   createdAt: number;
 }
 
@@ -44,6 +45,7 @@ export const useNotificationStore = create<NotificationState>((set) => ({
           ...existing,
           pendingToolCount: existing.pendingToolCount + 1,
           latestToolName: notification.latestToolName,
+          argumentsPreview: notification.argumentsPreview,
         });
       } else {
         next.set(notification.id, notification);

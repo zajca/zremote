@@ -55,6 +55,11 @@ function ActionToastItem({ notification }: { notification: ActionNotification })
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div>
           <div className="text-sm font-medium text-text-primary">{title}</div>
+          {notification.argumentsPreview && (
+            <div className="truncate font-mono text-xs text-text-tertiary">
+              {notification.argumentsPreview}
+            </div>
+          )}
           {notification.hostname && (
             <div className="text-xs text-text-tertiary">
               {notification.hostname}
