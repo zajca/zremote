@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use sysinfo::{ProcessesToUpdate, System};
 use uuid::Uuid;
-use zremote_protocol::{AgenticAgentMessage, AgenticLoopId, SessionId, UserAction};
+use zremote_protocol::{AgenticAgentMessage, AgenticLoopId, AgenticStatus, SessionId, UserAction};
 
 use super::claude_code::ClaudeCodeAdapter;
 use super::detector;
@@ -16,6 +16,9 @@ struct ActiveLoop {
     tool_name: String,
     adapter: ClaudeCodeAdapter,
     detected_pid: u32,
+    /// When true, terminal-parsed `WaitingForInput` events are suppressed
+    /// because the hooks server provides authoritative approval state.
+    hooks_active: bool,
 }
 
 /// Manages agentic loop detection and event processing across sessions.
@@ -81,6 +84,7 @@ impl AgenticLoopManager {
                         tool_name: detected.tool_name.clone(),
                         adapter: ClaudeCodeAdapter::new(),
                         detected_pid: detected.pid,
+                        hooks_active: false,
                     },
                 );
 
@@ -104,6 +108,15 @@ impl AgenticLoopManager {
         messages
     }
 
+    /// Mark a loop as having an active hooks connection.
+    /// When hooks are active, terminal parser `WaitingForInput` events are suppressed
+    /// because the hooks server provides authoritative approval state.
+    pub fn set_hooks_active_for_loop(&mut self, loop_id: &AgenticLoopId) {
+        if let Some(active) = self.loops.values_mut().find(|a| &a.loop_id == loop_id) {
+            active.hooks_active = true;
+        }
+    }
+
     /// Process terminal output for a session's active agentic loop.
     /// Returns protocol messages generated from parsing the output.
     pub fn process_output(
@@ -116,10 +129,25 @@ impl AgenticLoopManager {
         };
 
         let events = active.adapter.parse_output(data);
+        let hooks_active = active.hooks_active;
         let loop_id = active.loop_id;
 
         events
             .into_iter()
+            .filter(|event| {
+                if hooks_active {
+                    // Suppress terminal-parsed WaitingForInput when hooks provide authoritative state
+                    !matches!(
+                        event,
+                        AgenticEvent::StatusChanged {
+                            status: AgenticStatus::WaitingForInput,
+                            ..
+                        }
+                    )
+                } else {
+                    true
+                }
+            })
             .filter_map(|event| translate_event(loop_id, event))
             .collect()
     }
@@ -543,6 +571,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -579,6 +608,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -612,6 +642,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -640,6 +671,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -663,6 +695,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -684,6 +717,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -706,6 +740,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -739,6 +774,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 11111,
+                hooks_active: false,
             },
         );
         manager.loops.insert(
@@ -748,6 +784,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 22222,
+                hooks_active: false,
             },
         );
 
@@ -785,6 +822,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -806,6 +844,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -827,6 +866,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -851,12 +891,21 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
         // First transition to working
         let messages = manager.process_output(&session_id, b">>> Working on it");
         assert!(!messages.is_empty());
+
+        // Set last_transition to past so debounce is satisfied
+        manager
+            .loops
+            .get_mut(&session_id)
+            .unwrap()
+            .adapter
+            .last_transition = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
         // Then see approval prompt
         let messages = manager.process_output(&session_id, b"Allow Bash? (y/n)");
@@ -883,6 +932,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -903,6 +953,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -985,6 +1036,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -1009,6 +1061,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -1031,6 +1084,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -1056,6 +1110,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: u32::MAX - 1,
+                hooks_active: false,
             },
         );
 
@@ -1093,6 +1148,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -1120,6 +1176,7 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
@@ -1142,12 +1199,21 @@ mod tests {
                 tool_name: "claude-code".to_string(),
                 adapter: ClaudeCodeAdapter::new(),
                 detected_pid: 12345,
+                hooks_active: false,
             },
         );
 
         // First: transition to working
         let msgs = manager.process_output(&session_id, b">>> Working on it");
         assert!(!msgs.is_empty());
+
+        // Set last_transition to past so debounce is satisfied
+        manager
+            .loops
+            .get_mut(&session_id)
+            .unwrap()
+            .adapter
+            .last_transition = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
         // Then: approval prompt
         let msgs = manager.process_output(&session_id, b"Allow Bash? (y/n)");
@@ -1168,5 +1234,123 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn set_hooks_active_for_loop_works() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+                hooks_active: false,
+            },
+        );
+
+        assert!(!manager.loops.get(&session_id).unwrap().hooks_active);
+
+        manager.set_hooks_active_for_loop(&loop_id);
+
+        assert!(manager.loops.get(&session_id).unwrap().hooks_active);
+    }
+
+    #[test]
+    fn set_hooks_active_for_unknown_loop_is_noop() {
+        let mut manager = AgenticLoopManager::new();
+        let unknown_loop_id = Uuid::new_v4();
+        // Should not panic
+        manager.set_hooks_active_for_loop(&unknown_loop_id);
+    }
+
+    #[test]
+    fn process_output_hooks_active_suppresses_waiting() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+                hooks_active: true, // hooks are active
+            },
+        );
+
+        // First transition to working
+        let messages = manager.process_output(&session_id, b">>> Working on it");
+        assert!(!messages.is_empty());
+
+        // Set last_transition to past so debounce is satisfied in adapter
+        manager
+            .loops
+            .get_mut(&session_id)
+            .unwrap()
+            .adapter
+            .last_transition = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        // Approval prompt should NOT generate WaitingForInput because hooks_active is true
+        let messages = manager.process_output(&session_id, b"Allow Bash? (y/n)");
+        assert!(
+            !messages.iter().any(|m| matches!(
+                m,
+                AgenticAgentMessage::LoopStateUpdate {
+                    status: AgenticStatus::WaitingForInput,
+                    ..
+                }
+            )),
+            "WaitingForInput should be suppressed when hooks_active is true"
+        );
+    }
+
+    #[test]
+    fn process_output_hooks_inactive_allows_waiting() {
+        let mut manager = AgenticLoopManager::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        manager.loops.insert(
+            session_id,
+            ActiveLoop {
+                loop_id,
+                tool_name: "claude-code".to_string(),
+                adapter: ClaudeCodeAdapter::new(),
+                detected_pid: 12345,
+                hooks_active: false, // hooks are NOT active (default)
+            },
+        );
+
+        // First transition to working
+        let messages = manager.process_output(&session_id, b">>> Working on it");
+        assert!(!messages.is_empty());
+
+        // Set last_transition to past so debounce is satisfied in adapter
+        manager
+            .loops
+            .get_mut(&session_id)
+            .unwrap()
+            .adapter
+            .last_transition = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        // Approval prompt SHOULD generate WaitingForInput because hooks_active is false
+        let messages = manager.process_output(&session_id, b"Allow Bash? (y/n)");
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                AgenticAgentMessage::LoopStateUpdate {
+                    status: AgenticStatus::WaitingForInput,
+                    ..
+                }
+            )),
+            "WaitingForInput should be present when hooks_active is false"
+        );
     }
 }
