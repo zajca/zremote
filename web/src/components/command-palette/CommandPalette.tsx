@@ -23,7 +23,11 @@ import { showToast } from "../layout/Toast";
 const GROUP_HEADING_CLASS =
   "[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-text-tertiary";
 
-export function CommandPalette() {
+interface CommandPaletteProps {
+  onOpenHelp?: () => void;
+}
+
+export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
   const navigate = useNavigate();
   const { isLocal } = useMode();
   const { hosts } = useHosts();
@@ -323,8 +327,12 @@ export function CommandPalette() {
         setOpen(false);
         setClaudeDialogProject(proj);
       },
+      openHelp: () => {
+        setOpen(false);
+        onOpenHelp?.();
+      },
     }),
-    [navigate, setOpen, pushContext, isLocal],
+    [navigate, setOpen, pushContext, isLocal, onOpenHelp],
   );
 
   // Resolve actions based on context
