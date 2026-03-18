@@ -45,7 +45,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
 
   test-rust:
-    name: Test (Rust)
+    name: Test + Coverage (Rust)
     runs-on: ubuntu-latest
     needs: build-web
     steps:
@@ -56,10 +56,32 @@ jobs:
           name: web-dist
           path: web/dist/
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run tests with coverage
+        run: |
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace 2>&1)
+          echo "$COVERAGE_OUTPUT"
+          TOTAL_LINE=$(echo "$COVERAGE_OUTPUT" | grep "^TOTAL")
+          COVERAGE_PCT=$(echo "$TOTAL_LINE" | awk '{
+            for (i=NF; i>=1; i--) {
+              if ($i ~ /^[0-9]+\.[0-9]+%$/) {
+                gsub(/%/, "", $i)
+                print $i
+                exit
+              }
+            }
+          }')
+          echo "Backend line coverage: ${COVERAGE_PCT}%"
+          if [ "$(echo "$COVERAGE_PCT < 80" | bc -l)" = "1" ]; then
+            echo "::error::Backend coverage ${COVERAGE_PCT}% is below 80% threshold"
+            exit 1
+          fi
 
   test-web:
-    name: Test (Web)
+    name: Test + Coverage (Web)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +90,8 @@ jobs:
         working-directory: web
       - run: bun run typecheck
         working-directory: web
-      - run: bun run test
+      - name: Run tests with coverage (thresholds in vite.config.ts)
+        run: bun run test:coverage
         working-directory: web
 
   build:
