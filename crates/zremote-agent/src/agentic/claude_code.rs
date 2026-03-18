@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use zremote_protocol::{AgenticStatus, UserAction};
 
 use super::types::AgenticEvent;
@@ -22,6 +24,7 @@ pub enum ClaudeCodeState {
 /// patterns used here may break across Claude Code versions.
 pub struct ClaudeCodeAdapter {
     state: ClaudeCodeState,
+    pub(crate) last_transition: std::time::Instant,
 }
 
 #[allow(dead_code)]
@@ -29,6 +32,7 @@ impl ClaudeCodeAdapter {
     pub fn new() -> Self {
         Self {
             state: ClaudeCodeState::Idle,
+            last_transition: std::time::Instant::now(),
         }
     }
 
@@ -49,11 +53,17 @@ impl ClaudeCodeAdapter {
         };
 
         // Detect permission prompts (approval requests)
-        // Claude Code typically asks "Allow <tool>?" or shows a permission prompt
+        // Claude Code typically asks "Allow <tool>?" or shows "? (y/n)" prompt.
+        // Require "Allow " + "?" together (not just "Allow" alone) to avoid
+        // false positives on output like "Allowing tool access".
+        // Also enforce a debounce: the adapter must have been in Working state
+        // for at least 500ms to avoid catching auto-approved bypass prompts.
         if self.state == ClaudeCodeState::Working
-            && (text.contains("Allow") || text.contains("? (y/n)") || text.contains("approve"))
+            && ((text.contains("Allow ") && text.contains('?')) || text.contains("? (y/n)"))
+            && self.last_transition.elapsed() > Duration::from_millis(500)
         {
             self.state = ClaudeCodeState::WaitingForApproval;
+            self.last_transition = std::time::Instant::now();
             events.push(AgenticEvent::StatusChanged {
                 status: AgenticStatus::WaitingForInput,
                 current_step: Some("Waiting for approval".to_string()),
@@ -66,6 +76,7 @@ impl ClaudeCodeAdapter {
             && (text.contains("Thinking") || text.contains("Working") || text.contains(">>>"))
         {
             self.state = ClaudeCodeState::Working;
+            self.last_transition = std::time::Instant::now();
             events.push(AgenticEvent::StatusChanged {
                 status: AgenticStatus::Working,
                 current_step: None,
@@ -75,6 +86,7 @@ impl ClaudeCodeAdapter {
         // Detect completion patterns
         if text.contains("Task completed") || text.contains("Done!") {
             self.state = ClaudeCodeState::Completed;
+            self.last_transition = std::time::Instant::now();
             events.push(AgenticEvent::Ended {
                 reason: "completed".to_string(),
                 summary: None,
@@ -103,6 +115,18 @@ impl ClaudeCodeAdapter {
     /// Reset state back to idle (e.g. when the agentic process exits).
     pub fn reset(&mut self) {
         self.state = ClaudeCodeState::Idle;
+        self.last_transition = std::time::Instant::now();
+    }
+}
+
+#[cfg(test)]
+impl ClaudeCodeAdapter {
+    /// Set `last_transition` to a time far in the past so the debounce
+    /// window is already elapsed. Useful in tests that need to trigger
+    /// approval detection without waiting 500ms.
+    fn with_stale_transition(mut self) -> Self {
+        self.last_transition = std::time::Instant::now() - Duration::from_secs(1);
+        self
     }
 }
 
@@ -132,9 +156,12 @@ mod tests {
 
     #[test]
     fn transition_working_to_waiting_for_approval() {
-        let mut adapter = ClaudeCodeAdapter::new();
+        let mut adapter = ClaudeCodeAdapter::new().with_stale_transition();
         adapter.parse_output(b">>> Working on it");
         assert_eq!(adapter.state(), ClaudeCodeState::Working);
+
+        // Set last_transition to past so debounce is satisfied
+        adapter.last_transition = std::time::Instant::now() - Duration::from_secs(1);
 
         let events = adapter.parse_output(b"Allow Bash tool? (y/n)");
         assert_eq!(adapter.state(), ClaudeCodeState::WaitingForApproval);
@@ -225,6 +252,47 @@ mod tests {
         let mut adapter = ClaudeCodeAdapter::new();
         adapter.parse_output(b">>> Working");
         let events = adapter.parse_output(b"some random terminal output here");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn no_false_positive_on_allowing() {
+        // "Allowing tool access" contains "Allow" but not "Allow " + "?"
+        let mut adapter = ClaudeCodeAdapter::new().with_stale_transition();
+        adapter.parse_output(b">>> Working on it");
+        adapter.last_transition = std::time::Instant::now() - Duration::from_secs(1);
+
+        let events = adapter.parse_output(b"Allowing tool access");
+        // Should NOT transition to WaitingForApproval
+        assert_eq!(adapter.state(), ClaudeCodeState::Working);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn no_false_positive_on_approve_word() {
+        // "Please approve the changes" previously triggered due to "approve" pattern
+        let mut adapter = ClaudeCodeAdapter::new().with_stale_transition();
+        adapter.parse_output(b">>> Working on it");
+        adapter.last_transition = std::time::Instant::now() - Duration::from_secs(1);
+
+        let events = adapter.parse_output(b"Please approve the changes");
+        // Should NOT transition to WaitingForApproval
+        assert_eq!(adapter.state(), ClaudeCodeState::Working);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn debounce_prevents_rapid_transition() {
+        // Transition to Working, then immediately try approval pattern
+        // within 500ms debounce -- should NOT transition
+        let mut adapter = ClaudeCodeAdapter::new();
+        adapter.parse_output(b">>> Working on it");
+        assert_eq!(adapter.state(), ClaudeCodeState::Working);
+
+        // last_transition was just set by the Working transition (now),
+        // so debounce (500ms) is NOT satisfied
+        let events = adapter.parse_output(b"Allow Bash? (y/n)");
+        assert_eq!(adapter.state(), ClaudeCodeState::Working);
         assert!(events.is_empty());
     }
 }

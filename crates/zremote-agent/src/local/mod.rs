@@ -546,6 +546,17 @@ fn spawn_hooks_message_consumer(
                 _ => {}
             }
 
+            // Signal hooks_active when we receive structured hook data
+            match &msg {
+                AgenticAgentMessage::LoopToolCall { loop_id, .. }
+                | AgenticAgentMessage::LoopMetrics { loop_id, .. }
+                | AgenticAgentMessage::LoopToolResult { loop_id, .. } => {
+                    let mut mgr = state.agentic_manager.lock().await;
+                    mgr.set_hooks_active_for_loop(loop_id);
+                }
+                _ => {}
+            }
+
             if let Err(e) = state.agentic_processor.handle_message(msg).await {
                 tracing::warn!(error = %e, "failed to process agentic hook message");
             }
