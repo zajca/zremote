@@ -1,7 +1,7 @@
 import { Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type ProjectAction } from "../../lib/api";
-import { ActionCard } from "./ActionCard";
+import { ActionRow } from "./ActionRow";
 
 interface ActionsTabProps {
   projectId: string;
@@ -29,11 +29,11 @@ export function ActionsTab({ projectId, hostId }: ActionsTabProps) {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="rounded-md border border-border bg-bg-secondary divide-y divide-border">
         {[0, 1, 2].map((i) => (
           <div
             key={i}
-            className="h-32 animate-pulse rounded-lg border border-border bg-bg-tertiary"
+            className="h-8 animate-pulse bg-bg-tertiary"
           />
         ))}
       </div>
@@ -64,12 +64,12 @@ export function ActionsTab({ projectId, hostId }: ActionsTabProps) {
     <div className="space-y-6">
       {projectActions.length > 0 && (
         <div>
-          <h2 className="mb-3 text-sm font-medium text-text-primary">
+          <h2 className="mb-2 text-xs font-medium text-text-tertiary">
             Project Actions
           </h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="rounded-md border border-border bg-bg-secondary divide-y divide-border">
             {projectActions.map((action) => (
-              <ActionCard
+              <ActionRow
                 key={action.name}
                 action={action}
                 projectId={projectId}
@@ -81,12 +81,12 @@ export function ActionsTab({ projectId, hostId }: ActionsTabProps) {
       )}
       {worktreeActions.length > 0 && (
         <div>
-          <h2 className="mb-3 text-sm font-medium text-text-primary">
+          <h2 className="mb-2 text-xs font-medium text-text-tertiary">
             Worktree Actions
           </h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="rounded-md border border-border bg-bg-secondary divide-y divide-border">
             {worktreeActions.map((action) => (
-              <ActionCard
+              <ActionRow
                 key={action.name}
                 action={action}
                 projectId={projectId}

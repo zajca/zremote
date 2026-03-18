@@ -87,6 +87,15 @@ export interface RunActionRequest {
   rows?: number;
 }
 
+export interface RunActionResponse {
+  session_id: string;
+  action: string;
+  command: string;
+  working_dir: string;
+  status: string;
+  pid: number;
+}
+
 export interface ProjectSettings {
   shell?: string;
   working_dir?: string;
@@ -296,7 +305,7 @@ export const api = {
     actions: (projectId: string) =>
       request<{ actions: ProjectAction[] }>(`/api/projects/${projectId}/actions`),
     runAction: (projectId: string, actionName: string, body?: RunActionRequest) =>
-      request<Session>(`/api/projects/${projectId}/actions/${encodeURIComponent(actionName)}/run`, {
+      request<RunActionResponse>(`/api/projects/${projectId}/actions/${encodeURIComponent(actionName)}/run`, {
         method: "POST",
         body: JSON.stringify(body ?? {}),
       }),
