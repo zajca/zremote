@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router";
 import { Sidebar } from "./Sidebar";
-import { CommandPalette } from "./CommandPalette";
+import { CommandPalette } from "../command-palette/CommandPalette";
 import { ToastContainer } from "./Toast";
 import { ActionToastContainer } from "./ActionToast";
 import { ReconnectBanner } from "./ReconnectBanner";
