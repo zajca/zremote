@@ -378,7 +378,11 @@ mod tests {
 
         assert!(scanner.should_debounce());
 
-        scanner.last_scan = Some(Instant::now() - Duration::from_secs(DEBOUNCE_SECS + 1));
+        scanner.last_scan = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(DEBOUNCE_SECS + 1))
+                .unwrap(),
+        );
         assert!(!scanner.should_debounce());
     }
 

@@ -27,9 +27,53 @@ jobs:
           path: web/dist/
           retention-days: 1
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: build-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+
+  test-rust:
+    name: Test (Rust)
+    runs-on: ubuntu-latest
+    needs: build-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  test-web:
+    name: Test (Web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run typecheck
+        working-directory: web
+      - run: bun run test
+        working-directory: web
+
   build:
     name: Build (${{ matrix.target }})
-    needs: build-web
+    needs: [lint, test-rust, test-web]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

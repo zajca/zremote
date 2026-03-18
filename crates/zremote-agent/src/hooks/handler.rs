@@ -1487,7 +1487,7 @@ mod tests {
             message: None,
         };
 
-        handle_hook(State(state.clone()), Json(payload))
+        let _ = handle_hook(State(state.clone()), Json(payload))
             .await
             .into_response();
 

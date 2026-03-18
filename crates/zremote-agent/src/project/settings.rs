@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zremote_protocol::project::{DirectoryEntry, ProjectSettings};
+use zremote_protocol::project::{AgenticSettings, DirectoryEntry, ProjectSettings};
 
 /// Allowed hidden directory names that should not be filtered out.
 const ALLOWED_HIDDEN: &[&str] = &[".git", ".claude", ".zremote"];
@@ -261,7 +261,7 @@ mod tests {
             shell: Some("/bin/zsh".to_string()),
             working_dir: None,
             env: std::collections::HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
-            agentic: Default::default(),
+            agentic: AgenticSettings::default(),
             actions: vec![],
             worktree: None,
             linear: None,

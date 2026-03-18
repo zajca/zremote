@@ -209,16 +209,15 @@ mod tests {
         let mut found = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
-                Ok(Some(output)) => {
-                    assert_eq!(output.session_id, session_id);
-                    assert!(output.pane_id.is_none());
-                    if String::from_utf8_lossy(&output.data).contains("hello_from_pty") {
-                        found = true;
-                        break;
-                    }
+            if let Ok(Some(output)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                assert_eq!(output.session_id, session_id);
+                assert!(output.pane_id.is_none());
+                if String::from_utf8_lossy(&output.data).contains("hello_from_pty") {
+                    found = true;
+                    break;
                 }
-                _ => continue,
             }
         }
         assert!(found, "should have received 'hello_from_pty' in output");
@@ -264,13 +263,13 @@ mod tests {
     async fn drop_kills_child() {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (_session, pid) =
+        let (session, pid) =
             PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
 
         assert!(pid > 0);
 
         // Drop the session
-        drop(_session);
+        drop(session);
 
         // Drain the channel - should eventually get an EOF (empty vec)
         let mut got_eof = false;
@@ -281,7 +280,7 @@ mod tests {
                     got_eof = true;
                     break;
                 }
-                Ok(Some(_output)) => continue,
+                Ok(Some(_output)) => {}
                 _ => break,
             }
         }

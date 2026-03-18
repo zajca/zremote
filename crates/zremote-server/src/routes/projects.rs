@@ -1648,14 +1648,14 @@ mod tests {
             for _ in 0..500 {
                 if !settings_requests.is_empty() {
                     let key = settings_requests.iter().next().map(|e| *e.key());
-                    if let Some(request_id) = key {
-                        if let Some((_, tx)) = settings_requests.remove(&request_id) {
-                            let _ = tx.send(crate::state::SettingsGetResponse {
-                                settings: None,
-                                error: None,
-                            });
-                            return;
-                        }
+                    if let Some(request_id) = key
+                        && let Some((_, tx)) = settings_requests.remove(&request_id)
+                    {
+                        let _ = tx.send(crate::state::SettingsGetResponse {
+                            settings: None,
+                            error: None,
+                        });
+                        return;
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
