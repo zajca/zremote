@@ -37,6 +37,7 @@ function makeNotification(
     status: "waiting_for_input",
     pendingToolCount: 0,
     latestToolName: null,
+    argumentsPreview: null,
     createdAt: Date.now(),
     ...overrides,
   };
@@ -143,6 +144,29 @@ describe("ActionToastContainer", () => {
 
     await userEvent.click(screen.getByLabelText("Go to terminal"));
     expect(mockNavigate).toHaveBeenCalledWith("/hosts/h1/sessions/s1");
+  });
+
+  test("displays arguments preview when present", () => {
+    const notif = makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      latestToolName: "Bash",
+      argumentsPreview: "ls -la /tmp",
+    });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    expect(screen.getByText("ls -la /tmp")).toBeInTheDocument();
+  });
+
+  test("does not display arguments preview when null", () => {
+    const notif = makeNotification({ argumentsPreview: null });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    expect(screen.queryByText("ls -la /tmp")).not.toBeInTheDocument();
   });
 
   test("has role=alert on each notification", () => {

@@ -8,6 +8,7 @@ import {
 } from "../components/layout/ReconnectBanner";
 import { showToast } from "../components/layout/Toast";
 import { showBrowserNotification } from "../lib/browser-notifications";
+import { extractArgsPreview } from "../lib/notification-utils";
 import type {
   AgenticLoop,
   ToolCall,
@@ -127,6 +128,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                   status: "waiting_for_input",
                   pendingToolCount: parsed.loop.pending_tool_calls,
                   latestToolName: null,
+                  argumentsPreview: null,
                   createdAt: Date.now(),
                 });
                 if (notifStore.browserEnabled) {
@@ -164,6 +166,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
               if (parsed.tool_call.status === "pending") {
                 const notifStore2 = useNotificationStore.getState();
                 const existing = notifStore2.notifications.get(parsed.loop_id);
+                const preview = extractArgsPreview(parsed.tool_call.arguments_json, 60);
                 notifStore2.addOrUpdate({
                   id: parsed.loop_id,
                   loopId: parsed.loop_id,
@@ -174,11 +177,14 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                   status: "tool_pending",
                   pendingToolCount: (existing?.pendingToolCount ?? 0) + 1,
                   latestToolName: parsed.tool_call.tool_name,
+                  argumentsPreview: preview,
                   createdAt: existing?.createdAt ?? Date.now(),
                 });
                 if (notifStore2.browserEnabled) {
                   showBrowserNotification("Tool call pending", {
-                    body: `${parsed.tool_call.tool_name} needs approval`,
+                    body: preview
+                      ? `${parsed.tool_call.tool_name}: ${preview}`
+                      : `${parsed.tool_call.tool_name} needs approval`,
                     tag: `loop-${parsed.loop_id}`,
                   });
                 }

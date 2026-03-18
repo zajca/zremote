@@ -561,6 +561,7 @@ describe("useRealtimeUpdates", () => {
         status: "waiting_for_input",
         hostId: "h1",
         hostname: "dev-server",
+        argumentsPreview: null,
       }),
     );
   });
@@ -626,8 +627,78 @@ describe("useRealtimeUpdates", () => {
         loopId: "l1",
         status: "tool_pending",
         latestToolName: "Edit",
+        argumentsPreview: null,
       }),
     );
+  });
+
+  test("extracts argumentsPreview from tool call arguments_json", () => {
+    const mockAddOrUpdate = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_tool_call",
+      loop_id: "l1",
+      host_id: "h1",
+      hostname: "dev",
+      tool_call: {
+        id: "tc1",
+        tool_name: "Bash",
+        status: "pending",
+        arguments_json: '{"command":"ls -la /tmp"}',
+      },
+    });
+    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        argumentsPreview: "ls -la /tmp",
+      }),
+    );
+  });
+
+  test("sends browser notification with preview for pending tool", () => {
+    const mockAddOrUpdate = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: true,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_tool_call",
+      loop_id: "l1",
+      tool_call: {
+        id: "tc1",
+        tool_name: "Read",
+        status: "pending",
+        arguments_json: '{"file_path":"/src/main.rs"}',
+      },
+    });
+    expect(showBrowserNotification).toHaveBeenCalledWith("Tool call pending", {
+      body: "Read: /src/main.rs",
+      tag: "loop-l1",
+    });
   });
 
   test("resolves notification when loop ends", () => {

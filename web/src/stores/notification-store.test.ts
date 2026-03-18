@@ -21,6 +21,7 @@ function makeNotification(
     status: "waiting_for_input",
     pendingToolCount: 0,
     latestToolName: null,
+    argumentsPreview: null,
     createdAt: Date.now(),
     ...overrides,
   };
@@ -76,6 +77,28 @@ describe("addOrUpdate", () => {
     const stored = result.current.notifications.get("loop-1")!;
     expect(stored.pendingToolCount).toBe(2);
     expect(stored.latestToolName).toBe("Edit");
+  });
+
+  test("carries argumentsPreview on tool_pending update", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    const notif = makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      latestToolName: "Read",
+      argumentsPreview: "/foo.ts",
+    });
+    act(() => result.current.addOrUpdate(notif));
+
+    const update = makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      latestToolName: "Edit",
+      argumentsPreview: "/bar.ts",
+    });
+    act(() => result.current.addOrUpdate(update));
+
+    const stored = result.current.notifications.get("loop-1")!;
+    expect(stored.argumentsPreview).toBe("/bar.ts");
   });
 
   test("deduplicates by loopId", () => {
