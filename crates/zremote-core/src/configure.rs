@@ -61,8 +61,17 @@ pub fn build_configure_prompt(
         "  - Template variables: `{{project_path}}`, `{{worktree_path}}`, `{{branch}}`, `{{worktree_name}}`\n",
     );
     prompt.push_str(
-        "  - `{{worktree_name}}` is the basename of the worktree path (last path component)\n\n",
+        "  - `{{worktree_name}}` is the basename of the worktree path (last path component)\n",
     );
+    prompt.push_str("- `claude` (object, optional): Default settings for Claude sessions started from this project:\n");
+    prompt.push_str(
+        "  - `model` (string, optional): Default model, e.g. \"sonnet\", \"opus\", \"haiku\"\n",
+    );
+    prompt.push_str("  - `allowed_tools` (string[], optional): Default allowed tools, e.g. [\"Read\", \"Edit\", \"Bash\"]\n");
+    prompt
+        .push_str("  - `skip_permissions` (bool, optional): Whether to skip permission prompts\n");
+    prompt
+        .push_str("  - `custom_flags` (string, optional): Extra CLI flags, e.g. \"--verbose\"\n\n");
 
     // Section 3: Analysis Instructions
     prompt.push_str("## Analysis Instructions\n\n");
@@ -177,6 +186,11 @@ mod tests {
         assert!(prompt.contains("{{worktree_path}}"));
         assert!(prompt.contains("{{branch}}"));
         assert!(prompt.contains("{{worktree_name}}"));
+        // Claude defaults section
+        assert!(prompt.contains("`claude`"));
+        assert!(prompt.contains("allowed_tools"));
+        assert!(prompt.contains("skip_permissions"));
+        assert!(prompt.contains("custom_flags"));
     }
 
     #[test]

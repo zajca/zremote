@@ -267,6 +267,7 @@ mod tests {
             worktree: None,
             linear: None,
             prompts: vec![],
+            claude: None,
         };
 
         write_settings(tmp.path(), &settings).unwrap();

@@ -57,6 +57,19 @@ pub struct WorktreeInfo {
     pub commit_message: Option<String>,
 }
 
+/// Default settings for Claude sessions started from a project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ClaudeDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_flags: Option<String>,
+}
+
 /// Per-project settings stored in .zremote/settings.json.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProjectSettings {
@@ -76,6 +89,8 @@ pub struct ProjectSettings {
     pub linear: Option<LinearSettings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompts: Vec<PromptTemplate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<ClaudeDefaults>,
 }
 
 /// Agentic behavior settings for a project.
@@ -454,6 +469,7 @@ mod tests {
             worktree: None,
             linear: None,
             prompts: vec![],
+            claude: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -473,12 +489,81 @@ mod tests {
         assert!(settings.worktree.is_none());
         assert!(settings.linear.is_none());
         assert!(settings.prompts.is_empty());
+        assert!(settings.claude.is_none());
     }
 
     #[test]
     fn project_settings_empty_json() {
         let settings: ProjectSettings = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(settings, ProjectSettings::default());
+    }
+
+    #[test]
+    fn claude_defaults_roundtrip() {
+        let defaults = ClaudeDefaults {
+            model: Some("opus".to_string()),
+            allowed_tools: vec!["Read".to_string(), "Edit".to_string(), "Bash".to_string()],
+            skip_permissions: Some(true),
+            custom_flags: Some("--verbose".to_string()),
+        };
+        let json = serde_json::to_string(&defaults).expect("serialize");
+        let parsed: ClaudeDefaults = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(defaults, parsed);
+    }
+
+    #[test]
+    fn claude_defaults_empty() {
+        let defaults: ClaudeDefaults = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(defaults, ClaudeDefaults::default());
+        assert!(defaults.model.is_none());
+        assert!(defaults.allowed_tools.is_empty());
+        assert!(defaults.skip_permissions.is_none());
+        assert!(defaults.custom_flags.is_none());
+    }
+
+    #[test]
+    fn claude_defaults_skip_empty_fields() {
+        let defaults = ClaudeDefaults::default();
+        let json = serde_json::to_value(&defaults).unwrap();
+        assert!(
+            json.get("model").is_none(),
+            "model should be skipped when None"
+        );
+        assert!(
+            json.get("allowed_tools").is_none(),
+            "allowed_tools should be skipped when empty"
+        );
+        assert!(
+            json.get("skip_permissions").is_none(),
+            "skip_permissions should be skipped when None"
+        );
+        assert!(
+            json.get("custom_flags").is_none(),
+            "custom_flags should be skipped when None"
+        );
+    }
+
+    #[test]
+    fn project_settings_with_claude_roundtrip() {
+        let settings = ProjectSettings {
+            claude: Some(ClaudeDefaults {
+                model: Some("opus".to_string()),
+                allowed_tools: vec![],
+                skip_permissions: Some(true),
+                custom_flags: None,
+            }),
+            ..ProjectSettings::default()
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
+    }
+
+    #[test]
+    fn project_settings_backward_compat_no_claude() {
+        let json = r#"{"shell":"/bin/bash","agentic":{"auto_detect":true}}"#;
+        let parsed: ProjectSettings = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.claude.is_none());
     }
 
     #[test]
@@ -621,6 +706,7 @@ mod tests {
             }),
             linear: None,
             prompts: vec![],
+            claude: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -679,6 +765,7 @@ mod tests {
                 ],
             }),
             prompts: vec![],
+            claude: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -893,6 +980,7 @@ mod tests {
                 allowed_tools: vec![],
                 skip_permissions: None,
             }],
+            claude: None,
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
