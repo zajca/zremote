@@ -8,7 +8,12 @@ import {
 } from "../components/layout/ReconnectBanner";
 import { showToast } from "../components/layout/Toast";
 import { showBrowserNotification } from "../lib/browser-notifications";
-import { extractArgsPreview } from "../lib/notification-utils";
+import {
+  extractArgsPreview,
+  extractProjectName,
+  getCachedSessionName,
+  resolveSessionName,
+} from "../lib/notification-utils";
 import type {
   AgenticLoop,
   ToolCall,
@@ -118,6 +123,8 @@ export function useRealtimeUpdates(handlers: EventHandler) {
 
               const notifStore = useNotificationStore.getState();
               if (parsed.loop.status === "waiting_for_input") {
+                const projectName = extractProjectName(parsed.loop.project_path ?? null);
+                const sessionName = getCachedSessionName(parsed.loop.session_id);
                 notifStore.addOrUpdate({
                   id: parsed.loop.id,
                   loopId: parsed.loop.id,
@@ -130,10 +137,27 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                   latestToolName: null,
                   argumentsPreview: null,
                   createdAt: Date.now(),
+                  sessionName,
+                  projectName,
+                  taskName: parsed.loop.task_name ?? null,
                 });
+                if (!sessionName) {
+                  const loopId = parsed.loop.id;
+                  void resolveSessionName(parsed.loop.session_id).then(
+                    (name) => {
+                      if (name) {
+                        useNotificationStore
+                          .getState()
+                          .patchContext(loopId, { sessionName: name });
+                      }
+                    },
+                  );
+                }
                 if (notifStore.browserEnabled) {
+                  const contextParts = [sessionName, projectName].filter(Boolean);
+                  const context = contextParts.length > 0 ? ` (${contextParts.join(" · ")})` : "";
                   showBrowserNotification("Claude needs input", {
-                    body: `${parsed.loop.tool_name} is waiting for your response`,
+                    body: `${parsed.loop.tool_name} is waiting for your response${context}`,
                     tag: `loop-${parsed.loop.id}`,
                   });
                 }
@@ -167,10 +191,14 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                 const notifStore2 = useNotificationStore.getState();
                 const existing = notifStore2.notifications.get(parsed.loop_id);
                 const preview = extractArgsPreview(parsed.tool_call.arguments_json, 60);
+                const loop = store.activeLoops.get(parsed.loop_id);
+                const projectName = existing?.projectName ?? extractProjectName(loop?.project_path ?? null);
+                const sessionName = existing?.sessionName ?? getCachedSessionName(existing?.sessionId ?? loop?.session_id ?? "");
+                const sessionId = existing?.sessionId ?? loop?.session_id ?? "";
                 notifStore2.addOrUpdate({
                   id: parsed.loop_id,
                   loopId: parsed.loop_id,
-                  sessionId: existing?.sessionId ?? "",
+                  sessionId,
                   hostId: existing?.hostId ?? parsed.host_id ?? "",
                   hostname: existing?.hostname ?? parsed.hostname ?? "",
                   toolName: existing?.toolName ?? "",
@@ -179,7 +207,20 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                   latestToolName: parsed.tool_call.tool_name,
                   argumentsPreview: preview,
                   createdAt: existing?.createdAt ?? Date.now(),
+                  sessionName,
+                  projectName,
+                  taskName: existing?.taskName ?? loop?.task_name ?? null,
                 });
+                if (!sessionName && sessionId) {
+                  const loopId = parsed.loop_id;
+                  void resolveSessionName(sessionId).then((name) => {
+                    if (name) {
+                      useNotificationStore
+                        .getState()
+                        .patchContext(loopId, { sessionName: name });
+                    }
+                  });
+                }
                 if (notifStore2.browserEnabled) {
                   showBrowserNotification("Tool call pending", {
                     body: preview

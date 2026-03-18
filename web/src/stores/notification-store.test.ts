@@ -23,6 +23,9 @@ function makeNotification(
     latestToolName: null,
     argumentsPreview: null,
     createdAt: Date.now(),
+    sessionName: null,
+    projectName: null,
+    taskName: null,
     ...overrides,
   };
 }
@@ -223,5 +226,92 @@ describe("setBrowserPermission", () => {
     expect(result.current.browserPermission).toBe("granted");
     act(() => result.current.setBrowserPermission("unsupported"));
     expect(result.current.browserPermission).toBe("unsupported");
+  });
+});
+
+describe("patchContext", () => {
+  test("patches sessionName on existing notification", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    act(() => result.current.patchContext("loop-1", { sessionName: "my-session" }));
+    expect(result.current.notifications.get("loop-1")?.sessionName).toBe("my-session");
+  });
+
+  test("patches projectName on existing notification", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    act(() => result.current.patchContext("loop-1", { projectName: "my-project" }));
+    expect(result.current.notifications.get("loop-1")?.projectName).toBe("my-project");
+  });
+
+  test("patches taskName on existing notification", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    act(() => result.current.patchContext("loop-1", { taskName: "implement feature" }));
+    expect(result.current.notifications.get("loop-1")?.taskName).toBe("implement feature");
+  });
+
+  test("no-op for non-existent loopId", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.patchContext("nonexistent", { sessionName: "x" }));
+    expect(result.current.notifications.size).toBe(0);
+  });
+
+  test("does not overwrite other fields", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification({ toolName: "claude-code" })));
+    act(() => result.current.patchContext("loop-1", { sessionName: "s" }));
+    expect(result.current.notifications.get("loop-1")?.toolName).toBe("claude-code");
+  });
+});
+
+describe("addOrUpdate context backfill", () => {
+  test("backfills null sessionName from incoming on tool_pending", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      sessionName: null,
+    })));
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      sessionName: "resolved-session",
+    })));
+    expect(result.current.notifications.get("loop-1")?.sessionName).toBe("resolved-session");
+  });
+
+  test("preserves existing sessionName over incoming null on tool_pending", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      sessionName: "existing",
+    })));
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      sessionName: null,
+    })));
+    expect(result.current.notifications.get("loop-1")?.sessionName).toBe("existing");
+  });
+
+  test("backfills projectName and taskName on tool_pending", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      projectName: null,
+      taskName: null,
+    })));
+    act(() => result.current.addOrUpdate(makeNotification({
+      status: "tool_pending",
+      pendingToolCount: 1,
+      projectName: "myremote",
+      taskName: "fix bug",
+    })));
+    const stored = result.current.notifications.get("loop-1")!;
+    expect(stored.projectName).toBe("myremote");
+    expect(stored.taskName).toBe("fix bug");
   });
 });

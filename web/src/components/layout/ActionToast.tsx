@@ -19,6 +19,11 @@ function ActionToastItem({ notification }: { notification: ActionNotification })
         ? notification.latestToolName
         : notification.toolName || "Claude needs input";
 
+  const contextParts = [notification.sessionName, notification.projectName].filter(Boolean);
+  const contextLine = contextParts.length > 0
+    ? contextParts.join(" \u00B7 ")
+    : notification.hostname || null;
+
   const handleApprove = async () => {
     try {
       await useAgenticStore.getState().sendAction(notification.loopId, "approve");
@@ -55,14 +60,20 @@ function ActionToastItem({ notification }: { notification: ActionNotification })
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div>
           <div className="text-sm font-medium text-text-primary">{title}</div>
+          {contextLine && (
+            <div className="truncate text-xs text-text-secondary">
+              {contextLine}
+            </div>
+          )}
+          {notification.taskName &&
+            notification.taskName !== title && (
+              <div className="truncate text-xs text-text-tertiary">
+                {notification.taskName}
+              </div>
+            )}
           {notification.argumentsPreview && (
             <div className="truncate font-mono text-xs text-text-tertiary">
               {notification.argumentsPreview}
-            </div>
-          )}
-          {notification.hostname && (
-            <div className="text-xs text-text-tertiary">
-              {notification.hostname}
             </div>
           )}
         </div>

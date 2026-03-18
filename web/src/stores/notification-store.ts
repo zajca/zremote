@@ -13,6 +13,9 @@ export interface ActionNotification {
   latestToolName: string | null;
   argumentsPreview: string | null;
   createdAt: number;
+  sessionName: string | null;
+  projectName: string | null;
+  taskName: string | null;
 }
 
 interface NotificationState {
@@ -21,6 +24,12 @@ interface NotificationState {
   browserEnabled: boolean;
 
   addOrUpdate: (notification: ActionNotification) => void;
+  patchContext: (
+    loopId: string,
+    partial: Partial<
+      Pick<ActionNotification, "sessionName" | "projectName" | "taskName">
+    >,
+  ) => void;
   dismiss: (loopId: string) => void;
   dismissAll: () => void;
   setBrowserEnabled: (enabled: boolean) => void;
@@ -46,10 +55,28 @@ export const useNotificationStore = create<NotificationState>((set) => ({
           pendingToolCount: existing.pendingToolCount + 1,
           latestToolName: notification.latestToolName,
           argumentsPreview: notification.argumentsPreview,
+          sessionName: existing.sessionName ?? notification.sessionName,
+          projectName: existing.projectName ?? notification.projectName,
+          taskName: existing.taskName ?? notification.taskName,
         });
       } else {
         next.set(notification.id, notification);
       }
+      return { notifications: next };
+    });
+  },
+
+  patchContext: (loopId, partial) => {
+    set((state) => {
+      const existing = state.notifications.get(loopId);
+      if (!existing) return state;
+      const next = new Map(state.notifications);
+      next.set(loopId, {
+        ...existing,
+        ...(partial.sessionName !== undefined && { sessionName: partial.sessionName }),
+        ...(partial.projectName !== undefined && { projectName: partial.projectName }),
+        ...(partial.taskName !== undefined && { taskName: partial.taskName }),
+      });
       return { notifications: next };
     });
   },
