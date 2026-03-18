@@ -42,10 +42,10 @@ jobs:
             runner: ubuntu-latest
             use-cross: true
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
             use-cross: false
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
             use-cross: false
     steps:
       - uses: actions/checkout@v4
