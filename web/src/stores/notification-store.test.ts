@@ -34,6 +34,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   useNotificationStore.setState({
     notifications: new Map(),
+    recentlyDismissed: new Map(),
     browserPermission: "default",
     browserEnabled: false,
   });
@@ -262,6 +263,74 @@ describe("patchContext", () => {
     act(() => result.current.addOrUpdate(makeNotification({ toolName: "claude-code" })));
     act(() => result.current.patchContext("loop-1", { sessionName: "s" }));
     expect(result.current.notifications.get("loop-1")?.toolName).toBe("claude-code");
+  });
+});
+
+describe("recentlyDismissed", () => {
+  test("skips addOrUpdate for recently dismissed loopId", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    expect(result.current.notifications.size).toBe(1);
+
+    act(() => result.current.dismiss("loop-1"));
+    expect(result.current.notifications.size).toBe(0);
+
+    // Try to re-add the same notification — should be blocked
+    act(() => result.current.addOrUpdate(makeNotification()));
+    expect(result.current.notifications.size).toBe(0);
+  });
+
+  test("allows addOrUpdate after cooldown expires", () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useNotificationStore());
+      act(() => result.current.addOrUpdate(makeNotification()));
+      act(() => result.current.dismiss("loop-1"));
+      expect(result.current.notifications.size).toBe(0);
+
+      // Advance past the 5s cooldown
+      vi.advanceTimersByTime(5001);
+
+      act(() => result.current.addOrUpdate(makeNotification()));
+      expect(result.current.notifications.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("dismiss populates recentlyDismissed", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    act(() => result.current.dismiss("loop-1"));
+    expect(result.current.recentlyDismissed.has("loop-1")).toBe(true);
+  });
+
+  test("handleLoopResolved populates recentlyDismissed", () => {
+    const { result } = renderHook(() => useNotificationStore());
+    act(() => result.current.addOrUpdate(makeNotification()));
+    act(() => result.current.handleLoopResolved("loop-1"));
+    expect(result.current.recentlyDismissed.has("loop-1")).toBe(true);
+  });
+
+  test("cleanup removes stale entries from recentlyDismissed", () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useNotificationStore());
+
+      // Dismiss to populate recentlyDismissed
+      act(() => result.current.addOrUpdate(makeNotification()));
+      act(() => result.current.dismiss("loop-1"));
+      expect(result.current.recentlyDismissed.has("loop-1")).toBe(true);
+
+      // Advance past the 10s cleanup threshold
+      vi.advanceTimersByTime(10_001);
+
+      // addOrUpdate with a different id triggers cleanup
+      act(() => result.current.addOrUpdate(makeNotification({ id: "loop-2", loopId: "loop-2" })));
+      expect(result.current.recentlyDismissed.has("loop-1")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
