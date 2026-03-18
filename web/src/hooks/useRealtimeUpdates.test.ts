@@ -38,6 +38,7 @@ vi.mock("../stores/notification-store", () => ({
       addOrUpdate: vi.fn(),
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: false,
     })),
@@ -48,6 +49,15 @@ vi.mock("../lib/browser-notifications", () => ({
   showBrowserNotification: vi.fn(),
 }));
 
+vi.mock("../lib/notification-utils", async () => {
+  const actual = await vi.importActual("../lib/notification-utils");
+  return {
+    ...actual,
+    resolveSessionName: vi.fn().mockResolvedValue(null),
+    getCachedSessionName: vi.fn().mockReturnValue(null),
+  };
+});
+
 import { useRealtimeUpdates } from "./useRealtimeUpdates";
 import { useAgenticStore } from "../stores/agentic-store";
 import { useClaudeTaskStore } from "../stores/claude-task-store";
@@ -55,6 +65,7 @@ import { useNotificationStore } from "../stores/notification-store";
 import { dispatchWsReconnected, dispatchWsDisconnected } from "../components/layout/ReconnectBanner";
 import { showToast } from "../components/layout/Toast";
 import { showBrowserNotification } from "../lib/browser-notifications";
+import { resolveSessionName } from "../lib/notification-utils";
 
 class MockWebSocket {
   onopen: (() => void) | null = null;
@@ -532,6 +543,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: mockAddOrUpdate,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: false,
     });
@@ -540,6 +552,7 @@ describe("useRealtimeUpdates", () => {
       addToolCall: vi.fn(),
       updateToolCall: vi.fn(),
       addTranscript: vi.fn(),
+      activeLoops: new Map(),
     });
 
     renderHook(() => useRealtimeUpdates({}));
@@ -553,6 +566,8 @@ describe("useRealtimeUpdates", () => {
         status: "waiting_for_input",
         tool_name: "claude-code",
         pending_tool_calls: 0,
+        project_path: "/home/user/myremote",
+        task_name: "fix bug",
       },
     });
     expect(mockAddOrUpdate).toHaveBeenCalledWith(
@@ -562,8 +577,44 @@ describe("useRealtimeUpdates", () => {
         hostId: "h1",
         hostname: "dev-server",
         argumentsPreview: null,
+        projectName: "myremote",
+        taskName: "fix bug",
+        sessionName: null,
       }),
     );
+  });
+
+  test("triggers session name resolution for waiting_for_input", () => {
+    const mockAddOrUpdate = vi.fn();
+    const mockPatchContext = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      patchContext: mockPatchContext,
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+      activeLoops: new Map(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_state_update",
+      loop: {
+        id: "l1",
+        session_id: "s1",
+        status: "waiting_for_input",
+        tool_name: "claude-code",
+        pending_tool_calls: 0,
+      },
+    });
+    expect(resolveSessionName).toHaveBeenCalledWith("s1");
   });
 
   test("sends browser notification for waiting_for_input when enabled", () => {
@@ -571,6 +622,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: vi.fn(),
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: true,
     });
@@ -579,6 +631,7 @@ describe("useRealtimeUpdates", () => {
       addToolCall: vi.fn(),
       updateToolCall: vi.fn(),
       addTranscript: vi.fn(),
+      activeLoops: new Map(),
     });
 
     renderHook(() => useRealtimeUpdates({}));
@@ -604,6 +657,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: mockAddOrUpdate,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: false,
     });
@@ -612,6 +666,7 @@ describe("useRealtimeUpdates", () => {
       addToolCall: vi.fn(),
       updateToolCall: vi.fn(),
       addTranscript: vi.fn(),
+      activeLoops: new Map(),
     });
 
     renderHook(() => useRealtimeUpdates({}));
@@ -628,6 +683,49 @@ describe("useRealtimeUpdates", () => {
         status: "tool_pending",
         latestToolName: "Edit",
         argumentsPreview: null,
+        sessionName: null,
+        projectName: null,
+        taskName: null,
+      }),
+    );
+  });
+
+  test("populates context from activeLoops for pending tool call", () => {
+    const mockAddOrUpdate = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    const loopData = {
+      id: "l1",
+      session_id: "s1",
+      project_path: "/home/user/myremote",
+      task_name: "fix bug",
+    };
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+      activeLoops: new Map([["l1", loopData]]),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_tool_call",
+      loop_id: "l1",
+      host_id: "h1",
+      hostname: "dev",
+      tool_call: { id: "tc1", tool_name: "Edit", status: "pending" },
+    });
+    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectName: "myremote",
+        taskName: "fix bug",
       }),
     );
   });
@@ -638,6 +736,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: mockAddOrUpdate,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: false,
     });
@@ -646,6 +745,7 @@ describe("useRealtimeUpdates", () => {
       addToolCall: vi.fn(),
       updateToolCall: vi.fn(),
       addTranscript: vi.fn(),
+      activeLoops: new Map(),
     });
 
     renderHook(() => useRealtimeUpdates({}));
@@ -674,6 +774,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: mockAddOrUpdate,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: true,
     });
@@ -682,6 +783,7 @@ describe("useRealtimeUpdates", () => {
       addToolCall: vi.fn(),
       updateToolCall: vi.fn(),
       addTranscript: vi.fn(),
+      activeLoops: new Map(),
     });
 
     renderHook(() => useRealtimeUpdates({}));
@@ -731,6 +833,7 @@ describe("useRealtimeUpdates", () => {
       addOrUpdate: vi.fn(),
       handleLoopResolved: vi.fn(),
       handleToolResolved: mockHandleToolResolved,
+      patchContext: vi.fn(),
       notifications: new Map(),
       browserEnabled: false,
     });

@@ -39,6 +39,9 @@ function makeNotification(
     latestToolName: null,
     argumentsPreview: null,
     createdAt: Date.now(),
+    sessionName: null,
+    projectName: null,
+    taskName: null,
     ...overrides,
   };
 }
@@ -69,7 +72,50 @@ describe("ActionToastContainer", () => {
     });
     renderWithRouter(<ActionToastContainer />);
     expect(screen.getByText("claude-code")).toBeInTheDocument();
+    // Falls back to hostname when no session/project name
     expect(screen.getByText("dev-server")).toBeInTheDocument();
+  });
+
+  test("shows session and project name instead of hostname", () => {
+    const notif = makeNotification({
+      sessionName: "elegant-snacking",
+      projectName: "myremote",
+    });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    expect(screen.getByText("elegant-snacking \u00B7 myremote")).toBeInTheDocument();
+    expect(screen.queryByText("dev-server")).not.toBeInTheDocument();
+  });
+
+  test("shows only session name when project is null", () => {
+    const notif = makeNotification({ sessionName: "my-session", projectName: null });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    expect(screen.getByText("my-session")).toBeInTheDocument();
+  });
+
+  test("shows task name when present and different from title", () => {
+    const notif = makeNotification({ taskName: "implement notifications" });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    expect(screen.getByText("implement notifications")).toBeInTheDocument();
+  });
+
+  test("does not show task name when it matches title", () => {
+    const notif = makeNotification({ toolName: "claude-code", taskName: "claude-code" });
+    useNotificationStore.setState({
+      notifications: new Map([["loop-1", notif]]),
+    });
+    renderWithRouter(<ActionToastContainer />);
+    // Title and task are same; should render title once, no separate task line
+    const elements = screen.getAllByText("claude-code");
+    expect(elements).toHaveLength(1);
   });
 
   test("shows tool count when multiple pending tools", () => {
