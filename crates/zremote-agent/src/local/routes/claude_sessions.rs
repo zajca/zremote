@@ -8,7 +8,6 @@ use serde::Deserialize;
 use uuid::Uuid;
 use zremote_core::error::{AppError, AppJson};
 use zremote_core::queries::claude_sessions as q;
-use zremote_core::queries::sessions as sq;
 use zremote_core::state::{ServerEvent, SessionState};
 
 use crate::claude::{CommandBuilder, CommandOptions, SessionScanner};

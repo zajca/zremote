@@ -106,7 +106,7 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{get, put};
+    use axum::routing::get;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use uuid::Uuid;

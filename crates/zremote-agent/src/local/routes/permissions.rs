@@ -84,7 +84,7 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{delete, get, put};
+    use axum::routing::{delete, get};
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 

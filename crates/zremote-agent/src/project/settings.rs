@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use zremote_protocol::project::{AgenticSettings, DirectoryEntry, ProjectSettings};
+use zremote_protocol::project::{DirectoryEntry, ProjectSettings};
 
 /// Allowed hidden directory names that should not be filtered out.
 const ALLOWED_HIDDEN: &[&str] = &[".git", ".claude", ".zremote"];
@@ -127,6 +127,7 @@ pub fn write_settings(project_path: &Path, settings: &ProjectSettings) -> Result
 mod tests {
     use super::*;
     use std::fs;
+    use zremote_protocol::project::AgenticSettings;
 
     fn create_temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temp dir")
