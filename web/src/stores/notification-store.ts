@@ -20,6 +20,7 @@ export interface ActionNotification {
 
 interface NotificationState {
   notifications: Map<string, ActionNotification>;
+  recentlyDismissed: Map<string, number>;
   browserPermission: NotificationPermission | "unsupported";
   browserEnabled: boolean;
 
@@ -42,11 +43,26 @@ interface NotificationState {
 
 export const useNotificationStore = create<NotificationState>((set) => ({
   notifications: new Map(),
+  recentlyDismissed: new Map(),
   browserPermission: getBrowserPermission(),
   browserEnabled: false,
 
   addOrUpdate: (notification) => {
     set((state) => {
+      const now = Date.now();
+
+      // Skip if recently dismissed (prevents re-add from delayed WebSocket)
+      const dismissedAt = state.recentlyDismissed.get(notification.id);
+      if (dismissedAt !== undefined && now - dismissedAt < 5000) {
+        return state;
+      }
+
+      // Clean up stale entries
+      const nextDismissed = new Map(state.recentlyDismissed);
+      for (const [key, ts] of nextDismissed) {
+        if (now - ts > 10_000) nextDismissed.delete(key);
+      }
+
       const next = new Map(state.notifications);
       const existing = next.get(notification.id);
       if (existing && notification.status === "tool_pending") {
@@ -62,7 +78,7 @@ export const useNotificationStore = create<NotificationState>((set) => ({
       } else {
         next.set(notification.id, notification);
       }
-      return { notifications: next };
+      return { notifications: next, recentlyDismissed: nextDismissed };
     });
   },
 
@@ -85,7 +101,9 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     set((state) => {
       const next = new Map(state.notifications);
       next.delete(loopId);
-      return { notifications: next };
+      const nextDismissed = new Map(state.recentlyDismissed);
+      nextDismissed.set(loopId, Date.now());
+      return { notifications: next, recentlyDismissed: nextDismissed };
     });
   },
 
@@ -101,7 +119,9 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     set((state) => {
       const next = new Map(state.notifications);
       next.delete(loopId);
-      return { notifications: next };
+      const nextDismissed = new Map(state.recentlyDismissed);
+      nextDismissed.set(loopId, Date.now());
+      return { notifications: next, recentlyDismissed: nextDismissed };
     });
   },
 
@@ -114,9 +134,11 @@ export const useNotificationStore = create<NotificationState>((set) => ({
       const newCount = existing.pendingToolCount - 1;
       if (newCount <= 0 && existing.status === "tool_pending") {
         next.delete(loopId);
-      } else {
-        next.set(loopId, { ...existing, pendingToolCount: newCount });
+        const nextDismissed = new Map(state.recentlyDismissed);
+        nextDismissed.set(loopId, Date.now());
+        return { notifications: next, recentlyDismissed: nextDismissed };
       }
+      next.set(loopId, { ...existing, pendingToolCount: newCount });
       return { notifications: next };
     });
   },
