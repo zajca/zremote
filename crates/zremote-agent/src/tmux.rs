@@ -321,7 +321,11 @@ impl TmuxSession {
         Ok(())
     }
 
-    /// Resize the tmux pane.
+    /// Resize the tmux window (and all its panes).
+    ///
+    /// Uses `resize-window` instead of `resize-pane` because detached sessions
+    /// (created with `new-session -d`) keep their initial window size, and
+    /// `resize-pane` is silently capped by the window dimensions.
     pub fn resize(
         &self,
         cols: u16,
@@ -329,9 +333,9 @@ impl TmuxSession {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let output = tmux_cmd()
             .args([
-                "resize-pane",
+                "resize-window",
                 "-t",
-                &self.pane_id,
+                &self.tmux_name,
                 "-x",
                 &cols.to_string(),
                 "-y",
@@ -341,7 +345,7 @@ impl TmuxSession {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tmux resize-pane failed: {stderr}").into());
+            return Err(format!("tmux resize-window failed: {stderr}").into());
         }
 
         Ok(())
