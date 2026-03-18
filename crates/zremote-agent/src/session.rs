@@ -149,8 +149,10 @@ impl SessionManager {
     }
 
     /// Discover existing tmux sessions from a previous agent lifecycle.
-    /// Returns a list of (session_id, shell_name, pid) for recovered sessions.
-    pub fn discover_existing(&mut self) -> Vec<(SessionId, String, u32)> {
+    /// Returns a list of (session_id, shell_name, pid, initial_capture) for recovered sessions.
+    /// The initial capture contains the pane content at the time of reattach,
+    /// captured before live output starts flowing through the FIFO.
+    pub fn discover_existing(&mut self) -> Vec<(SessionId, String, u32, Option<Vec<u8>>)> {
         if !self.use_tmux {
             return Vec::new();
         }
@@ -161,14 +163,15 @@ impl SessionManager {
         let recovered = crate::tmux::discover_sessions(self.output_tx.clone());
         let mut result = Vec::new();
 
-        for session in recovered {
+        for mut session in recovered {
             let session_id = session.session_id();
             let pid = session.pid();
+            let capture = session.take_initial_capture();
             // Get shell from /proc/{pid}/comm or default to "shell"
             let shell = std::fs::read_to_string(format!("/proc/{pid}/comm"))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "shell".to_string());
-            result.push((session_id, shell, pid));
+            result.push((session_id, shell, pid, capture));
             self.sessions
                 .insert(session_id, SessionBackend::Tmux(session));
         }

@@ -146,8 +146,9 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
         );
       } else if (msg.type === "session_resumed") {
         suspendedRef.current = false;
+        term.reset();
         term.write(
-          `\r\n\x1b[32m[Session resumed]\x1b[0m\r\n`,
+          `\x1b[32m[Session resumed]\x1b[0m\r\n`,
         );
       } else if (msg.type === "error" && msg.message) {
         term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);

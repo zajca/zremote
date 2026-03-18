@@ -352,7 +352,7 @@ pub async fn run_connection(
             let sessions: Vec<zremote_protocol::RecoveredSession> = recovered
                 .iter()
                 .map(
-                    |(session_id, shell, pid)| zremote_protocol::RecoveredSession {
+                    |(session_id, shell, pid, _capture)| zremote_protocol::RecoveredSession {
                         session_id: *session_id,
                         shell: shell.clone(),
                         pid: *pid,
