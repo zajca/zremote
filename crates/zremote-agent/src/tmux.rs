@@ -51,6 +51,7 @@ pub struct TmuxSession {
     output_tx: mpsc::Sender<PtyOutput>,
     extra_panes: Vec<ExtraPaneHandle>,
     known_pane_ids: HashSet<String>,
+    initial_capture: Option<Vec<u8>>,
 }
 
 /// Create a `Command` pre-configured with `tmux -L zremote`.
@@ -179,6 +180,7 @@ impl TmuxSession {
             output_tx,
             extra_panes: Vec::new(),
             known_pane_ids,
+            initial_capture: None,
         };
 
         Ok((session, pid))
@@ -234,30 +236,26 @@ impl TmuxSession {
         let _ = fs::remove_file(&fifo_path);
         create_fifo(&fifo_path)?;
 
+        // Capture the current visible pane content BEFORE setting up pipe-pane.
+        // This avoids a race where live tmux output (with cursor positioning
+        // sequences) arrives through the FIFO before the capture data, causing
+        // conflicting screen content and duplicate cursors in the browser.
+        let initial_capture = tmux_cmd()
+            .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
+            .output()
+            .ok()
+            .filter(|cap| cap.status.success() && !cap.stdout.is_empty())
+            .map(|cap| cap.stdout);
+
         // Stop any existing pipe-pane, then set up fresh targeting the stable pane_id
         let _ = tmux_cmd().args(["pipe-pane", "-t", &pane_id]).output();
         setup_pipe_pane(&pane_id, &fifo_path)?;
 
-        // Spawn async reader task on FIFO
+        // Spawn async reader task on FIFO (only new output goes through channel)
         let reader_handle =
             spawn_fifo_reader(session_id, None, fifo_path.clone(), output_tx.clone());
 
         tracing::info!(session_id = %session_id, pane_id = %pane_id, "pane ID captured on reattach");
-
-        // Capture the current visible pane content so the browser gets
-        // an immediate snapshot after recovery (scrollback is lost on restart).
-        if let Ok(cap) = tmux_cmd()
-            .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
-            .output()
-            && cap.status.success()
-            && !cap.stdout.is_empty()
-        {
-            let _ = output_tx.try_send(PtyOutput {
-                session_id,
-                pane_id: None,
-                data: cap.stdout,
-            });
-        }
 
         let mut known_pane_ids = HashSet::new();
         known_pane_ids.insert(pane_id.clone());
@@ -272,6 +270,7 @@ impl TmuxSession {
             output_tx,
             extra_panes: Vec::new(),
             known_pane_ids,
+            initial_capture,
         })
     }
 
@@ -288,6 +287,12 @@ impl TmuxSession {
     /// Return the stable pane ID (`%N` format).
     pub fn pane_id(&self) -> &str {
         &self.pane_id
+    }
+
+    /// Take the initial capture data collected during reattach.
+    /// Returns `None` if no capture was taken or it has already been consumed.
+    pub fn take_initial_capture(&mut self) -> Option<Vec<u8>> {
+        self.initial_capture.take()
     }
 
     /// Send raw bytes as input to the tmux pane via `send-keys -H` (hex mode).

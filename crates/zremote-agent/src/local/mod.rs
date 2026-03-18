@@ -139,10 +139,13 @@ pub async fn run_local(
         mgr.discover_existing()
     };
 
-    let recovered_ids: Vec<String> = recovered.iter().map(|(id, _, _)| id.to_string()).collect();
+    let recovered_ids: Vec<String> = recovered
+        .iter()
+        .map(|(id, _, _, _)| id.to_string())
+        .collect();
 
     // Resume recovered sessions in DB and create in-memory state
-    for (session_id, shell, pid) in &recovered {
+    for (session_id, shell, pid, capture) in &recovered {
         sqlx::query(
             "UPDATE sessions SET status = 'active', suspended_at = NULL, \
              pid = ?, shell = ? WHERE id = ?",
@@ -156,6 +159,11 @@ pub async fn run_local(
         let mut sessions = state.sessions.write().await;
         let mut session_state = zremote_core::state::SessionState::new(*session_id, host_id);
         session_state.status = "active".to_string();
+        // Populate scrollback with captured pane content so browsers
+        // get an immediate snapshot on reconnect
+        if let Some(data) = capture {
+            session_state.append_scrollback(data.clone());
+        }
         sessions.insert(*session_id, session_state);
     }
 
