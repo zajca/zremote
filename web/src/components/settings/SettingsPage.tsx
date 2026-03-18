@@ -6,6 +6,7 @@ import { api } from "../../lib/api";
 import { requestBrowserPermission } from "../../lib/browser-notifications";
 import { useNotificationStore } from "../../stores/notification-store";
 import { showToast } from "../layout/Toast";
+import { Toggle } from "../ui/Toggle";
 
 interface ConfigEntry {
   key: string;
@@ -153,22 +154,11 @@ export function SettingsPage() {
                       {entry.description}
                     </div>
                   </div>
-                  <button
-                    onClick={() => void handleGlobalToggle(entry.key)}
-                    className={`relative h-5 w-9 rounded-full transition-colors duration-200 ${
-                      globalValues[entry.key] === "true"
-                        ? "bg-accent"
-                        : "bg-bg-tertiary"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200 ${
-                        globalValues[entry.key] === "true"
-                          ? "translate-x-4"
-                          : "translate-x-0.5"
-                      }`}
-                    />
-                  </button>
+                  <Toggle
+                    checked={globalValues[entry.key] === "true"}
+                    onChange={() => void handleGlobalToggle(entry.key)}
+                    aria-label={entry.label}
+                  />
                 </label>
               ))}
             </div>
@@ -208,22 +198,11 @@ export function SettingsPage() {
                           Override for this host
                         </div>
                       </div>
-                      <button
-                        onClick={() => void handleHostToggle(entry.key)}
-                        className={`relative h-5 w-9 rounded-full transition-colors duration-200 ${
-                          hostValues[entry.key] === "true"
-                            ? "bg-accent"
-                            : "bg-bg-tertiary"
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform duration-200 ${
-                            hostValues[entry.key] === "true"
-                              ? "translate-x-4"
-                              : "translate-x-0.5"
-                          }`}
-                        />
-                      </button>
+                      <Toggle
+                        checked={hostValues[entry.key] === "true"}
+                        onChange={() => void handleHostToggle(entry.key)}
+                        aria-label={`${entry.label} override`}
+                      />
                     </label>
                   ))}
                 </div>
