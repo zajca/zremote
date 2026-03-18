@@ -125,7 +125,7 @@ export function getLoopActions(
     keywords: ["transcript", "view", "conversation", "log"],
     group: "actions",
     onSelect: () => {
-      deps.navigate(`/hosts/${hostId}/sessions/${sessionId}/loops/${loopId}`);
+      deps.navigate(`/hosts/${hostId}/sessions/${sessionId}`);
       deps.close();
     },
   });

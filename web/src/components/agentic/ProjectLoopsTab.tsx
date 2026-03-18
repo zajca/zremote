@@ -178,9 +178,7 @@ export function ProjectLoopsTab({ projectId, hostId }: ProjectLoopsTabProps) {
 
   const handleLoopClick = useCallback(
     (loop: AgenticLoop) => {
-      void navigate(
-        `/hosts/${hostId}/sessions/${loop.session_id}/loops/${loop.id}`,
-      );
+      void navigate(`/hosts/${hostId}/sessions/${loop.session_id}`);
     },
     [navigate, hostId],
   );

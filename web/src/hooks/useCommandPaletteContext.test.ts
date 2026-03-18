@@ -49,17 +49,6 @@ describe("useCommandPaletteContext", () => {
     });
   });
 
-  test("returns loop level for /hosts/abc/sessions/def/loops/ghi", () => {
-    mockPathname = "/hosts/abc/sessions/def/loops/ghi";
-    const { result } = renderHook(() => useCommandPaletteContext());
-    expect(result.current).toEqual({
-      level: "loop",
-      hostId: "abc",
-      sessionId: "def",
-      loopId: "ghi",
-    });
-  });
-
   test("returns project level for /projects/xyz", () => {
     mockPathname = "/projects/xyz";
     const { result } = renderHook(() => useCommandPaletteContext());

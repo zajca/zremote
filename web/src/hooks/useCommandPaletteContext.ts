@@ -6,12 +6,8 @@ export function useCommandPaletteContext(): PaletteContext {
   const { pathname } = useLocation();
 
   return useMemo(() => {
-    // /hosts/:hostId/sessions/:sessionId/loops/:loopId
-    let match = pathname.match(/^\/hosts\/([^/]+)\/sessions\/([^/]+)\/loops\/([^/]+)/);
-    if (match) return { level: "loop" as const, hostId: match[1], sessionId: match[2], loopId: match[3] };
-
     // /hosts/:hostId/sessions/:sessionId
-    match = pathname.match(/^\/hosts\/([^/]+)\/sessions\/([^/]+)/);
+    let match = pathname.match(/^\/hosts\/([^/]+)\/sessions\/([^/]+)/);
     if (match) return { level: "session" as const, hostId: match[1], sessionId: match[2] };
 
     // /hosts/:hostId
