@@ -5,7 +5,6 @@ import { ModeProvider } from "./hooks/useMode";
 import { WelcomePage } from "./pages/WelcomePage";
 import { HostPage } from "./pages/HostPage";
 import { SessionPage } from "./pages/SessionPage";
-import { AgenticLoopPage } from "./pages/AgenticLoopPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { SettingsPage } from "./components/settings/SettingsPage";
 
@@ -38,10 +37,6 @@ const router = createBrowserRouter([
       {
         path: "hosts/:hostId/sessions/:sessionId",
         element: <SessionPage />,
-      },
-      {
-        path: "hosts/:hostId/sessions/:sessionId/loops/:loopId",
-        element: <AgenticLoopPage />,
       },
       {
         path: "analytics",
