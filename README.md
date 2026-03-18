@@ -1,103 +1,185 @@
 # ZRemote
 
-A self-hosted platform for managing remote machines through the browser. Connect agents on your servers, open terminal sessions, monitor AI agentic loops in real-time, track token usage and costs, and receive Telegram notifications -- all from a single dashboard.
+Remote machine management platform with interactive terminal sessions, AI agent monitoring, and real-time analytics. Runs in three modes: **Local** (single-host, zero-config), **Server** (multi-host via central server), and **MCP** (Claude Code integration over stdio).
+
+## Features
+
+**Terminal & Sessions**
+- Interactive PTY sessions in the browser (xterm.js)
+- Persistent sessions via tmux -- survive agent restarts, crashes, and updates
+- Multi-host management from a single dashboard
+
+**AI Agent Monitoring**
+- Agentic loop tracking: tool calls, transcripts, token usage, costs
+- Tool permissions: approve, reject, or auto-approve agent tool calls
+- Claude Code hooks integration for real-time event capture
+- Claude task lifecycle management
+
+**Project Management**
+- Auto-discovery of projects (Cargo.toml, package.json, pyproject.toml)
+- Git integration: branch info, recent commits, dirty state, worktree operations
+- Linear issue integration
+- Knowledge extraction via OpenViking
+
+**Analytics & Search**
+- Dashboard with token usage, cost tracking, and session statistics (recharts)
+- Full-text transcript search (FTS5)
+- History browser for past sessions and loops
+
+**Other**
+- Telegram notifications (host events, session activity, pending approvals)
+- MCP server mode for Claude Code tool integration
+- Interactive project configuration with Claude
+- Local mode: single binary, embedded web UI, zero configuration
+
+## Quick Start
+
+### Install
+
+**Pre-built binaries** from [GitHub Releases](../../releases):
+
+| Platform | Target |
+|----------|--------|
+| Linux x86_64 | `zremote-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64 | `zremote-aarch64-unknown-linux-musl.tar.gz` |
+| macOS x86_64 | `zremote-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 | `zremote-aarch64-apple-darwin.tar.gz` |
+
+Each archive contains `zremote-agent` and `zremote-server` binaries.
+
+**From source** (Nix recommended):
+
+```bash
+nix develop                           # Provides Rust, Bun, SQLite, etc.
+cd web && bun install && bun run build && cd ..
+cargo build --workspace --release
+```
+
+Or manually: Rust 1.94+, Bun 1.3+, SQLite.
+
+### Local Mode (recommended for getting started)
+
+```bash
+zremote-agent local --port 3000
+# Open http://127.0.0.1:3000
+```
+
+Single binary with embedded web UI and SQLite database. No server needed.
+
+### Server Mode (multi-host)
+
+```bash
+# Server
+ZREMOTE_TOKEN=secret cargo run -p zremote-server
+
+# Agent (on each remote host)
+ZREMOTE_SERVER_URL=ws://server-host:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent
+
+# Web UI (development)
+cd web && bun install && bun run dev   # :5173 proxies API to :3000
+```
+
+### MCP Server (Claude Code integration)
+
+```bash
+zremote-agent mcp-serve --project /path/to/project
+```
+
+Exposes project knowledge and tools over JSON-RPC stdio transport.
 
 ## Architecture
 
 ```
-┌─────────────┐       HTTP / WebSocket       ┌─────────────────┐       WebSocket       ┌─────────────┐
-│   Browser    │  <───────────────────────>   │  ZRemote Server │  <────────────────>   │    Agent     │
-│  (React UI)  │                             │   (Axum + SQLite) │                      │ (remote host)│
-└─────────────┘                              └─────────────────┘                       └─────────────┘
-                                                    │
-                                              ┌─────┴─────┐
-                                              │ Telegram   │
-                                              │ (optional) │
-                                              └───────────┘
+LOCAL MODE:
+
+  Browser <--HTTP/WS--> Agent (Axum + embedded UI + SQLite)
+                         |-- REST API (/api/*)
+                         |-- Terminal WebSocket (/ws/terminal/:id)
+                         |-- Events WebSocket (/ws/events)
+                         |-- PTY sessions (direct)
+                         |-- Agentic detection & hooks
+
+SERVER MODE:
+
+  Browser <--HTTP/WS--> Server (Axum + SQLite) <--WS--> Agent(s)
+                              |                          |-- PTY/tmux sessions
+                              |-- Telegram bot           |-- Agentic detection
+                              |-- REST API               |-- Project scanning
+                              |-- Event broadcast        |-- Claude Code hooks
 ```
-
-## Features
-
-- **Terminal sessions** -- Open interactive PTY sessions on remote machines directly from the browser (xterm.js)
-- **Persistent sessions** -- Sessions survive agent restarts via tmux. Kill the agent, restart it, and your terminal picks up where it left off
-- **Agentic loop monitoring** -- Track AI agent tool calls, transcripts, token usage, and costs in real-time
-- **Tool permissions** -- Approve, reject, or auto-approve agent tool calls with configurable permission rules
-- **Project discovery** -- Automatically scan and manage projects on remote hosts
-- **Analytics dashboard** -- Token usage, cost tracking, session statistics with charts
-- **Full-text search** -- Search across agentic loop transcripts (FTS5)
-- **Telegram notifications** -- Get notified about host connections, session events, and pending tool approvals
-- **Multi-host management** -- Connect and manage multiple remote machines from one server
-
-## Quick Start
-
-### Prerequisites
-
-- [Nix](https://nixos.org/download/) (recommended) or manually install: Rust 1.94+, Bun 1.3+, Node.js 22+, SQLite
-- A shared secret token for authentication
-
-### 1. Start the server
-
-```bash
-nix develop
-
-export ZREMOTE_TOKEN="your-secret-token"
-cargo run -p zremote-server
-```
-
-Server starts on `http://localhost:3000`.
-
-### 2. Connect an agent
-
-On the remote machine (or another terminal for local testing):
-
-```bash
-nix develop
-
-export ZREMOTE_TOKEN="your-secret-token"
-export ZREMOTE_SERVER_URL="ws://localhost:3000/ws/agent"
-cargo run -p zremote-agent
-```
-
-### 3. Open the web UI
-
-```bash
-cd web
-bun install
-bun run dev
-```
-
-Open `http://localhost:5173` in your browser. Connected hosts appear automatically.
 
 ## Configuration
 
-| Variable | Required | Component | Default | Description |
-|---|---|---|---|---|
-| `ZREMOTE_TOKEN` | Yes | Server + Agent | -- | Shared authentication token |
-| `ZREMOTE_SERVER_URL` | Yes | Agent | -- | Server WebSocket URL (e.g. `ws://host:3000/ws/agent`) |
-| `DATABASE_URL` | No | Server | `sqlite:zremote.db` | SQLite database path |
-| `ZREMOTE_PORT` | No | Server | `3000` | Server listen port |
-| `TELEGRAM_BOT_TOKEN` | No | Server | -- | Telegram bot token for notifications |
-| `RUST_LOG` | No | Both | `info` | Log level filter (e.g. `debug`, `zremote_server=debug`) |
+### Server Mode Environment Variables
 
-## Persistent Sessions
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ZREMOTE_TOKEN` | Yes | -- | Shared authentication token |
+| `ZREMOTE_SERVER_URL` | Yes (agent) | -- | Server WebSocket URL, e.g. `ws://host:3000/ws/agent` |
+| `DATABASE_URL` | No | `sqlite:zremote.db` | SQLite connection string |
+| `ZREMOTE_PORT` | No | `3000` | HTTP/WS listen port |
+| `TELEGRAM_BOT_TOKEN` | No | -- | Enables Telegram bot integration |
+| `RUST_LOG` | No | `info` | Tracing filter level |
 
-When [tmux](https://github.com/tmux/tmux) is installed on the remote host, terminal sessions automatically survive agent restarts. No configuration is needed -- the agent detects tmux at startup and uses it as the session backend.
+### Local Mode CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `3000` | HTTP/WS listen port |
+| `--db` | `~/.zremote/local.db` | SQLite database path |
+| `--bind` | `127.0.0.1` | Bind address |
+| `--web-dir` | embedded | Serve web UI from filesystem (for development) |
+
+## CLI Reference
+
+```
+zremote-agent [COMMAND]
+```
+
+| Command | Description |
+|---------|-------------|
+| `run` (default) | Connect to remote server |
+| `local` | Run with embedded web server (single-host mode) |
+| `mcp-serve` | Run as MCP server over stdio |
+| `configure` | Interactive project configuration with Claude |
+
+### `local`
+
+```
+zremote-agent local [--port 3000] [--db ~/.zremote/local.db] [--bind 127.0.0.1] [--web-dir PATH]
+```
+
+### `mcp-serve`
+
+```
+zremote-agent mcp-serve --project PATH [--ov-port 8741]
+```
+
+### `configure`
+
+```
+zremote-agent configure --project PATH [--model sonnet] [--skip-permissions]
+```
+
+## Persistent Sessions (tmux)
+
+When [tmux](https://github.com/tmux/tmux) is installed, terminal sessions automatically survive agent restarts in both local and server mode. No configuration needed -- the agent detects tmux at startup.
 
 ### How it works
 
-Without tmux, killing the agent kills all terminal sessions. With tmux enabled:
+Without tmux, killing the agent kills all terminal sessions. With tmux:
 
 1. Sessions spawn inside a dedicated tmux server (`tmux -L zremote`)
 2. When the agent stops (crash, update, restart), tmux keeps the shells alive
 3. The browser shows sessions as **suspended** with a yellow badge
-4. When the agent reconnects, it discovers the surviving tmux sessions and resumes them
-5. The browser terminal continues seamlessly -- scrollback is preserved
+4. When the agent reconnects, it discovers surviving tmux sessions and resumes them
+5. Scrollback is preserved -- the browser terminal continues seamlessly
 
-This is especially useful for long-running Claude Code sessions that would otherwise be destroyed by agent updates.
+Especially useful for long-running Claude Code sessions that would otherwise be destroyed by agent updates.
 
 ### Requirements
 
-- `tmux` installed on the remote host (any recent version)
+- `tmux` installed on the host (any recent version)
 - That's it. No configuration, no environment variables.
 
 ### Verification
@@ -109,7 +191,7 @@ This is especially useful for long-running Claude Code sessions that would other
 # List active zremote sessions
 tmux -L zremote ls
 
-# Test it: open a session in the UI, then kill the agent
+# Test: open a session in the UI, then kill the agent
 kill -9 $(pgrep zremote-agent)
 
 # Sessions are still alive
@@ -120,47 +202,77 @@ tmux -L zremote ls    # zremote-<uuid>: 1 windows ...
 
 ### Fallback
 
-If tmux is not installed, the agent uses standard PTY sessions (the original behavior). Sessions will not survive agent restarts. The agent logs `"tmux not found, using standard PTY sessions"` in this case.
+If tmux is not installed, the agent uses standard PTY sessions (sessions will not survive agent restarts). The agent logs `"tmux not found, using standard PTY sessions"` in this case.
 
 ## Development
 
+### Prerequisites
+
+[Nix](https://nixos.org/download/) (recommended):
+
 ```bash
-nix develop                          # Enter dev shell with all dependencies
+nix develop
+```
 
-# Rust
-cargo build                          # Build all crates
-cargo test --workspace               # Run all 443 tests
-cargo clippy --workspace             # Lint
+Or manually install: Rust 1.94+, Bun 1.3+, SQLite.
 
-# Web
-cd web
-bun install                          # Install dependencies
-bun run dev                          # Dev server (proxies API to :3000)
-bun run build                        # Production build
-bun run test                         # Run tests
-bun run typecheck                    # TypeScript check
-bun run lint                         # ESLint
-bun run format                       # Prettier
+### Dev Scripts
+
+```bash
+./scripts/dev-setup.sh       # First-time setup (checks tools, installs deps, builds)
+./scripts/dev.sh             # Full hot-reload: agent :3000 + Vite :5173
+./scripts/dev.sh 3001        # Override agent port
+./scripts/dev-backend.sh     # Backend only: agent :3000 with embedded UI
+```
+
+**Full dev** (`dev.sh`): Open `http://localhost:5173` -- Vite proxies API/WS to agent, frontend hot-reloads on save.
+
+**Backend only** (`dev-backend.sh`): Open `http://localhost:3000` -- embedded UI, no Vite needed.
+
+### Build
+
+```bash
+cargo build --workspace                # Full workspace
+cd web && bun run build && cd ..       # Web UI (required for rust-embed)
+cargo build -p zremote-agent           # Agent with embedded UI (default)
+cargo build -p zremote-agent --no-default-features  # Agent without local mode
+```
+
+### Tests
+
+```bash
+cargo test --workspace                 # Rust tests
+cargo clippy --workspace               # Lint
+cd web && bun run test                 # Frontend tests
+cd web && bun run typecheck            # TypeScript check
+```
+
+### Coverage
+
+The project maintains minimum code coverage thresholds, enforced in CI on every push and PR:
+
+| Target | Threshold |
+|--------|-----------|
+| Backend (lines) | >= 80% |
+| Frontend (statements/lines) | >= 75% |
+| Frontend (branches/functions) | >= 70% |
+
+```bash
+cargo llvm-cov --workspace --html     # Rust coverage -> target/llvm-cov/html/
+cd web && bun run test:coverage        # Frontend coverage -> web/coverage/
+./scripts/check-coverage.sh           # Full gate check (fails on regression)
 ```
 
 ## Project Structure
 
 ```
-zremote/
-├── crates/
-│   ├── zremote-protocol/           # Shared WebSocket message types
-│   ├── zremote-server/             # Axum server (REST API + WebSocket + Telegram)
-│   │   └── migrations/              # SQLite migrations (11 files)
-│   └── zremote-agent/              # Agent binary (PTY/tmux, project scanning, loop detection)
-├── web/                             # React frontend (Vite + TypeScript + Tailwind)
-│   └── src/
-│       ├── components/              # UI components (terminal, agentic panels, sidebar)
-│       ├── pages/                   # Route pages (dashboard, sessions, analytics, etc.)
-│       ├── stores/                  # Zustand state management
-│       └── lib/api.ts               # REST API client
-├── docs/                            # Design documents and implementation plans
-├── flake.nix                        # Nix development shell
-└── Cargo.toml                       # Workspace root
+crates/
+  zremote-protocol/     # Shared WebSocket message types
+  zremote-core/         # Shared types, DB, queries, message processing
+  zremote-server/       # Axum server (multi-host mode, Telegram)
+  zremote-agent/        # Agent binary (local/server/MCP/configure modes)
+web/                    # React 19 + TypeScript 5.8 + Tailwind CSS 4
+scripts/                # Dev workflow scripts
 ```
 
 ## License
