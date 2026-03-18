@@ -32,11 +32,29 @@ vi.mock("../components/layout/Toast", () => ({
   showToast: vi.fn(),
 }));
 
+vi.mock("../stores/notification-store", () => ({
+  useNotificationStore: {
+    getState: vi.fn(() => ({
+      addOrUpdate: vi.fn(),
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    })),
+  },
+}));
+
+vi.mock("../lib/browser-notifications", () => ({
+  showBrowserNotification: vi.fn(),
+}));
+
 import { useRealtimeUpdates } from "./useRealtimeUpdates";
 import { useAgenticStore } from "../stores/agentic-store";
 import { useClaudeTaskStore } from "../stores/claude-task-store";
+import { useNotificationStore } from "../stores/notification-store";
 import { dispatchWsReconnected, dispatchWsDisconnected } from "../components/layout/ReconnectBanner";
 import { showToast } from "../components/layout/Toast";
+import { showBrowserNotification } from "../lib/browser-notifications";
 
 class MockWebSocket {
   onopen: (() => void) | null = null;
@@ -394,5 +412,294 @@ describe("useRealtimeUpdates", () => {
     // Missing session_id
     mockWs.simulateMessage({ type: "claude_task_started", task_id: "t1" });
     expect(mockHandleStarted).not.toHaveBeenCalled();
+  });
+
+  test("shows toast on host_connected", () => {
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({ type: "host_connected", hostname: "my-host" });
+    expect(showToast).toHaveBeenCalledWith("Host my-host connected", "success");
+  });
+
+  test("shows toast on host_disconnected", () => {
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({ type: "host_disconnected", hostname: "my-host" });
+    expect(showToast).toHaveBeenCalledWith("Host my-host disconnected", "error");
+  });
+
+  test("shows toast on session_suspended", () => {
+    const onSessionUpdate = vi.fn();
+    renderHook(() => useRealtimeUpdates({ onSessionUpdate }));
+    mockWs.simulateMessage({ type: "session_suspended" });
+    expect(onSessionUpdate).toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith("Session suspended - agent reconnecting", "info");
+  });
+
+  test("shows toast on session_resumed", () => {
+    const onSessionUpdate = vi.fn();
+    renderHook(() => useRealtimeUpdates({ onSessionUpdate }));
+    mockWs.simulateMessage({ type: "session_resumed" });
+    expect(onSessionUpdate).toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith("Session resumed", "success");
+  });
+
+  test("shows toast on agentic_loop_ended", () => {
+    const mockUpdateLoop = vi.fn();
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: mockUpdateLoop,
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_ended",
+      loop: { id: "l1", status: "completed", end_reason: "completed" },
+    });
+    expect(showToast).toHaveBeenCalledWith("Loop ended: completed", "info");
+  });
+
+  test("shows error toast on agentic_loop_ended with error reason", () => {
+    const mockUpdateLoop = vi.fn();
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: mockUpdateLoop,
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_ended",
+      loop: { id: "l1", status: "error", end_reason: "error" },
+    });
+    expect(showToast).toHaveBeenCalledWith("Loop ended: error", "error");
+  });
+
+  test("shows toast on claude_task_started", () => {
+    (useClaudeTaskStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      handleTaskStarted: vi.fn(),
+      handleTaskUpdated: vi.fn(),
+      handleTaskEnded: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "claude_task_started",
+      task_id: "t1",
+      session_id: "s1",
+      host_id: "h1",
+      project_path: "/app",
+    });
+    expect(showToast).toHaveBeenCalledWith("Claude task started", "info");
+  });
+
+  test("shows toast on claude_task_ended completed", () => {
+    (useClaudeTaskStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      handleTaskStarted: vi.fn(),
+      handleTaskUpdated: vi.fn(),
+      handleTaskEnded: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "claude_task_ended",
+      task_id: "t1",
+      status: "completed",
+    });
+    expect(showToast).toHaveBeenCalledWith("Claude task completed", "success");
+  });
+
+  test("shows error toast on claude_task_ended with error status", () => {
+    (useClaudeTaskStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      handleTaskStarted: vi.fn(),
+      handleTaskUpdated: vi.fn(),
+      handleTaskEnded: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "claude_task_ended",
+      task_id: "t1",
+      status: "error",
+    });
+    expect(showToast).toHaveBeenCalledWith("Claude task ended: error", "error");
+  });
+
+  test("adds notification for waiting_for_input loop state", () => {
+    const mockAddOrUpdate = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_state_update",
+      host_id: "h1",
+      hostname: "dev-server",
+      loop: {
+        id: "l1",
+        session_id: "s1",
+        status: "waiting_for_input",
+        tool_name: "claude-code",
+        pending_tool_calls: 0,
+      },
+    });
+    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loopId: "l1",
+        status: "waiting_for_input",
+        hostId: "h1",
+        hostname: "dev-server",
+      }),
+    );
+  });
+
+  test("sends browser notification for waiting_for_input when enabled", () => {
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: vi.fn(),
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: true,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_state_update",
+      loop: {
+        id: "l1",
+        session_id: "s1",
+        status: "waiting_for_input",
+        tool_name: "claude-code",
+        pending_tool_calls: 0,
+      },
+    });
+    expect(showBrowserNotification).toHaveBeenCalledWith("Claude needs input", {
+      body: "claude-code is waiting for your response",
+      tag: "loop-l1",
+    });
+  });
+
+  test("adds notification for pending tool call", () => {
+    const mockAddOrUpdate = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: mockAddOrUpdate,
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_tool_call",
+      loop_id: "l1",
+      host_id: "h1",
+      hostname: "dev",
+      tool_call: { id: "tc1", tool_name: "Edit", status: "pending" },
+    });
+    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loopId: "l1",
+        status: "tool_pending",
+        latestToolName: "Edit",
+      }),
+    );
+  });
+
+  test("resolves notification when loop ends", () => {
+    const mockHandleLoopResolved = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: vi.fn(),
+      handleLoopResolved: mockHandleLoopResolved,
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_ended",
+      loop: { id: "l1", status: "completed", end_reason: "done" },
+    });
+    expect(mockHandleLoopResolved).toHaveBeenCalledWith("l1");
+  });
+
+  test("resolves tool notification on tool_result", () => {
+    const mockHandleToolResolved = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: vi.fn(),
+      handleLoopResolved: vi.fn(),
+      handleToolResolved: mockHandleToolResolved,
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_tool_result",
+      loop_id: "l1",
+      tool_call: { id: "tc1", tool_name: "Edit", status: "completed" },
+    });
+    expect(mockHandleToolResolved).toHaveBeenCalledWith("l1");
+  });
+
+  test("resolves notification for working loop state", () => {
+    const mockHandleLoopResolved = vi.fn();
+    (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      addOrUpdate: vi.fn(),
+      handleLoopResolved: mockHandleLoopResolved,
+      handleToolResolved: vi.fn(),
+      notifications: new Map(),
+      browserEnabled: false,
+    });
+    (useAgenticStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
+      updateLoop: vi.fn(),
+      addToolCall: vi.fn(),
+      updateToolCall: vi.fn(),
+      addTranscript: vi.fn(),
+    });
+
+    renderHook(() => useRealtimeUpdates({}));
+    mockWs.simulateMessage({
+      type: "agentic_loop_state_update",
+      loop: { id: "l1", status: "working" },
+    });
+    expect(mockHandleLoopResolved).toHaveBeenCalledWith("l1");
   });
 });

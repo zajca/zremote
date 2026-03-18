@@ -8,6 +8,7 @@ import type {
   MemoryCategory,
 } from "../types/knowledge";
 import { api } from "../lib/api";
+import { showToast } from "../components/layout/Toast";
 
 interface KnowledgeState {
   // State
@@ -120,8 +121,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     try {
       await api.knowledge.deleteMemory(projectId, memoryId);
       get().fetchMemories(projectId);
+      showToast("Memory deleted", "success");
     } catch (e) {
       console.error("Failed to delete memory:", e);
+      showToast("Failed to delete memory", "error");
       throw e;
     }
   },
@@ -141,8 +144,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
           ),
         },
       }));
+      showToast("Memory updated", "success");
     } catch (e) {
       console.error("Failed to update memory:", e);
+      showToast("Failed to update memory", "error");
       throw e;
     }
   },

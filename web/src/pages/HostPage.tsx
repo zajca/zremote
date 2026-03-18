@@ -25,6 +25,7 @@ export function HostPage() {
       setShowNewSession(false);
       try {
         const session = await api.sessions.create(hostId, options);
+        showToast("Session created", "success");
         void navigate(`/hosts/${hostId}/sessions/${session.id}`);
       } catch (e) {
         console.error("failed to create session", e);

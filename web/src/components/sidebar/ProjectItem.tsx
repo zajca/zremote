@@ -5,6 +5,7 @@ import type { Project, Session } from "../../lib/api";
 import { api } from "../../lib/api";
 import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
+import { showToast } from "../layout/Toast";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import { SessionItem } from "./SessionItem";
 
@@ -87,6 +88,7 @@ export const ProjectItem = memo(function ProjectItem({
         void navigate(`/hosts/${hostId}/sessions/${newTask.session_id}`);
       } catch (err) {
         console.error("failed to resume Claude task", err);
+        showToast("Failed to resume task", "error");
       }
     },
     [lastResumableTaskId, navigate, hostId],

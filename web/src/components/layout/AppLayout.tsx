@@ -3,6 +3,7 @@ import { Outlet } from "react-router";
 import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "./CommandPalette";
 import { ToastContainer } from "./Toast";
+import { ActionToastContainer } from "./ActionToast";
 import { ReconnectBanner } from "./ReconnectBanner";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -134,6 +135,7 @@ export function AppLayout() {
         </ErrorBoundary>
       </main>
       <CommandPalette />
+      <ActionToastContainer />
       <ToastContainer />
     </div>
   );
