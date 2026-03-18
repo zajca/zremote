@@ -224,7 +224,7 @@ mod tests {
             tokens_out: 3100,
             model: "claude-sonnet-4".to_string(),
             context_used: 45231,
-            context_max: 100000,
+            context_max: 100_000,
             estimated_cost_usd: 0.42,
             task_name: Some("test-task-name".to_string()),
         });
@@ -234,7 +234,7 @@ mod tests {
             tokens_out: 3100,
             model: "claude-sonnet-4".to_string(),
             context_used: 45231,
-            context_max: 100000,
+            context_max: 100_000,
             estimated_cost_usd: 0.42,
             task_name: None,
         });
