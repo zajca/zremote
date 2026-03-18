@@ -54,6 +54,10 @@ export const SessionItem = memo(function SessionItem({
   const activeLoops = loops.filter(
     (l) => l.status !== "completed" && l.status !== "error",
   );
+
+  const activeLoopTaskName = activeLoops.length > 0
+    ? (activeLoops[activeLoops.length - 1]?.task_name ?? activeLoops[0]?.task_name)
+    : (loops.length > 0 ? loops[loops.length - 1]?.task_name : null);
   const waitingLoops = activeLoops.filter(
     (l) => l.status === "waiting_for_input",
   );
@@ -89,7 +93,7 @@ export const SessionItem = memo(function SessionItem({
         >
           {session.status === "suspended" ? (
             <Pause size={13} className="shrink-0 text-status-warning" />
-          ) : isClaudeTask ? (
+          ) : isClaudeTask || activeLoops.length > 0 ? (
             <Bot size={13} className="shrink-0 text-accent" />
           ) : (
             <Terminal size={13} className="shrink-0 text-text-tertiary" />
@@ -97,7 +101,7 @@ export const SessionItem = memo(function SessionItem({
           <span className="truncate">
             {isClaudeTask && claudeTaskName
               ? claudeTaskName
-              : session.name || session.shell || "shell"}
+              : activeLoopTaskName || session.name || session.shell || "shell"}
           </span>
           <Badge variant={sessionStatusVariant(session.status)}>
             {session.status}
