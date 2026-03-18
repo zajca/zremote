@@ -11,10 +11,11 @@ const LEVEL_LABELS: Record<ContextLevel, string> = {
 
 interface CommandPaletteFooterProps {
   canGoBack: boolean;
+  canDrillDown: boolean;
   contextLevel: ContextLevel;
 }
 
-export function CommandPaletteFooter({ canGoBack, contextLevel }: CommandPaletteFooterProps) {
+export function CommandPaletteFooter({ canGoBack, canDrillDown, contextLevel }: CommandPaletteFooterProps) {
   return (
     <div className="flex items-center justify-between border-t border-border px-3 py-1.5 text-xs text-text-tertiary">
       <div className="flex items-center gap-3">
@@ -30,6 +31,14 @@ export function CommandPaletteFooter({ canGoBack, contextLevel }: CommandPalette
           </kbd>
           <span>Select</span>
         </span>
+        {canDrillDown && (
+          <span className="flex items-center gap-1">
+            <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]">
+              Tab
+            </kbd>
+            <span>Drill down</span>
+          </span>
+        )}
         {canGoBack && (
           <span className="flex items-center gap-1">
             <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]">

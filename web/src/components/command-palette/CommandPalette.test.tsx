@@ -1,4 +1,4 @@
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi, beforeEach } from "vitest";
 import { MemoryRouter } from "react-router";
@@ -17,6 +17,22 @@ vi.stubGlobal(
 );
 
 Element.prototype.scrollIntoView = vi.fn();
+
+// Radix Dialog (used by Command.Dialog) needs PointerEvent and pointer capture in JSDOM
+class MockPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  constructor(type: string, props: PointerEventInit & { pointerId?: number; pointerType?: string } = {}) {
+    super(type, props);
+    this.pointerId = props.pointerId ?? 0;
+    this.pointerType = props.pointerType ?? "";
+  }
+}
+vi.stubGlobal("PointerEvent", MockPointerEvent);
+
+HTMLElement.prototype.hasPointerCapture = vi.fn().mockReturnValue(false);
+HTMLElement.prototype.setPointerCapture = vi.fn();
+HTMLElement.prototype.releasePointerCapture = vi.fn();
 
 let mockHosts: Host[] = [];
 let mockIsLocal = false;
@@ -341,7 +357,7 @@ describe("CommandPalette", () => {
     });
   });
 
-  test("closes on Escape", () => {
+  test("closes on Escape", async () => {
     render(
       <MemoryRouter>
         <CommandPalette />
@@ -353,8 +369,13 @@ describe("CommandPalette", () => {
       screen.getByPlaceholderText("Search commands..."),
     ).toBeInTheDocument();
 
-    // cmdk handles Escape natively, but we can test via backdrop
-    // Pressing Escape is handled by cmdk's built-in behavior
+    await userEvent.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(
+        screen.queryByPlaceholderText("Search commands..."),
+      ).not.toBeInTheDocument();
+    });
   });
 
   test("closes when backdrop is clicked", async () => {
@@ -369,12 +390,15 @@ describe("CommandPalette", () => {
       screen.getByPlaceholderText("Search commands..."),
     ).toBeInTheDocument();
 
-    const backdrop = document.querySelector(".bg-black\\/50");
+    // Radix Dialog renders overlay with cmdk-overlay attribute
+    const backdrop = document.querySelector("[cmdk-overlay]") ?? document.querySelector(".bg-black\\/50");
     await userEvent.click(backdrop!);
 
-    expect(
-      screen.queryByPlaceholderText("Search commands..."),
-    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByPlaceholderText("Search commands..."),
+      ).not.toBeInTheDocument();
+    });
   });
 
   test("dialog spawning works (StartClaude)", async () => {
@@ -598,5 +622,167 @@ describe("CommandPalette", () => {
 
     // Breadcrumb should be gone (only 1 item in stack)
     expect(screen.queryByRole("button", { name: "Global" })).not.toBeInTheDocument();
+  });
+
+  test("Tab drills into item with drillDown", async () => {
+    mockHosts = [mockHost];
+
+    const { api } = await import("../../lib/api");
+    vi.mocked(api.projects.list).mockResolvedValue([]);
+    vi.mocked(api.sessions.list).mockResolvedValue([]);
+
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+
+    openPalette();
+
+    // Wait for host item to appear (it has a drillDown)
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+
+    // Navigate down to "my-server" (Item 4: 4 ArrowDown from first selected item)
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+
+    // Verify my-server is now selected
+    const hostItem = screen.getByText("my-server").closest("[cmdk-item]")!;
+    expect(hostItem.getAttribute("data-selected")).toBe("true");
+
+    // Press Tab to drill into the highlighted item (fire on cmdk-root for React event delegation)
+    const cmdkRoot = document.querySelector("[cmdk-root]")!;
+    fireEvent.keyDown(cmdkRoot, { key: "Tab" });
+
+    // Should now be at host level
+    await waitFor(() => {
+      expect(screen.getByText("New terminal session")).toBeInTheDocument();
+    });
+  });
+
+  test("Right arrow on empty input drills into drillDown item", async () => {
+    mockHosts = [mockHost];
+
+    const { api } = await import("../../lib/api");
+    vi.mocked(api.projects.list).mockResolvedValue([]);
+    vi.mocked(api.sessions.list).mockResolvedValue([]);
+
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+
+    openPalette();
+
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+
+    // Navigate down to "my-server" (Item 4)
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{ArrowDown}");
+
+    const hostItem = screen.getByText("my-server").closest("[cmdk-item]")!;
+    expect(hostItem.getAttribute("data-selected")).toBe("true");
+
+    // Right arrow on empty input should drill down (fire on cmdk-root)
+    const cmdkRoot = document.querySelector("[cmdk-root]")!;
+    fireEvent.keyDown(cmdkRoot, { key: "ArrowRight" });
+
+    await waitFor(() => {
+      expect(screen.getByText("New terminal session")).toBeInTheDocument();
+    });
+  });
+
+  test("Left arrow on empty input pops context", async () => {
+    mockHosts = [mockHost];
+
+    const { api } = await import("../../lib/api");
+    vi.mocked(api.projects.list).mockResolvedValue([]);
+    vi.mocked(api.sessions.list).mockResolvedValue([]);
+
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+
+    openPalette();
+
+    // Drill into host first
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByText("my-server"));
+
+    await waitFor(() => {
+      expect(screen.getByText("New terminal session")).toBeInTheDocument();
+    });
+
+    // Left arrow on empty input should go back
+    await userEvent.keyboard("{ArrowLeft}");
+
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+  });
+
+  test("Shift+Tab pops context", async () => {
+    mockHosts = [mockHost];
+
+    const { api } = await import("../../lib/api");
+    vi.mocked(api.projects.list).mockResolvedValue([]);
+    vi.mocked(api.sessions.list).mockResolvedValue([]);
+
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+
+    openPalette();
+
+    // Drill into host first
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByText("my-server"));
+
+    await waitFor(() => {
+      expect(screen.getByText("New terminal session")).toBeInTheDocument();
+    });
+
+    // Shift+Tab should go back
+    await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+  });
+
+  test("shows Drill down hint when drillDown items exist", async () => {
+    mockHosts = [mockHost];
+
+    render(
+      <MemoryRouter>
+        <CommandPalette />
+      </MemoryRouter>,
+    );
+
+    openPalette();
+
+    // Host items have drillDown, so "Drill down" hint should appear
+    await waitFor(() => {
+      expect(screen.getByText("my-server")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Drill down")).toBeInTheDocument();
+    expect(screen.getByText("Tab")).toBeInTheDocument();
   });
 });

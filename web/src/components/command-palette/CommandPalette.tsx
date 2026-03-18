@@ -10,7 +10,7 @@ import { api } from "../../lib/api";
 import type { Project, ProjectAction, Session } from "../../lib/api";
 import type { AgenticLoop } from "../../types/agentic";
 import { resolveActions, type ResolveData } from "./actions/registry";
-import type { ActionDeps, PaletteContext } from "./types";
+import type { ActionDeps, PaletteAction, PaletteContext } from "./types";
 import { CommandPaletteInput } from "./CommandPaletteInput";
 import { CommandPaletteItem } from "./CommandPaletteItem";
 import { CommandPaletteFooter } from "./CommandPaletteFooter";
@@ -302,69 +302,106 @@ export function CommandPalette() {
     [effectiveContext, deps, resolveData],
   );
 
+  // Build lookup map from cmdk value string -> action
+  const actionsByValue = useMemo(() => {
+    const map = new Map<string, PaletteAction>();
+    for (const action of actions) {
+      const value = [action.label, ...(action.keywords ?? [])].join(" ");
+      map.set(value, action);
+    }
+    return map;
+  }, [actions]);
+
+  const hasDrillDownItems = actions.some((a) => a.drillDown);
+
   // Group actions
   const actionGroup = actions.filter((a) => a.group === "actions");
   const navigateGroup = actions.filter((a) => a.group === "navigate");
   const globalGroup = actions.filter((a) => a.group === "global");
 
-  if (!open && !claudeDialogProject && !addProjectHostId) return null;
-
   return (
     <>
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]">
-          {/* Backdrop */}
-          <div
-            className="fixed inset-0 bg-black/50"
-            onClick={() => setOpen(false)}
-          />
+      <Command.Dialog
+        open={open}
+        onOpenChange={setOpen}
+        overlayClassName="fixed inset-0 bg-black/50 z-50"
+        contentClassName="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
+        className="relative w-full max-w-lg overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-2xl"
+        loop
+        label="Command palette"
+        onKeyDown={(e) => {
+          // Read selected item directly from DOM (cmdk marks it with data-selected="true")
+          const selectedEl = document.querySelector('[cmdk-item][data-selected="true"]');
+          const selectedValue = selectedEl?.getAttribute("data-value") ?? "";
+          const selected = actionsByValue.get(selectedValue);
 
-          <Command
-            className="relative w-full max-w-lg overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-2xl"
-            loop
-          >
-            <CommandPaletteInput
-              contextStack={contextStack}
-              query={query}
-              onQueryChange={setQuery}
-              onPopContext={popContext}
-              onJumpToIndex={jumpToIndex}
-            />
+          // Tab or Right Arrow (empty query): drill down into selected item
+          if (
+            (e.key === "Tab" && !e.shiftKey) ||
+            (e.key === "ArrowRight" && query === "")
+          ) {
+            if (selected?.drillDown) {
+              e.preventDefault();
+              pushContext(selected.drillDown);
+            }
+          }
 
-            <Command.List className="max-h-80 overflow-auto p-2">
-              <Command.Empty className="px-3 py-6 text-center text-sm text-text-tertiary">
-                No results found
-              </Command.Empty>
+          // Shift+Tab or Left Arrow (empty query): go back one level
+          if (
+            (e.key === "Tab" && e.shiftKey) ||
+            (e.key === "ArrowLeft" && query === "")
+          ) {
+            if (contextStack.length > 1) {
+              e.preventDefault();
+              popContext();
+            }
+          }
+        }}
+      >
+        <CommandPaletteInput
+          contextStack={contextStack}
+          query={query}
+          onQueryChange={setQuery}
+          onPopContext={popContext}
+          onJumpToIndex={jumpToIndex}
+        />
 
-              {actionGroup.length > 0 && (
-                <Command.Group heading="Actions" className={GROUP_HEADING_CLASS}>
-                  {actionGroup.map((action) => (
-                    <CommandPaletteItem key={action.id} action={action} />
-                  ))}
-                </Command.Group>
-              )}
+        <Command.List className="max-h-80 overflow-auto p-2">
+          <Command.Empty className="px-3 py-6 text-center text-sm text-text-tertiary">
+            No results found
+          </Command.Empty>
 
-              {navigateGroup.length > 0 && (
-                <Command.Group heading="Navigate" className={GROUP_HEADING_CLASS}>
-                  {navigateGroup.map((action) => (
-                    <CommandPaletteItem key={action.id} action={action} />
-                  ))}
-                </Command.Group>
-              )}
+          {actionGroup.length > 0 && (
+            <Command.Group heading="Actions" className={GROUP_HEADING_CLASS}>
+              {actionGroup.map((action) => (
+                <CommandPaletteItem key={action.id} action={action} />
+              ))}
+            </Command.Group>
+          )}
 
-              {globalGroup.length > 0 && (
-                <Command.Group heading="Global" className={GROUP_HEADING_CLASS}>
-                  {globalGroup.map((action) => (
-                    <CommandPaletteItem key={action.id} action={action} />
-                  ))}
-                </Command.Group>
-              )}
-            </Command.List>
+          {navigateGroup.length > 0 && (
+            <Command.Group heading="Navigate" className={GROUP_HEADING_CLASS}>
+              {navigateGroup.map((action) => (
+                <CommandPaletteItem key={action.id} action={action} />
+              ))}
+            </Command.Group>
+          )}
 
-            <CommandPaletteFooter canGoBack={contextStack.length > 1} contextLevel={effectiveContext.level} />
-          </Command>
-        </div>
-      )}
+          {globalGroup.length > 0 && (
+            <Command.Group heading="Global" className={GROUP_HEADING_CLASS}>
+              {globalGroup.map((action) => (
+                <CommandPaletteItem key={action.id} action={action} />
+              ))}
+            </Command.Group>
+          )}
+        </Command.List>
+
+        <CommandPaletteFooter
+          canGoBack={contextStack.length > 1}
+          canDrillDown={hasDrillDownItems}
+          contextLevel={effectiveContext.level}
+        />
+      </Command.Dialog>
 
       {addProjectHostId && (
         <AddProjectDialog
