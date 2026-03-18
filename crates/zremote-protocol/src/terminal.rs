@@ -190,7 +190,7 @@ pub enum ServerMessage {
     ProjectSaveSettings {
         request_id: uuid::Uuid,
         project_path: String,
-        settings: ProjectSettings,
+        settings: Box<ProjectSettings>,
     },
 }
 
@@ -728,7 +728,7 @@ mod tests {
         roundtrip_server(&ServerMessage::ProjectSaveSettings {
             request_id: Uuid::new_v4(),
             project_path: "/home/user/project".to_string(),
-            settings: ProjectSettings {
+            settings: Box::new(ProjectSettings {
                 shell: Some("/bin/zsh".to_string()),
                 working_dir: None,
                 env: HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
@@ -736,7 +736,7 @@ mod tests {
                 actions: vec![],
                 worktree: None,
                 linear: None,
-            },
+            }),
         });
     }
 

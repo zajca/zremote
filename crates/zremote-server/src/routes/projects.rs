@@ -359,7 +359,7 @@ pub async fn save_settings(
         .send(ServerMessage::ProjectSaveSettings {
             request_id,
             project_path,
-            settings,
+            settings: Box::new(settings),
         })
         .await
         .map_err(|_| {

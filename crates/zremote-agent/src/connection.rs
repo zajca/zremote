@@ -214,8 +214,17 @@ async fn run_worktree_hook_server(
     let wt_settings = settings.worktree.as_ref()?;
     let template = hook_selector(wt_settings)?;
 
-    let cmd =
-        crate::project::hooks::expand_hook_template(template, project_path, worktree_path, branch);
+    let worktree_name = std::path::Path::new(worktree_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let cmd = crate::project::hooks::expand_hook_template(
+        template,
+        project_path,
+        worktree_path,
+        branch,
+        worktree_name,
+    );
     let result = crate::project::hooks::execute_hook_async(
         cmd,
         std::path::PathBuf::from(worktree_path),
@@ -233,6 +242,21 @@ async fn run_worktree_hook_server(
         },
         duration_ms: result.duration.as_millis() as u64,
     })
+}
+
+/// Read worktree settings for a project, if configured.
+async fn read_worktree_settings_server(
+    project_path: &str,
+) -> Option<zremote_protocol::project::WorktreeSettings> {
+    let pp = project_path.to_string();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(std::path::Path::new(&pp))
+    })
+    .await
+    .ok()?
+    .ok()
+    .flatten()?;
+    settings.worktree
 }
 
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
@@ -901,6 +925,111 @@ fn handle_server_message(
             let wt_path = path.clone();
             let new_branch = *new_branch;
             tokio::spawn(async move {
+                // Check for custom create_command
+                let wt_settings = read_worktree_settings_server(&project_path).await;
+
+                if let Some(create_cmd) =
+                    wt_settings.as_ref().and_then(|s| s.create_command.as_ref())
+                {
+                    // Custom command flow: run via execute_hook_async
+                    let worktree_name = branch.replace('/', "-");
+                    let cmd = create_cmd
+                        .replace("{{project_path}}", &project_path)
+                        .replace("{{branch}}", &branch)
+                        .replace("{{worktree_name}}", &worktree_name);
+
+                    let result = crate::project::hooks::execute_hook_async(
+                        cmd,
+                        std::path::PathBuf::from(&project_path),
+                        vec![],
+                        None,
+                    )
+                    .await;
+
+                    if result.success {
+                        // Inspect git to find the new worktree
+                        let pp = project_path.clone();
+                        let inspect_result = tokio::task::spawn_blocking(move || {
+                            GitInspector::inspect(std::path::Path::new(&pp))
+                        })
+                        .await;
+
+                        if let Ok(Some((_git_info, worktrees))) = inspect_result {
+                            // Find a worktree matching the branch
+                            if let Some(wt) = worktrees.iter().find(|w| {
+                                w.branch.as_deref() == Some(&*branch)
+                                    || w.path.ends_with(&worktree_name)
+                            }) {
+                                let worktree = zremote_protocol::project::WorktreeInfo {
+                                    path: wt.path.clone(),
+                                    branch: wt.branch.clone(),
+                                    commit_hash: wt.commit_hash.clone(),
+                                    is_detached: wt.is_detached,
+                                    is_locked: wt.is_locked,
+                                    is_dirty: wt.is_dirty,
+                                    commit_message: wt.commit_message.clone(),
+                                };
+
+                                // Run on_create hook if configured
+                                let hook_result = run_worktree_hook_server(
+                                    &project_path,
+                                    &worktree.path,
+                                    worktree.branch.as_deref().unwrap_or_default(),
+                                    |wt| wt.on_create.as_deref(),
+                                )
+                                .await;
+
+                                if tx
+                                    .send(AgentMessage::WorktreeCreated {
+                                        project_path,
+                                        worktree,
+                                        hook_result,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "outbound channel closed, WorktreeCreated dropped"
+                                    );
+                                }
+                                return;
+                            }
+                        }
+
+                        // Fallback: couldn't find worktree after custom command
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message:
+                                    "custom create_command succeeded but worktree not found in git"
+                                        .to_string(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    } else {
+                        let msg = if result.output.is_empty() {
+                            "custom create_command failed".to_string()
+                        } else {
+                            format!("custom create_command failed: {}", result.output)
+                        };
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: msg,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                    return;
+                }
+
+                // Default flow: existing GitInspector behavior
                 let pp = project_path.clone();
                 let b = branch.clone();
                 let wp = wt_path.clone();
@@ -973,6 +1102,85 @@ fn handle_server_message(
             let worktree_path = worktree_path.clone();
             let force = *force;
             tokio::spawn(async move {
+                // Check for custom delete_command
+                let wt_settings = read_worktree_settings_server(&project_path).await;
+
+                if let Some(delete_cmd) =
+                    wt_settings.as_ref().and_then(|s| s.delete_command.as_ref())
+                {
+                    // Run on_delete hook first
+                    let hook_result =
+                        run_worktree_hook_server(&project_path, &worktree_path, "", |wt| {
+                            wt.on_delete.as_deref()
+                        })
+                        .await;
+
+                    if let Some(ref hr) = hook_result {
+                        let _ = tx
+                            .send(AgentMessage::WorktreeHookResult {
+                                project_path: project_path.clone(),
+                                worktree_path: worktree_path.clone(),
+                                hook_type: "on_delete".to_string(),
+                                success: hr.success,
+                                output: hr.output.clone(),
+                                duration_ms: hr.duration_ms,
+                            })
+                            .await;
+                    }
+
+                    // Run custom delete command
+                    let worktree_name = std::path::Path::new(&worktree_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let cmd = delete_cmd
+                        .replace("{{project_path}}", &project_path)
+                        .replace("{{worktree_path}}", &worktree_path)
+                        .replace("{{worktree_name}}", &worktree_name)
+                        .replace("{{branch}}", "");
+
+                    let result = crate::project::hooks::execute_hook_async(
+                        cmd,
+                        std::path::PathBuf::from(&project_path),
+                        vec![],
+                        None,
+                    )
+                    .await;
+
+                    if result.success {
+                        if tx
+                            .send(AgentMessage::WorktreeDeleted {
+                                project_path,
+                                worktree_path,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("outbound channel closed, WorktreeDeleted dropped");
+                        }
+                    } else {
+                        let msg = if result.output.is_empty() {
+                            "custom delete_command failed".to_string()
+                        } else {
+                            format!("custom delete_command failed: {}", result.output)
+                        };
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: msg,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                    return;
+                }
+
+                // Default flow: existing behavior
                 // Run on_delete hook before removing worktree
                 let hook_result =
                     run_worktree_hook_server(&project_path, &worktree_path, "", |wt| {

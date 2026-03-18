@@ -68,6 +68,8 @@ export interface ProjectAction {
 }
 
 export interface WorktreeSettings {
+  create_command?: string;
+  delete_command?: string;
   on_create?: string;
   on_delete?: string;
 }
@@ -266,12 +268,12 @@ export const api = {
       id: string,
       body: { branch: string; path?: string; new_branch?: boolean },
     ) =>
-      request<void>(`/api/projects/${id}/worktrees`, {
+      request<unknown>(`/api/projects/${id}/worktrees`, {
         method: "POST",
         body: JSON.stringify(body),
       }),
     deleteWorktree: (projectId: string, worktreeId: string) =>
-      request<void>(`/api/projects/${projectId}/worktrees/${worktreeId}`, {
+      request<unknown>(`/api/projects/${projectId}/worktrees/${worktreeId}`, {
         method: "DELETE",
       }),
     getSettings: async (projectId: string): Promise<{ settings: ProjectSettings | null; error?: string }> => {
