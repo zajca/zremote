@@ -51,7 +51,6 @@ pub struct TmuxSession {
     output_tx: mpsc::Sender<PtyOutput>,
     extra_panes: Vec<ExtraPaneHandle>,
     known_pane_ids: HashSet<String>,
-    initial_capture: Option<Vec<u8>>,
 }
 
 /// Create a `Command` pre-configured with `tmux -L zremote`.
@@ -180,7 +179,6 @@ impl TmuxSession {
             output_tx,
             extra_panes: Vec::new(),
             known_pane_ids,
-            initial_capture: None,
         };
 
         Ok((session, pid))
@@ -240,12 +238,20 @@ impl TmuxSession {
         // This avoids a race where live tmux output (with cursor positioning
         // sequences) arrives through the FIFO before the capture data, causing
         // conflicting screen content and duplicate cursors in the browser.
-        let initial_capture = tmux_cmd()
+        // Send through output_tx so it flows through the normal PTY output loop
+        // (scrollback + browser senders).
+        if let Ok(cap) = tmux_cmd()
             .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
             .output()
-            .ok()
-            .filter(|cap| cap.status.success() && !cap.stdout.is_empty())
-            .map(|cap| cap.stdout);
+            && cap.status.success()
+            && !cap.stdout.is_empty()
+        {
+            let _ = output_tx.try_send(PtyOutput {
+                session_id,
+                pane_id: None,
+                data: cap.stdout,
+            });
+        }
 
         // Stop any existing pipe-pane, then set up fresh targeting the stable pane_id
         let _ = tmux_cmd().args(["pipe-pane", "-t", &pane_id]).output();
@@ -270,7 +276,6 @@ impl TmuxSession {
             output_tx,
             extra_panes: Vec::new(),
             known_pane_ids,
-            initial_capture,
         })
     }
 
@@ -287,12 +292,6 @@ impl TmuxSession {
     /// Return the stable pane ID (`%N` format).
     pub fn pane_id(&self) -> &str {
         &self.pane_id
-    }
-
-    /// Take the initial capture data collected during reattach.
-    /// Returns `None` if no capture was taken or it has already been consumed.
-    pub fn take_initial_capture(&mut self) -> Option<Vec<u8>> {
-        self.initial_capture.take()
     }
 
     /// Send raw bytes as input to the tmux pane via `send-keys -H` (hex mode).
