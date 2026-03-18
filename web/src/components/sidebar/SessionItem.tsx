@@ -62,16 +62,6 @@ export const SessionItem = memo(function SessionItem({
     void navigate(`/hosts/${hostId}/sessions/${session.id}`);
   }, [navigate, hostId, session.id]);
 
-  const handleLoopClick = useCallback(
-    (e: React.MouseEvent, loopId: string) => {
-      e.stopPropagation();
-      void navigate(
-        `/hosts/${hostId}/sessions/${session.id}/loops/${loopId}`,
-      );
-    },
-    [navigate, hostId, session.id],
-  );
-
   const handleClose = useCallback(
     async (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -135,32 +125,6 @@ export const SessionItem = memo(function SessionItem({
           </button>
         )}
       </div>
-      {activeLoops.map((loop) => (
-        <button
-          key={loop.id}
-          onClick={(e) => handleLoopClick(e, loop.id)}
-          className="flex h-6 w-full items-center gap-1.5 pl-7 pr-2 text-[11px] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
-        >
-          <Bot size={11} className={loop.status === "waiting_for_input" ? "animate-pulse text-status-warning" : "text-accent"} />
-          <span className="truncate">{loop.task_name || loop.tool_name}</span>
-          <Badge
-            variant={
-              loop.status === "waiting_for_input"
-                ? "warning"
-                : loop.status === "working"
-                  ? "creating"
-                  : "offline"
-            }
-          >
-            {loop.status}
-          </Badge>
-          {loop.pending_tool_calls > 0 && (
-            <span className="ml-auto rounded bg-status-warning/15 px-1 text-[10px] text-status-warning">
-              {loop.pending_tool_calls}
-            </span>
-          )}
-        </button>
-      ))}
     </div>
   );
 });

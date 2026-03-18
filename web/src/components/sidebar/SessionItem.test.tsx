@@ -184,39 +184,6 @@ describe("SessionItem", () => {
     expect(screen.getByText("1")).toBeInTheDocument();
   });
 
-  test("shows active loop sub-items with tool name and status", () => {
-    mockLoops = [mockLoop({ status: "working", tool_name: "grep_search" })];
-    render(
-      <MemoryRouter>
-        <SessionItem session={baseSession} hostId="host-1" />
-      </MemoryRouter>,
-    );
-    expect(screen.getByText("grep_search")).toBeInTheDocument();
-    expect(screen.getByText("working")).toBeInTheDocument();
-  });
-
-  test("shows waiting_for_input loop with warning style", () => {
-    mockLoops = [mockLoop({ status: "waiting_for_input", pending_tool_calls: 2 })];
-    render(
-      <MemoryRouter>
-        <SessionItem session={baseSession} hostId="host-1" />
-      </MemoryRouter>,
-    );
-    expect(screen.getByText("waiting_for_input")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
-  });
-
-  test("does not show loop items for completed loops", () => {
-    mockLoops = [mockLoop({ status: "completed", tool_name: "done_tool" })];
-    render(
-      <MemoryRouter>
-        <SessionItem session={baseSession} hostId="host-1" />
-      </MemoryRouter>,
-    );
-    // Completed loops are not shown as sub-items
-    expect(screen.queryByText("done_tool")).not.toBeInTheDocument();
-  });
-
   test("shows Bot icon when session is a Claude task", () => {
     mockSessionTaskIndex = new Map([["sess-1", "task-1"]]);
     mockTasks = new Map([["task-1", { task_name: undefined }]]);
