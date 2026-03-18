@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useAgenticStore } from "../stores/agentic-store";
+import { useSessionMruStore } from "../stores/session-mru-store";
 import { useClaudeTaskStore } from "../stores/claude-task-store";
 import { useNotificationStore } from "../stores/notification-store";
 import {
@@ -92,15 +93,22 @@ export function useRealtimeUpdates(handlers: EventHandler) {
             handlersRef.current.onHostUpdate?.();
             break;
           case "session_created":
+            handlersRef.current.onSessionUpdate?.();
+            window.dispatchEvent(new Event("zremote:session-update"));
+            break;
           case "session_closed":
             handlersRef.current.onSessionUpdate?.();
+            window.dispatchEvent(new Event("zremote:session-update"));
+            useSessionMruStore.getState().removeSession(parsed.session_id ?? "");
             break;
           case "session_suspended":
             handlersRef.current.onSessionUpdate?.();
+            window.dispatchEvent(new Event("zremote:session-update"));
             showToast("Session suspended - agent reconnecting", "info");
             break;
           case "session_resumed":
             handlersRef.current.onSessionUpdate?.();
+            window.dispatchEvent(new Event("zremote:session-update"));
             showToast("Session resumed", "success");
             break;
           case "projects_updated":

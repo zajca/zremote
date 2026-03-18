@@ -16,6 +16,9 @@ import { CommandPaletteItem } from "./CommandPaletteItem";
 import { CommandPaletteFooter } from "./CommandPaletteFooter";
 import { AddProjectDialog } from "../AddProjectDialog";
 import { StartClaudeDialog } from "../StartClaudeDialog";
+import { useShortcutSessions } from "../../hooks/useShortcutSessions";
+import { useGlobalShortcuts, type ShortcutAction } from "../../hooks/useGlobalShortcuts";
+import { showToast } from "../layout/Toast";
 
 const GROUP_HEADING_CLASS =
   "[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-text-tertiary";
@@ -25,6 +28,7 @@ export function CommandPalette() {
   const { isLocal } = useMode();
   const { hosts } = useHosts();
   const routeContext = useCommandPaletteContext();
+  const shortcutSessions = useShortcutSessions(hosts, isLocal);
 
   const {
     open,
@@ -81,6 +85,59 @@ export function CommandPalette() {
     }
   }, [open, setOpen]);
   useDoubleShift(handleDoubleShift);
+
+  // Global keyboard shortcuts (always active, not gated by palette open state)
+  const globalShortcutActions = useMemo((): ShortcutAction[] => {
+    const sa: ShortcutAction[] = [];
+
+    // Session shortcuts (Ctrl+1-9)
+    for (let i = 0; i < Math.min(shortcutSessions.length, 9); i++) {
+      const s = shortcutSessions[i];
+      if (!s) continue;
+      sa.push({
+        shortcut: { mod: true, key: String(i + 1) },
+        onSelect: () => {
+          void navigate(`/hosts/${s.hostId}/sessions/${s.sessionId}`);
+          setOpen(false);
+        },
+      });
+    }
+
+    // Ctrl+, → Settings
+    sa.push({
+      shortcut: { mod: true, key: "," },
+      onSelect: () => {
+        void navigate("/settings");
+        setOpen(false);
+      },
+    });
+
+    // Ctrl+N → New session (on first online host)
+    const targetHost = hosts.find((h) => h.status === "online");
+    if (targetHost) {
+      sa.push({
+        shortcut: { mod: true, key: "n" },
+        onSelect: () => {
+          void (async () => {
+            try {
+              const s = await api.sessions.create(targetHost.id);
+              void navigate(`/hosts/${targetHost.id}/sessions/${s.id}`);
+              setOpen(false);
+            } catch (err) {
+              showToast(
+                `Failed to create session: ${err instanceof Error ? err.message : String(err)}`,
+                "error",
+              );
+            }
+          })();
+        },
+      });
+    }
+
+    return sa;
+  }, [shortcutSessions, hosts, navigate, setOpen]);
+
+  useGlobalShortcuts(globalShortcutActions);
 
   // Reset context from route when palette opens
   const prevOpenRef = useRef(false);
@@ -283,8 +340,9 @@ export function CommandPalette() {
       session,
       loop,
       hasRecentClaudeTask,
+      globalSessions: shortcutSessions,
     }),
-    [hosts, projects, sessions, loops, customActions, project, parentProject, session, loop, hasRecentClaudeTask],
+    [hosts, projects, sessions, loops, customActions, project, parentProject, session, loop, hasRecentClaudeTask, shortcutSessions],
   );
 
   // In local mode at global level, resolve as host level with the online host

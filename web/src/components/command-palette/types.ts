@@ -14,6 +14,13 @@ export interface PaletteContext {
   sessionName?: string;
 }
 
+export interface KeyboardShortcut {
+  mod?: boolean; // Ctrl on Linux/Win, Cmd on Mac
+  shift?: boolean;
+  alt?: boolean;
+  key: string; // e.g. "1", "n", ","
+}
+
 export interface PaletteAction {
   id: string;
   label: string;
@@ -23,6 +30,7 @@ export interface PaletteAction {
   onSelect: () => void;
   drillDown?: PaletteContext;
   dangerous?: boolean;
+  shortcut?: KeyboardShortcut;
 }
 
 export interface ActionDeps {
