@@ -114,21 +114,29 @@ export function ProjectPage() {
       setNewPath("");
       setIsNewBranch(false);
       setShowCreateWorktree(false);
-      loadWorktrees();
-      const hook = (response as Record<string, unknown> | undefined)?.hook as
-        | { success: boolean; duration_ms: number }
-        | undefined;
-      if (hook) {
-        if (hook.success) {
-          showToast(
-            `Worktree created. Setup hook completed (${(hook.duration_ms / 1000).toFixed(1)}s)`,
-            "success",
-          );
-        } else {
-          showToast("Worktree created. Setup hook failed", "info");
-        }
+
+      const resp = response as Record<string, unknown>;
+      if (resp?.mode === "custom_command" && resp?.session_id) {
+        // Custom command: navigate to terminal session
+        showToast("Worktree creation started in terminal", "success");
+        void navigate(`/hosts/${project?.host_id}/sessions/${resp.session_id}`);
       } else {
-        showToast("Worktree created", "success");
+        loadWorktrees();
+        const hook = resp?.hook_result as
+          | { success: boolean; duration_ms: number }
+          | undefined;
+        if (hook) {
+          if (hook.success) {
+            showToast(
+              `Worktree created. Setup hook completed (${(hook.duration_ms / 1000).toFixed(1)}s)`,
+              "success",
+            );
+          } else {
+            showToast("Worktree created. Setup hook failed", "info");
+          }
+        } else {
+          showToast("Worktree created", "success");
+        }
       }
     } catch (e) {
       console.error("failed to create worktree", e);
@@ -136,22 +144,29 @@ export function ProjectPage() {
     } finally {
       setCreating(false);
     }
-  }, [projectId, newBranch, newPath, isNewBranch, loadWorktrees]);
+  }, [projectId, newBranch, newPath, isNewBranch, loadWorktrees, navigate, project?.host_id]);
 
   const handleDeleteWorktree = useCallback(
     async (worktreeId: string, worktreeName: string) => {
       if (!projectId) return;
       if (!window.confirm(`Delete worktree "${worktreeName}"?`)) return;
       try {
-        await api.projects.deleteWorktree(projectId, worktreeId);
-        loadWorktrees();
-        showToast("Worktree deleted", "success");
+        const response = await api.projects.deleteWorktree(projectId, worktreeId);
+        const resp = response as Record<string, unknown> | undefined;
+        if (resp?.mode === "custom_command" && resp?.session_id) {
+          // Custom command: navigate to terminal session
+          showToast("Worktree deletion started in terminal", "success");
+          void navigate(`/hosts/${project?.host_id}/sessions/${resp.session_id}`);
+        } else {
+          loadWorktrees();
+          showToast("Worktree deleted", "success");
+        }
       } catch (e) {
         console.error("failed to delete worktree", e);
         showToast("Failed to delete worktree", "error");
       }
     },
-    [projectId, loadWorktrees],
+    [projectId, loadWorktrees, navigate, project?.host_id],
   );
 
   const handleOpenWorktreeTerminal = useCallback(

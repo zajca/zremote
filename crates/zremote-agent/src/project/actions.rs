@@ -8,6 +8,7 @@ pub struct TemplateContext {
     pub project_path: String,
     pub worktree_path: Option<String>,
     pub branch: Option<String>,
+    pub worktree_name: Option<String>,
 }
 
 /// Find an action by name from the list of configured actions.
@@ -28,6 +29,9 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> String {
     }
     if let Some(ref branch) = ctx.branch {
         result = result.replace("{{branch}}", branch);
+    }
+    if let Some(ref wt_name) = ctx.worktree_name {
+        result = result.replace("{{worktree_name}}", wt_name);
     }
     result
 }
@@ -81,6 +85,9 @@ pub fn build_action_env(
     if let Some(ref branch) = ctx.branch {
         env.push(("ZREMOTE_BRANCH".to_string(), branch.clone()));
     }
+    if let Some(ref wt_name) = ctx.worktree_name {
+        env.push(("ZREMOTE_WORKTREE_NAME".to_string(), wt_name.clone()));
+    }
 
     env
 }
@@ -123,6 +130,7 @@ mod tests {
             project_path: "/home/user/repo".to_string(),
             worktree_path: Some("/home/user/repo-feat".to_string()),
             branch: Some("feature/test".to_string()),
+            worktree_name: None,
         };
         let result = expand_template(
             "cd {{worktree_path}} && git checkout {{branch}} && echo {{project_path}}",
@@ -140,6 +148,7 @@ mod tests {
             project_path: "/home/user/repo".to_string(),
             worktree_path: None,
             branch: None,
+            worktree_name: None,
         };
         let result = expand_template("echo {{project_path}}", &ctx);
         assert_eq!(result, "echo /home/user/repo");
@@ -153,6 +162,7 @@ mod tests {
             project_path: "/repo".to_string(),
             worktree_path: None,
             branch: None,
+            worktree_name: None,
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo/frontend");
     }
@@ -165,6 +175,7 @@ mod tests {
             project_path: "/repo".to_string(),
             worktree_path: Some("/repo-wt".to_string()),
             branch: None,
+            worktree_name: None,
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo-wt");
     }
@@ -176,6 +187,7 @@ mod tests {
             project_path: "/repo".to_string(),
             worktree_path: None,
             branch: None,
+            worktree_name: None,
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo");
     }
@@ -194,6 +206,7 @@ mod tests {
             project_path: "/repo".to_string(),
             worktree_path: Some("/repo-wt".to_string()),
             branch: Some("main".to_string()),
+            worktree_name: Some("repo-wt".to_string()),
         };
 
         let env = build_action_env(&project_env, &action, &ctx);
@@ -205,5 +218,34 @@ mod tests {
         assert_eq!(find("ZREMOTE_PROJECT_PATH"), Some("/repo"));
         assert_eq!(find("ZREMOTE_WORKTREE_PATH"), Some("/repo-wt"));
         assert_eq!(find("ZREMOTE_BRANCH"), Some("main"));
+        assert_eq!(find("ZREMOTE_WORKTREE_NAME"), Some("repo-wt"));
+    }
+
+    #[test]
+    fn expand_template_worktree_name() {
+        let ctx = TemplateContext {
+            project_path: "/home/user/repo".to_string(),
+            worktree_path: Some("/home/user/repo-feat".to_string()),
+            branch: Some("feature/test".to_string()),
+            worktree_name: Some("repo-feat".to_string()),
+        };
+        let result = expand_template("echo {{worktree_name}} in {{project_path}}", &ctx);
+        assert_eq!(result, "echo repo-feat in /home/user/repo");
+    }
+
+    #[test]
+    fn build_action_env_worktree_name() {
+        let project_env = HashMap::new();
+        let action = test_action("build");
+        let ctx = TemplateContext {
+            project_path: "/repo".to_string(),
+            worktree_path: None,
+            branch: None,
+            worktree_name: Some("my-wt".to_string()),
+        };
+        let env = build_action_env(&project_env, &action, &ctx);
+        let find = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
+        assert_eq!(find("ZREMOTE_WORKTREE_NAME"), Some("my-wt"));
+        assert!(find("ZREMOTE_WORKTREE_PATH").is_none());
     }
 }

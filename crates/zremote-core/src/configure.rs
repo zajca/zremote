@@ -46,13 +46,22 @@ pub fn build_configure_prompt(
     );
     prompt.push_str("- `worktree` (object, optional):\n");
     prompt.push_str(
-        "  - `on_create` (string, optional): Command to run when a worktree is created\n",
+        "  - `create_command` (string, optional): Custom command that replaces `git worktree add`. Runs in a terminal session so the user can see output. Use when the project has custom worktree setup scripts.\n",
     );
     prompt.push_str(
-        "  - `on_delete` (string, optional): Command to run when a worktree is deleted\n",
+        "  - `delete_command` (string, optional): Custom command that replaces `git worktree remove`. Runs in a terminal session.\n",
     );
     prompt.push_str(
-        "  - Template variables: `{{project_path}}`, `{{worktree_path}}`, `{{branch}}`\n\n",
+        "  - `on_create` (string, optional): Post-create hook command. Runs after worktree is created (by either git or create_command).\n",
+    );
+    prompt.push_str(
+        "  - `on_delete` (string, optional): Pre-delete hook command. Runs before worktree is deleted.\n",
+    );
+    prompt.push_str(
+        "  - Template variables: `{{project_path}}`, `{{worktree_path}}`, `{{branch}}`, `{{worktree_name}}`\n",
+    );
+    prompt.push_str(
+        "  - `{{worktree_name}}` is the basename of the worktree path (last path component)\n\n",
     );
 
     // Section 3: Analysis Instructions
@@ -62,7 +71,9 @@ pub fn build_configure_prompt(
     prompt.push_str("3. Create actions for each identified workflow\n");
     prompt.push_str("4. Set appropriate environment variables if needed\n");
     prompt
-        .push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n\n");
+        .push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
+    prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns). If found, configure `create_command` and `delete_command` to use them.\n");
+    prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), create `worktree_scoped: true` actions for common operations (start, stop, expose).\n\n");
 
     // Section 4: Project-Type-Specific Guidance
     match project_type {
@@ -161,9 +172,12 @@ mod tests {
         assert!(prompt.contains("worktree"));
         assert!(prompt.contains("on_create"));
         assert!(prompt.contains("on_delete"));
+        assert!(prompt.contains("create_command"));
+        assert!(prompt.contains("delete_command"));
         assert!(prompt.contains("{{project_path}}"));
         assert!(prompt.contains("{{worktree_path}}"));
         assert!(prompt.contains("{{branch}}"));
+        assert!(prompt.contains("{{worktree_name}}"));
     }
 
     #[test]
@@ -209,6 +223,16 @@ mod tests {
         assert!(prompt.contains("Existing Settings"));
         assert!(prompt.contains("Preserve existing"));
         assert!(prompt.contains(existing));
+    }
+
+    #[test]
+    fn test_prompt_contains_custom_worktree_guidance() {
+        let prompt = build_configure_prompt("/tmp/project", "unknown", None);
+        assert!(prompt.contains("create_command"));
+        assert!(prompt.contains("delete_command"));
+        assert!(prompt.contains("{{worktree_name}}"));
+        assert!(prompt.contains("worktree management scripts"));
+        assert!(prompt.contains("worktree_scoped"));
     }
 
     #[test]

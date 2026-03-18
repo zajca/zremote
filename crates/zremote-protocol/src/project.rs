@@ -122,6 +122,10 @@ pub struct ProjectAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WorktreeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_create: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
@@ -468,6 +472,8 @@ mod tests {
     #[test]
     fn worktree_settings_roundtrip() {
         let settings = WorktreeSettings {
+            create_command: None,
+            delete_command: None,
             on_create: Some("npm install".to_string()),
             on_delete: Some("rm -rf node_modules".to_string()),
         };
@@ -480,8 +486,33 @@ mod tests {
     fn worktree_settings_empty() {
         let settings: WorktreeSettings = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(settings, WorktreeSettings::default());
+        assert!(settings.create_command.is_none());
+        assert!(settings.delete_command.is_none());
         assert!(settings.on_create.is_none());
         assert!(settings.on_delete.is_none());
+    }
+
+    #[test]
+    fn worktree_settings_backward_compat_old_json() {
+        let json = r#"{"on_create":"npm install","on_delete":"rm -rf node_modules"}"#;
+        let parsed: WorktreeSettings = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.create_command.is_none());
+        assert!(parsed.delete_command.is_none());
+        assert_eq!(parsed.on_create.as_deref(), Some("npm install"));
+        assert_eq!(parsed.on_delete.as_deref(), Some("rm -rf node_modules"));
+    }
+
+    #[test]
+    fn worktree_settings_all_fields_roundtrip() {
+        let settings = WorktreeSettings {
+            create_command: Some("git worktree add".to_string()),
+            delete_command: Some("git worktree remove".to_string()),
+            on_create: Some("npm install".to_string()),
+            on_delete: Some("rm -rf node_modules".to_string()),
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: WorktreeSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
     }
 
     #[test]
@@ -510,6 +541,8 @@ mod tests {
                 worktree_scoped: false,
             }],
             worktree: Some(WorktreeSettings {
+                create_command: None,
+                delete_command: None,
                 on_create: Some("npm install".to_string()),
                 on_delete: None,
             }),

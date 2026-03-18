@@ -22,16 +22,19 @@ const MAX_OUTPUT_SIZE: usize = 65536;
 /// - `{{project_path}}` - path to the project root
 /// - `{{worktree_path}}` - path to the worktree directory
 /// - `{{branch}}` - branch name
+/// - `{{worktree_name}}` - directory name of the worktree
 pub fn expand_hook_template(
     template: &str,
     project_path: &str,
     worktree_path: &str,
     branch: &str,
+    worktree_name: &str,
 ) -> String {
     template
         .replace("{{project_path}}", project_path)
         .replace("{{worktree_path}}", worktree_path)
         .replace("{{branch}}", branch)
+        .replace("{{worktree_name}}", worktree_name)
 }
 
 /// Execute a hook command in a blocking context with timeout.
@@ -239,6 +242,7 @@ mod tests {
             "/home/user/repo",
             "/home/user/repo-feat",
             "feature/test",
+            "repo-feat",
         );
         assert_eq!(
             result,
@@ -253,14 +257,27 @@ mod tests {
             "/home/user/repo",
             "/home/user/repo-feat",
             "main",
+            "repo-feat",
         );
         assert_eq!(result, "npm install --prefix /home/user/repo-feat");
     }
 
     #[test]
     fn expand_hook_template_no_placeholders() {
-        let result = expand_hook_template("echo hello", "/a", "/b", "c");
+        let result = expand_hook_template("echo hello", "/a", "/b", "c", "b");
         assert_eq!(result, "echo hello");
+    }
+
+    #[test]
+    fn expand_hook_template_worktree_name() {
+        let result = expand_hook_template(
+            "echo {{worktree_name}} at {{worktree_path}}",
+            "/home/user/repo",
+            "/home/user/repo-feat",
+            "main",
+            "repo-feat",
+        );
+        assert_eq!(result, "echo repo-feat at /home/user/repo-feat");
     }
 
     #[tokio::test]
