@@ -80,6 +80,7 @@ export function resolveActions(
         data.session,
         context.hostId,
         data.loops,
+        data.sessions,
         deps,
       );
       return [...sessionActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
