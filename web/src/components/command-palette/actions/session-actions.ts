@@ -1,4 +1,5 @@
 import {
+  Bot,
   Edit3,
   FolderOpen,
   Laptop,
@@ -11,11 +12,14 @@ import { showToast } from "../../layout/Toast";
 import type { AgenticLoop } from "../../../types/agentic";
 import type { ActionDeps, PaletteAction } from "../types";
 
+const ACTIVE_LOOP_STATUSES = new Set(["working", "waiting_for_input", "paused"]);
+
 export function getSessionActions(
   sessionId: string,
   session: Session,
   hostId: string,
   loops: AgenticLoop[],
+  sessions: Session[],
   deps: ActionDeps,
 ): PaletteAction[] {
   const actions: PaletteAction[] = [];
@@ -80,14 +84,16 @@ export function getSessionActions(
     });
   }
 
-  // Loop drill-down items
-  for (const loop of loops) {
-    const label = loop.task_name ?? loop.tool_name ?? `Loop ${loop.id.slice(0, 8)}`;
+  // Active loop drill-down items (filtered to active statuses only)
+  const activeLoops = loops.filter((l) => ACTIVE_LOOP_STATUSES.has(l.status));
+  for (const loop of activeLoops) {
+    const baseName = loop.task_name ?? loop.tool_name ?? `Loop ${loop.id.slice(0, 8)}`;
+    const label = `${baseName} (${loop.status.replace(/_/g, " ")})`;
     actions.push({
       id: `session:${sessionId}:loop:${loop.id}`,
       label,
-      icon: Monitor,
-      keywords: ["loop", "agentic", label],
+      icon: Bot,
+      keywords: ["loop", "agentic", baseName, loop.status],
       group: "navigate",
       onSelect: () => {
         deps.pushContext({
@@ -103,6 +109,26 @@ export function getSessionActions(
         hostId,
         sessionId,
         loopId: loop.id,
+      },
+    });
+  }
+
+  // Sibling sessions (other active/suspended sessions on the same host)
+  const siblingStatuses = new Set(["active", "suspended"]);
+  const siblings = sessions.filter(
+    (s) => s.id !== sessionId && siblingStatuses.has(s.status),
+  );
+  for (const sib of siblings) {
+    const sibLabel = sib.name ?? `Session ${sib.id.slice(0, 8)}`;
+    actions.push({
+      id: `session:${sessionId}:sibling:${sib.id}`,
+      label: sibLabel,
+      icon: Monitor,
+      keywords: ["session", "terminal", sibLabel],
+      group: "navigate",
+      onSelect: () => {
+        deps.navigate(`/hosts/${hostId}/sessions/${sib.id}`);
+        deps.close();
       },
     });
   }

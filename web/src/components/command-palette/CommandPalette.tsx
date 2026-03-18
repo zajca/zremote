@@ -204,16 +204,17 @@ export function CommandPalette() {
           }
 
           case "session": {
-            if (!effectiveCtx.sessionId) break;
-            const [s, sLoops] = await Promise.all([
+            if (!effectiveCtx.sessionId || !effectiveCtx.hostId) break;
+            const [s, sLoops, sibSessions] = await Promise.all([
               api.sessions.get(effectiveCtx.sessionId),
               api.loops.list({ session_id: effectiveCtx.sessionId }),
+              api.sessions.list(effectiveCtx.hostId),
             ]);
             if (cancelled) return;
             setSession(s);
             setLoops(sLoops);
             setProjects([]);
-            setSessions([]);
+            setSessions(sibSessions);
             setCustomActions([]);
             setProject(null);
             setParentProject(null);
