@@ -6,6 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { PaneEvent } from "../types/terminal";
+import { usePendingPasteStore } from "../stores/pending-paste-store";
 
 interface TerminalProps {
   sessionId: string;
@@ -320,6 +321,19 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
       fitAddonRef.current = null;
     };
   }, [connect]);
+
+  // Check for pending paste after WebSocket connects
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const data = usePendingPasteStore.getState().consume(sessionId);
+      if (data) {
+        ws.send(JSON.stringify({ type: "input", data: data + "\n" }));
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [sessionId]);
 
   return (
     <div

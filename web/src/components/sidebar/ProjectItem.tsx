@@ -1,12 +1,14 @@
-import { Bot, Brain, ChevronRight, FolderGit2, GitBranch, Plus, RotateCcw, Settings, Sparkles } from "lucide-react";
+import { Bot, Brain, ChevronRight, FileText, FolderGit2, GitBranch, Plus, RotateCcw, Settings, Sparkles } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, Session } from "../../lib/api";
 import { api } from "../../lib/api";
+import type { PromptTemplate } from "../../types/prompt";
 import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { showToast } from "../layout/Toast";
 import { StartClaudeDialog } from "../StartClaudeDialog";
+import { RunPromptDialog } from "../RunPromptDialog";
 import { SessionItem } from "./SessionItem";
 
 // CSS-only tooltip — no JS state, instant hover
@@ -46,6 +48,18 @@ export const ProjectItem = memo(function ProjectItem({
     sessions.length > 0 || worktreeChildren.some((wt) => (projectSessionsMap?.get(wt.id) ?? []).length > 0),
   );
   const [showClaudeDialog, setShowClaudeDialog] = useState(false);
+  const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
+  const [showPromptMenu, setShowPromptMenu] = useState(false);
+  const [selectedPrompt, setSelectedPrompt] = useState<PromptTemplate | null>(null);
+
+  // Fetch prompt templates if project has zremote config
+  useEffect(() => {
+    if (!project.has_zremote_config) return;
+    void api.projects.actions(project.id).then(
+      (data) => setPrompts(data.prompts ?? []),
+      () => {},
+    );
+  }, [project.id, project.has_zremote_config]);
 
   // Find the last resumable Claude task for this project (return stable string, not object)
   const lastResumableTaskId = useClaudeTaskStore((s) => {
@@ -204,6 +218,37 @@ export const ProjectItem = memo(function ProjectItem({
             <RotateCcw size={11} />
           </button>
         )}
+        {prompts.length > 0 && (
+          <span className="relative">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowPromptMenu((prev) => !prev);
+              }}
+              className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-accent group-hover:flex"
+              aria-label="Run prompt template"
+            >
+              <FileText size={11} />
+            </button>
+            {showPromptMenu && (
+              <div className="absolute right-0 top-full z-50 mt-1 min-w-[160px] rounded-md border border-border bg-bg-primary py-1 shadow-lg">
+                {prompts.map((p) => (
+                  <button
+                    key={p.name}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowPromptMenu(false);
+                      setSelectedPrompt(p);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -248,6 +293,16 @@ export const ProjectItem = memo(function ProjectItem({
           hostId={hostId}
           projectId={project.id}
           onClose={() => setShowClaudeDialog(false)}
+        />
+      )}
+      {selectedPrompt && (
+        <RunPromptDialog
+          template={selectedPrompt}
+          projectId={project.id}
+          projectPath={project.path}
+          hostId={hostId}
+          projectName={project.name}
+          onClose={() => setSelectedPrompt(null)}
         />
       )}
     </div>

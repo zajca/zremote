@@ -1,5 +1,6 @@
 import {
   Bot,
+  FileText,
   GitBranch,
   Monitor,
   Play,
@@ -12,6 +13,7 @@ import {
   FolderOpen,
 } from "lucide-react";
 import type { Project, ProjectAction, Session } from "../../../lib/api";
+import type { PromptTemplate } from "../../../types/prompt";
 import { api } from "../../../lib/api";
 import { showToast } from "../../layout/Toast";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -22,6 +24,7 @@ export function getProjectActions(
   sessions: Session[],
   worktrees: Project[],
   customActions: ProjectAction[],
+  promptTemplates: PromptTemplate[],
   hasRecentClaudeTask: boolean,
   deps: ActionDeps,
 ): PaletteAction[] {
@@ -254,6 +257,25 @@ export function getProjectActions(
         } catch (err) {
           showToast(`Action failed: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
+      },
+    });
+  }
+
+  // Prompt templates
+  for (const tmpl of promptTemplates) {
+    actions.push({
+      id: `project:${projectId}:prompt:${tmpl.name}`,
+      label: tmpl.description ?? tmpl.name,
+      icon: FileText,
+      keywords: ["prompt", "template", tmpl.name],
+      group: "actions",
+      onSelect: () => {
+        deps.openRunPrompt(tmpl, {
+          id: project.id,
+          name: project.name,
+          path: project.path,
+          host_id: project.host_id,
+        });
       },
     });
   }

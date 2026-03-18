@@ -2,6 +2,7 @@ import {
   ArrowUp,
   Bot,
   BookOpen,
+  FileText,
   Monitor,
   Play,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { Project, ProjectAction, Session } from "../../../lib/api";
+import type { PromptTemplate } from "../../../types/prompt";
 import { api } from "../../../lib/api";
 import { showToast } from "../../layout/Toast";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -21,6 +23,7 @@ export function getWorktreeActions(
   parentProject: Project | null,
   sessions: Session[],
   customActions: ProjectAction[],
+  promptTemplates: PromptTemplate[],
   hasRecentClaudeTask: boolean,
   deps: ActionDeps,
 ): PaletteAction[] {
@@ -232,6 +235,25 @@ export function getWorktreeActions(
         } catch (err) {
           showToast(`Action failed: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
+      },
+    });
+  }
+
+  // Prompt templates
+  for (const tmpl of promptTemplates) {
+    actions.push({
+      id: `worktree:${worktreeId}:prompt:${tmpl.name}`,
+      label: tmpl.description ?? tmpl.name,
+      icon: FileText,
+      keywords: ["prompt", "template", tmpl.name],
+      group: "actions",
+      onSelect: () => {
+        deps.openRunPrompt(tmpl, {
+          id: worktree.id,
+          name: worktree.name,
+          path: worktree.path,
+          host_id: worktree.host_id,
+        });
       },
     });
   }

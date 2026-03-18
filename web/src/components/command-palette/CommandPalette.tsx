@@ -9,6 +9,7 @@ import { useHosts } from "../../hooks/useHosts";
 import { api } from "../../lib/api";
 import type { Project, ProjectAction, Session } from "../../lib/api";
 import type { AgenticLoop } from "../../types/agentic";
+import type { PromptTemplate } from "../../types/prompt";
 import { resolveActions, type ResolveData } from "./actions/registry";
 import type { ActionDeps, PaletteAction, PaletteContext } from "./types";
 import { CommandPaletteInput } from "./CommandPaletteInput";
@@ -16,6 +17,7 @@ import { CommandPaletteItem } from "./CommandPaletteItem";
 import { CommandPaletteFooter } from "./CommandPaletteFooter";
 import { AddProjectDialog } from "../AddProjectDialog";
 import { StartClaudeDialog } from "../StartClaudeDialog";
+import { RunPromptDialog } from "../RunPromptDialog";
 import { useShortcutSessions } from "../../hooks/useShortcutSessions";
 import { useGlobalShortcuts, type ShortcutAction } from "../../hooks/useGlobalShortcuts";
 import { showToast } from "../layout/Toast";
@@ -58,12 +60,17 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
     path: string;
     host_id: string;
   } | null>(null);
+  const [runPromptState, setRunPromptState] = useState<{
+    template: PromptTemplate;
+    project: { id: string; name: string; path: string; host_id: string };
+  } | null>(null);
 
   // Fetched entity state
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loops, setLoops] = useState<AgenticLoop[]>([]);
   const [customActions, setCustomActions] = useState<ProjectAction[]>([]);
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [parentProject, setParentProject] = useState<Project | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -179,6 +186,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setSessions([]);
             setLoops([]);
             setCustomActions([]);
+            setPromptTemplates([]);
             setProject(null);
             setParentProject(null);
             setSession(null);
@@ -197,6 +205,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setSessions(hostSessions);
             setLoops([]);
             setCustomActions([]);
+            setPromptTemplates([]);
             setProject(null);
             setParentProject(null);
             setSession(null);
@@ -212,7 +221,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
               api.projects.get(effectiveCtx.projectId),
               api.projects.sessions(effectiveCtx.projectId).catch(() => [] as Session[]),
               api.projects.worktrees(effectiveCtx.projectId).catch(() => [] as Project[]),
-              api.projects.actions(effectiveCtx.projectId).catch(() => ({ actions: [] as ProjectAction[] })),
+              api.projects.actions(effectiveCtx.projectId).catch(() => ({ actions: [] as ProjectAction[], prompts: [] as PromptTemplate[] })),
             ]);
             if (cancelled) return;
 
@@ -243,6 +252,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setProjects(pWorktrees);
             setSessions(pSessions);
             setCustomActions(pActions.actions);
+            setPromptTemplates(pActions.prompts ?? []);
             setLoops([]);
             setSession(null);
             setLoop(null);
@@ -277,6 +287,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setProjects([]);
             setSessions(sibSessions);
             setCustomActions([]);
+            setPromptTemplates([]);
             setProject(null);
             setParentProject(null);
             setLoop(null);
@@ -293,6 +304,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             setSessions([]);
             setLoops([]);
             setCustomActions([]);
+            setPromptTemplates([]);
             setProject(null);
             setParentProject(null);
             setSession(null);
@@ -327,6 +339,10 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         setOpen(false);
         setClaudeDialogProject(proj);
       },
+      openRunPrompt: (tmpl: PromptTemplate, proj: { id: string; name: string; path: string; host_id: string }) => {
+        setOpen(false);
+        setRunPromptState({ template: tmpl, project: proj });
+      },
       openHelp: () => {
         setOpen(false);
         onOpenHelp?.();
@@ -343,6 +359,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       sessions,
       loops,
       customActions,
+      promptTemplates,
       project,
       parentProject,
       session,
@@ -350,7 +367,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       hasRecentClaudeTask,
       globalSessions: shortcutSessions,
     }),
-    [hosts, projects, sessions, loops, customActions, project, parentProject, session, loop, hasRecentClaudeTask, shortcutSessions],
+    [hosts, projects, sessions, loops, customActions, promptTemplates, project, parentProject, session, loop, hasRecentClaudeTask, shortcutSessions],
   );
 
   // In local mode at global level, resolve as host level with the online host
@@ -485,6 +502,17 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
           hostId={claudeDialogProject.host_id}
           projectId={claudeDialogProject.id}
           onClose={() => setClaudeDialogProject(null)}
+        />
+      )}
+
+      {runPromptState && (
+        <RunPromptDialog
+          template={runPromptState.template}
+          projectId={runPromptState.project.id}
+          projectPath={runPromptState.project.path}
+          hostId={runPromptState.project.host_id}
+          projectName={runPromptState.project.name}
+          onClose={() => setRunPromptState(null)}
         />
       )}
     </>

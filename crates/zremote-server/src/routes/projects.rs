@@ -441,8 +441,13 @@ pub async fn list_actions(
             if let Some(error) = response.error {
                 Err(AppError::Internal(error))
             } else {
-                let actions = response.settings.map(|s| s.actions).unwrap_or_default();
-                Ok(Json(serde_json::json!({ "actions": actions })))
+                let (actions, prompts) = response
+                    .settings
+                    .map(|s| (s.actions, s.prompts))
+                    .unwrap_or_default();
+                Ok(Json(
+                    serde_json::json!({ "actions": actions, "prompts": prompts }),
+                ))
             }
         }
         Ok(Err(_)) => Err(AppError::Internal("response channel closed".to_string())),
@@ -453,6 +458,119 @@ pub async fn list_actions(
             ))
         }
     }
+}
+
+/// Request body for resolving a prompt template.
+#[derive(Debug, Deserialize)]
+pub struct ResolvePromptRequest {
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// `POST /api/projects/:project_id/prompts/:prompt_name/resolve` - resolve a prompt template.
+///
+/// Fetches project settings from the agent, finds the named prompt template,
+/// and resolves it with the provided inputs. Only inline templates are supported
+/// in server mode; file-based templates require direct agent access.
+pub async fn resolve_prompt(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, prompt_name)): Path<(String, String)>,
+    AppJson(body): AppJson<ResolvePromptRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    // Fetch settings from agent
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.settings_get_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ProjectGetSettings {
+            request_id,
+            project_path: project_path.clone(),
+        })
+        .await
+        .map_err(|_| {
+            state.settings_get_requests.remove(&request_id);
+            AppError::Conflict("failed to send settings request to agent".to_string())
+        })?;
+
+    let settings = match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(response)) => {
+            if let Some(error) = response.error {
+                return Err(AppError::Internal(error));
+            }
+            response
+                .settings
+                .ok_or_else(|| AppError::NotFound("no project settings found".to_string()))?
+        }
+        Ok(Err(_)) => return Err(AppError::Internal("response channel closed".to_string())),
+        Err(_) => {
+            state.settings_get_requests.remove(&request_id);
+            return Err(AppError::Internal(
+                "settings request timed out after 10s".to_string(),
+            ));
+        }
+    };
+
+    let template = settings
+        .prompts
+        .iter()
+        .find(|p| p.name == prompt_name)
+        .ok_or_else(|| AppError::NotFound(format!("prompt template '{prompt_name}' not found")))?;
+
+    // Resolve body - only inline supported in server mode
+    let template_body = match &template.body {
+        zremote_protocol::project::PromptBody::Inline(text) => text.clone(),
+        zremote_protocol::project::PromptBody::File { .. } => {
+            return Err(AppError::BadRequest(
+                "file-based prompt templates are not supported in server mode; use inline body or connect directly to the agent".to_string(),
+            ));
+        }
+    };
+
+    let worktree_name = body
+        .worktree_path
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .map(String::from);
+
+    // Render template with simple inline replacement
+    let mut rendered = template_body;
+    for (key, value) in &body.inputs {
+        rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
+    }
+    rendered = rendered.replace("{{project_path}}", &project_path);
+    if let Some(ref wt) = body.worktree_path {
+        rendered = rendered.replace("{{worktree_path}}", wt);
+    }
+    if let Some(ref branch) = body.branch {
+        rendered = rendered.replace("{{branch}}", branch);
+    }
+    if let Some(ref wt_name) = worktree_name {
+        rendered = rendered.replace("{{worktree_name}}", wt_name);
+    }
+
+    Ok(Json(serde_json::json!({ "prompt": rendered })))
 }
 
 /// `POST /api/projects/:project_id/actions/:action_name/run` - run a project action.

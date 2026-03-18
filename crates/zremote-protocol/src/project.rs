@@ -74,6 +74,8 @@ pub struct ProjectSettings {
     pub worktree: Option<WorktreeSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear: Option<LinearSettings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<PromptTemplate>,
 }
 
 /// Agentic behavior settings for a project.
@@ -159,6 +161,75 @@ pub struct LinearAction {
     pub icon: Option<String>,
     /// Prompt template with {{issue.identifier}}, {{issue.title}}, {{issue.description}} placeholders.
     pub prompt: String,
+}
+
+/// Execution mode for a prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptExecMode {
+    PasteToTerminal,
+    ClaudeSession,
+}
+
+/// Input field type for a prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptInputType {
+    #[default]
+    Text,
+    Multiline,
+    Select,
+}
+
+/// Prompt body source - inline string or file path reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PromptBody {
+    Inline(String),
+    File { file: String },
+}
+
+/// A typed input parameter for a prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_input_type")]
+    pub input_type: PromptInputType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+fn is_default_input_type(t: &PromptInputType) -> bool {
+    *t == PromptInputType::Text
+}
+
+/// A predefined prompt template with typed inputs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptTemplate {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub body: PromptBody,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<PromptInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<PromptExecMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
 }
 
 /// Information about a discovered project on a remote host.
@@ -382,6 +453,7 @@ mod tests {
             actions: vec![],
             worktree: None,
             linear: None,
+            prompts: vec![],
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -400,6 +472,7 @@ mod tests {
         assert!(settings.actions.is_empty());
         assert!(settings.worktree.is_none());
         assert!(settings.linear.is_none());
+        assert!(settings.prompts.is_empty());
     }
 
     #[test]
@@ -547,6 +620,7 @@ mod tests {
                 on_delete: None,
             }),
             linear: None,
+            prompts: vec![],
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -604,6 +678,7 @@ mod tests {
                     },
                 ],
             }),
+            prompts: vec![],
         };
         let json = serde_json::to_string(&settings).expect("serialize");
         let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
@@ -653,5 +728,174 @@ mod tests {
             val.get("icon").is_none(),
             "icon should be skipped when None"
         );
+    }
+
+    #[test]
+    fn prompt_body_inline_roundtrip() {
+        let body = PromptBody::Inline("Hello {{name}}".to_string());
+        let json = serde_json::to_string(&body).expect("serialize");
+        assert_eq!(json, r#""Hello {{name}}""#);
+        let parsed: PromptBody = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(body, parsed);
+    }
+
+    #[test]
+    fn prompt_body_file_roundtrip() {
+        let body = PromptBody::File {
+            file: "implement.md".to_string(),
+        };
+        let json = serde_json::to_string(&body).expect("serialize");
+        assert!(json.contains(r#""file":"implement.md""#));
+        let parsed: PromptBody = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(body, parsed);
+    }
+
+    #[test]
+    fn prompt_input_full_roundtrip() {
+        let input = PromptInput {
+            name: "scope".to_string(),
+            label: Some("Scope".to_string()),
+            input_type: PromptInputType::Select,
+            placeholder: None,
+            default: Some("fullstack".to_string()),
+            required: true,
+            options: vec![
+                "frontend".to_string(),
+                "backend".to_string(),
+                "fullstack".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&input).expect("serialize");
+        let parsed: PromptInput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(input, parsed);
+    }
+
+    #[test]
+    fn prompt_input_minimal() {
+        let json = r#"{"name":"desc"}"#;
+        let parsed: PromptInput = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.name, "desc");
+        assert!(parsed.label.is_none());
+        assert_eq!(parsed.input_type, PromptInputType::Text);
+        assert!(parsed.placeholder.is_none());
+        assert!(parsed.default.is_none());
+        assert!(parsed.required);
+        assert!(parsed.options.is_empty());
+    }
+
+    #[test]
+    fn prompt_input_type_default_skipped_in_json() {
+        let input = PromptInput {
+            name: "test".to_string(),
+            label: None,
+            input_type: PromptInputType::Text,
+            placeholder: None,
+            default: None,
+            required: true,
+            options: vec![],
+        };
+        let val = serde_json::to_value(&input).unwrap();
+        assert!(
+            val.get("input_type").is_none(),
+            "default input_type should be skipped"
+        );
+    }
+
+    #[test]
+    fn prompt_template_full_roundtrip() {
+        let template = PromptTemplate {
+            name: "Implement Feature".to_string(),
+            description: Some("Start implementing a new feature".to_string()),
+            icon: Some("code".to_string()),
+            body: PromptBody::File {
+                file: "implement.md".to_string(),
+            },
+            inputs: vec![PromptInput {
+                name: "feature_name".to_string(),
+                label: Some("Feature name".to_string()),
+                input_type: PromptInputType::Text,
+                placeholder: Some("e.g., user authentication".to_string()),
+                default: None,
+                required: true,
+                options: vec![],
+            }],
+            default_mode: Some(PromptExecMode::ClaudeSession),
+            model: Some("opus".to_string()),
+            allowed_tools: vec!["Read".to_string(), "Write".to_string()],
+            skip_permissions: Some(true),
+        };
+        let json = serde_json::to_string(&template).expect("serialize");
+        let parsed: PromptTemplate = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(template, parsed);
+    }
+
+    #[test]
+    fn prompt_template_minimal() {
+        let json = r#"{"name":"Quick","body":"Do something"}"#;
+        let parsed: PromptTemplate = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.name, "Quick");
+        assert!(parsed.description.is_none());
+        assert!(parsed.icon.is_none());
+        assert_eq!(parsed.body, PromptBody::Inline("Do something".to_string()));
+        assert!(parsed.inputs.is_empty());
+        assert!(parsed.default_mode.is_none());
+        assert!(parsed.model.is_none());
+        assert!(parsed.allowed_tools.is_empty());
+        assert!(parsed.skip_permissions.is_none());
+    }
+
+    #[test]
+    fn prompt_exec_mode_roundtrip() {
+        let paste = PromptExecMode::PasteToTerminal;
+        let json = serde_json::to_string(&paste).expect("serialize");
+        assert_eq!(json, r#""paste_to_terminal""#);
+        let parsed: PromptExecMode = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(paste, parsed);
+
+        let claude = PromptExecMode::ClaudeSession;
+        let json = serde_json::to_string(&claude).expect("serialize");
+        assert_eq!(json, r#""claude_session""#);
+    }
+
+    #[test]
+    fn project_settings_backward_compat_no_prompts() {
+        let json = r#"{"shell":"/bin/bash","agentic":{"auto_detect":true}}"#;
+        let parsed: ProjectSettings = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.prompts.is_empty());
+    }
+
+    #[test]
+    fn project_settings_with_prompts_roundtrip() {
+        let settings = ProjectSettings {
+            shell: None,
+            working_dir: None,
+            env: HashMap::new(),
+            agentic: AgenticSettings::default(),
+            actions: vec![],
+            worktree: None,
+            linear: None,
+            prompts: vec![PromptTemplate {
+                name: "Debug".to_string(),
+                description: None,
+                icon: None,
+                body: PromptBody::Inline("Investigate: {{issue}}".to_string()),
+                inputs: vec![PromptInput {
+                    name: "issue".to_string(),
+                    label: None,
+                    input_type: PromptInputType::Multiline,
+                    placeholder: None,
+                    default: None,
+                    required: true,
+                    options: vec![],
+                }],
+                default_mode: Some(PromptExecMode::PasteToTerminal),
+                model: None,
+                allowed_tools: vec![],
+                skip_permissions: None,
+            }],
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(settings, parsed);
     }
 }

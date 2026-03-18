@@ -132,6 +132,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::projects::run_action),
         )
         .route(
+            "/api/projects/{project_id}/prompts/{prompt_name}/resolve",
+            post(routes::projects::resolve_prompt),
+        )
+        .route(
             "/api/projects/{project_id}/configure",
             post(routes::projects::configure_with_claude),
         )

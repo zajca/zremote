@@ -265,6 +265,7 @@ mod tests {
             actions: vec![],
             worktree: None,
             linear: None,
+            prompts: vec![],
         };
 
         write_settings(tmp.path(), &settings).unwrap();
