@@ -78,18 +78,18 @@ mod tests {
         let cmd = build_claude_command(Path::new("/tmp/project"), "sonnet", "test prompt", false);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd.get_program(), "claude");
-        assert!(args.contains(&&std::ffi::OsStr::new("--print")));
-        assert!(args.contains(&&std::ffi::OsStr::new("test prompt")));
-        assert!(args.contains(&&std::ffi::OsStr::new("--model")));
-        assert!(args.contains(&&std::ffi::OsStr::new("sonnet")));
-        assert!(!args.contains(&&std::ffi::OsStr::new("--dangerously-skip-permissions")));
+        assert!(args.contains(&std::ffi::OsStr::new("--print")));
+        assert!(args.contains(&std::ffi::OsStr::new("test prompt")));
+        assert!(args.contains(&std::ffi::OsStr::new("--model")));
+        assert!(args.contains(&std::ffi::OsStr::new("sonnet")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--dangerously-skip-permissions")));
     }
 
     #[test]
     fn test_build_claude_command_skip_permissions() {
         let cmd = build_claude_command(Path::new("/tmp/project"), "sonnet", "prompt", true);
         let args: Vec<_> = cmd.get_args().collect();
-        assert!(args.contains(&&std::ffi::OsStr::new("--dangerously-skip-permissions")));
+        assert!(args.contains(&std::ffi::OsStr::new("--dangerously-skip-permissions")));
     }
 
     #[test]
