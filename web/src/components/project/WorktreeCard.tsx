@@ -2,7 +2,7 @@ import { GitBranch, Terminal, Trash2 } from "lucide-react";
 import type { Project, ProjectAction } from "../../lib/api";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
-import { ActionCard } from "./ActionCard";
+import { ActionRow } from "./ActionRow";
 
 interface WorktreeCardProps {
   worktree: Project;
@@ -69,22 +69,17 @@ export function WorktreeCard({
       </div>
 
       {worktreeActions.length > 0 && (
-        <div className="mt-3 border-t border-border pt-3">
-          <h3 className="mb-2 text-xs font-medium text-text-tertiary">
-            Actions
-          </h3>
-          <div className="grid grid-cols-1 gap-2">
-            {worktreeActions.map((action) => (
-              <ActionCard
-                key={action.name}
-                action={action}
-                projectId={parentProjectId}
-                hostId={hostId}
-                worktreePath={worktree.path}
-                worktreeBranch={worktree.git_branch ?? undefined}
-              />
-            ))}
-          </div>
+        <div className="mt-2 border-t border-border pt-2 divide-y divide-border">
+          {worktreeActions.map((action) => (
+            <ActionRow
+              key={action.name}
+              action={action}
+              projectId={parentProjectId}
+              hostId={hostId}
+              worktreePath={worktree.path}
+              worktreeBranch={worktree.git_branch ?? undefined}
+            />
+          ))}
         </div>
       )}
     </div>
