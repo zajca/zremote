@@ -129,7 +129,7 @@ export function AppLayout() {
         </>
       )}
 
-      <main className="flex-1 overflow-hidden bg-bg-primary">
+      <main className="flex-1 overflow-auto bg-bg-primary">
         <ErrorBoundary>
           <Outlet />
         </ErrorBoundary>
