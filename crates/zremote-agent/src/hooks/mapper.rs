@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use zremote_protocol::{AgenticLoopId, SessionId};
 
 /// Maps Claude Code session IDs to zremote loop IDs.
@@ -19,6 +20,8 @@ pub struct SessionMapper {
     session_to_loop: Arc<RwLock<HashMap<SessionId, AgenticLoopId>>>,
     /// `session_id` -> `claude_task_id` (tracks which PTY sessions are Claude tasks)
     claude_task_ids: Arc<RwLock<HashMap<SessionId, uuid::Uuid>>>,
+    /// Notified whenever a new loop is registered via `register_loop()`.
+    loop_registered: Arc<Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +40,7 @@ impl SessionMapper {
             loop_to_cc: Arc::new(RwLock::new(HashMap::new())),
             session_to_loop: Arc::new(RwLock::new(HashMap::new())),
             claude_task_ids: Arc::new(RwLock::new(HashMap::new())),
+            loop_registered: Arc::new(Notify::new()),
         }
     }
 
@@ -46,6 +50,7 @@ impl SessionMapper {
             .write()
             .await
             .insert(session_id, loop_id);
+        self.loop_registered.notify_waiters();
     }
 
     /// Register a PTY session as a Claude task (started via UI).
@@ -115,21 +120,9 @@ impl SessionMapper {
             .retain(|_, lid| lid != loop_id);
     }
 
-    /// Try to find a loop_id for a hook event by checking known CC sessions,
-    /// or fall back to matching by cwd against known PTY sessions.
-    pub async fn resolve_loop_id(
-        &self,
-        cc_session_id: &str,
-        _cwd: Option<&str>,
-    ) -> Option<MappedSession> {
-        // Direct lookup by CC session ID
-        if let Some(mapped) = self.lookup_by_cc_session(cc_session_id).await {
-            return Some(mapped);
-        }
-
-        // If not found, check if we have any active loop and auto-register.
-        // This handles the case where the first hook fires before we've seen
-        // the CC session_id. We pick the most recently registered loop.
+    /// Try to resolve a CC session ID by checking active loops that don't
+    /// yet have a CC session mapping. If found, auto-registers the mapping.
+    async fn try_resolve_fallback(&self, cc_session_id: &str) -> Option<MappedSession> {
         let session_to_loop = self.session_to_loop.read().await;
         if let Some((&session_id, &loop_id)) = session_to_loop.iter().next() {
             // Check if this loop already has a CC session mapping
@@ -141,6 +134,42 @@ impl SessionMapper {
                 return self.lookup_by_cc_session(cc_session_id).await;
             }
         }
+        None
+    }
+
+    /// Try to find a loop_id for a hook event by checking known CC sessions,
+    /// or fall back to matching by cwd against known PTY sessions.
+    /// If no mapping is found immediately, retries up to 5 times waiting for
+    /// a loop registration (handles the race where hooks fire before the
+    /// 3-second agentic detection polling registers the loop).
+    pub async fn resolve_loop_id(
+        &self,
+        cc_session_id: &str,
+        _cwd: Option<&str>,
+    ) -> Option<MappedSession> {
+        // Direct lookup by CC session ID
+        if let Some(mapped) = self.lookup_by_cc_session(cc_session_id).await {
+            return Some(mapped);
+        }
+
+        // Fallback: check if we have any active loop and auto-register.
+        if let Some(mapped) = self.try_resolve_fallback(cc_session_id).await {
+            return Some(mapped);
+        }
+
+        // Both lookups failed. Wait for a loop registration and retry.
+        // This handles the race where CC hooks fire before the 3s agentic
+        // detection polling has registered the loop.
+        for _ in 0..5 {
+            tokio::select! {
+                () = self.loop_registered.notified() => {
+                    if let Some(mapped) = self.try_resolve_fallback(cc_session_id).await {
+                        return Some(mapped);
+                    }
+                }
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
 
         None
     }
@@ -149,6 +178,7 @@ impl SessionMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -243,5 +273,34 @@ mod tests {
     async fn resolve_unknown_returns_none() {
         let mapper = SessionMapper::new();
         assert!(mapper.resolve_loop_id("unknown", None).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_retry_succeeds_after_late_registration() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Simulate the agentic detector registering a loop after 500ms
+        let mapper_clone = mapper.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            mapper_clone.register_loop(session_id, loop_id).await;
+        });
+
+        // resolve_loop_id should retry and succeed once the loop is registered
+        let mapped = mapper
+            .resolve_loop_id("late-cc-session", None)
+            .await
+            .expect("should resolve after late registration");
+        assert_eq!(mapped.loop_id, loop_id);
+        assert_eq!(mapped.session_id, session_id);
+
+        // Verify the CC session was auto-registered for subsequent lookups
+        let mapped2 = mapper
+            .lookup_by_cc_session("late-cc-session")
+            .await
+            .expect("CC session should be registered after resolve");
+        assert_eq!(mapped2.loop_id, loop_id);
     }
 }
