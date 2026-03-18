@@ -104,6 +104,7 @@ export interface ProjectSettings {
   actions?: ProjectAction[];
   worktree?: WorktreeSettings;
   linear?: LinearSettings;
+  prompts?: PromptTemplate[];
 }
 
 export interface ConfigValue {
@@ -175,6 +176,13 @@ import type {
   LinearSettings,
   IssuePreset,
 } from "../types/linear";
+import type {
+  PromptTemplate,
+  ResolvePromptRequest,
+  ResolvePromptResponse,
+} from "../types/prompt";
+
+export type { PromptTemplate } from "../types/prompt";
 
 export const api = {
   hosts: {
@@ -303,7 +311,7 @@ export const api = {
         body: JSON.stringify(settings),
       }),
     actions: (projectId: string) =>
-      request<{ actions: ProjectAction[] }>(`/api/projects/${projectId}/actions`),
+      request<{ actions: ProjectAction[]; prompts: PromptTemplate[] }>(`/api/projects/${projectId}/actions`),
     runAction: (projectId: string, actionName: string, body?: RunActionRequest) =>
       request<RunActionResponse>(`/api/projects/${projectId}/actions/${encodeURIComponent(actionName)}/run`, {
         method: "POST",
@@ -313,6 +321,11 @@ export const api = {
       request<ClaudeTask>(`/api/projects/${projectId}/configure`, {
         method: "POST",
         body: JSON.stringify({ model, skip_permissions: skipPermissions }),
+      }),
+    resolvePrompt: (projectId: string, promptName: string, body: ResolvePromptRequest) =>
+      request<ResolvePromptResponse>(`/api/projects/${projectId}/prompts/${encodeURIComponent(promptName)}/resolve`, {
+        method: "POST",
+        body: JSON.stringify(body),
       }),
   },
   analytics: {

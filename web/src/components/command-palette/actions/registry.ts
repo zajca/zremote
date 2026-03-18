@@ -1,5 +1,6 @@
 import type { Host, Project, ProjectAction, Session } from "../../../lib/api";
 import type { AgenticLoop } from "../../../types/agentic";
+import type { PromptTemplate } from "../../../types/prompt";
 import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
 import type { ActionDeps, PaletteAction, PaletteContext } from "../types";
 import { getGlobalActions } from "./global-actions";
@@ -15,6 +16,7 @@ export interface ResolveData {
   sessions: Session[];
   loops: AgenticLoop[];
   customActions: ProjectAction[];
+  promptTemplates: PromptTemplate[];
   // Resolved entities
   project: Project | null;
   parentProject: Project | null;
@@ -55,6 +57,7 @@ export function resolveActions(
         data.sessions,
         data.projects.filter((p) => p.parent_project_id === context.projectId),
         data.customActions,
+        data.promptTemplates,
         data.hasRecentClaudeTask,
         deps,
       );
@@ -69,6 +72,7 @@ export function resolveActions(
         data.parentProject,
         data.sessions,
         data.customActions,
+        data.promptTemplates,
         data.hasRecentClaudeTask,
         deps,
       );

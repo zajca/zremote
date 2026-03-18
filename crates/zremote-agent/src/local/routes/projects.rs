@@ -946,13 +946,15 @@ pub async fn list_actions(
     .await
     .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?;
 
-    let actions = match result {
-        Ok(Some(settings)) => settings.actions,
-        Ok(None) => Vec::new(),
+    let (actions, prompts) = match result {
+        Ok(Some(settings)) => (settings.actions, settings.prompts),
+        Ok(None) => (Vec::new(), Vec::new()),
         Err(e) => return Err(AppError::Internal(e)),
     };
 
-    Ok(Json(serde_json::json!({ "actions": actions })))
+    Ok(Json(
+        serde_json::json!({ "actions": actions, "prompts": prompts }),
+    ))
 }
 
 /// `POST /api/projects/:project_id/actions/:action_name/run` - run a project action.
@@ -1226,6 +1228,71 @@ pub async fn configure_with_claude(
     Ok((StatusCode::CREATED, Json(task)))
 }
 
+/// Request body for resolving a prompt template.
+#[derive(Debug, Deserialize)]
+pub struct ResolvePromptRequest {
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// `POST /api/projects/:project_id/prompts/:prompt_name/resolve` - resolve a prompt template.
+pub async fn resolve_prompt(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath((project_id, prompt_name)): AxumPath<(String, String)>,
+    AppJson(body): AppJson<ResolvePromptRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (_, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let path_for_settings = project_path.clone();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&path_for_settings))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?
+    .map_err(AppError::Internal)?
+    .ok_or_else(|| AppError::NotFound("no project settings found".to_string()))?;
+
+    let template = settings
+        .prompts
+        .iter()
+        .find(|p| p.name == prompt_name)
+        .ok_or_else(|| AppError::NotFound(format!("prompt template '{prompt_name}' not found")))?;
+
+    let project_path_clone = project_path.clone();
+    let body_clone = template.body.clone();
+    let template_body = tokio::task::spawn_blocking(move || {
+        crate::project::prompts::resolve_body(Path::new(&project_path_clone), &body_clone)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("template resolve task failed: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let worktree_name = body
+        .worktree_path
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .map(String::from);
+    let ctx = crate::project::actions::TemplateContext {
+        project_path,
+        worktree_path: body.worktree_path,
+        branch: body.branch,
+        worktree_name,
+    };
+
+    let rendered = crate::project::prompts::render_prompt(&template_body, &body.inputs, &ctx);
+
+    Ok(Json(serde_json::json!({ "prompt": rendered })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1279,6 +1346,10 @@ mod tests {
             .route(
                 "/api/projects/{project_id}/actions/{action_name}/run",
                 post(run_action),
+            )
+            .route(
+                "/api/projects/{project_id}/prompts/{prompt_name}/resolve",
+                post(resolve_prompt),
             )
             .with_state(state)
     }
