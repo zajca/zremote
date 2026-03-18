@@ -1,5 +1,6 @@
 import type { Host, Project, ProjectAction, Session } from "../../../lib/api";
 import type { AgenticLoop } from "../../../types/agentic";
+import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
 import type { ActionDeps, PaletteAction, PaletteContext } from "../types";
 import { getGlobalActions } from "./global-actions";
 import { getHostActions } from "./host-actions";
@@ -20,6 +21,7 @@ export interface ResolveData {
   session: Session | null;
   loop: AgenticLoop | null;
   hasRecentClaudeTask: boolean;
+  globalSessions: ShortcutSession[];
 }
 
 export function resolveActions(
@@ -27,7 +29,7 @@ export function resolveActions(
   deps: ActionDeps,
   data: ResolveData,
 ): PaletteAction[] {
-  const globalActions = getGlobalActions(data.hosts, deps);
+  const globalActions = getGlobalActions(data.hosts, data.globalSessions, deps);
 
   switch (context.level) {
     case "global":

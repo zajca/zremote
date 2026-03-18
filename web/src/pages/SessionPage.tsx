@@ -5,6 +5,7 @@ import { useHosts } from "../hooks/useHosts";
 import { useSessions } from "../hooks/useSessions";
 import { useAgenticLoops } from "../hooks/useAgenticLoops";
 import { useClaudeTaskStore } from "../stores/claude-task-store";
+import { useSessionMruStore } from "../stores/session-mru-store";
 import { api } from "../lib/api";
 import { Badge } from "../components/ui/Badge";
 import { IconButton } from "../components/ui/IconButton";
@@ -46,6 +47,12 @@ export function SessionPage() {
       void useClaudeTaskStore.getState().fetchTasks({ host_id: hostId });
     }
   }, [hostId]);
+
+  // Record MRU visit when session is viewed
+  const recordVisit = useSessionMruStore((s) => s.recordVisit);
+  useEffect(() => {
+    if (sessionId) recordVisit(sessionId);
+  }, [sessionId, recordVisit]);
 
   // Get active agentic loop for this session
   const { loops } = useAgenticLoops(

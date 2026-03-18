@@ -239,6 +239,23 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
       // WebGL not available, canvas renderer is fine
     }
 
+    // Let global shortcuts pass through xterm to document handlers
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const key = e.key.toLowerCase();
+        if (
+          (key >= "1" && key <= "9") ||
+          key === "n" ||
+          key === "," ||
+          key === "k" ||
+          key === "b"
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 

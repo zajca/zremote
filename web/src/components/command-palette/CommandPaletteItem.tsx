@@ -1,6 +1,36 @@
 import { ChevronRight } from "lucide-react";
 import { Command } from "cmdk";
-import type { PaletteAction } from "./types";
+import type { KeyboardShortcut, PaletteAction } from "./types";
+
+const KBD_CLASS =
+  "rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]";
+
+function formatShortcutParts(shortcut: KeyboardShortcut): string[] {
+  const isMac =
+    typeof navigator !== "undefined" &&
+    /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+  const parts: string[] = [];
+  if (shortcut.mod) parts.push(isMac ? "\u2318" : "Ctrl");
+  if (shortcut.shift) parts.push(isMac ? "\u21E7" : "Shift");
+  if (shortcut.alt) parts.push(isMac ? "\u2325" : "Alt");
+  parts.push(
+    shortcut.key.length === 1 ? shortcut.key.toUpperCase() : shortcut.key,
+  );
+  return parts;
+}
+
+function ShortcutBadge({ shortcut }: { shortcut: KeyboardShortcut }) {
+  const parts = formatShortcutParts(shortcut);
+  return (
+    <span className="ml-auto flex items-center gap-0.5">
+      {parts.map((part, i) => (
+        <kbd key={i} className={KBD_CLASS}>
+          {part}
+        </kbd>
+      ))}
+    </span>
+  );
+}
 
 interface CommandPaletteItemProps {
   action: PaletteAction;
@@ -19,12 +49,18 @@ export function CommandPaletteItem({ action }: CommandPaletteItemProps) {
         size={14}
         className={action.dangerous ? "text-red-400" : "text-text-tertiary"}
       />
-      <span className={action.dangerous ? "text-red-400" : "text-text-secondary"}>
+      <span
+        className={
+          action.dangerous ? "text-red-400" : "text-text-secondary"
+        }
+      >
         {action.label}
       </span>
-      {action.drillDown && (
+      {action.shortcut ? (
+        <ShortcutBadge shortcut={action.shortcut} />
+      ) : action.drillDown ? (
         <ChevronRight size={12} className="ml-auto text-text-tertiary" />
-      )}
+      ) : null}
     </Command.Item>
   );
 }
