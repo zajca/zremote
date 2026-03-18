@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;

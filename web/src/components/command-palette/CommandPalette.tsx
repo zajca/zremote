@@ -413,6 +413,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         className="relative w-full max-w-lg overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-2xl"
         loop
         label="Command palette"
+        aria-describedby={undefined}
         onKeyDown={(e) => {
           // Read selected item directly from DOM (cmdk marks it with data-selected="true")
           const selectedEl = document.querySelector('[cmdk-item][data-selected="true"]');

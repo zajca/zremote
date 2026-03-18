@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zremote_core::processing::AgenticProcessor;
 use zremote_core::state::{AgenticLoopStore, ServerEvent, SessionStore};
-use zremote_protocol::SessionId;
 
 use crate::agentic::manager::AgenticLoopManager;
 use crate::hooks::mapper::SessionMapper;

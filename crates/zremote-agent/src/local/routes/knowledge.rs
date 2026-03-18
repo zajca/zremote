@@ -345,7 +345,7 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{delete, get, post, put};
+    use axum::routing::{delete, get, post};
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use zremote_core::queries::projects as pq;
