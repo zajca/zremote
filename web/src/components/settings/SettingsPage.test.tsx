@@ -15,8 +15,21 @@ vi.mock("../../hooks/useMode", () => ({
   useMode: () => ({ mode: mockIsLocal ? "local" : "server", isLocal: mockIsLocal }),
 }));
 
+vi.mock("../../lib/browser-notifications", () => ({
+  requestBrowserPermission: vi.fn().mockResolvedValue("granted"),
+}));
+
+vi.mock("../../stores/notification-store", () => ({
+  useNotificationStore: {
+    getState: vi.fn(() => ({
+      setBrowserPermission: vi.fn(),
+      setBrowserEnabled: vi.fn(),
+    })),
+  },
+}));
+
 beforeEach(() => {
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
   mockHosts = [];
   mockIsLocal = false;
   global.fetch = vi.fn().mockImplementation((url: string) => {
@@ -58,7 +71,7 @@ describe("SettingsPage", () => {
   test("renders Notifications setting", () => {
     render(<SettingsPage />);
     expect(screen.getByText("Notifications")).toBeInTheDocument();
-    expect(screen.getByText("Enable desktop notifications for events")).toBeInTheDocument();
+    expect(screen.getByText("Enable browser notifications when Claude needs input")).toBeInTheDocument();
   });
 
   test("renders Auto-approve tools setting", () => {
@@ -149,12 +162,13 @@ describe("SettingsPage", () => {
     });
 
     // Find all toggle buttons - there are 2 global settings
+    // Click the second toggle (auto_approve) to avoid browser permission flow
     const toggleButtons = screen.getAllByRole("button").filter(
       (btn) => btn.className.includes("rounded-full"),
     );
-    expect(toggleButtons.length).toBeGreaterThan(0);
+    expect(toggleButtons.length).toBeGreaterThan(1);
 
-    await userEvent.click(toggleButtons[0]);
+    await userEvent.click(toggleButtons[1]);
 
     await waitFor(() => {
       expect(screen.getByText("Saved")).toBeInTheDocument();

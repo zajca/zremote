@@ -149,6 +149,10 @@ export function AgenticOverlay({ loopId }: AgenticOverlayProps) {
       useAgenticStore
         .getState()
         .sendAction(loopId, action, payload)
+        .then(() => {
+          if (action === "approve") showToast("Action approved", "success");
+          else if (action === "reject") showToast("Action rejected", "info");
+        })
         .catch(() => showToast("Failed to send action", "error"));
       setTimeout(() => setPendingAction(null), 500);
     },
@@ -196,6 +200,7 @@ export function AgenticOverlay({ loopId }: AgenticOverlayProps) {
       useAgenticStore
         .getState()
         .sendAction(loopId, "approve")
+        .then(() => showToast("Tool approved", "success"))
         .catch(() => showToast("Failed to approve tool", "error"));
     },
     [loopId],
@@ -206,6 +211,7 @@ export function AgenticOverlay({ loopId }: AgenticOverlayProps) {
       useAgenticStore
         .getState()
         .sendAction(loopId, "reject")
+        .then(() => showToast("Tool rejected", "info"))
         .catch(() => showToast("Failed to reject tool", "error"));
     },
     [loopId],

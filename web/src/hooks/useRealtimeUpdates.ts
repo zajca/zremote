@@ -1,11 +1,13 @@
 import { useEffect, useRef } from "react";
 import { useAgenticStore } from "../stores/agentic-store";
 import { useClaudeTaskStore } from "../stores/claude-task-store";
+import { useNotificationStore } from "../stores/notification-store";
 import {
   dispatchWsDisconnected,
   dispatchWsReconnected,
 } from "../components/layout/ReconnectBanner";
 import { showToast } from "../components/layout/Toast";
+import { showBrowserNotification } from "../lib/browser-notifications";
 import type {
   AgenticLoop,
   ToolCall,
@@ -25,8 +27,11 @@ interface ServerEvent {
   transcript_entry?: TranscriptEntry;
   loop_id?: string;
   host_id?: string;
+  hostname?: string;
   project_path?: string;
   message?: string;
+  session_suspended?: boolean;
+  end_reason?: string;
   // Claude task event fields
   task_id?: string;
   session_id?: string;
@@ -70,13 +75,27 @@ export function useRealtimeUpdates(handlers: EventHandler) {
 
         switch (parsed.type) {
           case "host_connected":
+            handlersRef.current.onHostUpdate?.();
+            showToast(`Host ${parsed.hostname ?? "unknown"} connected`, "success");
+            break;
           case "host_disconnected":
+            handlersRef.current.onHostUpdate?.();
+            showToast(`Host ${parsed.hostname ?? "unknown"} disconnected`, "error");
+            break;
           case "host_status_changed":
             handlersRef.current.onHostUpdate?.();
             break;
           case "session_created":
           case "session_closed":
             handlersRef.current.onSessionUpdate?.();
+            break;
+          case "session_suspended":
+            handlersRef.current.onSessionUpdate?.();
+            showToast("Session suspended - agent reconnecting", "info");
+            break;
+          case "session_resumed":
+            handlersRef.current.onSessionUpdate?.();
+            showToast("Session resumed", "success");
             break;
           case "projects_updated":
             handlersRef.current.onProjectUpdate?.();
@@ -95,6 +114,34 @@ export function useRealtimeUpdates(handlers: EventHandler) {
               window.dispatchEvent(
                 new Event("zremote:agentic-loop-update"),
               );
+
+              const notifStore = useNotificationStore.getState();
+              if (parsed.loop.status === "waiting_for_input") {
+                notifStore.addOrUpdate({
+                  id: parsed.loop.id,
+                  loopId: parsed.loop.id,
+                  sessionId: parsed.loop.session_id,
+                  hostId: parsed.host_id ?? "",
+                  hostname: parsed.hostname ?? "",
+                  toolName: parsed.loop.tool_name,
+                  status: "waiting_for_input",
+                  pendingToolCount: parsed.loop.pending_tool_calls,
+                  latestToolName: null,
+                  createdAt: Date.now(),
+                });
+                if (notifStore.browserEnabled) {
+                  showBrowserNotification("Claude needs input", {
+                    body: `${parsed.loop.tool_name} is waiting for your response`,
+                    tag: `loop-${parsed.loop.id}`,
+                  });
+                }
+              } else if (
+                parsed.loop.status === "working" ||
+                parsed.loop.status === "completed" ||
+                parsed.loop.status === "error"
+              ) {
+                notifStore.handleLoopResolved(parsed.loop.id);
+              }
             }
             break;
           case "agentic_loop_ended":
@@ -103,16 +150,47 @@ export function useRealtimeUpdates(handlers: EventHandler) {
               window.dispatchEvent(
                 new Event("zremote:agentic-loop-update"),
               );
+              useNotificationStore.getState().handleLoopResolved(parsed.loop.id);
+              const reason = parsed.loop.end_reason ?? parsed.end_reason ?? "";
+              showToast(
+                `Loop ended${reason ? `: ${reason}` : ""}`,
+                reason === "error" ? "error" : "info",
+              );
             }
             break;
           case "agentic_loop_tool_call":
             if (parsed.tool_call && parsed.loop_id) {
               store.addToolCall(parsed.loop_id, parsed.tool_call);
+              if (parsed.tool_call.status === "pending") {
+                const notifStore2 = useNotificationStore.getState();
+                const existing = notifStore2.notifications.get(parsed.loop_id);
+                notifStore2.addOrUpdate({
+                  id: parsed.loop_id,
+                  loopId: parsed.loop_id,
+                  sessionId: existing?.sessionId ?? "",
+                  hostId: existing?.hostId ?? parsed.host_id ?? "",
+                  hostname: existing?.hostname ?? parsed.hostname ?? "",
+                  toolName: existing?.toolName ?? "",
+                  status: "tool_pending",
+                  pendingToolCount: (existing?.pendingToolCount ?? 0) + 1,
+                  latestToolName: parsed.tool_call.tool_name,
+                  createdAt: existing?.createdAt ?? Date.now(),
+                });
+                if (notifStore2.browserEnabled) {
+                  showBrowserNotification("Tool call pending", {
+                    body: `${parsed.tool_call.tool_name} needs approval`,
+                    tag: `loop-${parsed.loop_id}`,
+                  });
+                }
+              }
             }
             break;
           case "agentic_loop_tool_result":
             if (parsed.tool_call && parsed.loop_id) {
               store.updateToolCall(parsed.loop_id, parsed.tool_call);
+              if (parsed.tool_call.status !== "pending") {
+                useNotificationStore.getState().handleToolResolved(parsed.loop_id);
+              }
             }
             break;
           case "agentic_loop_transcript":
@@ -145,6 +223,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                 host_id: parsed.host_id,
                 project_path: parsed.project_path,
               });
+              showToast("Claude task started", "info");
             }
             break;
           case "claude_task_updated":
@@ -164,6 +243,10 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                 summary: parsed.summary ?? null,
                 total_cost_usd: parsed.total_cost_usd ?? 0,
               });
+              showToast(
+                `Claude task ${parsed.status === "completed" ? "completed" : "ended: " + (parsed.status ?? "")}`,
+                parsed.status === "completed" ? "success" : "error",
+              );
             }
             break;
         }

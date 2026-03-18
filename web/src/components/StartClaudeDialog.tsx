@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import type { ClaudeTask, ToolPreset } from "../types/claude-session";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
+import { showToast } from "./layout/Toast";
 
 interface StartClaudeDialogProps {
   projectName: string;
@@ -124,7 +125,9 @@ export function StartClaudeDialog({
       void navigate(`/hosts/${hostId}/sessions/${task.session_id}`);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start Claude task");
+      const msg = err instanceof Error ? err.message : "Failed to start Claude task";
+      setError(msg);
+      showToast(msg, "error");
     } finally {
       setLoading(false);
     }

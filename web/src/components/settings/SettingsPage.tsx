@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
 import { api } from "../../lib/api";
+import { requestBrowserPermission } from "../../lib/browser-notifications";
+import { useNotificationStore } from "../../stores/notification-store";
 import { showToast } from "../layout/Toast";
 
 interface ConfigEntry {
@@ -15,7 +17,7 @@ const GLOBAL_CONFIG_KEYS: ConfigEntry[] = [
   {
     key: "notifications.enabled",
     label: "Notifications",
-    description: "Enable desktop notifications for events",
+    description: "Enable browser notifications when Claude needs input",
   },
   {
     key: "auto_approve.enabled",
@@ -73,6 +75,21 @@ export function SettingsPage() {
   const handleGlobalToggle = useCallback(
     async (key: string) => {
       const current = globalValues[key] === "true";
+
+      if (key === "notifications.enabled") {
+        if (!current) {
+          const permission = await requestBrowserPermission();
+          useNotificationStore.getState().setBrowserPermission(permission);
+          if (permission !== "granted") {
+            showToast("Browser notifications were not permitted", "info");
+            return;
+          }
+          useNotificationStore.getState().setBrowserEnabled(true);
+        } else {
+          useNotificationStore.getState().setBrowserEnabled(false);
+        }
+      }
+
       const newValue = String(!current);
       try {
         await api.config.setGlobal(key, newValue);
