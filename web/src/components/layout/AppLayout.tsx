@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router";
 import { Sidebar } from "./Sidebar";
 import { CommandPalette } from "../command-palette/CommandPalette";
+import { HelpModal } from "../HelpModal";
 import { ToastContainer } from "./Toast";
 import { ActionToastContainer } from "./ActionToast";
 import { ReconnectBanner } from "./ReconnectBanner";
@@ -30,6 +31,7 @@ function persistMode(mode: SidebarMode) {
 }
 
 export function AppLayout() {
+  const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>(getPersistedMode);
   const [hoverVisible, setHoverVisible] = useState(false);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -96,13 +98,28 @@ export function AppLayout() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [toggleSidebar]);
 
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "?") return;
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) return;
+      if (document.querySelector("[cmdk-root]")) return;
+      setHelpOpen(true);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const openHelp = useCallback(() => setHelpOpen(true), []);
+
   const isPinned = sidebarMode === "pinned";
 
   return (
     <div className="flex h-screen overflow-hidden">
       <ReconnectBanner />
 
-      {isPinned && <Sidebar pinned onPin={pin} onUnpin={unpin} />}
+      {isPinned && <Sidebar pinned onPin={pin} onUnpin={unpin} onOpenHelp={openHelp} />}
 
       {!isPinned && (
         <>
@@ -123,7 +140,7 @@ export function AppLayout() {
             onMouseLeave={handleSidebarLeave}
           >
             <div className="h-full shadow-[4px_0_12px_rgba(0,0,0,0.3)]">
-              <Sidebar pinned={false} onPin={pin} onUnpin={unpin} />
+              <Sidebar pinned={false} onPin={pin} onUnpin={unpin} onOpenHelp={openHelp} />
             </div>
           </div>
         </>
@@ -134,7 +151,8 @@ export function AppLayout() {
           <Outlet />
         </ErrorBoundary>
       </main>
-      <CommandPalette />
+      <CommandPalette onOpenHelp={openHelp} />
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <ActionToastContainer />
       <ToastContainer />
     </div>

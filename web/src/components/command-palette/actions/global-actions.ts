@@ -1,4 +1,4 @@
-import { BarChart3, Clock, Laptop, Monitor, Search, Settings } from "lucide-react";
+import { BarChart3, Clock, HelpCircle, Laptop, Monitor, Search, Settings } from "lucide-react";
 import type { Host } from "../../../lib/api";
 import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -58,6 +58,19 @@ export function getGlobalActions(
     onSelect: () => {
       deps.navigate("/settings");
       deps.close();
+    },
+  });
+
+  actions.push({
+    id: "global:help",
+    label: "Show keyboard shortcuts",
+    icon: HelpCircle,
+    keywords: ["help", "shortcuts", "keyboard", "keys", "hotkeys"],
+    group: "actions",
+    shortcut: { key: "?" },
+    onSelect: () => {
+      deps.close();
+      deps.openHelp();
     },
   });
 

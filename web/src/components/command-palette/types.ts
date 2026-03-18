@@ -40,4 +40,5 @@ export interface ActionDeps {
   isLocal: boolean;
   openAddProject: (hostId: string) => void;
   openStartClaude: (project: { id: string; name: string; path: string; host_id: string }) => void;
+  openHelp: () => void;
 }

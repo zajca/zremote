@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { BarChart3, Clock, Laptop, Monitor, PanelLeftClose, Pin, Settings } from "lucide-react";
+import { BarChart3, Clock, HelpCircle, Laptop, Monitor, PanelLeftClose, Pin, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
@@ -12,9 +12,10 @@ interface SidebarProps {
   pinned: boolean;
   onPin: () => void;
   onUnpin: () => void;
+  onOpenHelp: () => void;
 }
 
-export function Sidebar({ pinned, onPin, onUnpin }: SidebarProps) {
+export function Sidebar({ pinned, onPin, onUnpin, onOpenHelp }: SidebarProps) {
   const { hosts, loading, refetch: refetchHosts } = useHosts();
   const { isLocal } = useMode();
 
@@ -91,6 +92,15 @@ export function Sidebar({ pinned, onPin, onUnpin }: SidebarProps) {
           <Settings size={16} />
           Settings
         </Link>
+        <button
+          onClick={onOpenHelp}
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+          aria-label="Open help"
+        >
+          <HelpCircle size={16} />
+          <span className="flex-1 text-left">Help</span>
+          <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px] text-text-tertiary">?</kbd>
+        </button>
       </div>
     </aside>
   );
