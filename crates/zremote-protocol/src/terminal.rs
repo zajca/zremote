@@ -737,6 +737,7 @@ mod tests {
                 worktree: None,
                 linear: None,
                 prompts: vec![],
+                claude: None,
             }),
         });
     }
@@ -755,6 +756,7 @@ mod tests {
                 worktree: None,
                 linear: None,
                 prompts: vec![],
+                claude: None,
             })),
             error: None,
         });
