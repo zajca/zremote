@@ -16,7 +16,7 @@ pub fn detect_project_type(path: &Path) -> &'static str {
     }
 }
 
-/// Build a `std::process::Command` to run `claude --print <prompt>`.
+/// Build a `std::process::Command` to run `claude <prompt>` interactively.
 pub fn build_claude_command(
     project_path: &Path,
     model: &str,
@@ -24,7 +24,7 @@ pub fn build_claude_command(
     skip_permissions: bool,
 ) -> Command {
     let mut cmd = Command::new("claude");
-    cmd.arg("--print").arg(prompt);
+    cmd.arg(prompt);
     cmd.arg("--model").arg(model);
     cmd.current_dir(project_path);
 
@@ -78,7 +78,7 @@ mod tests {
         let cmd = build_claude_command(Path::new("/tmp/project"), "sonnet", "test prompt", false);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd.get_program(), "claude");
-        assert!(args.contains(&std::ffi::OsStr::new("--print")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--print")));
         assert!(args.contains(&std::ffi::OsStr::new("test prompt")));
         assert!(args.contains(&std::ffi::OsStr::new("--model")));
         assert!(args.contains(&std::ffi::OsStr::new("sonnet")));
