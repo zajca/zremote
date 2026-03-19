@@ -1013,13 +1013,14 @@ async fn handle_agent_message(
             inputs,
             error,
         } => {
-            tracing::debug!(
-                host_id = %host_id,
-                request_id = %request_id,
-                inputs_count = inputs.len(),
-                has_error = error.is_some(),
-                "received action inputs resolved"
-            );
+            if let Some((_, sender)) = state.action_inputs_requests.remove(&request_id) {
+                let _ = sender.send(crate::state::ActionInputsResolveResponse { inputs, error });
+            } else {
+                tracing::warn!(
+                    request_id = %request_id,
+                    "received ActionInputsResolved for unknown request"
+                );
+            }
         }
     }
     Ok(())

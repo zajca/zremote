@@ -396,6 +396,8 @@ pub struct RunActionRequest {
     pub cols: Option<u16>,
     #[serde(default)]
     pub rows: Option<u16>,
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,
 }
 
 /// `GET /api/projects/:project_id/actions` - list available actions for a project.
@@ -573,6 +575,68 @@ pub async fn resolve_prompt(
     Ok(Json(serde_json::json!({ "prompt": rendered })))
 }
 
+/// `POST /api/projects/:project_id/actions/:action_name/resolve-inputs` - resolve action inputs.
+///
+/// Sends a `ResolveActionInputs` message to the agent and waits for the response.
+pub async fn resolve_action_inputs(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, action_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (host_id_str, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
+
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.action_inputs_requests.insert(request_id, tx);
+
+    sender
+        .send(ServerMessage::ResolveActionInputs {
+            request_id,
+            project_path,
+            action_name,
+        })
+        .await
+        .map_err(|_| {
+            state.action_inputs_requests.remove(&request_id);
+            AppError::Conflict("failed to send resolve-inputs request to agent".to_string())
+        })?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
+        Ok(Ok(response)) => {
+            if let Some(error) = response.error {
+                Err(AppError::Internal(error))
+            } else {
+                Ok(Json(serde_json::json!({ "inputs": response.inputs })))
+            }
+        }
+        Ok(Err(_)) => {
+            state.action_inputs_requests.remove(&request_id);
+            Err(AppError::Internal(
+                "agent disconnected while resolving inputs".to_string(),
+            ))
+        }
+        Err(_) => {
+            state.action_inputs_requests.remove(&request_id);
+            Err(AppError::Internal(
+                "resolve action inputs timed out after 15s".to_string(),
+            ))
+        }
+    }
+}
+
 /// `POST /api/projects/:project_id/actions/:action_name/run` - run a project action.
 ///
 /// Fetches project settings from the agent, finds the named action, expands
@@ -701,9 +765,18 @@ fn expand_action_template(template: &str, project_path: &str, body: &RunActionRe
     let mut result = template.replace("{{project_path}}", project_path);
     if let Some(ref wt) = body.worktree_path {
         result = result.replace("{{worktree_path}}", wt);
+        if let Some(name) = std::path::Path::new(wt)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
+            result = result.replace("{{worktree_name}}", name);
+        }
     }
     if let Some(ref branch) = body.branch {
         result = result.replace("{{branch}}", branch);
+    }
+    for (key, value) in &body.inputs {
+        result = result.replace(&format!("{{{{{key}}}}}"), value);
     }
     result
 }
@@ -980,6 +1053,7 @@ mod tests {
             directory_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -1040,6 +1114,10 @@ mod tests {
             .route(
                 "/api/projects/{project_id}/actions/{action_name}/run",
                 post(run_action),
+            )
+            .route(
+                "/api/projects/{project_id}/actions/{action_name}/resolve-inputs",
+                post(resolve_action_inputs),
             )
             .route("/api/hosts/{host_id}/browse", get(browse_directory))
             .route(
@@ -1516,6 +1594,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = expand_action_template(
             "cd {{project_path}} && cargo build",
@@ -1532,6 +1611,7 @@ mod tests {
             branch: Some("feature".to_string()),
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = expand_action_template(
             "cd {{worktree_path}} && git checkout {{branch}}",
@@ -1548,6 +1628,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = expand_action_template("echo {{worktree_path}} {{branch}}", "/proj", &body);
         // Placeholders remain when no value provided
@@ -1573,6 +1654,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = resolve_action_working_dir(&action, "/proj", &body);
         assert_eq!(result, "/proj/sub");
@@ -1597,6 +1679,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = resolve_action_working_dir(&action, "/proj", &body);
         assert_eq!(result, "/tmp/wt");
@@ -1621,6 +1704,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = resolve_action_working_dir(&action, "/proj", &body);
         assert_eq!(result, "/proj");
@@ -1645,6 +1729,7 @@ mod tests {
             branch: None,
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let result = resolve_action_working_dir(&action, "/proj", &body);
         assert_eq!(result, "/tmp/wt");
@@ -1676,6 +1761,7 @@ mod tests {
             branch: Some("feat".to_string()),
             cols: None,
             rows: None,
+            inputs: std::collections::HashMap::new(),
         };
         let env = build_action_env_map(&project_env, &action, "/proj", &body);
         assert_eq!(env["KEY1"], "val1");
@@ -1842,5 +1928,113 @@ mod tests {
         // Verify that the agent received messages
         let msg = rx.try_recv();
         assert!(msg.is_ok(), "agent should have received a message");
+    }
+
+    #[test]
+    fn run_action_request_deserialize_with_inputs() {
+        let json = r#"{"inputs":{"tag":"0.2.4","message":"Release"}}"#;
+        let body: RunActionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(body.inputs.get("tag").unwrap(), "0.2.4");
+        assert_eq!(body.inputs.get("message").unwrap(), "Release");
+    }
+
+    #[test]
+    fn run_action_request_deserialize_without_inputs() {
+        let json = r#"{"worktree_path":"/tmp/wt"}"#;
+        let body: RunActionRequest = serde_json::from_str(json).unwrap();
+        assert!(body.inputs.is_empty());
+    }
+
+    #[test]
+    fn expand_action_template_with_custom_inputs() {
+        let body = RunActionRequest {
+            worktree_path: None,
+            branch: None,
+            cols: None,
+            rows: None,
+            inputs: std::collections::HashMap::from([
+                ("tag".to_string(), "0.2.4".to_string()),
+                ("message".to_string(), "Release notes".to_string()),
+            ]),
+        };
+        let result = expand_action_template("git tag -a {{tag}} -m '{{message}}'", "/proj", &body);
+        assert_eq!(result, "git tag -a 0.2.4 -m 'Release notes'");
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_project_not_found() {
+        let state = test_state().await;
+        let proj_id = Uuid::new_v4().to_string();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(format!(
+                    "/api/projects/{proj_id}/actions/build/resolve-inputs"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_invalid_project_id() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/projects/not-a-uuid/actions/build/resolve-inputs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_host_offline() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(format!(
+                    "/api/projects/{proj_id}/actions/build/resolve-inputs"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn run_action_with_custom_inputs() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4().to_string();
+        let proj_id = Uuid::new_v4().to_string();
+        insert_host(&state, &host_id).await;
+        insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::post(format!("/api/projects/{proj_id}/actions/build/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"inputs":{"tag":"v1.0"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Host is offline, so we get CONFLICT -- but the request parsed successfully
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

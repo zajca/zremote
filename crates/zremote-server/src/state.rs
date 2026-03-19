@@ -147,6 +147,12 @@ pub struct SettingsSaveResponse {
     pub error: Option<String>,
 }
 
+/// Response type for action inputs resolve oneshot channels.
+pub struct ActionInputsResolveResponse {
+    pub inputs: Vec<zremote_protocol::project::ResolvedActionInput>,
+    pub error: Option<String>,
+}
+
 /// Shared application state.
 pub struct AppState {
     pub db: SqlitePool,
@@ -174,6 +180,8 @@ pub struct AppState {
         Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsGetResponse>>>,
     pub settings_save_requests:
         Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsSaveResponse>>>,
+    pub action_inputs_requests:
+        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<ActionInputsResolveResponse>>>,
 }
 
 #[cfg(test)]
