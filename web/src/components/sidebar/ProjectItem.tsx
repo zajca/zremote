@@ -1,4 +1,4 @@
-import { Bot, Brain, ChevronRight, FileText, FolderGit2, GitBranch, Loader2, Plus, RotateCcw, Settings, Sparkles, Zap } from "lucide-react";
+import { Bot, Brain, ChevronRight, FileText, FolderGit2, GitBranch, Loader2, Pin, Plus, RotateCcw, Settings, Sparkles, Zap } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, ProjectAction, Session } from "../../lib/api";
@@ -147,6 +147,19 @@ export const ProjectItem = memo(function ProjectItem({
     [hostId, project.path, navigate],
   );
 
+  const handleTogglePin = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      try {
+        await api.projects.update(project.id, { pinned: !project.pinned });
+      } catch (err) {
+        console.error("failed to toggle pin", err);
+        showToast("Failed to update project", "error");
+      }
+    },
+    [project.id, project.pinned],
+  );
+
   // Dismiss dropdowns on outside click or Escape
   useEffect(() => {
     if (!showSidebarMenu && !showPromptMenu) return;
@@ -222,6 +235,11 @@ export const ProjectItem = memo(function ProjectItem({
           <span className="truncate">{project.name}</span>
         </span>
         <span className="flex shrink-0 items-center gap-1">
+          {project.pinned && (
+            <Tooltip label="Pinned">
+              <Pin size={10} className="text-accent" />
+            </Tooltip>
+          )}
           {project.git_branch && (
             <Tooltip label={`Branch: ${project.git_branch}${project.git_is_dirty ? " (uncommitted changes)" : ""}${project.git_ahead > 0 ? ` +${project.git_ahead} ahead` : ""}${project.git_behind > 0 ? ` ${project.git_behind} behind` : ""}`}>
               <GitBranch
@@ -254,6 +272,16 @@ export const ProjectItem = memo(function ProjectItem({
             <span className="text-[10px] text-text-tertiary">{totalSessions}</span>
           )}
         </span>
+        <button
+          onClick={(e) => void handleTogglePin(e)}
+          className={`hidden h-4 w-4 shrink-0 items-center justify-center rounded transition-colors duration-150 hover:bg-bg-active group-hover:flex ${
+            project.pinned ? "text-accent" : "text-text-tertiary hover:text-text-primary"
+          }`}
+          aria-label={project.pinned ? "Unpin project" : "Pin project"}
+          title={project.pinned ? "Unpin project" : "Pin project"}
+        >
+          <Pin size={11} />
+        </button>
         {lastResumableTaskId && (
           <button
             onClick={(e) => void handleResume(e)}

@@ -43,6 +43,7 @@ export interface Project {
   git_remotes: string | null;
   git_updated_at: string | null;
   has_zremote_config: boolean;
+  pinned: boolean;
 }
 
 export interface DirectoryEntry {
@@ -306,6 +307,11 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+    update: (id: string, body: { pinned?: boolean }) =>
+      request<Project>(`/api/projects/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
     browse: (hostId: string, path: string) =>
       request<DirectoryEntry[]>(
         `/api/hosts/${hostId}/browse?path=${encodeURIComponent(path)}`,

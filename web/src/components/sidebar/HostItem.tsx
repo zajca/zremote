@@ -1,4 +1,4 @@
-import { ChevronRight, Plus, Search } from "lucide-react";
+import { ChevronRight, Eye, EyeOff, Plus, Search } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Host } from "../../lib/api";
@@ -32,6 +32,14 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
   const { projects } = useProjects(expanded ? host.id : undefined);
 
   const [addProjectOpen, setAddProjectOpen] = useState(false);
+
+  const [showAll, setShowAll] = useState(() => {
+    return localStorage.getItem(`zremote:show-all-projects:${host.id}`) === "true";
+  });
+
+  useEffect(() => {
+    localStorage.setItem(`zremote:show-all-projects:${host.id}`, String(showAll));
+  }, [showAll, host.id]);
 
   const handleScanProjects = useCallback(
     async (e: React.MouseEvent) => {
@@ -89,6 +97,19 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
     [projects],
   );
 
+  const visibleProjects = useMemo(() => {
+    if (showAll) return rootProjects;
+    return rootProjects.filter((p) => {
+      if (p.pinned) return true;
+      if (projectSessionsMap.has(p.id)) return true;
+      // Check if any worktree child has sessions
+      const worktreeChildren = projects.filter((wt) => wt.parent_project_id === p.id);
+      return worktreeChildren.some((wt) => projectSessionsMap.has(wt.id));
+    });
+  }, [rootProjects, showAll, projectSessionsMap, projects]);
+
+  const hiddenCount = rootProjects.length - visibleProjects.length;
+
   return (
     <div>
       <div
@@ -135,6 +156,21 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                 Projects
               </span>
               <div className="flex items-center gap-0.5">
+                {rootProjects.length > 0 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowAll((prev) => !prev);
+                    }}
+                    className={`flex h-4 w-4 items-center justify-center rounded transition-colors duration-150 hover:bg-bg-active hover:text-text-primary ${
+                      showAll ? "text-accent" : "text-text-tertiary"
+                    }`}
+                    aria-label={showAll ? "Show active projects only" : "Show all projects"}
+                    title={showAll ? "Show active projects only" : "Show all projects"}
+                  >
+                    {showAll ? <Eye size={10} /> : <EyeOff size={10} />}
+                  </button>
+                )}
                 <button
                   onClick={handleScanProjects}
                   className="flex h-4 w-4 items-center justify-center rounded text-text-tertiary hover:bg-bg-active hover:text-text-primary"
@@ -155,12 +191,14 @@ export const HostItem = memo(function HostItem({ host }: HostItemProps) {
                 </button>
               </div>
             </div>
-            {rootProjects.length === 0 && (
+            {visibleProjects.length === 0 && (
               <div className="px-2 py-2 text-[11px] text-text-tertiary">
-                No projects
+                {rootProjects.length === 0
+                  ? "No projects"
+                  : `${hiddenCount} project${hiddenCount !== 1 ? "s" : ""} hidden`}
               </div>
             )}
-            {rootProjects.map((project) => {
+            {visibleProjects.map((project) => {
               const worktreeChildren = projects.filter(
                 (p) => p.parent_project_id === project.id,
               );
