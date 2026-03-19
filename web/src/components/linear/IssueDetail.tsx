@@ -8,7 +8,7 @@ interface IssueDetailProps {
   issue: LinearIssue;
   projectId: string;
   actions: LinearAction[];
-  onStartClaude: (prompt: string) => void;
+  onStartClaude: (prompt: string) => void | Promise<void>;
 }
 
 const PRIORITY_LABELS: Record<number, string> = {

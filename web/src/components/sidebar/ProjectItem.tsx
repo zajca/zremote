@@ -2,13 +2,12 @@ import { Bot, Brain, ChevronRight, FileText, FolderGit2, GitBranch, Loader2, Pin
 import { memo, useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Project, ProjectAction, Session } from "../../lib/api";
-import { api } from "../../lib/api";
+import { api, startClaudeForProject } from "../../lib/api";
 import type { PromptTemplate } from "../../types/prompt";
 import { useClaudeTaskStore } from "../../stores/claude-task-store";
 import { useKnowledgeStore } from "../../stores/knowledge-store";
 import { showToast } from "../layout/Toast";
 import { getActionIcon, hasScope } from "../project/action-utils";
-import { StartClaudeDialog } from "../StartClaudeDialog";
 import { RunPromptDialog } from "../RunPromptDialog";
 import { SessionItem } from "./SessionItem";
 
@@ -48,7 +47,7 @@ export const ProjectItem = memo(function ProjectItem({
   const [expanded, setExpanded] = useState(
     sessions.length > 0 || worktreeChildren.some((wt) => (projectSessionsMap?.get(wt.id) ?? []).length > 0),
   );
-  const [showClaudeDialog, setShowClaudeDialog] = useState(false);
+  const [startingClaude, setStartingClaude] = useState(false);
   const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
   const [showPromptMenu, setShowPromptMenu] = useState(false);
   const [selectedPrompt, setSelectedPrompt] = useState<PromptTemplate | null>(null);
@@ -379,12 +378,36 @@ export const ProjectItem = memo(function ProjectItem({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            setShowClaudeDialog(true);
+            if (startingClaude) return;
+            setStartingClaude(true);
+            void (async () => {
+              try {
+                const { settings } = await api.projects.getSettings(project.id);
+                const defaults = settings?.claude;
+                const result = await startClaudeForProject(
+                  hostId,
+                  project.path,
+                  project.id,
+                  {
+                    model: defaults?.model,
+                    allowedTools: defaults?.allowed_tools,
+                    skipPermissions: defaults?.skip_permissions,
+                    customFlags: defaults?.custom_flags,
+                  },
+                );
+                void navigate(`/hosts/${result.hostId}/sessions/${result.sessionId}`);
+              } catch (err) {
+                showToast(`Failed to start Claude: ${err instanceof Error ? err.message : String(err)}`, "error");
+              } finally {
+                setStartingClaude(false);
+              }
+            })();
           }}
+          disabled={startingClaude}
           className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-accent group-hover:flex"
           aria-label="Start Claude in project"
         >
-          <Bot size={11} />
+          {startingClaude ? <Loader2 size={11} className="animate-spin" /> : <Bot size={11} />}
         </button>
         <button
           onClick={(e) => void handleNewSession(e)}
@@ -412,15 +435,6 @@ export const ProjectItem = memo(function ProjectItem({
             />
           ))}
         </div>
-      )}
-      {showClaudeDialog && (
-        <StartClaudeDialog
-          projectName={project.name}
-          projectPath={project.path}
-          hostId={hostId}
-          projectId={project.id}
-          onClose={() => setShowClaudeDialog(false)}
-        />
       )}
       {selectedPrompt && (
         <RunPromptDialog

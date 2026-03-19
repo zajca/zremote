@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import type { Project, ProjectAction, Session } from "../../../lib/api";
 import type { PromptTemplate } from "../../../types/prompt";
-import { api } from "../../../lib/api";
+import { api, startClaudeForProject } from "../../../lib/api";
 import { showToast } from "../../layout/Toast";
 import { hasScope } from "../../project/action-utils";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -38,13 +38,26 @@ export function getProjectActions(
     icon: Bot,
     keywords: ["claude", "ai", "start", "agent"],
     group: "actions",
-    onSelect: () => {
-      deps.openStartClaude({
-        id: project.id,
-        name: project.name,
-        path: project.path,
-        host_id: project.host_id,
-      });
+    onSelect: async () => {
+      try {
+        const { settings } = await api.projects.getSettings(projectId);
+        const defaults = settings?.claude;
+        const { hostId, sessionId } = await startClaudeForProject(
+          project.host_id,
+          project.path,
+          project.id,
+          {
+            model: defaults?.model,
+            allowedTools: defaults?.allowed_tools,
+            skipPermissions: defaults?.skip_permissions,
+            customFlags: defaults?.custom_flags,
+          },
+        );
+        deps.navigate(`/hosts/${hostId}/sessions/${sessionId}`);
+        deps.close();
+      } catch (err) {
+        showToast(`Failed to start Claude: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
     },
   });
 

@@ -629,3 +629,26 @@ export const api = {
       ),
   },
 };
+
+/**
+ * Start a Claude task for a project, optionally with project defaults.
+ * Returns host and session IDs for navigation.
+ */
+export async function startClaudeForProject(
+  hostId: string,
+  projectPath: string,
+  projectId?: string,
+  options?: { prompt?: string; model?: string; allowedTools?: string[]; skipPermissions?: boolean; customFlags?: string },
+): Promise<{ hostId: string; sessionId: string }> {
+  const task = await api.claudeTasks.create({
+    host_id: hostId,
+    project_path: projectPath,
+    project_id: projectId,
+    model: options?.model ?? "sonnet",
+    initial_prompt: options?.prompt,
+    allowed_tools: options?.allowedTools,
+    skip_permissions: options?.skipPermissions,
+    custom_flags: options?.customFlags,
+  });
+  return { hostId, sessionId: task.session_id };
+}

@@ -59,6 +59,7 @@ vi.mock("../../lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/api")>();
   return {
     ...original,
+    startClaudeForProject: vi.fn().mockResolvedValue({ hostId: "host-1", sessionId: "sess-1" }),
     api: {
       hosts: { list: vi.fn().mockResolvedValue([]), get: vi.fn() },
       sessions: {
@@ -78,6 +79,7 @@ vi.mock("../../lib/api", async (importOriginal) => {
         actions: vi.fn().mockResolvedValue({ actions: [] }),
         refreshGit: vi.fn(),
         configureWithClaude: vi.fn(),
+        getSettings: vi.fn().mockResolvedValue({ settings: null }),
       },
       loops: {
         list: vi.fn().mockResolvedValue([]),
@@ -401,7 +403,7 @@ describe("CommandPalette", () => {
     });
   });
 
-  test("dialog spawning works (StartClaude)", async () => {
+  test("Start Claude action calls API directly", async () => {
     mockHosts = [mockHost];
     mockIsLocal = true;
 
@@ -412,7 +414,24 @@ describe("CommandPalette", () => {
     vi.mocked(api.projects.sessions).mockResolvedValue([]);
     vi.mocked(api.projects.worktrees).mockResolvedValue([]);
     vi.mocked(api.projects.actions).mockResolvedValue({ actions: [] });
+    vi.mocked(api.projects.getSettings).mockResolvedValue({ settings: null });
     vi.mocked(api.claudeTasks.list).mockResolvedValue([]);
+    vi.mocked(api.claudeTasks.create).mockResolvedValue({
+      id: "task-1",
+      session_id: "sess-1",
+      host_id: "host-1",
+      project_id: "proj-1",
+      project_path: "/home/user/project",
+      model: "sonnet",
+      status: "running",
+      started_at: new Date().toISOString(),
+      ended_at: null,
+      initial_prompt: null,
+      summary: null,
+      total_tokens_in: 0,
+      total_tokens_out: 0,
+      total_cost_usd: 0,
+    });
 
     render(
       <MemoryRouter>
@@ -436,11 +455,16 @@ describe("CommandPalette", () => {
     });
     await userEvent.click(screen.getByText("Start Claude"));
 
-    // Palette closes, StartClaudeDialog opens
-    expect(
-      screen.queryByPlaceholderText("Search commands..."),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("Project: my-project")).toBeInTheDocument();
+    // startClaudeForProject is called directly instead of opening a dialog
+    const { startClaudeForProject } = await import("../../lib/api");
+    await waitFor(() => {
+      expect(startClaudeForProject).toHaveBeenCalledWith(
+        "host-1",
+        "/home/user/project",
+        "proj-1",
+        expect.any(Object),
+      );
+    });
   });
 
   test("search filtering works", async () => {
