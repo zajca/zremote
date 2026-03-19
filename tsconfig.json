@@ -1,5 +1,0 @@
-{
-  "extends": "./web/tsconfig.json",
-  "include": ["web/src"],
-  "exclude": ["web/src/**/*.test.ts", "web/src/**/*.test.tsx"]
-}
