@@ -208,6 +208,8 @@ pub enum ServerEvent {
     SessionSuspended { session_id: String },
     #[serde(rename = "session_resumed")]
     SessionResumed { session_id: String },
+    #[serde(rename = "session_updated")]
+    SessionUpdated { session_id: String },
     #[serde(rename = "agentic_loop_detected")]
     LoopDetected {
         #[serde(rename = "loop")]
@@ -829,6 +831,9 @@ mod tests {
                 session_id: "s1".to_string(),
             },
             ServerEvent::SessionResumed {
+                session_id: "s1".to_string(),
+            },
+            ServerEvent::SessionUpdated {
                 session_id: "s1".to_string(),
             },
             ServerEvent::LoopDetected {

@@ -111,6 +111,10 @@ export function useRealtimeUpdates(handlers: EventHandler) {
             window.dispatchEvent(new Event("zremote:session-update"));
             showToast("Session resumed", "success");
             break;
+          case "session_updated":
+            handlersRef.current.onSessionUpdate?.();
+            window.dispatchEvent(new Event("zremote:session-update"));
+            break;
           case "projects_updated":
             handlersRef.current.onProjectUpdate?.();
             break;
