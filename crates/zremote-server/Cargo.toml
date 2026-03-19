@@ -25,7 +25,10 @@ subtle.workspace = true
 tokio-util.workspace = true
 dashmap.workspace = true
 teloxide.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+tempfile = "3"
 tower = { workspace = true, features = ["util"] }
