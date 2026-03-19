@@ -1274,6 +1274,18 @@ fn handle_server_message(
                 }
             }
         }
+        ServerMessage::ResolveActionInputs {
+            request_id,
+            project_path,
+            action_name,
+        } => {
+            tracing::info!(
+                request_id = %request_id,
+                project_path = %project_path,
+                action_name = %action_name,
+                "resolve action inputs not yet implemented in server mode"
+            );
+        }
     }
 }
 

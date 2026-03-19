@@ -130,6 +130,7 @@ mod tests {
             env: HashMap::new(),
             worktree_scoped: false,
             scopes: vec![],
+            inputs: vec![],
         }
     }
 

@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use crate::agentic::AgenticServerMessage;
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
-use crate::project::{DirectoryEntry, GitInfo, ProjectInfo, ProjectSettings, WorktreeInfo};
+use crate::project::{
+    DirectoryEntry, GitInfo, ProjectInfo, ProjectSettings, ResolvedActionInput, WorktreeInfo,
+};
 use crate::{HostId, SessionId};
 
 /// A recovered tmux session reported by the agent during reconnection.
@@ -115,6 +117,12 @@ pub enum AgentMessage {
         request_id: uuid::Uuid,
         error: Option<String>,
     },
+    ActionInputsResolved {
+        request_id: uuid::Uuid,
+        inputs: Vec<ResolvedActionInput>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
 }
@@ -191,6 +199,11 @@ pub enum ServerMessage {
         request_id: uuid::Uuid,
         project_path: String,
         settings: Box<ProjectSettings>,
+    },
+    ResolveActionInputs {
+        request_id: uuid::Uuid,
+        project_path: String,
+        action_name: String,
     },
 }
 
@@ -858,6 +871,47 @@ mod tests {
         let json = serde_json::to_string(&info_minimal).expect("serialize");
         let parsed: HookResultInfo = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(info_minimal, parsed);
+    }
+
+    #[test]
+    fn resolve_action_inputs_roundtrip() {
+        roundtrip_server(&ServerMessage::ResolveActionInputs {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/project".to_string(),
+            action_name: "release".to_string(),
+        });
+    }
+
+    #[test]
+    fn action_inputs_resolved_roundtrip() {
+        use crate::project::{ActionInputOption, ResolvedActionInput};
+        roundtrip_agent(&AgentMessage::ActionInputsResolved {
+            request_id: Uuid::new_v4(),
+            inputs: vec![ResolvedActionInput {
+                name: "tag".to_string(),
+                options: vec![
+                    ActionInputOption {
+                        value: "0.2.4".to_string(),
+                        label: Some("Patch".to_string()),
+                    },
+                    ActionInputOption {
+                        value: "0.3.0".to_string(),
+                        label: None,
+                    },
+                ],
+                error: None,
+            }],
+            error: None,
+        });
+    }
+
+    #[test]
+    fn action_inputs_resolved_with_error_roundtrip() {
+        roundtrip_agent(&AgentMessage::ActionInputsResolved {
+            request_id: Uuid::new_v4(),
+            inputs: vec![],
+            error: Some("action not found".to_string()),
+        });
     }
 
     #[test]

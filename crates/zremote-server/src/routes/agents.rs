@@ -1008,6 +1008,19 @@ async fn handle_agent_message(
                 tracing::error!(host_id = %host_id, error = %e, "error handling claude message");
             }
         }
+        AgentMessage::ActionInputsResolved {
+            request_id,
+            inputs,
+            error,
+        } => {
+            tracing::debug!(
+                host_id = %host_id,
+                request_id = %request_id,
+                inputs_count = inputs.len(),
+                has_error = error.is_some(),
+                "received action inputs resolved"
+            );
+        }
     }
     Ok(())
 }
