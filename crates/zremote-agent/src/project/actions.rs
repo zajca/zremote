@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use zremote_protocol::ProjectAction;
+use zremote_protocol::{ActionScope, ProjectAction};
 
 /// Template expansion context for action commands.
 pub struct TemplateContext {
@@ -46,12 +46,31 @@ pub fn resolve_working_dir(action: &ProjectAction, ctx: &TemplateContext) -> Str
     if let Some(ref wd) = action.working_dir {
         return expand_template(wd, ctx);
     }
-    if action.worktree_scoped
+    if has_scope(action, &ActionScope::Worktree)
         && let Some(ref wt) = ctx.worktree_path
     {
         return wt.clone();
     }
     ctx.project_path.clone()
+}
+
+/// Return the effective scopes for an action.
+///
+/// If the action has explicit scopes, use them. Otherwise derive from legacy `worktree_scoped`.
+pub fn effective_scopes(action: &ProjectAction) -> Vec<ActionScope> {
+    if !action.scopes.is_empty() {
+        return action.scopes.clone();
+    }
+    if action.worktree_scoped {
+        vec![ActionScope::Worktree, ActionScope::CommandPalette]
+    } else {
+        vec![ActionScope::Project, ActionScope::CommandPalette]
+    }
+}
+
+/// Check whether an action should appear in the given scope.
+pub fn has_scope(action: &ProjectAction, scope: &ActionScope) -> bool {
+    effective_scopes(action).contains(scope)
 }
 
 /// Build environment variables for action execution.
@@ -110,6 +129,7 @@ mod tests {
             working_dir: None,
             env: HashMap::new(),
             worktree_scoped: false,
+            scopes: vec![],
         }
     }
 
@@ -231,6 +251,58 @@ mod tests {
         };
         let result = expand_template("echo {{worktree_name}} in {{project_path}}", &ctx);
         assert_eq!(result, "echo repo-feat in /home/user/repo");
+    }
+
+    #[test]
+    fn effective_scopes_empty_non_worktree() {
+        let action = test_action("build");
+        let scopes = effective_scopes(&action);
+        assert_eq!(
+            scopes,
+            vec![ActionScope::Project, ActionScope::CommandPalette]
+        );
+    }
+
+    #[test]
+    fn effective_scopes_empty_worktree() {
+        let mut action = test_action("install");
+        action.worktree_scoped = true;
+        let scopes = effective_scopes(&action);
+        assert_eq!(
+            scopes,
+            vec![ActionScope::Worktree, ActionScope::CommandPalette]
+        );
+    }
+
+    #[test]
+    fn effective_scopes_explicit_overrides() {
+        let mut action = test_action("build");
+        action.worktree_scoped = true; // should be ignored
+        action.scopes = vec![ActionScope::Sidebar];
+        let scopes = effective_scopes(&action);
+        assert_eq!(scopes, vec![ActionScope::Sidebar]);
+    }
+
+    #[test]
+    fn has_scope_checks_effective() {
+        let action = test_action("build"); // default: project + command_palette
+        assert!(has_scope(&action, &ActionScope::Project));
+        assert!(has_scope(&action, &ActionScope::CommandPalette));
+        assert!(!has_scope(&action, &ActionScope::Sidebar));
+        assert!(!has_scope(&action, &ActionScope::Worktree));
+    }
+
+    #[test]
+    fn resolve_working_dir_scope_based_worktree() {
+        let mut action = test_action("build");
+        action.scopes = vec![ActionScope::Worktree]; // no worktree_scoped=true needed
+        let ctx = TemplateContext {
+            project_path: "/repo".to_string(),
+            worktree_path: Some("/repo-wt".to_string()),
+            branch: None,
+            worktree_name: None,
+        };
+        assert_eq!(resolve_working_dir(&action, &ctx), "/repo-wt");
     }
 
     #[test]

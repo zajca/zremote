@@ -15,6 +15,7 @@ import type { Project, ProjectAction, Session } from "../../../lib/api";
 import type { PromptTemplate } from "../../../types/prompt";
 import { api } from "../../../lib/api";
 import { showToast } from "../../layout/Toast";
+import { hasScope } from "../../project/action-utils";
 import type { ActionDeps, PaletteAction } from "../types";
 
 export function getWorktreeActions(
@@ -213,8 +214,9 @@ export function getWorktreeActions(
     });
   }
 
-  // Custom actions
-  for (const action of customActions) {
+  // Custom actions (only command_palette-scoped)
+  const paletteActions = customActions.filter((a) => hasScope(a, "command_palette"));
+  for (const action of paletteActions) {
     actions.push({
       id: `worktree:${worktreeId}:action:${action.name}`,
       label: action.description ?? action.name,

@@ -2,6 +2,7 @@ import { Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type ProjectAction } from "../../lib/api";
 import { ActionRow } from "./ActionRow";
+import { hasScope } from "./action-utils";
 
 interface ActionsTabProps {
   projectId: string;
@@ -57,8 +58,8 @@ export function ActionsTab({ projectId, hostId }: ActionsTabProps) {
     );
   }
 
-  const projectActions = actions.filter((a) => !a.worktree_scoped);
-  const worktreeActions = actions.filter((a) => a.worktree_scoped);
+  const projectActions = actions.filter((a) => hasScope(a, "project"));
+  const worktreeActions = actions.filter((a) => hasScope(a, "worktree"));
 
   return (
     <div className="space-y-6">

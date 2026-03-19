@@ -1,7 +1,19 @@
 import * as LucideIcons from "lucide-react";
 import { Terminal } from "lucide-react";
+import type { ActionScope, ProjectAction } from "../../lib/api";
 
 const TEMPLATE_VAR_RE = /\{\{(worktree_path|branch|worktree_name)\}\}/g;
+
+export function effectiveScopes(action: ProjectAction): ActionScope[] {
+  if (action.scopes && action.scopes.length > 0) return action.scopes;
+  return action.worktree_scoped
+    ? ["worktree", "command_palette"]
+    : ["project", "command_palette"];
+}
+
+export function hasScope(action: ProjectAction, scope: ActionScope): boolean {
+  return effectiveScopes(action).includes(scope);
+}
 
 export function detectMissingInputs(
   command: string,

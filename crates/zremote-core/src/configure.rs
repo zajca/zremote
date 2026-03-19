@@ -44,6 +44,9 @@ pub fn build_configure_prompt(
     prompt.push_str(
         "  - `worktree_scoped` (bool, default false): If true, action runs in worktree context\n",
     );
+    prompt.push_str(
+        "  - `scopes` (string[], optional): Where the action appears in the UI.\n    Values: \"project\" (actions tab), \"worktree\" (worktree cards),\n    \"sidebar\" (quick access in sidebar), \"command_palette\" (Cmd+K).\n    Defaults to [\"project\", \"command_palette\"]. If set, `worktree_scoped` is ignored.\n",
+    );
     prompt.push_str("- `worktree` (object, optional):\n");
     prompt.push_str(
         "  - `create_command` (string, optional): Custom command that replaces `git worktree add`. Runs in a terminal session so the user can see output. Use when the project has custom worktree setup scripts.\n",
@@ -81,7 +84,7 @@ pub fn build_configure_prompt(
     prompt.push_str("4. Set appropriate environment variables if needed\n");
     prompt.push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
     prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns). If found, configure `create_command` and `delete_command` to use them.\n");
-    prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), create `worktree_scoped: true` actions for common operations (start, stop, expose).\n\n");
+    prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), add `\"worktree\"` to the action's `scopes` for common operations (start, stop, expose).\n8. For frequently-used actions (build, test), add `\"sidebar\"` scope for quick access from the sidebar.\n\n");
 
     // Section 4: Project-Type-Specific Guidance
     match project_type {
@@ -191,6 +194,8 @@ mod tests {
         assert!(prompt.contains("allowed_tools"));
         assert!(prompt.contains("skip_permissions"));
         assert!(prompt.contains("custom_flags"));
+        // Action scopes
+        assert!(prompt.contains("scopes"));
     }
 
     #[test]
@@ -245,7 +250,8 @@ mod tests {
         assert!(prompt.contains("delete_command"));
         assert!(prompt.contains("{{worktree_name}}"));
         assert!(prompt.contains("worktree management scripts"));
-        assert!(prompt.contains("worktree_scoped"));
+        assert!(prompt.contains("sidebar"));
+        assert!(prompt.contains("scopes"));
     }
 
     #[test]
