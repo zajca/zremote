@@ -62,7 +62,7 @@ mod tests {
     #[tokio::test]
     async fn api_mode_returns_server() {
         let state = test_state().await;
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(Request::get("/api/mode").body(Body::empty()).unwrap())
             .await
@@ -77,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn health_status_is_ok() {
         let state = test_state().await;
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await

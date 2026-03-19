@@ -12,15 +12,15 @@ mod db;
 mod error;
 mod routes;
 mod state;
+mod static_files;
 mod telegram;
 
 use state::{AppState, ConnectionManager};
 
 #[allow(clippy::too_many_lines)]
-fn create_router(state: Arc<AppState>) -> Router {
+fn create_router(state: Arc<AppState>, web_dir: Option<std::path::PathBuf>) -> Router {
     // TODO(phase-3): Add authentication middleware for REST API endpoints
-    Router::new()
-        .route("/", get(root))
+    let router = Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
         .route("/ws/agent", get(routes::agents::ws_handler))
@@ -213,11 +213,17 @@ fn create_router(state: Arc<AppState>) -> Router {
         .layer(TraceLayer::new_for_http())
         // TODO(phase-3): Restrict CORS to known UI origins
         .layer(CorsLayer::permissive())
-        .with_state(state)
-}
+        .with_state(state);
 
-async fn root() -> &'static str {
-    "ZRemote Server"
+    if let Some(dir) = web_dir {
+        tracing::info!(web_dir = %dir.display(), "serving web UI from filesystem");
+        router.fallback(move |uri: axum::http::Uri| {
+            static_files::filesystem_static_handler(uri, dir.clone())
+        })
+    } else {
+        tracing::info!("serving embedded web UI");
+        router.fallback(static_files::static_handler)
+    }
 }
 
 #[tokio::main]
@@ -346,6 +352,10 @@ async fn main() {
         Err(_) => 3000,
     };
 
+    let web_dir = std::env::var("ZREMOTE_WEB_DIR")
+        .ok()
+        .map(std::path::PathBuf::from);
+
     let addr = format!("0.0.0.0:{port}");
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -358,7 +368,7 @@ async fn main() {
 
     tracing::info!(addr = %addr, "Server ready on {addr}");
 
-    axum::serve(listener, create_router(state))
+    axum::serve(listener, create_router(state, web_dir))
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("server error");
@@ -406,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn health_returns_ok() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -421,24 +431,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_returns_server_name() {
+    async fn root_serves_web_ui_or_not_found() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"ZRemote Server");
+        let status = response.status();
+        // Embedded web UI: 200 if web/dist/index.html exists, 404 otherwise
+        assert!(
+            status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+            "unexpected status: {status}"
+        );
     }
 
     #[tokio::test]
     async fn list_hosts_returns_empty_array() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/api/hosts").body(Body::empty()).unwrap())
             .await
@@ -454,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn get_host_not_found() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get("/api/hosts/00000000-0000-0000-0000-000000000000")
@@ -470,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn get_host_invalid_uuid_returns_bad_request() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get("/api/hosts/not-a-uuid")
@@ -486,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn delete_host_not_found() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::delete("/api/hosts/00000000-0000-0000-0000-000000000000")
@@ -533,7 +545,7 @@ mod tests {
         )
         .await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/api/hosts").body(Body::empty()).unwrap())
             .await
@@ -554,7 +566,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "my-server", "my-hostname").await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/hosts/{host_id}"))
@@ -581,7 +593,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "old-name", "host").await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -603,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn patch_host_not_found() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -625,7 +637,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "host", "host").await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -648,7 +660,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "host", "host").await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -673,7 +685,7 @@ mod tests {
         let long_name = "a".repeat(256);
         let body = format!(r#"{{"name": "{long_name}"}}"#);
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -692,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn patch_host_invalid_uuid_returns_bad_request() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -714,7 +726,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "host", "host").await;
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/hosts/{host_id}"))
@@ -738,7 +750,7 @@ mod tests {
     #[tokio::test]
     async fn delete_host_with_invalid_uuid_returns_bad_request() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::delete("/api/hosts/not-a-uuid")
@@ -761,7 +773,7 @@ mod tests {
             .register(uuid::Uuid::new_v4(), "test-host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -774,15 +786,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonexistent_route_returns_404() {
+    async fn nonexistent_route_falls_back_to_spa() {
         let state = test_state().await;
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(Request::get("/nonexistent").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let status = response.status();
+        // SPA fallback: 200 if web/dist/index.html exists, 404 otherwise
+        assert!(
+            status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+            "unexpected status: {status}"
+        );
     }
 
     // --- Session route tests ---
@@ -801,7 +818,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -826,7 +843,7 @@ mod tests {
         let state = test_state().await;
         let host_id = uuid::Uuid::new_v4().to_string();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -849,7 +866,7 @@ mod tests {
         insert_test_host(&state, &host_id, "host", "host").await;
 
         // Host exists in DB but no active connection registered
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -871,7 +888,7 @@ mod tests {
         let host_id = uuid::Uuid::new_v4().to_string();
         insert_test_host(&state, &host_id, "host", "host").await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/hosts/{host_id}/sessions"))
@@ -902,7 +919,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/hosts/{host_id}/sessions"))
@@ -933,7 +950,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))
@@ -956,7 +973,7 @@ mod tests {
         let state = test_state().await;
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))
@@ -991,7 +1008,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/sessions/{session_id}"))
@@ -1009,7 +1026,7 @@ mod tests {
         let state = test_state().await;
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/sessions/{session_id}"))
@@ -1036,7 +1053,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/sessions/{session_id}"))
@@ -1063,7 +1080,7 @@ mod tests {
             .register(host_id, "connected-host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/hosts/{host_id_str}"))
@@ -1128,7 +1145,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1149,7 +1166,7 @@ mod tests {
         let session_id = json["id"].as_str().unwrap();
 
         // Verify session has project_id linked
-        let app2 = create_router(state);
+        let app2 = create_router(state, None);
         let get_resp = app2
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))
@@ -1185,7 +1202,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1205,7 +1222,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let session_id = json["id"].as_str().unwrap();
 
-        let app2 = create_router(state);
+        let app2 = create_router(state, None);
         let get_resp = app2
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))
@@ -1232,7 +1249,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1252,7 +1269,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let session_id = json["id"].as_str().unwrap();
 
-        let app2 = create_router(state);
+        let app2 = create_router(state, None);
         let get_resp = app2
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))
@@ -1300,7 +1317,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/projects/{project_id}/sessions"))
@@ -1343,7 +1360,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = create_router(state.clone());
+        let app = create_router(state.clone(), None);
         let response = app
             .oneshot(
                 Request::delete(format!("/api/projects/{project_id}"))
@@ -1378,7 +1395,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_router(state);
+        let app = create_router(state, None);
         let response = app
             .oneshot(
                 Request::get(format!("/api/sessions/{session_id}"))

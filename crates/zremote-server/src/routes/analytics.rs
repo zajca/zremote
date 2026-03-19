@@ -258,7 +258,7 @@ mod tests {
         let state = test_state().await;
         seed_analytics_data(&state.db).await;
 
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/tokens")
@@ -282,7 +282,7 @@ mod tests {
         let state = test_state().await;
         seed_analytics_data(&state.db).await;
 
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/tokens?by=model")
@@ -306,7 +306,7 @@ mod tests {
         let state = test_state().await;
         seed_analytics_data(&state.db).await;
 
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get(
@@ -332,7 +332,7 @@ mod tests {
         let state = test_state().await;
         seed_analytics_data(&state.db).await;
 
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/cost")
@@ -356,7 +356,7 @@ mod tests {
         let state = test_state().await;
         seed_analytics_data(&state.db).await;
 
-        let app = crate::create_router(state);
+        let app = crate::create_router(state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/cost?granularity=month")
@@ -383,7 +383,7 @@ mod tests {
         let app_state = test_state().await;
         seed_analytics_data(&app_state.db).await;
 
-        let app = crate::create_router(app_state);
+        let app = crate::create_router(app_state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/sessions")
@@ -408,7 +408,7 @@ mod tests {
         let app_state = test_state().await;
         seed_analytics_data(&app_state.db).await;
 
-        let app = crate::create_router(app_state);
+        let app = crate::create_router(app_state, None);
         // Filter to a date range that excludes the session
         let response = app
             .oneshot(
@@ -433,7 +433,7 @@ mod tests {
         let app_state = test_state().await;
         seed_analytics_data(&app_state.db).await;
 
-        let app = crate::create_router(app_state);
+        let app = crate::create_router(app_state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/loops")
@@ -459,7 +459,7 @@ mod tests {
         let app_state = test_state().await;
         seed_analytics_data(&app_state.db).await;
 
-        let app = crate::create_router(app_state);
+        let app = crate::create_router(app_state, None);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/analytics/loops?from=2026-03-11T00:00:00Z")
