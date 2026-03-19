@@ -157,6 +157,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         let result = render_prompt("Implement {{feature}} in {{scope}}", &inputs, &ctx);
         assert_eq!(result, "Implement auth in backend");
@@ -170,6 +171,7 @@ mod tests {
             worktree_path: Some("/home/user/repo-feat".to_string()),
             branch: Some("feature/auth".to_string()),
             worktree_name: Some("repo-feat".to_string()),
+            custom_inputs: HashMap::new(),
         };
         let result = render_prompt(
             "Project: {{project_path}}, WT: {{worktree_path}}, Branch: {{branch}}, Name: {{worktree_name}}",
@@ -191,6 +193,7 @@ mod tests {
             worktree_path: None,
             branch: Some("main".to_string()),
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         let result = render_prompt(
             "{{task}} on branch {{branch}} in {{project_path}}",

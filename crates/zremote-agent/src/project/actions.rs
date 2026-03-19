@@ -9,6 +9,7 @@ pub struct TemplateContext {
     pub worktree_path: Option<String>,
     pub branch: Option<String>,
     pub worktree_name: Option<String>,
+    pub custom_inputs: HashMap<String, String>,
 }
 
 /// Find an action by name from the list of configured actions.
@@ -32,6 +33,9 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> String {
     }
     if let Some(ref wt_name) = ctx.worktree_name {
         result = result.replace("{{worktree_name}}", wt_name);
+    }
+    for (key, value) in &ctx.custom_inputs {
+        result = result.replace(&format!("{{{{{key}}}}}"), value);
     }
     result
 }
@@ -152,6 +156,7 @@ mod tests {
             worktree_path: Some("/home/user/repo-feat".to_string()),
             branch: Some("feature/test".to_string()),
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         let result = expand_template(
             "cd {{worktree_path}} && git checkout {{branch}} && echo {{project_path}}",
@@ -170,6 +175,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         let result = expand_template("echo {{project_path}}", &ctx);
         assert_eq!(result, "echo /home/user/repo");
@@ -184,6 +190,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo/frontend");
     }
@@ -197,6 +204,7 @@ mod tests {
             worktree_path: Some("/repo-wt".to_string()),
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo-wt");
     }
@@ -209,6 +217,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo");
     }
@@ -228,6 +237,7 @@ mod tests {
             worktree_path: Some("/repo-wt".to_string()),
             branch: Some("main".to_string()),
             worktree_name: Some("repo-wt".to_string()),
+            custom_inputs: HashMap::new(),
         };
 
         let env = build_action_env(&project_env, &action, &ctx);
@@ -249,6 +259,7 @@ mod tests {
             worktree_path: Some("/home/user/repo-feat".to_string()),
             branch: Some("feature/test".to_string()),
             worktree_name: Some("repo-feat".to_string()),
+            custom_inputs: HashMap::new(),
         };
         let result = expand_template("echo {{worktree_name}} in {{project_path}}", &ctx);
         assert_eq!(result, "echo repo-feat in /home/user/repo");
@@ -302,6 +313,7 @@ mod tests {
             worktree_path: Some("/repo-wt".to_string()),
             branch: None,
             worktree_name: None,
+            custom_inputs: HashMap::new(),
         };
         assert_eq!(resolve_working_dir(&action, &ctx), "/repo-wt");
     }
@@ -315,10 +327,43 @@ mod tests {
             worktree_path: None,
             branch: None,
             worktree_name: Some("my-wt".to_string()),
+            custom_inputs: HashMap::new(),
         };
         let env = build_action_env(&project_env, &action, &ctx);
         let find = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
         assert_eq!(find("ZREMOTE_WORKTREE_NAME"), Some("my-wt"));
         assert!(find("ZREMOTE_WORKTREE_PATH").is_none());
+    }
+
+    #[test]
+    fn expand_template_custom_inputs() {
+        let ctx = TemplateContext {
+            project_path: "/repo".to_string(),
+            worktree_path: None,
+            branch: None,
+            worktree_name: None,
+            custom_inputs: HashMap::from([
+                ("tag".to_string(), "0.2.4".to_string()),
+                ("message".to_string(), "Release notes".to_string()),
+            ]),
+        };
+        let result = expand_template("git tag -a {{tag}} -m '{{message}}'", &ctx);
+        assert_eq!(result, "git tag -a 0.2.4 -m 'Release notes'");
+    }
+
+    #[test]
+    fn expand_template_custom_inputs_mixed_with_builtins() {
+        let ctx = TemplateContext {
+            project_path: "/repo".to_string(),
+            worktree_path: Some("/repo-wt".to_string()),
+            branch: Some("main".to_string()),
+            worktree_name: Some("repo-wt".to_string()),
+            custom_inputs: HashMap::from([("tag".to_string(), "1.0.0".to_string())]),
+        };
+        let result = expand_template(
+            "cd {{worktree_path}} && git tag {{tag}} && echo {{branch}}",
+            &ctx,
+        );
+        assert_eq!(result, "cd /repo-wt && git tag 1.0.0 && echo main");
     }
 }
