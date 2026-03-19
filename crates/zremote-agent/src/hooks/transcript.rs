@@ -241,7 +241,10 @@ pub async fn parse_transcript_file(
                                                 let s =
                                                     serde_json::to_string(v).unwrap_or_default();
                                                 if s.len() > 200 {
-                                                    format!("{}...", &s[..200])
+                                                    format!(
+                                                        "{}...",
+                                                        &s[..s.floor_char_boundary(200)]
+                                                    )
                                                 } else {
                                                     s
                                                 }
@@ -266,7 +269,7 @@ pub async fn parse_transcript_file(
                                         .map(|v| {
                                             let s = serde_json::to_string(v).unwrap_or_default();
                                             if s.len() > 500 {
-                                                format!("{}...", &s[..500])
+                                                format!("{}...", &s[..s.floor_char_boundary(500)])
                                             } else {
                                                 s
                                             }
