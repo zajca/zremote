@@ -23,8 +23,12 @@ use views::main_view::MainView;
 #[derive(Parser)]
 #[command(name = "zremote-gui", version, about = "ZRemote native desktop client")]
 struct Cli {
-    /// Server URL to connect to
-    #[arg(long, default_value = "http://localhost:3000")]
+    /// Server URL to connect to (or set ZREMOTE_SERVER_URL env var)
+    #[arg(
+        long,
+        env = "ZREMOTE_SERVER_URL",
+        default_value = "http://localhost:3000"
+    )]
     server: String,
 }
 
