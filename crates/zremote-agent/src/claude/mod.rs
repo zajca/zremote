@@ -7,6 +7,10 @@ pub struct CommandOptions<'a> {
     pub working_dir: &'a str,
     pub model: Option<&'a str>,
     pub initial_prompt: Option<&'a str>,
+    /// Path to a file containing the prompt text. When set, the command uses
+    /// `$(cat '<path>')` instead of inlining the prompt, avoiding PTY buffer
+    /// overflow for large prompts. Takes precedence over `initial_prompt`.
+    pub prompt_file: Option<&'a str>,
     pub resume_cc_session_id: Option<&'a str>,
     pub continue_last: bool,
     pub allowed_tools: &'a [String],
@@ -28,6 +32,7 @@ impl CommandBuilder {
             working_dir,
             model,
             initial_prompt,
+            prompt_file,
             resume_cc_session_id,
             continue_last,
             allowed_tools,
@@ -98,8 +103,10 @@ impl CommandBuilder {
             parts.push(flags.to_string());
         }
 
-        if let Some(prompt) = initial_prompt {
-            parts.push("--print".to_string());
+        if let Some(file_path) = prompt_file {
+            // Read prompt from file via shell expansion to avoid PTY buffer limits
+            parts.push(format!("\"$(cat {})\"", shell_quote(file_path)));
+        } else if let Some(prompt) = initial_prompt {
             parts.push(shell_quote(prompt));
         }
 
@@ -107,6 +114,16 @@ impl CommandBuilder {
         cmd.push('\n');
         Ok(cmd)
     }
+}
+
+/// Write a prompt to a temporary file, returning the file path.
+///
+/// Used to avoid PTY N_TTY canonical mode buffer overflow (4096 bytes)
+/// when the prompt is too large to inline in the command.
+pub fn write_prompt_file(prompt: &str) -> Result<String, std::io::Error> {
+    let path = format!("/tmp/zremote-prompt-{}.txt", uuid::Uuid::new_v4());
+    std::fs::write(&path, prompt)?;
+    Ok(path)
 }
 
 /// Shell-safe quoting: wrap in single quotes, escape embedded single quotes.
@@ -304,6 +321,7 @@ mod tests {
             working_dir,
             model: None,
             initial_prompt: None,
+            prompt_file: None,
             resume_cc_session_id: None,
             continue_last: false,
             allowed_tools: &[],
@@ -337,7 +355,31 @@ mod tests {
             ..minimal_opts("/tmp")
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
-        assert!(cmd.contains("--print 'Fix the bug'"));
+        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(cmd.contains("'Fix the bug'"));
+    }
+
+    #[test]
+    fn build_with_prompt_file() {
+        let opts = CommandOptions {
+            prompt_file: Some("/tmp/zremote-prompt-abc.txt"),
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(cmd.contains("\"$(cat '/tmp/zremote-prompt-abc.txt')\""));
+    }
+
+    #[test]
+    fn build_prompt_file_takes_precedence_over_initial_prompt() {
+        let opts = CommandOptions {
+            initial_prompt: Some("inline prompt"),
+            prompt_file: Some("/tmp/prompt.txt"),
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("$(cat"));
+        assert!(!cmd.contains("inline prompt"));
     }
 
     #[test]
@@ -400,6 +442,7 @@ mod tests {
             working_dir: "/home/user/project",
             model: Some("claude-sonnet-4-20250514"),
             initial_prompt: Some("Fix all tests"),
+            prompt_file: None,
             resume_cc_session_id: None,
             continue_last: false,
             allowed_tools: &tools,
@@ -415,7 +458,8 @@ mod tests {
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(cmd.contains("--output-format 'stream-json'"));
         assert!(cmd.contains("--verbose"));
-        assert!(cmd.contains("--print 'Fix all tests'"));
+        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(cmd.contains("'Fix all tests'"));
         assert!(cmd.ends_with('\n'));
     }
 
@@ -511,6 +555,17 @@ mod tests {
     #[test]
     fn shell_quote_empty_string() {
         assert_eq!(shell_quote(""), "''");
+    }
+
+    // --- write_prompt_file tests ---
+
+    #[test]
+    fn write_prompt_file_creates_file_with_content() {
+        let content = "This is a test prompt for Claude";
+        let path = write_prompt_file(content).unwrap();
+        let read_back = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(read_back, content);
+        std::fs::remove_file(&path).ok();
     }
 
     // --- PromptDetector tests ---

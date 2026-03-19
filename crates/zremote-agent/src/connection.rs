@@ -1382,11 +1382,37 @@ fn handle_claude_server_message(
             custom_flags,
             continue_last,
         } => {
+            // Write large prompts to temp file to avoid PTY buffer overflow
+            let prompt_file_path = initial_prompt
+                .as_deref()
+                .filter(|p| p.len() > 2048)
+                .map(crate::claude::write_prompt_file);
+            let prompt_file_path = match prompt_file_path {
+                Some(Ok(path)) => Some(path),
+                Some(Err(e)) => {
+                    tracing::warn!(claude_task_id = %claude_task_id, error = %e, "failed to write prompt file");
+                    let _ = outbound_tx.try_send(AgentMessage::ClaudeAction(
+                        ClaudeAgentMessage::SessionStartFailed {
+                            claude_task_id: *claude_task_id,
+                            session_id: *session_id,
+                            error: format!("failed to write prompt file: {e}"),
+                        },
+                    ));
+                    return;
+                }
+                None => None,
+            };
+
             // Build the claude CLI command
             let opts = crate::claude::CommandOptions {
                 working_dir,
                 model: model.as_deref(),
-                initial_prompt: initial_prompt.as_deref(),
+                initial_prompt: if prompt_file_path.is_some() {
+                    None
+                } else {
+                    initial_prompt.as_deref()
+                },
+                prompt_file: prompt_file_path.as_deref(),
                 resume_cc_session_id: resume_cc_session_id.as_deref(),
                 continue_last: *continue_last,
                 allowed_tools,
@@ -1449,8 +1475,10 @@ fn handle_claude_server_message(
                         });
                     }
 
-                    // Write the claude command directly to the PTY stdin.
-                    // The shell buffers stdin and will execute the command once it initializes.
+                    // Brief delay to let the shell initialize before writing the command
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+
+                    // Write the claude command directly to the PTY stdin
                     if let Err(e) = session_manager.write_to(session_id, command.as_bytes()) {
                         tracing::warn!(
                             session_id = %session_id,

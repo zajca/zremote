@@ -1148,7 +1148,7 @@ pub async fn configure_with_claude(
     let claude_task_id_str = claude_task_id.to_string();
 
     let model = body.model.as_deref();
-    let skip_permissions = body.skip_permissions.unwrap_or(true);
+    let skip_permissions = body.skip_permissions.unwrap_or(false);
 
     // Insert DB rows
     cq::insert_session_for_task(
@@ -1179,11 +1179,16 @@ pub async fn configure_with_claude(
         sessions.insert(session_id, SessionState::new(session_id, state.host_id));
     }
 
+    // Write prompt to temp file to avoid PTY buffer overflow (prompt is ~4KB)
+    let prompt_file_path = crate::claude::write_prompt_file(&prompt)
+        .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
+
     // Build claude command via CommandBuilder (PTY injection path)
     let opts = CommandOptions {
         working_dir: &project_path,
         model,
-        initial_prompt: Some(&prompt),
+        initial_prompt: None,
+        prompt_file: Some(&prompt_file_path),
         resume_cc_session_id: None,
         continue_last: false,
         allowed_tools: &[],
@@ -1211,6 +1216,9 @@ pub async fn configure_with_claude(
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
+
+    // Brief delay to let the shell initialize before writing the command
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Write the claude command into the PTY
     {

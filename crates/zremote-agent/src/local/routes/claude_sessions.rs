@@ -95,12 +95,24 @@ pub async fn create_claude_task(
         sessions.insert(session_id, SessionState::new(session_id, state.host_id));
     }
 
-    // Build claude command
+    // Build claude command - use prompt file for large prompts to avoid PTY buffer overflow
     let allowed_tools = body.allowed_tools.unwrap_or_default();
+    let prompt_file_path = body
+        .initial_prompt
+        .as_deref()
+        .filter(|p| p.len() > 2048)
+        .map(crate::claude::write_prompt_file)
+        .transpose()
+        .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
     let opts = CommandOptions {
         working_dir: &body.project_path,
         model: body.model.as_deref(),
-        initial_prompt: body.initial_prompt.as_deref(),
+        initial_prompt: if prompt_file_path.is_some() {
+            None
+        } else {
+            body.initial_prompt.as_deref()
+        },
+        prompt_file: prompt_file_path.as_deref(),
         resume_cc_session_id: None,
         continue_last: false,
         allowed_tools: &allowed_tools,
@@ -128,6 +140,9 @@ pub async fn create_claude_task(
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
+
+    // Brief delay to let the shell initialize before writing the command
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Write the claude command into the PTY
     {
@@ -269,10 +284,22 @@ pub async fn resume_claude_task(
             (vec![], false, None, None)
         };
 
+    // Use prompt file for large prompts to avoid PTY buffer overflow
+    let prompt_file_path = initial_prompt
+        .as_deref()
+        .filter(|p| p.len() > 2048)
+        .map(crate::claude::write_prompt_file)
+        .transpose()
+        .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
     let cmd_opts = CommandOptions {
         working_dir: &original.project_path,
         model: original.model.as_deref(),
-        initial_prompt: initial_prompt.as_deref(),
+        initial_prompt: if prompt_file_path.is_some() {
+            None
+        } else {
+            initial_prompt.as_deref()
+        },
+        prompt_file: prompt_file_path.as_deref(),
         resume_cc_session_id: cc_session_id.as_deref(),
         continue_last,
         allowed_tools: &allowed_tools,
@@ -307,6 +334,9 @@ pub async fn resume_claude_task(
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
+
+    // Brief delay to let the shell initialize before writing the command
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Write the claude command into the PTY
     {
