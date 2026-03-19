@@ -5,6 +5,7 @@ import { api, type ProjectAction, type RunActionRequest } from "../../lib/api";
 import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
 import { showToast } from "../layout/Toast";
+import { ActionInputDialog } from "./ActionInputDialog";
 import { ActionInputPopover } from "./ActionInputPopover";
 import { detectMissingInputs, effectiveScopes, getActionIcon } from "./action-utils";
 
@@ -27,6 +28,7 @@ export function ActionRow({
   const [running, setRunning] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [showInput, setShowInput] = useState(false);
+  const [showInputDialog, setShowInputDialog] = useState(false);
   const Icon = getActionIcon(action.icon);
 
   const runAction = useCallback(
@@ -46,6 +48,12 @@ export function ActionRow({
   );
 
   const handleRun = useCallback(() => {
+    // If action has custom inputs, always show full dialog
+    if (action.inputs && action.inputs.length > 0) {
+      setShowInputDialog(true);
+      return;
+    }
+
     const { needsWorktree, needsBranch } = detectMissingInputs(
       action.command,
       action.working_dir,
@@ -62,7 +70,7 @@ export function ActionRow({
     if (worktreePath) body.worktree_path = worktreePath;
     if (worktreeBranch) body.branch = worktreeBranch;
     void runAction(body);
-  }, [action.command, action.working_dir, worktreePath, worktreeBranch, runAction]);
+  }, [action.inputs, action.command, action.working_dir, worktreePath, worktreeBranch, runAction]);
 
   const handleRunWithValues = useCallback(
     (values: { worktreePath?: string; branch?: string }) => {
@@ -129,6 +137,16 @@ export function ActionRow({
             {action.command}
           </pre>
         </div>
+      )}
+      {showInputDialog && (
+        <ActionInputDialog
+          action={action}
+          projectId={projectId}
+          hostId={hostId}
+          worktreePath={worktreePath}
+          worktreeBranch={worktreeBranch}
+          onClose={() => setShowInputDialog(false)}
+        />
       )}
     </div>
   );

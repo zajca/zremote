@@ -68,6 +68,29 @@ export interface ProjectAction {
   env: Record<string, string>;
   worktree_scoped: boolean;
   scopes?: ActionScope[];
+  inputs?: ActionInput[];
+}
+
+export interface ActionInput {
+  name: string;
+  label?: string;
+  input_type?: "text" | "multiline" | "select";
+  placeholder?: string;
+  default?: string;
+  required?: boolean;
+  options?: string[];
+  script?: string;
+}
+
+export interface ActionInputOption {
+  value: string;
+  label?: string;
+}
+
+export interface ResolvedActionInput {
+  name: string;
+  options: ActionInputOption[];
+  error?: string;
 }
 
 export interface WorktreeSettings {
@@ -88,6 +111,7 @@ export interface RunActionRequest {
   branch?: string;
   cols?: number;
   rows?: number;
+  inputs?: Record<string, string>;
 }
 
 export interface RunActionResponse {
@@ -333,6 +357,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ model, skip_permissions: skipPermissions }),
       }),
+    resolveActionInputs: (projectId: string, actionName: string) =>
+      request<{ inputs: ResolvedActionInput[] }>(
+        `/api/projects/${projectId}/actions/${encodeURIComponent(actionName)}/resolve-inputs`,
+        { method: "POST" },
+      ),
     resolvePrompt: (projectId: string, promptName: string, body: ResolvePromptRequest) =>
       request<ResolvePromptResponse>(`/api/projects/${projectId}/prompts/${encodeURIComponent(promptName)}/resolve`, {
         method: "POST",

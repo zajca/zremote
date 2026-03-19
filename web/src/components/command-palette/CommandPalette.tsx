@@ -18,6 +18,7 @@ import { CommandPaletteFooter } from "./CommandPaletteFooter";
 import { AddProjectDialog } from "../AddProjectDialog";
 import { StartClaudeDialog } from "../StartClaudeDialog";
 import { RunPromptDialog } from "../RunPromptDialog";
+import { ActionInputDialog } from "../project/ActionInputDialog";
 import { useShortcutSessions } from "../../hooks/useShortcutSessions";
 import { useGlobalShortcuts, type ShortcutAction } from "../../hooks/useGlobalShortcuts";
 import { showToast } from "../layout/Toast";
@@ -63,6 +64,10 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
   const [runPromptState, setRunPromptState] = useState<{
     template: PromptTemplate;
     project: { id: string; name: string; path: string; host_id: string };
+  } | null>(null);
+  const [actionInputState, setActionInputState] = useState<{
+    action: ProjectAction;
+    project: { id: string; host_id: string };
   } | null>(null);
 
   // Fetched entity state
@@ -515,6 +520,10 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         setOpen(false);
         setRunPromptState({ template: tmpl, project: proj });
       },
+      openActionInput: (action: ProjectAction, proj: { id: string; host_id: string }) => {
+        setOpen(false);
+        setActionInputState({ action, project: proj });
+      },
       openHelp: () => {
         setOpen(false);
         onOpenHelp?.();
@@ -720,6 +729,15 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
           hostId={runPromptState.project.host_id}
           projectName={runPromptState.project.name}
           onClose={() => setRunPromptState(null)}
+        />
+      )}
+
+      {actionInputState && (
+        <ActionInputDialog
+          action={actionInputState.action}
+          projectId={actionInputState.project.id}
+          hostId={actionInputState.project.host_id}
+          onClose={() => setActionInputState(null)}
         />
       )}
     </>

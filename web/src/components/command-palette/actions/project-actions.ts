@@ -242,25 +242,39 @@ export function getProjectActions(
   // Custom actions (only command_palette-scoped)
   const paletteActions = customActions.filter((a) => hasScope(a, "command_palette"));
   for (const action of paletteActions) {
-    actions.push({
-      id: `project:${projectId}:action:${action.name}`,
-      label: action.description ?? action.name,
-      icon: Zap,
-      keywords: ["action", "custom", action.name],
-      group: "actions",
-      onSelect: async () => {
-        try {
-          const result = await api.projects.runAction(projectId, action.name);
-          if (result.session_id) {
-            deps.navigate(`/hosts/${project.host_id}/sessions/${result.session_id}`);
+    // If action has custom inputs, open the input dialog
+    if (action.inputs && action.inputs.length > 0) {
+      actions.push({
+        id: `project:${projectId}:action:${action.name}`,
+        label: action.description ?? action.name,
+        icon: Zap,
+        keywords: ["action", "custom", action.name],
+        group: "actions",
+        onSelect: () => {
+          deps.openActionInput(action, { id: project.id, host_id: project.host_id });
+        },
+      });
+    } else {
+      actions.push({
+        id: `project:${projectId}:action:${action.name}`,
+        label: action.description ?? action.name,
+        icon: Zap,
+        keywords: ["action", "custom", action.name],
+        group: "actions",
+        onSelect: async () => {
+          try {
+            const result = await api.projects.runAction(projectId, action.name);
+            if (result.session_id) {
+              deps.navigate(`/hosts/${project.host_id}/sessions/${result.session_id}`);
+            }
+            showToast(`Action "${action.name}" started`, "success");
+            deps.close();
+          } catch (err) {
+            showToast(`Action failed: ${err instanceof Error ? err.message : String(err)}`, "error");
           }
-          showToast(`Action "${action.name}" started`, "success");
-          deps.close();
-        } catch (err) {
-          showToast(`Action failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-        }
-      },
-    });
+        },
+      });
+    }
   }
 
   // Prompt templates
