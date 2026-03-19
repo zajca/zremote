@@ -8,6 +8,7 @@ interface CommandPaletteInputProps {
   onQueryChange: (q: string) => void;
   onPopContext: () => void;
   onJumpToIndex: (index: number) => void;
+  placeholder?: string;
 }
 
 function getContextLabel(ctx: PaletteContext, index: number): string {
@@ -30,6 +31,7 @@ export function CommandPaletteInput({
   onQueryChange,
   onPopContext,
   onJumpToIndex,
+  placeholder = "Search commands...",
 }: CommandPaletteInputProps) {
   const showBreadcrumbs = contextStack.length > 1;
 
@@ -55,7 +57,7 @@ export function CommandPaletteInput({
         </div>
       )}
       <Command.Input
-        placeholder="Search commands..."
+        placeholder={placeholder}
         value={query}
         onValueChange={onQueryChange}
         onKeyDown={(e) => {

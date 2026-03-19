@@ -644,7 +644,8 @@ describe("CommandPalette", () => {
       expect(screen.getByText("my-server")).toBeInTheDocument();
     });
 
-    // Navigate down to "my-server" (Item 5: 5 ArrowDown from first selected item)
+    // Navigate down to "my-server" (Item 6: 6 ArrowDown from first selected item, +1 for Switch Session action)
+    await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");
@@ -684,7 +685,8 @@ describe("CommandPalette", () => {
       expect(screen.getByText("my-server")).toBeInTheDocument();
     });
 
-    // Navigate down to "my-server" (Item 5)
+    // Navigate down to "my-server" (Item 6, +1 for Switch Session action)
+    await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");
     await userEvent.keyboard("{ArrowDown}");

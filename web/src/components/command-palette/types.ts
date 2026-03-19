@@ -37,6 +37,12 @@ export interface PaletteAction {
   sourceLevel?: ContextLevel;
   /** Display name for the source context (e.g., "MyProject", "my-server") */
   sourceLabel?: string;
+  /** Secondary text line (e.g. project + host + path) */
+  description?: string;
+  /** CSS class for status dot (e.g. "bg-green-400") */
+  statusColor?: string;
+  /** Show sparkle icon when AI is running */
+  showAgenticIndicator?: boolean;
 }
 
 export interface ActionDeps {
@@ -49,4 +55,5 @@ export interface ActionDeps {
   openRunPrompt: (template: PromptTemplate, project: { id: string; name: string; path: string; host_id: string }) => void;
   openActionInput: (action: ProjectAction, project: { id: string; host_id: string }) => void;
   openHelp: () => void;
+  openWithFilter: (mode: "sessions") => void;
 }

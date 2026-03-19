@@ -49,6 +49,8 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
     query,
     setQuery,
     currentContext,
+    filterMode,
+    openWithFilter,
   } = useCommandPaletteStore();
 
   const ctx = currentContext();
@@ -128,6 +130,12 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         },
       });
     }
+
+    // Ctrl+Shift+S → Switch Session filter
+    sa.push({
+      shortcut: { mod: true, shift: true, key: "s" },
+      onSelect: () => openWithFilter("sessions"),
+    });
 
     // Ctrl+, → Settings
     sa.push({
@@ -240,7 +248,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
     });
 
     return sa;
-  }, [shortcutSessions, hosts, navigate, setOpen, routeContext]);
+  }, [shortcutSessions, hosts, navigate, setOpen, routeContext, openWithFilter]);
 
   useGlobalShortcuts(globalShortcutActions);
 
@@ -528,8 +536,9 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         setOpen(false);
         onOpenHelp?.();
       },
+      openWithFilter,
     }),
-    [navigate, setOpen, pushContext, isLocal, onOpenHelp],
+    [navigate, setOpen, pushContext, isLocal, onOpenHelp, openWithFilter],
   );
 
   // Resolve actions based on context
@@ -570,10 +579,18 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
     return ctx;
   }, [ctx, isLocal, hosts]);
 
-  const actions = useMemo(
+  const allActions = useMemo(
     () => resolveActions(effectiveContext, deps, resolveData),
     [effectiveContext, deps, resolveData],
   );
+
+  // Apply filter mode: when in sessions filter, keep only session items
+  const actions = useMemo(() => {
+    if (filterMode === "sessions") {
+      return allActions.filter((a) => a.id.startsWith("global:session:"));
+    }
+    return allActions;
+  }, [allActions, filterMode]);
 
   // Build lookup map from cmdk value string -> action
   const actionsByValue = useMemo(() => {
@@ -651,11 +668,12 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
           onQueryChange={setQuery}
           onPopContext={popContext}
           onJumpToIndex={jumpToIndex}
+          placeholder={filterMode === "sessions" ? "Switch to session..." : undefined}
         />
 
         <Command.List className="max-h-80 overflow-auto p-2">
           <Command.Empty className="px-3 py-6 text-center text-sm text-text-tertiary">
-            No results found
+            {filterMode === "sessions" ? "No active sessions" : "No results found"}
           </Command.Empty>
 
           {currentActions.length > 0 && (
@@ -700,6 +718,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
           canGoBack={contextStack.length > 1}
           canDrillDown={hasDrillDownItems}
           contextLevel={effectiveContext.level}
+          filterMode={filterMode}
         />
       </Command.Dialog>
 
