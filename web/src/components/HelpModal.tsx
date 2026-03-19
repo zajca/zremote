@@ -127,6 +127,14 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
                 keys={<Kbd>?</Kbd>}
                 description="Show this help"
               />
+              <ShortcutRow
+                keys={<Kbd>{mod}+Shift+S</Kbd>}
+                description="Switch to sessions filter"
+              />
+              <ShortcutRow
+                keys={<Kbd>Shift+Alt+N</Kbd>}
+                description="Quick-start Claude session"
+              />
             </div>
           </div>
 
@@ -159,6 +167,35 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
               <ShortcutRow
                 keys={<Kbd>Esc</Kbd>}
                 description="Close palette"
+              />
+            </div>
+          </div>
+
+          {/* Agentic Loop */}
+          <div className="mt-4">
+            <h4 className="mb-2 text-xs font-medium text-text-tertiary">
+              Agentic Loop
+            </h4>
+            <div className="space-y-0.5">
+              <ShortcutRow
+                keys={<Kbd>Enter</Kbd>}
+                description="Approve tool call"
+              />
+              <ShortcutRow
+                keys={<Kbd>Esc</Kbd>}
+                description="Reject tool call"
+              />
+              <ShortcutRow
+                keys={<Kbd>I</Kbd>}
+                description="Provide custom input"
+              />
+              <ShortcutRow
+                keys={<Kbd>P</Kbd>}
+                description="Pause / resume loop"
+              />
+              <ShortcutRow
+                keys={<Kbd>Shift+S</Kbd>}
+                description="Stop loop"
               />
             </div>
           </div>
