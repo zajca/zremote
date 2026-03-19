@@ -1,4 +1,4 @@
-import { BarChart3, Clock, HelpCircle, Laptop, Monitor, Search, Settings } from "lucide-react";
+import { ArrowLeftRight, BarChart3, Clock, HelpCircle, Laptop, Monitor, Search, Settings } from "lucide-react";
 import type { Host } from "../../../lib/api";
 import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -74,18 +74,40 @@ export function getGlobalActions(
     },
   });
 
+  // Switch Session action (before session items)
+  actions.push({
+    id: "global:switch-session",
+    label: "Switch Session",
+    icon: ArrowLeftRight,
+    keywords: ["switch", "session", "jump", "terminal"],
+    group: "actions",
+    shortcut: { mod: true, shift: true, key: "s" },
+    onSelect: () => deps.openWithFilter("sessions"),
+  });
+
   // Sessions (shown at global level with Ctrl+1-9 shortcuts)
   for (let i = 0; i < globalSessions.length; i++) {
     const s = globalSessions[i];
     if (!s) continue;
     const label = s.hostName ? `${s.hostName}: ${s.name}` : s.name;
+
+    // Build description: projectName + hostName (server mode) + workingDir
+    const descParts: string[] = [];
+    if (s.projectName) descParts.push(s.projectName);
+    if (s.hostName) descParts.push(s.hostName);
+    if (s.workingDir) descParts.push(s.workingDir);
+    const description = descParts.length > 0 ? descParts.join(" \u00B7 ") : undefined;
+
     actions.push({
       id: `global:session:${s.sessionId}`,
       label,
       icon: Monitor,
-      keywords: ["session", "terminal", s.name, s.hostName ?? ""],
+      keywords: ["session", "terminal", s.name, s.hostName ?? "", s.projectName ?? "", s.workingDir ?? ""],
       group: "navigate",
       shortcut: i < 9 ? { mod: true, key: String(i + 1) } : undefined,
+      description,
+      statusColor: s.status === "active" ? "bg-green-400" : "bg-amber-400",
+      showAgenticIndicator: s.hasAgenticLoop === true,
       onSelect: () => {
         deps.navigate(`/hosts/${s.hostId}/sessions/${s.sessionId}`);
         deps.close();

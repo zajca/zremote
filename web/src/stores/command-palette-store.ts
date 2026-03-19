@@ -15,6 +15,9 @@ interface CommandPaletteState {
   query: string;
   setQuery: (q: string) => void;
 
+  filterMode: "sessions" | null;
+  openWithFilter: (mode: "sessions") => void;
+
   currentContext: () => PaletteContext;
 }
 
@@ -22,12 +25,12 @@ const DEFAULT_CONTEXT: PaletteContext = { level: "global" };
 
 export const useCommandPaletteStore = create<CommandPaletteState>((set, get) => ({
   open: false,
-  setOpen: (open) => set({ open }),
+  setOpen: (open) => set(open ? { open } : { open, filterMode: null }),
   toggle: () => set((s) => ({ open: !s.open })),
 
   contextStack: [DEFAULT_CONTEXT],
   pushContext: (ctx) =>
-    set((s) => ({ contextStack: [...s.contextStack, ctx], query: "" })),
+    set((s) => ({ contextStack: [...s.contextStack, ctx], query: "", filterMode: null })),
   popContext: () =>
     set((s) => {
       if (s.contextStack.length <= 1) return s;
@@ -42,6 +45,9 @@ export const useCommandPaletteStore = create<CommandPaletteState>((set, get) => 
 
   query: "",
   setQuery: (q) => set({ query: q }),
+
+  filterMode: null,
+  openWithFilter: (mode) => set({ filterMode: mode, open: true, query: "" }),
 
   currentContext: () => {
     const stack = get().contextStack;

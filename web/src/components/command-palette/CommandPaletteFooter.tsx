@@ -13,9 +13,10 @@ interface CommandPaletteFooterProps {
   canGoBack: boolean;
   canDrillDown: boolean;
   contextLevel: ContextLevel;
+  filterMode?: "sessions" | null;
 }
 
-export function CommandPaletteFooter({ canGoBack, canDrillDown, contextLevel }: CommandPaletteFooterProps) {
+export function CommandPaletteFooter({ canGoBack, canDrillDown, contextLevel, filterMode }: CommandPaletteFooterProps) {
   return (
     <div className="flex items-center justify-between border-t border-border px-3 py-1.5 text-xs text-text-tertiary">
       <div className="flex items-center gap-3">
@@ -55,7 +56,7 @@ export function CommandPaletteFooter({ canGoBack, canDrillDown, contextLevel }: 
           </kbd>
           <span>Quick Claude</span>
         </span>
-        <span className="text-text-tertiary">{LEVEL_LABELS[contextLevel]}</span>
+        <span className="text-text-tertiary">{filterMode === "sessions" ? "Sessions" : LEVEL_LABELS[contextLevel]}</span>
         <span className="flex items-center gap-1">
           <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]">
             Esc

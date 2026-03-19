@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import { Command } from "cmdk";
 import type { KeyboardShortcut, PaletteAction } from "./types";
 
@@ -38,6 +38,7 @@ interface CommandPaletteItemProps {
 
 export function CommandPaletteItem({ action }: CommandPaletteItemProps) {
   const Icon = action.icon;
+  const hasRichLayout = action.description != null || action.statusColor != null;
 
   return (
     <Command.Item
@@ -45,22 +46,62 @@ export function CommandPaletteItem({ action }: CommandPaletteItemProps) {
       onSelect={action.onSelect}
       className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors duration-75 data-[selected=true]:bg-bg-hover data-[selected=true]:text-text-primary"
     >
-      <Icon
-        size={14}
-        className={action.dangerous ? "text-red-400" : "text-text-tertiary"}
-      />
-      <span
-        className={
-          action.dangerous ? "text-red-400" : "text-text-secondary"
-        }
-      >
-        {action.label}
-      </span>
-      {action.shortcut ? (
-        <ShortcutBadge shortcut={action.shortcut} />
-      ) : action.drillDown ? (
-        <ChevronRight size={12} className="ml-auto text-text-tertiary" />
-      ) : null}
+      {hasRichLayout ? (
+        <>
+          {action.statusColor && (
+            <span
+              className={`shrink-0 rounded-full w-1.5 h-1.5 ${action.statusColor}`}
+            />
+          )}
+          <Icon
+            size={14}
+            className={action.dangerous ? "text-red-400" : "text-text-tertiary"}
+          />
+          <div className="flex flex-col min-w-0">
+            <span className="flex items-center gap-1">
+              <span
+                className={
+                  action.dangerous ? "text-red-400 truncate" : "text-text-secondary truncate"
+                }
+              >
+                {action.label}
+              </span>
+              {action.showAgenticIndicator && (
+                <Sparkles size={12} className="shrink-0 text-accent" />
+              )}
+            </span>
+            {action.description && (
+              <span className="text-xs text-text-tertiary truncate">
+                {action.description}
+              </span>
+            )}
+          </div>
+          {action.shortcut ? (
+            <ShortcutBadge shortcut={action.shortcut} />
+          ) : action.drillDown ? (
+            <ChevronRight size={12} className="ml-auto text-text-tertiary" />
+          ) : null}
+        </>
+      ) : (
+        <>
+          <Icon
+            size={14}
+            className={action.dangerous ? "text-red-400" : "text-text-tertiary"}
+          />
+          <span
+            className={
+              action.dangerous ? "text-red-400" : "text-text-secondary"
+            }
+          >
+            {action.label}
+          </span>
+          {action.shortcut ? (
+            <ShortcutBadge shortcut={action.shortcut} />
+          ) : action.drillDown ? (
+            <ChevronRight size={12} className="ml-auto text-text-tertiary" />
+          ) : null}
+        </>
+      )}
     </Command.Item>
   );
 }
