@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import type { ProjectAction } from "../../lib/api";
 import type { PromptTemplate } from "../../types/prompt";
 
 export type ContextLevel = "global" | "host" | "project" | "worktree" | "session" | "loop";
@@ -46,5 +47,6 @@ export interface ActionDeps {
   openAddProject: (hostId: string) => void;
   openStartClaude: (project: { id: string; name: string; path: string; host_id: string }) => void;
   openRunPrompt: (template: PromptTemplate, project: { id: string; name: string; path: string; host_id: string }) => void;
+  openActionInput: (action: ProjectAction, project: { id: string; host_id: string }) => void;
   openHelp: () => void;
 }
