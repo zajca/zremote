@@ -10,7 +10,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use zremote_protocol::claude::ClaudeAgentMessage;
-use zremote_protocol::{AgentMessage, AgenticAgentMessage, SessionId, ToolCallStatus};
+use zremote_protocol::{
+    AgentMessage, AgenticAgentMessage, AgenticStatus, SessionId, ToolCallStatus,
+};
 
 use super::mapper::SessionMapper;
 use super::metrics::aggregate_metrics;
@@ -484,11 +486,35 @@ async fn handle_permission_request(
                 tracing::warn!("agentic channel full, permission LoopToolCall dropped");
             }
 
+            // Signal waiting_for_input so the UI shows "Waiting" status
+            let status_msg = AgenticAgentMessage::LoopStateUpdate {
+                loop_id: mapped.loop_id,
+                status: AgenticStatus::WaitingForInput,
+                current_step: Some(format!("Permission: {tool_name}")),
+                context_usage_pct: 0.0,
+                total_tokens: 0,
+                estimated_cost_usd: 0.0,
+                pending_tool_calls: 1,
+            };
+            let _ = state.agentic_tx.try_send(status_msg);
+
             // Wait for user decision (up to 55s)
             let result = state
                 .permission_manager
                 .wait_for_decision(mapped.loop_id, &tool_name)
                 .await;
+
+            // Transition back to working after decision
+            let back_msg = AgenticAgentMessage::LoopStateUpdate {
+                loop_id: mapped.loop_id,
+                status: AgenticStatus::Working,
+                current_step: None,
+                context_usage_pct: 0.0,
+                total_tokens: 0,
+                estimated_cost_usd: 0.0,
+                pending_tool_calls: 0,
+            };
+            let _ = state.agentic_tx.try_send(back_msg);
 
             match result {
                 super::permission::PermissionDecision::Allow => (
@@ -1542,5 +1568,102 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // Wildcard matches "unknown" default
         assert_eq!(json["decision"], "allow");
+    }
+
+    #[tokio::test]
+    async fn permission_request_ask_emits_waiting_for_input() {
+        let (state, mut agentic_rx, _outbound_rx) = make_test_hooks_state();
+
+        let session_id = uuid::Uuid::new_v4();
+        let loop_id = uuid::Uuid::new_v4();
+        state.mapper.register_loop(session_id, loop_id).await;
+        state
+            .mapper
+            .register_cc_session("cc-perm-ask".to_string(), loop_id, session_id)
+            .await;
+
+        // No rules configured -> default is Ask, so wait_for_decision will be called.
+        // Spawn handle_permission_request in a task, then resolve the decision externally.
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            let payload = HookPayload {
+                session_id: "cc-perm-ask".to_string(),
+                hook_event_name: "PermissionRequest".to_string(),
+                transcript_path: None,
+                cwd: None,
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": "ls"})),
+                tool_use_id: Some("toolu_ask".to_string()),
+                tool_response: None,
+                message: None,
+            };
+            handle_permission_request(&state_clone, &payload).await
+        });
+
+        // Wait briefly for the handler to register the pending permission
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Resolve the permission so wait_for_decision returns
+        state
+            .permission_manager
+            .resolve_permission(
+                loop_id,
+                "Bash",
+                crate::hooks::permission::PermissionDecision::Allow,
+            )
+            .await;
+
+        let resp = handle.await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["decision"], "allow");
+
+        // Collect all messages sent to agentic_tx
+        let mut messages = Vec::new();
+        while let Ok(msg) = agentic_rx.try_recv() {
+            messages.push(msg);
+        }
+
+        // Should have: LoopToolCall (pending), LoopStateUpdate (WaitingForInput),
+        // LoopStateUpdate (Working)
+        assert!(
+            messages.len() >= 3,
+            "expected at least 3 messages, got {}",
+            messages.len()
+        );
+
+        // First: the pending tool call
+        assert!(
+            matches!(&messages[0], AgenticAgentMessage::LoopToolCall { status, .. }
+                if *status == ToolCallStatus::Pending),
+            "expected LoopToolCall(Pending), got {:?}",
+            messages[0]
+        );
+
+        // Second: WaitingForInput state update
+        assert!(
+            matches!(&messages[1], AgenticAgentMessage::LoopStateUpdate {
+                status: AgenticStatus::WaitingForInput,
+                current_step: Some(step),
+                ..
+            } if step.contains("Bash")),
+            "expected LoopStateUpdate(WaitingForInput), got {:?}",
+            messages[1]
+        );
+
+        // Third: Working state update (after decision)
+        assert!(
+            matches!(
+                &messages[2],
+                AgenticAgentMessage::LoopStateUpdate {
+                    status: AgenticStatus::Working,
+                    ..
+                }
+            ),
+            "expected LoopStateUpdate(Working), got {:?}",
+            messages[2]
+        );
     }
 }
