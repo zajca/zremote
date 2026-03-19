@@ -16,7 +16,6 @@ import { CommandPaletteInput } from "./CommandPaletteInput";
 import { CommandPaletteItem } from "./CommandPaletteItem";
 import { CommandPaletteFooter } from "./CommandPaletteFooter";
 import { AddProjectDialog } from "../AddProjectDialog";
-import { StartClaudeDialog } from "../StartClaudeDialog";
 import { RunPromptDialog } from "../RunPromptDialog";
 import { ActionInputDialog } from "../project/ActionInputDialog";
 import { useShortcutSessions } from "../../hooks/useShortcutSessions";
@@ -57,12 +56,6 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
 
   // Dialog state
   const [addProjectHostId, setAddProjectHostId] = useState<string | null>(null);
-  const [claudeDialogProject, setClaudeDialogProject] = useState<{
-    id: string;
-    name: string;
-    path: string;
-    host_id: string;
-  } | null>(null);
   const [runPromptState, setRunPromptState] = useState<{
     template: PromptTemplate;
     project: { id: string; name: string; path: string; host_id: string };
@@ -534,10 +527,6 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         setOpen(false);
         setAddProjectHostId(hostId);
       },
-      openStartClaude: (proj: { id: string; name: string; path: string; host_id: string }) => {
-        setOpen(false);
-        setClaudeDialogProject(proj);
-      },
       openRunPrompt: (tmpl: PromptTemplate, proj: { id: string; name: string; path: string; host_id: string }) => {
         setOpen(false);
         setRunPromptState({ template: tmpl, project: proj });
@@ -741,16 +730,6 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
           hostId={addProjectHostId}
           open={true}
           onClose={() => setAddProjectHostId(null)}
-        />
-      )}
-
-      {claudeDialogProject && (
-        <StartClaudeDialog
-          projectName={claudeDialogProject.name}
-          projectPath={claudeDialogProject.path}
-          hostId={claudeDialogProject.host_id}
-          projectId={claudeDialogProject.id}
-          onClose={() => setClaudeDialogProject(null)}
         />
       )}
 

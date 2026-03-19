@@ -1,9 +1,10 @@
 import { AlertCircle, ListTodo, Loader2, RefreshCw, Settings } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../../lib/api";
+import { useNavigate } from "react-router";
+import { api, startClaudeForProject } from "../../lib/api";
 import type { IssuePreset, LinearAction, LinearIssue } from "../../types/linear";
 import { Button } from "../ui/Button";
-import { StartClaudeDialog } from "../StartClaudeDialog";
+import { showToast } from "../layout/Toast";
 import { IssueDetail } from "./IssueDetail";
 import { IssueFilterBar } from "./IssueFilterBar";
 import { IssueRow } from "./IssueRow";
@@ -16,6 +17,7 @@ interface LinearIssuesPanelProps {
 type PanelState = "loading" | "not-configured" | "error" | "empty" | "data";
 
 export function LinearIssuesPanel({ projectId, hostId }: LinearIssuesPanelProps) {
+  const navigate = useNavigate();
   const [panelState, setPanelState] = useState<PanelState>("loading");
   const [issues, setIssues] = useState<LinearIssue[]>([]);
   const [actions, setActions] = useState<LinearAction[]>([]);
@@ -23,11 +25,7 @@ export function LinearIssuesPanel({ projectId, hostId }: LinearIssuesPanelProps)
   const [activePreset, setActivePreset] = useState<IssuePreset | null>("my_issues");
   const [errorMessage, setErrorMessage] = useState("");
   const [refreshing, setRefreshing] = useState(false);
-  const [projectName, setProjectName] = useState("");
   const [projectPath, setProjectPath] = useState("");
-
-  // Claude dialog state
-  const [claudePrompt, setClaudePrompt] = useState<string | null>(null);
 
   const fetchIssues = useCallback(async (preset: IssuePreset | null) => {
     try {
@@ -66,7 +64,6 @@ export function LinearIssuesPanel({ projectId, hostId }: LinearIssuesPanelProps)
   useEffect(() => {
     void api.projects.get(projectId).then(
       (p) => {
-        setProjectName(p.name);
         setProjectPath(p.path);
       },
       () => {},
@@ -86,9 +83,27 @@ export function LinearIssuesPanel({ projectId, hostId }: LinearIssuesPanelProps)
     void loadSettings();
   }, [loadSettings]);
 
-  const handleStartClaude = useCallback((prompt: string) => {
-    setClaudePrompt(prompt);
-  }, []);
+  const handleStartClaude = useCallback(async (prompt: string) => {
+    try {
+      const { settings } = await api.projects.getSettings(projectId);
+      const defaults = settings?.claude;
+      const result = await startClaudeForProject(
+        hostId,
+        projectPath,
+        projectId,
+        {
+          prompt,
+          model: defaults?.model,
+          allowedTools: defaults?.allowed_tools,
+          skipPermissions: defaults?.skip_permissions,
+          customFlags: defaults?.custom_flags,
+        },
+      );
+      void navigate(`/hosts/${result.hostId}/sessions/${result.sessionId}`);
+    } catch (err) {
+      showToast(`Failed to start Claude: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }, [projectId, hostId, projectPath, navigate]);
 
   if (panelState === "loading") {
     return (
@@ -181,16 +196,6 @@ export function LinearIssuesPanel({ projectId, hostId }: LinearIssuesPanelProps)
         />
       )}
 
-      {claudePrompt !== null && (
-        <StartClaudeDialog
-          projectName={projectName}
-          projectPath={projectPath}
-          hostId={hostId}
-          projectId={projectId}
-          initialPrompt={claudePrompt}
-          onClose={() => setClaudePrompt(null)}
-        />
-      )}
     </div>
   );
 }

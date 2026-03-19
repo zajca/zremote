@@ -53,7 +53,6 @@ export interface ActionDeps {
   pushContext: (ctx: PaletteContext) => void;
   isLocal: boolean;
   openAddProject: (hostId: string) => void;
-  openStartClaude: (project: { id: string; name: string; path: string; host_id: string }) => void;
   openRunPrompt: (template: PromptTemplate, project: { id: string; name: string; path: string; host_id: string }) => void;
   openActionInput: (action: ProjectAction, project: { id: string; host_id: string }) => void;
   openHelp: () => void;

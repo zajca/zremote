@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import type { Project, ProjectAction, Session } from "../../../lib/api";
 import type { PromptTemplate } from "../../../types/prompt";
-import { api } from "../../../lib/api";
+import { api, startClaudeForProject } from "../../../lib/api";
 import { showToast } from "../../layout/Toast";
 import { hasScope } from "../../project/action-utils";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -52,13 +52,26 @@ export function getWorktreeActions(
     icon: Bot,
     keywords: ["claude", "ai", "start", "agent"],
     group: "actions",
-    onSelect: () => {
-      deps.openStartClaude({
-        id: worktree.id,
-        name: worktree.name,
-        path: worktree.path,
-        host_id: worktree.host_id,
-      });
+    onSelect: async () => {
+      try {
+        const { settings } = await api.projects.getSettings(worktreeId);
+        const defaults = settings?.claude;
+        const { hostId, sessionId } = await startClaudeForProject(
+          worktree.host_id,
+          worktree.path,
+          worktree.id,
+          {
+            model: defaults?.model,
+            allowedTools: defaults?.allowed_tools,
+            skipPermissions: defaults?.skip_permissions,
+            customFlags: defaults?.custom_flags,
+          },
+        );
+        deps.navigate(`/hosts/${hostId}/sessions/${sessionId}`);
+        deps.close();
+      } catch (err) {
+        showToast(`Failed to start Claude: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
     },
   });
 
