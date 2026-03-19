@@ -23,5 +23,5 @@ url.workspace = true
 gpui.workspace = true
 alacritty_terminal.workspace = true
 flume.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
