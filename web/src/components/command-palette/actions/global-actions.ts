@@ -120,7 +120,8 @@ export function getGlobalActions(
       shortcut: i < 9 ? { mod: true, key: String(i + 1) } : undefined,
       description,
       statusColor: s.status === "active" ? "bg-green-400" : "bg-amber-400",
-      showAgenticIndicator: s.hasAgenticLoop === true,
+      showAgenticIndicator: s.agenticStatus != null,
+      agenticWaiting: s.agenticStatus === "waiting",
       onSelect: () => {
         deps.navigate(`/hosts/${s.hostId}/sessions/${s.sessionId}`);
         deps.close();

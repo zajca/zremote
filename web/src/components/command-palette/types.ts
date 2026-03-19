@@ -43,6 +43,8 @@ export interface PaletteAction {
   statusColor?: string;
   /** Show sparkle icon when AI is running */
   showAgenticIndicator?: boolean;
+  /** AI is waiting for user input (pulsing yellow indicator) */
+  agenticWaiting?: boolean;
 }
 
 export interface ActionDeps {

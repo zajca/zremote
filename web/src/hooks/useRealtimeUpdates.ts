@@ -170,7 +170,6 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                   });
                 }
               } else if (
-                parsed.loop.status === "working" ||
                 parsed.loop.status === "completed" ||
                 parsed.loop.status === "error"
               ) {
@@ -203,7 +202,7 @@ export function useRealtimeUpdates(handlers: EventHandler) {
                 const projectName = existing?.projectName ?? extractProjectName(loop?.project_path ?? null);
                 const sessionName = existing?.sessionName ?? getCachedSessionName(existing?.sessionId ?? loop?.session_id ?? "");
                 const sessionId = existing?.sessionId ?? loop?.session_id ?? "";
-                notifStore2.addOrUpdate({
+                notifStore2.scheduleToolPending({
                   id: parsed.loop_id,
                   loopId: parsed.loop_id,
                   sessionId,

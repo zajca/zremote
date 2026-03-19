@@ -652,9 +652,10 @@ describe("useRealtimeUpdates", () => {
   });
 
   test("adds notification for pending tool call", () => {
-    const mockAddOrUpdate = vi.fn();
+    const mockScheduleToolPending = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
-      addOrUpdate: mockAddOrUpdate,
+      addOrUpdate: vi.fn(),
+      scheduleToolPending: mockScheduleToolPending,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
       patchContext: vi.fn(),
@@ -677,7 +678,7 @@ describe("useRealtimeUpdates", () => {
       hostname: "dev",
       tool_call: { id: "tc1", tool_name: "Edit", status: "pending" },
     });
-    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+    expect(mockScheduleToolPending).toHaveBeenCalledWith(
       expect.objectContaining({
         loopId: "l1",
         status: "tool_pending",
@@ -691,9 +692,10 @@ describe("useRealtimeUpdates", () => {
   });
 
   test("populates context from activeLoops for pending tool call", () => {
-    const mockAddOrUpdate = vi.fn();
+    const mockScheduleToolPending = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
-      addOrUpdate: mockAddOrUpdate,
+      addOrUpdate: vi.fn(),
+      scheduleToolPending: mockScheduleToolPending,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
       patchContext: vi.fn(),
@@ -722,7 +724,7 @@ describe("useRealtimeUpdates", () => {
       hostname: "dev",
       tool_call: { id: "tc1", tool_name: "Edit", status: "pending" },
     });
-    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+    expect(mockScheduleToolPending).toHaveBeenCalledWith(
       expect.objectContaining({
         projectName: "myremote",
         taskName: "fix bug",
@@ -731,9 +733,10 @@ describe("useRealtimeUpdates", () => {
   });
 
   test("extracts argumentsPreview from tool call arguments_json", () => {
-    const mockAddOrUpdate = vi.fn();
+    const mockScheduleToolPending = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
-      addOrUpdate: mockAddOrUpdate,
+      addOrUpdate: vi.fn(),
+      scheduleToolPending: mockScheduleToolPending,
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
       patchContext: vi.fn(),
@@ -761,7 +764,7 @@ describe("useRealtimeUpdates", () => {
         arguments_json: '{"command":"ls -la /tmp"}',
       },
     });
-    expect(mockAddOrUpdate).toHaveBeenCalledWith(
+    expect(mockScheduleToolPending).toHaveBeenCalledWith(
       expect.objectContaining({
         argumentsPreview: "ls -la /tmp",
       }),
@@ -769,9 +772,9 @@ describe("useRealtimeUpdates", () => {
   });
 
   test("sends browser notification with preview for pending tool", () => {
-    const mockAddOrUpdate = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
-      addOrUpdate: mockAddOrUpdate,
+      addOrUpdate: vi.fn(),
+      scheduleToolPending: vi.fn(),
       handleLoopResolved: vi.fn(),
       handleToolResolved: vi.fn(),
       patchContext: vi.fn(),
@@ -853,10 +856,11 @@ describe("useRealtimeUpdates", () => {
     expect(mockHandleToolResolved).toHaveBeenCalledWith("l1");
   });
 
-  test("resolves notification for working loop state", () => {
+  test("does not resolve notification for working loop state", () => {
     const mockHandleLoopResolved = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
       addOrUpdate: vi.fn(),
+      scheduleToolPending: vi.fn(),
       handleLoopResolved: mockHandleLoopResolved,
       handleToolResolved: vi.fn(),
       notifications: new Map(),
@@ -874,6 +878,6 @@ describe("useRealtimeUpdates", () => {
       type: "agentic_loop_state_update",
       loop: { id: "l1", status: "working" },
     });
-    expect(mockHandleLoopResolved).toHaveBeenCalledWith("l1");
+    expect(mockHandleLoopResolved).not.toHaveBeenCalled();
   });
 });
