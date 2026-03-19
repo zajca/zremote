@@ -649,7 +649,7 @@ pub async fn resolve_action_inputs(
     match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
         Ok(Ok(response)) => {
             if let Some(error) = response.error {
-                Err(AppError::Internal(error))
+                Err(AppError::BadRequest(error))
             } else {
                 Ok(Json(serde_json::json!({ "inputs": response.inputs })))
             }

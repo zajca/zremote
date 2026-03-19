@@ -100,6 +100,14 @@ cmd_next() {
     echo "  major  $(bump_part "$cur" major)"
 }
 
+cmd_options() {
+    local cur
+    cur="$(current_version)"
+    printf '%s\t%s\n' "patch" "Patch ($(bump_part "$cur" patch))"
+    printf '%s\t%s\n' "minor" "Minor ($(bump_part "$cur" minor))"
+    printf '%s\t%s\n' "major" "Major ($(bump_part "$cur" major))"
+}
+
 cmd_release() {
     local version="$1"
 
@@ -229,12 +237,14 @@ Usage: $(basename "$0") <command> [args]
 
 Commands:
   next              Show current version and next possible versions
+  options           Output version options in tab-separated format (for action inputs)
   release <VER>     Release a new version (VER = X.Y.Z | patch | minor | major)
   retry [VER]       Delete tag and re-push (defaults to latest tag)
   status            Show current version and tag state
 
 Examples:
   $(basename "$0") next
+  $(basename "$0") options
   $(basename "$0") release patch
   $(basename "$0") release 0.3.0
   $(basename "$0") retry
@@ -244,6 +254,7 @@ EOF
 
 case "${1:-}" in
     next)    cmd_next ;;
+    options) cmd_options ;;
     release) [[ -z "${2:-}" ]] && { echo "error: version required"; usage; exit 1; }; cmd_release "$2" ;;
     retry)   cmd_retry "${2:-}" ;;
     status)  cmd_status ;;
