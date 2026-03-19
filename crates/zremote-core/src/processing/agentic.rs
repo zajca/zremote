@@ -558,6 +558,7 @@ impl AgenticProcessor {
             tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
         }
 
+        let task_name = task_name.filter(|s| !s.is_empty());
         if task_name.is_some() {
             let _ = sqlx::query(
                 "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
@@ -566,6 +567,27 @@ impl AgenticProcessor {
             .bind(&loop_id_str)
             .execute(&self.db)
             .await;
+
+            // Propagate task_name to session name (only if session has no name yet)
+            if let Ok(Some((session_id,))) =
+                sqlx::query_as::<_, (String,)>("SELECT session_id FROM agentic_loops WHERE id = ?")
+                    .bind(&loop_id_str)
+                    .fetch_optional(&self.db)
+                    .await
+            {
+                let changed =
+                    sqlx::query("UPDATE sessions SET name = ? WHERE id = ? AND name IS NULL")
+                        .bind(task_name.as_deref())
+                        .bind(&session_id)
+                        .execute(&self.db)
+                        .await;
+
+                if let Ok(result) = changed
+                    && result.rows_affected() > 0
+                {
+                    let _ = self.events.send(ServerEvent::SessionUpdated { session_id });
+                }
+            }
         }
 
         if let Some(loop_info) = self.fetch_loop_info(&loop_id_str).await {
@@ -1884,5 +1906,158 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(tc_count, 2);
+    }
+
+    #[tokio::test]
+    async fn handle_loop_metrics_propagates_task_name_to_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let mut rx = proc.events.subscribe();
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Verify session name starts as NULL
+        let (name_before,): (Option<String>,) =
+            sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(name_before.is_none());
+
+        // Detect loop
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+        // Drain LoopDetected event
+        let _ = rx.try_recv();
+
+        // Send metrics with task_name
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 1000,
+            tokens_out: 500,
+            model: "sonnet".to_string(),
+            context_used: 1000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.05,
+            task_name: Some("wondrous-gathering-castle".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Verify session name is now set
+        let (name_after,): (Option<String>,) =
+            sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(name_after.unwrap(), "wondrous-gathering-castle");
+
+        // Verify SessionUpdated event was emitted (plus LoopMetrics)
+        let mut found_session_updated = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::SessionUpdated { .. }) {
+                found_session_updated = true;
+            }
+        }
+        assert!(
+            found_session_updated,
+            "SessionUpdated event should be emitted on first task_name"
+        );
+
+        // Send metrics again with a different task_name
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 2000,
+            tokens_out: 1000,
+            model: "sonnet".to_string(),
+            context_used: 2000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.10,
+            task_name: Some("different-slug-name".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Verify session name was NOT overwritten (still the first task_name)
+        let (name_unchanged,): (Option<String>,) =
+            sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(name_unchanged.unwrap(), "wondrous-gathering-castle");
+
+        // Verify SessionUpdated was NOT emitted for the second call
+        let mut found_second_update = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::SessionUpdated { .. }) {
+                found_second_update = true;
+            }
+        }
+        assert!(
+            !found_second_update,
+            "SessionUpdated should not be emitted when name already set"
+        );
+    }
+
+    #[sqlx::test]
+    async fn handle_loop_metrics_empty_task_name_does_not_set_session_name() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+            model: "sonnet".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Send metrics with empty task_name
+        proc.handle_message(AgenticAgentMessage::LoopMetrics {
+            loop_id,
+            tokens_in: 1000,
+            tokens_out: 500,
+            model: "sonnet".to_string(),
+            context_used: 1000,
+            context_max: 200_000,
+            estimated_cost_usd: 0.05,
+            task_name: Some(String::new()),
+        })
+        .await
+        .unwrap();
+
+        // Verify session name remains NULL
+        let (name,): (Option<String>,) = sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(
+            name.is_none(),
+            "Empty task_name should not set session name"
+        );
     }
 }

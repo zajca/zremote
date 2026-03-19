@@ -856,6 +856,18 @@ describe("useRealtimeUpdates", () => {
     expect(mockHandleToolResolved).toHaveBeenCalledWith("l1");
   });
 
+  test("calls onSessionUpdate and dispatches event for session_updated", () => {
+    const onSessionUpdate = vi.fn();
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    renderHook(() => useRealtimeUpdates({ onSessionUpdate }));
+    mockWs.simulateMessage({ type: "session_updated", session_id: "s1" });
+    expect(onSessionUpdate).toHaveBeenCalled();
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "zremote:session-update" }),
+    );
+    dispatchSpy.mockRestore();
+  });
+
   test("does not resolve notification for working loop state", () => {
     const mockHandleLoopResolved = vi.fn();
     (useNotificationStore.getState as ReturnType<typeof vi.fn>).mockReturnValue({
