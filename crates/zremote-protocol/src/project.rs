@@ -145,6 +145,8 @@ pub struct ProjectAction {
     pub worktree_scoped: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<ActionScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<ActionInput>,
 }
 
 /// Worktree lifecycle hook configuration.
@@ -236,6 +238,43 @@ pub struct PromptInput {
 
 fn is_default_input_type(t: &PromptInputType) -> bool {
     *t == PromptInputType::Text
+}
+
+/// An option returned by a script for a select input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionInputOption {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A custom input field for a project action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_input_type")]
+    pub input_type: PromptInputType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+}
+
+/// Resolved options for a single action input (result of script execution).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedActionInput {
+    pub name: String,
+    pub options: Vec<ActionInputOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A predefined prompt template with typed inputs.
@@ -621,6 +660,7 @@ mod tests {
             env: HashMap::from([("RUST_LOG".to_string(), "info".to_string())]),
             worktree_scoped: true,
             scopes: vec![],
+            inputs: vec![],
         };
         let json = serde_json::to_string(&action).expect("serialize");
         let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
@@ -711,6 +751,7 @@ mod tests {
                 env: HashMap::new(),
                 worktree_scoped: false,
                 scopes: vec![],
+                inputs: vec![],
             }],
             worktree: Some(WorktreeSettings {
                 create_command: None,
@@ -1005,6 +1046,7 @@ mod tests {
                 ActionScope::Sidebar,
                 ActionScope::CommandPalette,
             ],
+            inputs: vec![],
         };
         let json = serde_json::to_string(&action).expect("serialize");
         let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
@@ -1022,12 +1064,198 @@ mod tests {
             env: std::collections::HashMap::new(),
             worktree_scoped: false,
             scopes: vec![],
+            inputs: vec![],
         };
         let val = serde_json::to_value(&action).unwrap();
         assert!(
             val.get("scopes").is_none(),
             "empty scopes should be skipped"
         );
+    }
+
+    #[test]
+    fn action_input_option_roundtrip() {
+        let opt = ActionInputOption {
+            value: "0.2.4".to_string(),
+            label: Some("Patch release".to_string()),
+        };
+        let json = serde_json::to_string(&opt).expect("serialize");
+        let parsed: ActionInputOption = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(opt, parsed);
+
+        // Without label
+        let opt_no_label = ActionInputOption {
+            value: "alpha".to_string(),
+            label: None,
+        };
+        let json = serde_json::to_string(&opt_no_label).expect("serialize");
+        let parsed: ActionInputOption = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(opt_no_label, parsed);
+        let val = serde_json::to_value(&opt_no_label).unwrap();
+        assert!(
+            val.get("label").is_none(),
+            "label should be skipped when None"
+        );
+    }
+
+    #[test]
+    fn action_input_full_roundtrip() {
+        let input = ActionInput {
+            name: "tag".to_string(),
+            label: Some("Next tag".to_string()),
+            input_type: PromptInputType::Select,
+            placeholder: Some("Select version...".to_string()),
+            default: Some("0.2.4".to_string()),
+            required: true,
+            options: vec![
+                "0.2.4".to_string(),
+                "0.3.0".to_string(),
+                "1.0.0".to_string(),
+            ],
+            script: Some("scripts/next-versions.sh".to_string()),
+        };
+        let json = serde_json::to_string(&input).expect("serialize");
+        let parsed: ActionInput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(input, parsed);
+    }
+
+    #[test]
+    fn action_input_minimal() {
+        let json = r#"{"name":"msg"}"#;
+        let parsed: ActionInput = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.name, "msg");
+        assert!(parsed.label.is_none());
+        assert_eq!(parsed.input_type, PromptInputType::Text);
+        assert!(parsed.placeholder.is_none());
+        assert!(parsed.default.is_none());
+        assert!(parsed.required);
+        assert!(parsed.options.is_empty());
+        assert!(parsed.script.is_none());
+    }
+
+    #[test]
+    fn action_input_with_script_only() {
+        let input = ActionInput {
+            name: "version".to_string(),
+            label: None,
+            input_type: PromptInputType::Select,
+            placeholder: None,
+            default: None,
+            required: true,
+            options: vec![],
+            script: Some("git tag --sort=-v:refname | head -5".to_string()),
+        };
+        let json = serde_json::to_string(&input).expect("serialize");
+        let parsed: ActionInput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(input, parsed);
+        // Verify empty optional fields are skipped
+        let val = serde_json::to_value(&input).unwrap();
+        assert!(val.get("label").is_none());
+        assert!(val.get("placeholder").is_none());
+        assert!(val.get("default").is_none());
+        assert!(
+            val.get("options").is_none(),
+            "empty options should be skipped"
+        );
+    }
+
+    #[test]
+    fn project_action_backward_compat_no_inputs() {
+        let json = r#"{"name":"test","command":"cargo test"}"#;
+        let parsed: ProjectAction = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.inputs.is_empty());
+    }
+
+    #[test]
+    fn project_action_with_inputs_roundtrip() {
+        let action = ProjectAction {
+            name: "release".to_string(),
+            command: "git tag {{tag}}".to_string(),
+            description: Some("Create release".to_string()),
+            icon: Some("tag".to_string()),
+            working_dir: None,
+            env: HashMap::new(),
+            worktree_scoped: false,
+            scopes: vec![],
+            inputs: vec![
+                ActionInput {
+                    name: "tag".to_string(),
+                    label: Some("Version".to_string()),
+                    input_type: PromptInputType::Select,
+                    placeholder: None,
+                    default: None,
+                    required: true,
+                    options: vec![],
+                    script: Some("scripts/versions.sh".to_string()),
+                },
+                ActionInput {
+                    name: "message".to_string(),
+                    label: Some("Message".to_string()),
+                    input_type: PromptInputType::Text,
+                    placeholder: Some("Release notes...".to_string()),
+                    default: None,
+                    required: false,
+                    options: vec![],
+                    script: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&action).expect("serialize");
+        let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(action, parsed);
+    }
+
+    #[test]
+    fn project_action_empty_inputs_skipped_in_json() {
+        let action = ProjectAction {
+            name: "test".to_string(),
+            command: "cargo test".to_string(),
+            description: None,
+            icon: None,
+            working_dir: None,
+            env: HashMap::new(),
+            worktree_scoped: false,
+            scopes: vec![],
+            inputs: vec![],
+        };
+        let val = serde_json::to_value(&action).unwrap();
+        assert!(
+            val.get("inputs").is_none(),
+            "empty inputs should be skipped"
+        );
+    }
+
+    #[test]
+    fn resolved_action_input_roundtrip() {
+        let resolved = ResolvedActionInput {
+            name: "tag".to_string(),
+            options: vec![
+                ActionInputOption {
+                    value: "0.2.4".to_string(),
+                    label: Some("Patch".to_string()),
+                },
+                ActionInputOption {
+                    value: "0.3.0".to_string(),
+                    label: None,
+                },
+            ],
+            error: None,
+        };
+        let json = serde_json::to_string(&resolved).expect("serialize");
+        let parsed: ResolvedActionInput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(resolved, parsed);
+    }
+
+    #[test]
+    fn resolved_action_input_with_error() {
+        let resolved = ResolvedActionInput {
+            name: "tag".to_string(),
+            options: vec![],
+            error: Some("script timed out".to_string()),
+        };
+        let json = serde_json::to_string(&resolved).expect("serialize");
+        let parsed: ResolvedActionInput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(resolved, parsed);
     }
 
     #[test]

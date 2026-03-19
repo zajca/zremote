@@ -1566,6 +1566,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             worktree_scoped: false,
             scopes: vec![],
+            inputs: vec![],
         };
         let body = RunActionRequest {
             worktree_path: None,
@@ -1589,6 +1590,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             worktree_scoped: true,
             scopes: vec![],
+            inputs: vec![],
         };
         let body = RunActionRequest {
             worktree_path: Some("/tmp/wt".to_string()),
@@ -1612,6 +1614,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             worktree_scoped: false,
             scopes: vec![],
+            inputs: vec![],
         };
         let body = RunActionRequest {
             worktree_path: None,
@@ -1635,6 +1638,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             worktree_scoped: false, // legacy field says no, but scopes says yes
             scopes: vec![ActionScope::Worktree],
+            inputs: vec![],
         };
         let body = RunActionRequest {
             worktree_path: Some("/tmp/wt".to_string()),
@@ -1665,6 +1669,7 @@ mod tests {
             ]),
             worktree_scoped: false,
             scopes: vec![],
+            inputs: vec![],
         };
         let body = RunActionRequest {
             worktree_path: Some("/tmp/wt".to_string()),
