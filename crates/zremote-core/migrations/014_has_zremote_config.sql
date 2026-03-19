@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN has_zremote_config BOOLEAN NOT NULL DEFAULT 0;

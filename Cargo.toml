@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zremote-protocol",
+    "crates/zremote-core",
+    "crates/zremote-server",
+    "crates/zremote-agent",
+    "crates/zremote-gui",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio = { version = "1.50", features = ["full"] }
+
+# Server-only
+axum = "0.8.8"
+tower = "0.5.3"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
+sha2 = "0.10"
+subtle = "2"
+tokio-util = "0.7"
+dashmap = "6"
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
+
+# Agent-only
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-native-roots"] }
+futures-util = "0.3"
+portable-pty = "0.9"
+hostname = "0.4"
+url = "2"
+rand = "0.9"
+sysinfo = "0.34"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rust-embed = { version = "8", features = ["compression"] }
+mime_guess = "2"
+
+# GUI
+gpui = "0.2"
+alacritty_terminal = "0.25"
+flume = "0.11"
+
+# Internal
+zremote-protocol = { path = "crates/zremote-protocol" }
+zremote-core = { path = "crates/zremote-core" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,0 +1,169 @@
+{
+  "shell": "/bin/zsh",
+  "env": {
+    "RUST_LOG": "info"
+  },
+  "agentic": {
+    "auto_detect": true,
+    "auto_approve_patterns": [
+      "cargo check *",
+      "cargo clippy *",
+      "cargo test *",
+      "cargo fmt --check",
+      "cargo audit",
+      "bun run test",
+      "bun run typecheck",
+      "bun run lint"
+    ]
+  },
+  "actions": [
+    {
+      "name": "Build",
+      "command": "cargo build --workspace",
+      "icon": "hammer",
+      "scopes": ["sidebar", "project", "command_palette"]
+    },
+    {
+      "name": "Test",
+      "command": "cargo test --workspace",
+      "icon": "test-tube",
+      "scopes": ["sidebar", "project", "command_palette"]
+    },
+    {
+      "name": "Clippy",
+      "command": "cargo clippy --workspace",
+      "icon": "search",
+      "scopes": ["sidebar", "project", "command_palette"]
+    },
+    {
+      "name": "Frontend Test",
+      "command": "cd web && bun run test",
+      "icon": "test-tube-2",
+      "scopes": ["sidebar", "project", "command_palette"]
+    },
+    {
+      "name": "Check",
+      "command": "cargo check --workspace",
+      "icon": "check-circle",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Format Check",
+      "command": "cargo fmt --check",
+      "icon": "align-left",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Format Fix",
+      "command": "cargo fmt",
+      "icon": "align-left",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Frontend Build",
+      "command": "cd web && bun run build",
+      "icon": "package",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Frontend Typecheck",
+      "command": "cd web && bun run typecheck",
+      "icon": "file-check",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Frontend Lint",
+      "command": "cd web && bun run lint",
+      "icon": "scan",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Dev Full",
+      "command": "./scripts/dev.sh",
+      "description": "Full hot-reload: agent :3000 + Vite :5173",
+      "icon": "play",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Dev Backend",
+      "command": "./scripts/dev-backend.sh",
+      "description": "Backend only: agent :3000 with embedded UI",
+      "icon": "server",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Coverage Check",
+      "command": "./scripts/check-coverage.sh",
+      "description": "Full coverage gate: backend >= 80%, frontend >= 75%",
+      "icon": "shield-check",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Quick Tests",
+      "command": "./scripts/check-coverage.sh --quick",
+      "description": "Tests only, skip coverage measurement",
+      "icon": "zap",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Dev Setup",
+      "command": "./scripts/dev-setup.sh",
+      "description": "First-time setup: checks tools, installs deps, builds",
+      "icon": "wrench",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Cargo Audit",
+      "command": "cargo audit",
+      "icon": "shield-alert",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Release",
+      "command": "./scripts/release.sh release {{version}}",
+      "description": "Create a new release with the specified version",
+      "icon": "rocket",
+      "scopes": ["project", "command_palette"],
+      "inputs": [
+        {
+          "name": "version",
+          "label": "Version",
+          "input_type": "select",
+          "placeholder": "Select version to release",
+          "script": "./scripts/release.sh options"
+        }
+      ]
+    },
+    {
+      "name": "Release Status",
+      "command": "./scripts/release.sh status",
+      "description": "Show current release status",
+      "icon": "info",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Release Next",
+      "command": "./scripts/release.sh next",
+      "description": "Show next version suggestions",
+      "icon": "git-branch",
+      "scopes": ["project", "command_palette"]
+    },
+    {
+      "name": "Worktree Build",
+      "command": "cargo build --workspace",
+      "icon": "hammer",
+      "worktree_scoped": true,
+      "scopes": ["worktree"]
+    },
+    {
+      "name": "Worktree Test",
+      "command": "cargo test --workspace",
+      "icon": "test-tube",
+      "worktree_scoped": true,
+      "scopes": ["worktree"]
+    }
+  ],
+  "worktree": {
+    "on_create": "cd web && bun install && bun run build"
+  }
+}

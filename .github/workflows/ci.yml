@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-web:
+    name: Build Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run build
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: build-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+
+  test-rust:
+    name: Test + Coverage (Rust)
+    runs-on: ubuntu-latest
+    needs: build-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run tests with coverage
+        run: |
+          set +e
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace 2>&1)
+          LLVM_COV_EXIT=$?
+          set -e
+          echo "$COVERAGE_OUTPUT"
+          if [ $LLVM_COV_EXIT -ne 0 ]; then
+            echo "::error::cargo llvm-cov failed with exit code $LLVM_COV_EXIT"
+            exit $LLVM_COV_EXIT
+          fi
+          TOTAL_LINE=$(echo "$COVERAGE_OUTPUT" | grep "^TOTAL")
+          COVERAGE_PCT=$(echo "$TOTAL_LINE" | awk '{
+            for (i=NF; i>=1; i--) {
+              if ($i ~ /^[0-9]+\.[0-9]+%$/) {
+                gsub(/%/, "", $i)
+                print $i
+                exit
+              }
+            }
+          }')
+          echo "Backend line coverage: ${COVERAGE_PCT}%"
+          if [ "$(echo "$COVERAGE_PCT < 80" | bc -l)" = "1" ]; then
+            echo "::error::Backend coverage ${COVERAGE_PCT}% is below 80% threshold"
+            exit 1
+          fi
+
+  test-web:
+    name: Test + Coverage (Web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run typecheck
+        working-directory: web
+      - name: Run tests with coverage (thresholds in vite.config.ts)
+        run: bun run test:coverage
+        working-directory: web
