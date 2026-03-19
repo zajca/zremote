@@ -2,6 +2,7 @@ import { Bot, ChevronDown, History, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../lib/api";
+import type { ClaudeDefaults } from "../lib/api";
 import type { ClaudeTask, ToolPreset } from "../types/claude-session";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
@@ -13,6 +14,7 @@ interface StartClaudeDialogProps {
   hostId: string;
   projectId?: string;
   initialPrompt?: string;
+  defaults?: ClaudeDefaults;
   onClose: () => void;
 }
 
@@ -47,18 +49,25 @@ export function StartClaudeDialog({
   hostId,
   projectId,
   initialPrompt,
+  defaults,
   onClose,
 }: StartClaudeDialogProps) {
   const navigate = useNavigate();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [prompt, setPrompt] = useState(initialPrompt ?? "");
-  const [model, setModel] = useState("sonnet");
-  const [optionsOpen, setOptionsOpen] = useState(false);
-  const [toolPreset, setToolPreset] = useState<ToolPreset>("standard");
-  const [customTools, setCustomTools] = useState("");
-  const [skipPermissions, setSkipPermissions] = useState(false);
-  const [customFlags, setCustomFlags] = useState("");
+  const [model, setModel] = useState(defaults?.model ?? "sonnet");
+  const [optionsOpen, setOptionsOpen] = useState(
+    !!(defaults?.allowed_tools?.length || defaults?.skip_permissions || defaults?.custom_flags),
+  );
+  const [toolPreset, setToolPreset] = useState<ToolPreset>(
+    defaults?.allowed_tools?.length ? "custom" : "standard",
+  );
+  const [customTools, setCustomTools] = useState(
+    defaults?.allowed_tools?.join(", ") ?? "",
+  );
+  const [skipPermissions, setSkipPermissions] = useState(defaults?.skip_permissions ?? false);
+  const [customFlags, setCustomFlags] = useState(defaults?.custom_flags ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

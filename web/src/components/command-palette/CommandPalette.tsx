@@ -7,7 +7,7 @@ import { useDoubleShift } from "../../hooks/useDoubleShift";
 import { useMode } from "../../hooks/useMode";
 import { useHosts } from "../../hooks/useHosts";
 import { api } from "../../lib/api";
-import type { Project, ProjectAction, Session } from "../../lib/api";
+import type { ClaudeDefaults, Project, ProjectAction, Session } from "../../lib/api";
 import type { AgenticLoop } from "../../types/agentic";
 import type { PromptTemplate } from "../../types/prompt";
 import { resolveActions, type ResolveData } from "./actions/registry";
@@ -133,7 +133,7 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       },
     });
 
-    // Alt+N → New session (on first online host)
+    // Alt+N → New session (context-aware)
     const targetHost = hosts.find((h) => h.status === "online");
     if (targetHost) {
       sa.push({
@@ -141,8 +141,33 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
         onSelect: () => {
           void (async () => {
             try {
-              const s = await api.sessions.create(targetHost.id);
-              void navigate(`/hosts/${targetHost.id}/sessions/${s.id}`);
+              let hostId = targetHost.id;
+              let opts: { workingDir?: string } = {};
+
+              // Resolve project context from current route
+              if (routeContext.projectId) {
+                try {
+                  const proj = await api.projects.get(routeContext.projectId);
+                  hostId = proj.host_id;
+                  opts = { workingDir: proj.path };
+                } catch { /* fall back to default host */ }
+              } else if (routeContext.sessionId) {
+                try {
+                  const sess = await api.sessions.get(routeContext.sessionId);
+                  if (sess.project_id) {
+                    const proj = await api.projects.get(sess.project_id);
+                    hostId = proj.host_id;
+                    opts = { workingDir: proj.path };
+                  } else if (sess.host_id) {
+                    hostId = sess.host_id;
+                  }
+                } catch { /* fall back to default host */ }
+              } else if (routeContext.hostId) {
+                hostId = routeContext.hostId;
+              }
+
+              const s = await api.sessions.create(hostId, opts);
+              void navigate(`/hosts/${hostId}/sessions/${s.id}`);
               setOpen(false);
             } catch (err) {
               showToast(
@@ -155,8 +180,62 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       });
     }
 
+    // Shift+Alt+N → Quick-start Claude session with project defaults
+    sa.push({
+      shortcut: { shift: true, alt: true, key: "n" },
+      onSelect: () => {
+        void (async () => {
+          try {
+            let projectId: string | undefined;
+            let hostId: string | undefined;
+
+            // Resolve project context from current route
+            if (routeContext.projectId) {
+              projectId = routeContext.projectId;
+            } else if (routeContext.sessionId) {
+              try {
+                const sess = await api.sessions.get(routeContext.sessionId);
+                if (sess.project_id) projectId = sess.project_id;
+                hostId = sess.host_id;
+              } catch { /* ignore */ }
+            }
+
+            if (!projectId) {
+              showToast("No project context for quick Claude start", "error");
+              return;
+            }
+
+            const proj = await api.projects.get(projectId);
+            hostId = proj.host_id;
+
+            // Fetch project settings for claude defaults
+            const { settings } = await api.projects.getSettings(projectId);
+            const defaults: ClaudeDefaults | undefined = settings?.claude ?? undefined;
+
+            const task = await api.claudeTasks.create({
+              host_id: hostId,
+              project_path: proj.path,
+              project_id: projectId,
+              model: defaults?.model ?? "sonnet",
+              allowed_tools: defaults?.allowed_tools,
+              skip_permissions: defaults?.skip_permissions,
+              custom_flags: defaults?.custom_flags,
+            });
+
+            void navigate(`/hosts/${hostId}/sessions/${task.session_id}`);
+            setOpen(false);
+          } catch (err) {
+            showToast(
+              `Failed to start Claude: ${err instanceof Error ? err.message : String(err)}`,
+              "error",
+            );
+          }
+        })();
+      },
+    });
+
     return sa;
-  }, [shortcutSessions, hosts, navigate, setOpen]);
+  }, [shortcutSessions, hosts, navigate, setOpen, routeContext]);
 
   useGlobalShortcuts(globalShortcutActions);
 
