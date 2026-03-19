@@ -142,8 +142,11 @@ cmd_release() {
     # Bump versions in all Cargo.toml files
     set_version "$version"
 
+    # Regenerate Cargo.lock with updated versions
+    cargo check --workspace --quiet
+
     # Commit, tag, push
-    git add "${CARGO_FILES[@]}"
+    git add "${CARGO_FILES[@]}" Cargo.lock
     git commit -m "Bump version to $version"
     git tag -a "v$version" -m "v$version"
     git push origin main
