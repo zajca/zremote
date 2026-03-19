@@ -32,15 +32,22 @@ impl SidebarView {
     fn load_data(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         let api = self.app_state.api.clone();
+        let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let hosts = api.list_hosts().await.unwrap_or_default();
-
-            let mut all_sessions = Vec::new();
-            for host in &hosts {
-                if let Ok(sessions) = api.list_sessions(&host.id).await {
-                    all_sessions.extend(sessions);
-                }
-            }
+            // Dispatch HTTP calls to the tokio runtime (reqwest needs it)
+            let (hosts, all_sessions) = handle
+                .spawn(async move {
+                    let hosts = api.list_hosts().await.unwrap_or_default();
+                    let mut all_sessions = Vec::new();
+                    for host in &hosts {
+                        if let Ok(sessions) = api.list_sessions(&host.id).await {
+                            all_sessions.extend(sessions);
+                        }
+                    }
+                    (hosts, all_sessions)
+                })
+                .await
+                .unwrap_or_default();
 
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                 this.hosts = hosts;
@@ -69,6 +76,7 @@ impl SidebarView {
     fn create_session(&mut self, host_id: &str, cx: &mut Context<Self>) {
         let api = self.app_state.api.clone();
         let host_id = host_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let req = CreateSessionRequest {
                 name: None,
@@ -77,7 +85,12 @@ impl SidebarView {
                 rows: 24,
                 working_dir: None,
             };
-            match api.create_session(&host_id, &req).await {
+            let host_id_for_api = host_id.clone();
+            let result = handle
+                .spawn(async move { api.create_session(&host_id_for_api, &req).await })
+                .await
+                .unwrap();
+            match result {
                 Ok(session) => {
                     let session_id = session.id.clone();
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
@@ -101,8 +114,16 @@ impl SidebarView {
     fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let api = self.app_state.api.clone();
         let session_id = session_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            if let Err(e) = api.close_session(&session_id).await {
+            let result = handle
+                .spawn({
+                    let session_id = session_id.clone();
+                    async move { api.close_session(&session_id).await }
+                })
+                .await
+                .unwrap();
+            if let Err(e) = result {
                 tracing::error!(error = %e, "failed to close session");
                 return;
             }
