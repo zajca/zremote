@@ -7,10 +7,14 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { PaneEvent } from "../types/terminal";
 import { usePendingPasteStore } from "../stores/pending-paste-store";
+import { useClipboardStore } from "../stores/clipboard-store";
+import { useActiveTerminalStore } from "../stores/active-terminal-store";
+import { showToast } from "./layout/Toast";
 
 interface TerminalProps {
   sessionId: string;
   paneId?: string;
+  sessionName?: string;
   onPaneEvent?: (event: PaneEvent) => void;
 }
 
@@ -25,7 +29,7 @@ interface WsMessage {
   message?: string;
 }
 
-export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
+export function Terminal({ sessionId, paneId, sessionName, onPaneEvent }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -246,6 +250,10 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
       if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "n") {
         return false;
       }
+      // Alt+V → Clipboard history shortcut
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "v") {
+        return false;
+      }
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const key = e.key.toLowerCase();
         if (
@@ -275,6 +283,28 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
       }
     });
 
+    // Copy-on-select: debounced clipboard copy + history (throttle toasts to avoid flood)
+    let selectionTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastCopyToastAt = 0;
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (selectionTimer) clearTimeout(selectionTimer);
+      selectionTimer = setTimeout(() => {
+        if (!term.hasSelection()) return;
+        const text = term.getSelection().trim();
+        if (!text || text.length < 2) return;
+        // System clipboard
+        void navigator.clipboard.writeText(text).catch(() => {});
+        // App history
+        useClipboardStore.getState().addEntry(text, { sessionId, sessionName });
+        // Throttle toast to max once per 2s
+        const now = Date.now();
+        if (now - lastCopyToastAt >= 2000) {
+          showToast("Copied to clipboard", "success");
+          lastCopyToastAt = now;
+        }
+      }, 300);
+    });
+
     // Resize handling
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const observer = new ResizeObserver(() => {
@@ -298,11 +328,25 @@ export function Terminal({ sessionId, paneId, onPaneEvent }: TerminalProps) {
     // Start WebSocket connection
     connect();
 
+    // Register as active terminal for paste-from-clipboard (main terminal only, not panes)
+    if (!paneId) {
+      useActiveTerminalStore.getState().register(sessionId, (data) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN && !closedRef.current) {
+          wsRef.current.send(JSON.stringify({ type: "input", pane_id: paneId, data }));
+        }
+      });
+    }
+
     return () => {
       unmountedRef.current = true;
       observer.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
       inputDisposable.dispose();
+      selectionDisposable.dispose();
+      if (selectionTimer) clearTimeout(selectionTimer);
+      if (!paneId) {
+        useActiveTerminalStore.getState().unregister(sessionId);
+      }
 
       if (reconnectTimerRef.current !== null) {
         clearTimeout(reconnectTimerRef.current);

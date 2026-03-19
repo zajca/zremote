@@ -249,6 +249,7 @@ export function SessionPage() {
               >
                 <Terminal
                   sessionId={sessionId}
+                  sessionName={session.name || session.shell || "shell"}
                   onPaneEvent={handlePaneEvent}
                 />
               </div>
