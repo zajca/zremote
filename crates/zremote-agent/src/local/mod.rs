@@ -313,6 +313,10 @@ fn build_router(
             post(routes::projects::run_action),
         )
         .route(
+            "/api/projects/{project_id}/actions/{action_name}/resolve-inputs",
+            post(routes::projects::resolve_action_inputs_handler),
+        )
+        .route(
             "/api/projects/{project_id}/prompts/{prompt_name}/resolve",
             post(routes::projects::resolve_prompt),
         )

@@ -132,6 +132,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::projects::run_action),
         )
         .route(
+            "/api/projects/{project_id}/actions/{action_name}/resolve-inputs",
+            post(routes::projects::resolve_action_inputs),
+        )
+        .route(
             "/api/projects/{project_id}/prompts/{prompt_name}/resolve",
             post(routes::projects::resolve_prompt),
         )
@@ -310,6 +314,7 @@ async fn main() {
     let directory_requests = std::sync::Arc::new(dashmap::DashMap::new());
     let settings_get_requests = std::sync::Arc::new(dashmap::DashMap::new());
     let settings_save_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let action_inputs_requests = std::sync::Arc::new(dashmap::DashMap::new());
 
     let state = Arc::new(AppState {
         db: pool,
@@ -324,6 +329,7 @@ async fn main() {
         directory_requests,
         settings_get_requests,
         settings_save_requests,
+        action_inputs_requests,
     });
 
     // Spawn heartbeat monitor background task
@@ -393,6 +399,7 @@ mod tests {
             directory_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

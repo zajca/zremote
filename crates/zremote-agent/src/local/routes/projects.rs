@@ -927,6 +927,8 @@ pub struct RunActionRequest {
     pub cols: Option<u16>,
     #[serde(default)]
     pub rows: Option<u16>,
+    #[serde(default)]
+    pub inputs: std::collections::HashMap<String, String>,
 }
 
 /// `GET /api/projects/:project_id/actions` - list available actions for a project.
@@ -993,7 +995,7 @@ pub async fn run_action(
         worktree_path: body.worktree_path.clone(),
         branch: body.branch.clone(),
         worktree_name,
-        custom_inputs: std::collections::HashMap::new(),
+        custom_inputs: body.inputs.clone(),
     };
 
     let expanded_command = crate::project::actions::expand_template(&action.command, &ctx);
@@ -1295,6 +1297,41 @@ pub async fn resolve_prompt(
     Ok(Json(serde_json::json!({ "prompt": rendered })))
 }
 
+/// `POST /api/projects/:project_id/actions/:action_name/resolve-inputs` - resolve action inputs.
+pub async fn resolve_action_inputs_handler(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath((project_id, action_name)): AxumPath<(String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    let (_, project_path) = q::get_project_host_and_path(&state.db, &project_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
+
+    let path_for_settings = project_path.clone();
+    let settings = tokio::task::spawn_blocking(move || {
+        crate::project::settings::read_settings(Path::new(&path_for_settings))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?
+    .map_err(AppError::Internal)?
+    .ok_or_else(|| AppError::NotFound("no project settings found".to_string()))?;
+
+    let action = crate::project::actions::find_action(&settings.actions, &action_name)
+        .ok_or_else(|| AppError::NotFound(format!("action '{action_name}' not found")))?
+        .clone();
+
+    let project_env = settings.env.clone();
+    let inputs = crate::project::action_inputs::resolve_action_inputs(
+        &action,
+        Path::new(&project_path),
+        &project_env,
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({ "inputs": inputs })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1348,6 +1385,10 @@ mod tests {
             .route(
                 "/api/projects/{project_id}/actions/{action_name}/run",
                 post(run_action),
+            )
+            .route(
+                "/api/projects/{project_id}/actions/{action_name}/resolve-inputs",
+                post(resolve_action_inputs_handler),
             )
             .route(
                 "/api/projects/{project_id}/prompts/{prompt_name}/resolve",
@@ -2837,5 +2878,172 @@ mod tests {
         let req: ConfigureRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.model.as_deref(), Some("sonnet"));
         assert!(req.skip_permissions.is_none());
+    }
+
+    #[test]
+    fn run_action_request_deserialize_with_inputs() {
+        let json = r#"{"inputs":{"tag":"0.2.4","message":"Release"}}"#;
+        let body: RunActionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(body.inputs.get("tag").unwrap(), "0.2.4");
+        assert_eq!(body.inputs.get("message").unwrap(), "Release");
+    }
+
+    #[test]
+    fn run_action_request_deserialize_without_inputs() {
+        let json = r#"{"worktree_path":"/tmp/wt"}"#;
+        let body: RunActionRequest = serde_json::from_str(json).unwrap();
+        assert!(body.inputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_project_not_found() {
+        let state = test_state().await;
+        let project_id = Uuid::new_v4();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/actions/build/resolve-inputs"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_action_not_found() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"actions": [{"name": "build", "command": "cargo build"}]}"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/actions/nonexistent/resolve-inputs"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_action_inputs_success() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"actions": [{"name": "deploy", "command": "echo deploy", "inputs": [{"name": "env", "label": "Environment", "options": ["staging", "production"]}]}]}"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{project_id}/actions/deploy/resolve-inputs"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inputs = json["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0]["name"], "env");
+        let options = inputs[0]["options"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_action_with_custom_inputs() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().to_str().unwrap().to_string();
+
+        let settings_dir = dir.path().join(".zremote");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"actions": [{"name": "tag", "command": "git tag {{tag}}"}]}"#,
+        )
+        .unwrap();
+
+        q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/actions/tag/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"inputs":{"tag":"v1.0.0"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["command"], "git tag v1.0.0");
     }
 }

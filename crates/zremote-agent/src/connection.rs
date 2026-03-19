@@ -1279,12 +1279,83 @@ fn handle_server_message(
             project_path,
             action_name,
         } => {
-            tracing::info!(
-                request_id = %request_id,
-                project_path = %project_path,
-                action_name = %action_name,
-                "resolve action inputs not yet implemented in server mode"
-            );
+            let tx = outbound_tx.clone();
+            let request_id = *request_id;
+            let project_path = project_path.clone();
+            let action_name = action_name.clone();
+            tokio::spawn(async move {
+                // Read settings
+                let path = project_path.clone();
+                let settings = match tokio::task::spawn_blocking(move || {
+                    crate::project::settings::read_settings(std::path::Path::new(&path))
+                })
+                .await
+                {
+                    Ok(Ok(Some(settings))) => settings,
+                    Ok(Ok(None)) => {
+                        let _ = tx
+                            .send(AgentMessage::ActionInputsResolved {
+                                request_id,
+                                inputs: vec![],
+                                error: Some("no project settings found".to_string()),
+                            })
+                            .await;
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx
+                            .send(AgentMessage::ActionInputsResolved {
+                                request_id,
+                                inputs: vec![],
+                                error: Some(format!("failed to read settings: {e}")),
+                            })
+                            .await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(AgentMessage::ActionInputsResolved {
+                                request_id,
+                                inputs: vec![],
+                                error: Some(format!("task join error: {e}")),
+                            })
+                            .await;
+                        return;
+                    }
+                };
+
+                // Find action
+                let action =
+                    match crate::project::actions::find_action(&settings.actions, &action_name) {
+                        Some(a) => a.clone(),
+                        None => {
+                            let _ = tx
+                                .send(AgentMessage::ActionInputsResolved {
+                                    request_id,
+                                    inputs: vec![],
+                                    error: Some(format!("action '{action_name}' not found")),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                // Resolve inputs
+                let inputs = crate::project::action_inputs::resolve_action_inputs(
+                    &action,
+                    std::path::Path::new(&project_path),
+                    &settings.env,
+                )
+                .await;
+
+                let _ = tx
+                    .send(AgentMessage::ActionInputsResolved {
+                        request_id,
+                        inputs,
+                        error: None,
+                    })
+                    .await;
+            });
         }
     }
 }
