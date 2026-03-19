@@ -118,6 +118,16 @@ impl Default for AgenticSettings {
     }
 }
 
+/// Where an action should appear in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionScope {
+    Project,
+    Worktree,
+    Sidebar,
+    CommandPalette,
+}
+
 /// A user-defined action configured in .zremote/settings.json.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectAction {
@@ -133,6 +143,8 @@ pub struct ProjectAction {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub worktree_scoped: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<ActionScope>,
 }
 
 /// Worktree lifecycle hook configuration.
@@ -608,6 +620,7 @@ mod tests {
             working_dir: Some("/home/user/project".to_string()),
             env: HashMap::from([("RUST_LOG".to_string(), "info".to_string())]),
             worktree_scoped: true,
+            scopes: vec![],
         };
         let json = serde_json::to_string(&action).expect("serialize");
         let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
@@ -697,6 +710,7 @@ mod tests {
                 working_dir: None,
                 env: HashMap::new(),
                 worktree_scoped: false,
+                scopes: vec![],
             }],
             worktree: Some(WorktreeSettings {
                 create_command: None,
@@ -949,6 +963,71 @@ mod tests {
         let json = r#"{"shell":"/bin/bash","agentic":{"auto_detect":true}}"#;
         let parsed: ProjectSettings = serde_json::from_str(json).expect("deserialize");
         assert!(parsed.prompts.is_empty());
+    }
+
+    #[test]
+    fn action_scope_serde_roundtrip() {
+        let scopes = vec![
+            ActionScope::Project,
+            ActionScope::Worktree,
+            ActionScope::Sidebar,
+            ActionScope::CommandPalette,
+        ];
+        let json = serde_json::to_string(&scopes).expect("serialize");
+        assert_eq!(
+            json,
+            r#"["project","worktree","sidebar","command_palette"]"#
+        );
+        let parsed: Vec<ActionScope> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(scopes, parsed);
+    }
+
+    #[test]
+    fn project_action_backward_compat_no_scopes() {
+        let json = r#"{"name":"test","command":"cargo test"}"#;
+        let parsed: ProjectAction = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.scopes.is_empty());
+        assert!(!parsed.worktree_scoped);
+    }
+
+    #[test]
+    fn project_action_with_scopes_roundtrip() {
+        let action = ProjectAction {
+            name: "build".to_string(),
+            command: "cargo build".to_string(),
+            description: None,
+            icon: None,
+            working_dir: None,
+            env: std::collections::HashMap::new(),
+            worktree_scoped: false,
+            scopes: vec![
+                ActionScope::Project,
+                ActionScope::Sidebar,
+                ActionScope::CommandPalette,
+            ],
+        };
+        let json = serde_json::to_string(&action).expect("serialize");
+        let parsed: ProjectAction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(action, parsed);
+    }
+
+    #[test]
+    fn project_action_empty_scopes_skipped_in_json() {
+        let action = ProjectAction {
+            name: "test".to_string(),
+            command: "cargo test".to_string(),
+            description: None,
+            icon: None,
+            working_dir: None,
+            env: std::collections::HashMap::new(),
+            worktree_scoped: false,
+            scopes: vec![],
+        };
+        let val = serde_json::to_value(&action).unwrap();
+        assert!(
+            val.get("scopes").is_none(),
+            "empty scopes should be skipped"
+        );
     }
 
     #[test]

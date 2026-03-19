@@ -6,7 +6,7 @@ import { Badge } from "../ui/Badge";
 import { IconButton } from "../ui/IconButton";
 import { showToast } from "../layout/Toast";
 import { ActionInputPopover } from "./ActionInputPopover";
-import { detectMissingInputs, getActionIcon } from "./action-utils";
+import { detectMissingInputs, effectiveScopes, getActionIcon } from "./action-utils";
 
 interface ActionRowProps {
   action: ProjectAction;
@@ -107,9 +107,11 @@ export function ActionRow({
         <span className="shrink-0 text-sm font-medium text-text-primary">
           {action.name}
         </span>
-        {action.worktree_scoped && (
-          <Badge variant="creating">worktree</Badge>
-        )}
+        {effectiveScopes(action).filter((s) => s !== "command_palette" && s !== "project").map((scope) => (
+          <Badge key={scope} variant="creating">
+            {scope}
+          </Badge>
+        ))}
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}

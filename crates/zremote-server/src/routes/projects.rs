@@ -717,9 +717,14 @@ fn resolve_action_working_dir(
     if let Some(ref wd) = action.working_dir {
         return expand_action_template(wd, project_path, body);
     }
-    if action.worktree_scoped
-        && let Some(ref wt) = body.worktree_path
-    {
+    let is_worktree = if action.scopes.is_empty() {
+        action.worktree_scoped
+    } else {
+        action
+            .scopes
+            .contains(&zremote_protocol::project::ActionScope::Worktree)
+    };
+    if is_worktree && let Some(ref wt) = body.worktree_path {
         return wt.clone();
     }
     project_path.to_string()
@@ -1560,6 +1565,7 @@ mod tests {
             working_dir: Some("{{project_path}}/sub".to_string()),
             env: std::collections::HashMap::new(),
             worktree_scoped: false,
+            scopes: vec![],
         };
         let body = RunActionRequest {
             worktree_path: None,
@@ -1582,6 +1588,7 @@ mod tests {
             working_dir: None,
             env: std::collections::HashMap::new(),
             worktree_scoped: true,
+            scopes: vec![],
         };
         let body = RunActionRequest {
             worktree_path: Some("/tmp/wt".to_string()),
@@ -1604,6 +1611,7 @@ mod tests {
             working_dir: None,
             env: std::collections::HashMap::new(),
             worktree_scoped: false,
+            scopes: vec![],
         };
         let body = RunActionRequest {
             worktree_path: None,
@@ -1613,6 +1621,29 @@ mod tests {
         };
         let result = resolve_action_working_dir(&action, "/proj", &body);
         assert_eq!(result, "/proj");
+    }
+
+    #[test]
+    fn resolve_action_working_dir_scope_based_worktree() {
+        use zremote_protocol::project::{ActionScope, ProjectAction};
+        let action = ProjectAction {
+            name: "install".to_string(),
+            command: "bun install".to_string(),
+            description: None,
+            icon: None,
+            working_dir: None,
+            env: std::collections::HashMap::new(),
+            worktree_scoped: false, // legacy field says no, but scopes says yes
+            scopes: vec![ActionScope::Worktree],
+        };
+        let body = RunActionRequest {
+            worktree_path: Some("/tmp/wt".to_string()),
+            branch: None,
+            cols: None,
+            rows: None,
+        };
+        let result = resolve_action_working_dir(&action, "/proj", &body);
+        assert_eq!(result, "/tmp/wt");
     }
 
     #[test]
@@ -1633,6 +1664,7 @@ mod tests {
                 ("KEY3".to_string(), "val3".to_string()),
             ]),
             worktree_scoped: false,
+            scopes: vec![],
         };
         let body = RunActionRequest {
             worktree_path: Some("/tmp/wt".to_string()),

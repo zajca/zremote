@@ -3,12 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   api,
+  type ActionScope,
   type AgenticSettings,
   type ProjectAction,
   type ProjectSettings,
   type WorktreeSettings,
 } from "../lib/api";
 import type { LinearAction } from "../types/linear";
+import { effectiveScopes, hasScope } from "./project/action-utils";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
 import { showToast } from "./layout/Toast";
@@ -53,6 +55,7 @@ function emptyAction(): ProjectAction {
     working_dir: undefined,
     env: {},
     worktree_scoped: false,
+    scopes: [],
   };
 }
 
@@ -565,21 +568,40 @@ export function ProjectSettingsTab({
                       className="h-8 flex-1 rounded-md border border-border bg-bg-secondary px-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none"
                       aria-label="Action name"
                     />
-                    <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-                      <input
-                        type="checkbox"
-                        checked={action.worktree_scoped}
-                        onChange={(e) =>
-                          handleActionChange(
-                            i,
-                            "worktree_scoped",
-                            e.target.checked,
-                          )
-                        }
-                        className="rounded border-border"
-                      />
-                      Worktree
-                    </label>
+                    {/* Scopes: where this action appears in the UI */}
+                    <div className="flex flex-wrap gap-1">
+                      {(["project", "worktree", "sidebar", "command_palette"] as const).map((scope) => (
+                        <button
+                          key={scope}
+                          type="button"
+                          aria-pressed={hasScope(action, scope)}
+                          onClick={() => {
+                            const current = effectiveScopes(action);
+                            const has = current.includes(scope);
+                            let next: ActionScope[];
+                            if (action.scopes && action.scopes.length > 0) {
+                              next = has
+                                ? action.scopes.filter((s) => s !== scope)
+                                : [...action.scopes, scope];
+                            } else {
+                              next = has
+                                ? current.filter((s) => s !== scope)
+                                : [...current, scope];
+                            }
+                            // Sync legacy field for backward compat with older agents
+                            handleActionChange(i, "scopes", next);
+                            handleActionChange(i, "worktree_scoped", next.includes("worktree"));
+                          }}
+                          className={`rounded px-1.5 py-0.5 text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${
+                            hasScope(action, scope)
+                              ? "bg-accent/20 text-accent"
+                              : "bg-bg-active text-text-tertiary hover:text-text-secondary"
+                          }`}
+                        >
+                          {scope === "command_palette" ? "Palette" : scope.charAt(0).toUpperCase() + scope.slice(1)}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <input
                     type="text"

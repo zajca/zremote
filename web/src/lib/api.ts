@@ -57,6 +57,8 @@ export interface AgenticSettings {
   auto_approve_patterns: string[];
 }
 
+export type ActionScope = "project" | "worktree" | "sidebar" | "command_palette";
+
 export interface ProjectAction {
   name: string;
   command: string;
@@ -65,6 +67,7 @@ export interface ProjectAction {
   working_dir?: string;
   env: Record<string, string>;
   worktree_scoped: boolean;
+  scopes?: ActionScope[];
 }
 
 export interface WorktreeSettings {

@@ -23,6 +23,7 @@ import { ActionsTab } from "../components/project/ActionsTab";
 import { WorktreeCard } from "../components/project/WorktreeCard";
 import { LinearIssuesPanel } from "../components/linear/LinearIssuesPanel";
 import { showToast } from "../components/layout/Toast";
+import { hasScope } from "../components/project/action-utils";
 
 type Tab = "sessions" | "actions" | "loops" | "knowledge" | "linear" | "settings" | "git";
 
@@ -78,7 +79,7 @@ export function ProjectPage() {
     if (activeTab === "git" && projectId) {
       loadWorktrees();
       void api.projects.actions(projectId).then(
-        (res) => setWorktreeActions(res.actions.filter((a) => a.worktree_scoped)),
+        (res) => setWorktreeActions(res.actions.filter((a) => hasScope(a, "worktree"))),
         () => setWorktreeActions([]),
       );
     }
