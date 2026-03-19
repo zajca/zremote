@@ -1,0 +1,142 @@
+import { Bot, Pause, Terminal, X } from "lucide-react";
+import { memo, useCallback } from "react";
+import { useLocation, useNavigate } from "react-router";
+import type { Session } from "../../lib/api";
+import { api } from "../../lib/api";
+import { useAgenticLoops } from "../../hooks/useAgenticLoops";
+import { useClaudeTaskStore } from "../../stores/claude-task-store";
+import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
+import { Badge } from "../ui/Badge";
+import { showToast } from "../layout/Toast";
+
+interface SessionItemProps {
+  session: Session;
+  hostId: string;
+}
+
+function sessionStatusVariant(
+  status: Session["status"],
+): "online" | "offline" | "error" | "warning" | "creating" {
+  switch (status) {
+    case "active":
+      return "online";
+    case "closed":
+      return "offline";
+    case "error":
+      return "error";
+    case "creating":
+      return "creating";
+    case "suspended":
+      return "warning";
+    default:
+      return "offline";
+  }
+}
+
+export const SessionItem = memo(function SessionItem({
+  session,
+  hostId,
+}: SessionItemProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const isActive = location.pathname.includes(`/sessions/${session.id}`);
+  const claudeTaskName = useClaudeTaskStore((s) => {
+    const taskId = s.sessionTaskIndex.get(session.id);
+    return taskId ? s.tasks.get(taskId)?.task_name : undefined;
+  });
+  const isClaudeTask = useClaudeTaskStore(
+    (s) => s.sessionTaskIndex.has(session.id),
+  );
+  const { loops } = useAgenticLoops(
+    session.status === "active" || session.status === "suspended" ? session.id : undefined,
+  );
+
+  const activeLoops = loops.filter(
+    (l) => l.status !== "completed" && l.status !== "error",
+  );
+
+  const activeLoopTaskName = activeLoops.length > 0
+    ? (activeLoops[activeLoops.length - 1]?.task_name ?? activeLoops[0]?.task_name)
+    : (loops.length > 0 ? loops[loops.length - 1]?.task_name : null);
+  const waitingLoops = activeLoops.filter(
+    (l) => l.status === "waiting_for_input",
+  );
+
+  const handleClick = useCallback(() => {
+    void navigate(`/hosts/${hostId}/sessions/${session.id}`);
+  }, [navigate, hostId, session.id]);
+
+  const handleClose = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!window.confirm("Close this session?")) return;
+      try {
+        await api.sessions.close(session.id);
+        showToast("Session closed", "success");
+        window.dispatchEvent(new Event(SESSION_UPDATE_EVENT));
+      } catch (err) {
+        console.error("failed to close session", err);
+        showToast("Failed to close session", "error");
+      }
+    },
+    [session.id],
+  );
+
+  return (
+    <div>
+      <div
+        className={`group/session flex h-7 w-full items-center gap-2 px-2 text-[13px] transition-colors duration-150 hover:bg-bg-hover ${isActive ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}
+      >
+        <button
+          onClick={handleClick}
+          className="flex min-w-0 flex-1 items-center gap-2"
+        >
+          {session.status === "suspended" ? (
+            <Pause size={13} className="shrink-0 text-status-warning" />
+          ) : isClaudeTask || activeLoops.length > 0 ? (
+            <Bot size={13} className="shrink-0 text-accent" />
+          ) : (
+            <Terminal size={13} className="shrink-0 text-text-tertiary" />
+          )}
+          <span className="truncate">
+            {isClaudeTask && claudeTaskName
+              ? claudeTaskName
+              : activeLoopTaskName || session.name || session.shell || "shell"}
+          </span>
+          <Badge variant={sessionStatusVariant(session.status)}>
+            {session.status}
+          </Badge>
+          {activeLoops.length > 0 && (
+            <span
+              className={`ml-auto flex items-center gap-1 text-[10px] font-medium ${
+                waitingLoops.length > 0
+                  ? "text-status-warning"
+                  : "text-accent"
+              }`}
+            >
+              {waitingLoops.length > 0 ? (
+                <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-status-warning" />
+              ) : (
+                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-transparent border-t-accent" />
+              )}
+              <span className="max-w-[80px] truncate">
+                {waitingLoops.length > 0
+                  ? (waitingLoops[0]?.tool_name ?? "Waiting")
+                  : "Working"}
+              </span>
+            </span>
+          )}
+        </button>
+        {(session.status === "active" || session.status === "suspended") && (
+          <button
+            onClick={handleClose}
+            className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors duration-150 hover:bg-bg-active hover:text-status-error group-hover/session:flex"
+            aria-label="Close session"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});
