@@ -993,6 +993,7 @@ pub async fn run_action(
         worktree_path: body.worktree_path.clone(),
         branch: body.branch.clone(),
         worktree_name,
+        custom_inputs: std::collections::HashMap::new(),
     };
 
     let expanded_command = crate::project::actions::expand_template(&action.command, &ctx);
@@ -1286,6 +1287,7 @@ pub async fn resolve_prompt(
         worktree_path: body.worktree_path,
         branch: body.branch,
         worktree_name,
+        custom_inputs: std::collections::HashMap::new(),
     };
 
     let rendered = crate::project::prompts::render_prompt(&template_body, &body.inputs, &ctx);

@@ -47,6 +47,21 @@ pub fn build_configure_prompt(
     prompt.push_str(
         "  - `scopes` (string[], optional): Where the action appears in the UI.\n    Values: \"project\" (actions tab), \"worktree\" (worktree cards),\n    \"sidebar\" (quick access in sidebar), \"command_palette\" (Cmd+K).\n    Defaults to [\"project\", \"command_palette\"]. If set, `worktree_scoped` is ignored.\n",
     );
+    prompt.push_str(
+        "  - `inputs` (array, optional): Custom input fields for the action. Each input:\n",
+    );
+    prompt.push_str("    - `name` (string, required): Input name, used as `{{name}}` template variable in command\n");
+    prompt.push_str("    - `label` (string, optional): Display label in the UI\n");
+    prompt.push_str(
+        "    - `input_type` (string, optional): \"text\" (default), \"multiline\", or \"select\"\n",
+    );
+    prompt.push_str("    - `placeholder` (string, optional): Placeholder text\n");
+    prompt.push_str("    - `default` (string, optional): Default value\n");
+    prompt.push_str("    - `required` (bool, default true): Whether the input is mandatory\n");
+    prompt.push_str("    - `options` (string[], optional): Static options for select inputs\n");
+    prompt.push_str(
+        "    - `script` (string, optional): Shell command that generates options dynamically.\n      Output: one option per line, tab-separated value\\tlabel. Example: \"0.2.4\\tPatch release\"\n",
+    );
     prompt.push_str("- `worktree` (object, optional):\n");
     prompt.push_str(
         "  - `create_command` (string, optional): Custom command that replaces `git worktree add`. Runs in a terminal session so the user can see output. Use when the project has custom worktree setup scripts.\n",
@@ -84,7 +99,7 @@ pub fn build_configure_prompt(
     prompt.push_str("4. Set appropriate environment variables if needed\n");
     prompt.push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
     prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns). If found, configure `create_command` and `delete_command` to use them.\n");
-    prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), add `\"worktree\"` to the action's `scopes` for common operations (start, stop, expose).\n8. For frequently-used actions (build, test), add `\"sidebar\"` scope for quick access from the sidebar.\n\n");
+    prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), add `\"worktree\"` to the action's `scopes` for common operations (start, stop, expose).\n8. For frequently-used actions (build, test), add `\"sidebar\"` scope for quick access from the sidebar.\n9. For actions that need user input before running (e.g., release version, deploy target, branch name), define `inputs` with appropriate types. Use `script` for dynamic options that depend on project state (git tags, branches, environments).\n\n");
 
     // Section 4: Project-Type-Specific Guidance
     match project_type {
@@ -196,6 +211,11 @@ mod tests {
         assert!(prompt.contains("custom_flags"));
         // Action scopes
         assert!(prompt.contains("scopes"));
+        // Action inputs
+        assert!(prompt.contains("inputs"));
+        assert!(prompt.contains("input_type"));
+        assert!(prompt.contains("script"));
+        assert!(prompt.contains("placeholder"));
     }
 
     #[test]
