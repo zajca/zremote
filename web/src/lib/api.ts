@@ -173,7 +173,16 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new ApiError(response.status, text || response.statusText);
+    let message = text || response.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.error?.message) {
+        message = parsed.error.message;
+      }
+    } catch {
+      // Not JSON, use raw text
+    }
+    throw new ApiError(response.status, message);
   }
 
   const text = await response.text();

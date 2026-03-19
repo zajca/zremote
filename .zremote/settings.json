@@ -130,7 +130,7 @@
           "label": "Version",
           "input_type": "select",
           "placeholder": "Select version to release",
-          "script": "./scripts/release.sh next"
+          "script": "./scripts/release.sh options"
         }
       ]
     },
