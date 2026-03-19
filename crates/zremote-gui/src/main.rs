@@ -23,10 +23,38 @@ use views::main_view::MainView;
 #[derive(Parser)]
 #[command(name = "zremote-gui", version, about = "ZRemote native desktop client")]
 struct Cli {
-    /// Server base URL, e.g. http://localhost:3000 or https://zremote.example.com
-    /// (or set ZREMOTE_URL env var)
-    #[arg(long, env = "ZREMOTE_URL", default_value = "http://localhost:3000")]
+    /// Server URL (same ZREMOTE_SERVER_URL as agent uses, e.g. ws://host:3000/ws/agent
+    /// or just http://host:3000). Path is stripped automatically.
+    #[arg(
+        long,
+        env = "ZREMOTE_SERVER_URL",
+        default_value = "http://localhost:3000"
+    )]
     server: String,
+}
+
+/// Extract base HTTP URL from a server URL that may include a WS path.
+/// e.g. "ws://host:3000/ws/agent" -> "http://host:3000"
+///      "wss://host.com/ws/agent" -> "https://host.com"
+///      "http://localhost:3000"    -> "http://localhost:3000"
+fn extract_base_url(raw: &str) -> String {
+    let url = raw.trim_end_matches('/');
+    // Parse with url crate to extract scheme + host + port
+    if let Ok(parsed) = url::Url::parse(url) {
+        let scheme = match parsed.scheme() {
+            "ws" => "http",
+            "wss" => "https",
+            other => other,
+        };
+        let host = parsed.host_str().unwrap_or("localhost");
+        if let Some(port) = parsed.port() {
+            format!("{scheme}://{host}:{port}")
+        } else {
+            format!("{scheme}://{host}")
+        }
+    } else {
+        url.to_string()
+    }
 }
 
 fn main() {
@@ -38,7 +66,7 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
-    let server_url = cli.server.trim_end_matches('/').to_string();
+    let server_url = extract_base_url(&cli.server);
 
     tracing::info!(server = %server_url, "starting ZRemote GUI");
 
