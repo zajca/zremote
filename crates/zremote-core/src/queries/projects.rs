@@ -27,15 +27,17 @@ pub struct ProjectRow {
     pub git_behind: i32,
     pub git_remotes: Option<String>,
     pub git_updated_at: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 const PROJECT_COLUMNS: &str = "id, host_id, path, name, has_claude_config, has_zremote_config, project_type, created_at, \
      parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-     git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at";
+     git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at, pinned";
 
 pub async fn list_projects(pool: &SqlitePool, host_id: &str) -> Result<Vec<ProjectRow>, AppError> {
     let projects: Vec<ProjectRow> = sqlx::query_as(&format!(
-        "SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? ORDER BY name"
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE host_id = ? ORDER BY pinned DESC, name"
     ))
     .bind(host_id)
     .fetch_all(pool)
@@ -113,7 +115,7 @@ pub async fn list_worktrees(
     project_id: &str,
 ) -> Result<Vec<ProjectRow>, AppError> {
     let worktrees: Vec<ProjectRow> = sqlx::query_as(&format!(
-        "SELECT {PROJECT_COLUMNS} FROM projects WHERE parent_project_id = ? ORDER BY name"
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE parent_project_id = ? ORDER BY pinned DESC, name"
     ))
     .bind(project_id)
     .fetch_all(pool)
@@ -145,6 +147,19 @@ pub async fn get_project_info(
             .fetch_optional(pool)
             .await?;
     row.ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))
+}
+
+pub async fn set_project_pinned(
+    pool: &SqlitePool,
+    project_id: &str,
+    pinned: bool,
+) -> Result<u64, AppError> {
+    let result = sqlx::query("UPDATE projects SET pinned = ? WHERE id = ?")
+        .bind(pinned)
+        .bind(project_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 #[cfg(test)]
@@ -364,5 +379,58 @@ mod tests {
 
         let projects = list_projects(&pool, "h1").await.unwrap();
         assert_eq!(projects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pinned_defaults_to_false() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert!(!project.pinned);
+    }
+
+    #[tokio::test]
+    async fn set_project_pinned_updates_flag() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let affected = set_project_pinned(&pool, "p1", true).await.unwrap();
+        assert_eq!(affected, 1);
+
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert!(project.pinned);
+
+        // Unpin
+        let affected = set_project_pinned(&pool, "p1", false).await.unwrap();
+        assert_eq!(affected, 1);
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert!(!project.pinned);
+    }
+
+    #[tokio::test]
+    async fn set_project_pinned_nonexistent_returns_zero() {
+        let pool = setup_db().await;
+        let affected = set_project_pinned(&pool, "nonexistent", true)
+            .await
+            .unwrap();
+        assert_eq!(affected, 0);
+    }
+
+    #[tokio::test]
+    async fn list_projects_pinned_first() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/alpha", "alpha").await;
+        insert_project(&pool, "p2", "h1", "/home/user/beta", "beta").await;
+        insert_project(&pool, "p3", "h1", "/home/user/gamma", "gamma").await;
+
+        // Pin "gamma" which alphabetically comes last
+        set_project_pinned(&pool, "p3", true).await.unwrap();
+
+        let projects = list_projects(&pool, "h1").await.unwrap();
+        assert_eq!(projects.len(), 3);
+        assert_eq!(projects[0].name, "gamma"); // pinned, comes first
+        assert!(projects[0].pinned);
+        assert_eq!(projects[1].name, "alpha");
+        assert!(!projects[1].pinned);
     }
 }

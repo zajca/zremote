@@ -101,7 +101,9 @@ fn create_router(state: Arc<AppState>, web_dir: Option<std::path::PathBuf>) -> R
         )
         .route(
             "/api/projects/{project_id}",
-            get(routes::projects::get_project).delete(routes::projects::delete_project),
+            get(routes::projects::get_project)
+                .patch(routes::projects::update_project)
+                .delete(routes::projects::delete_project),
         )
         .route(
             "/api/projects/{project_id}/sessions",

@@ -215,6 +215,38 @@ pub async fn get_project(
     Ok(Json(project))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateProjectRequest {
+    pub pinned: Option<bool>,
+}
+
+/// `PATCH /api/projects/:project_id` - update project properties.
+pub async fn update_project(
+    State(state): State<Arc<LocalAppState>>,
+    AxumPath(project_id): AxumPath<String>,
+    AppJson(body): AppJson<UpdateProjectRequest>,
+) -> Result<Json<ProjectResponse>, AppError> {
+    let _parsed = parse_project_id(&project_id)?;
+
+    if let Some(pinned) = body.pinned {
+        let rows = q::set_project_pinned(&state.db, &project_id, pinned).await?;
+        if rows == 0 {
+            return Err(AppError::NotFound(format!(
+                "project {project_id} not found"
+            )));
+        }
+    }
+
+    let project = q::get_project(&state.db, &project_id).await?;
+
+    // Broadcast event so sidebar refreshes
+    let _ = state.events.send(ServerEvent::ProjectsUpdated {
+        host_id: project.host_id.clone(),
+    });
+
+    Ok(Json(project))
+}
+
 /// `DELETE /api/projects/:project_id` - unregister project.
 pub async fn delete_project(
     State(state): State<Arc<LocalAppState>>,
