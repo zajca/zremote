@@ -9,6 +9,7 @@ import { getLoopActions } from "./loop-actions";
 import { getProjectActions } from "./project-actions";
 import { getSessionActions } from "./session-actions";
 import { getWorktreeActions } from "./worktree-actions";
+import { getClipboardActions } from "./clipboard-actions";
 
 export interface ResolveData {
   hosts: Host[];
@@ -218,6 +219,11 @@ export function resolveActions(
         : [];
 
       return [...loopActions, ...sessionAncestorActions, ...projectAncestorActions, ...hostAncestorActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
+    }
+
+    case "clipboard": {
+      const clipboardActions = getClipboardActions(deps);
+      return [...clipboardActions, ...globalActions.map((a) => ({ ...a, group: "global" as const }))];
     }
 
     default:

@@ -7,6 +7,7 @@ const LEVEL_LABELS: Record<ContextLevel, string> = {
   worktree: "Worktree",
   session: "Session",
   loop: "Loop",
+  clipboard: "Clipboard",
 };
 
 interface CommandPaletteFooterProps {

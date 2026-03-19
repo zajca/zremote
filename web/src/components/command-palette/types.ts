@@ -2,7 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ProjectAction } from "../../lib/api";
 import type { PromptTemplate } from "../../types/prompt";
 
-export type ContextLevel = "global" | "host" | "project" | "worktree" | "session" | "loop";
+export type ContextLevel = "global" | "host" | "project" | "worktree" | "session" | "loop" | "clipboard";
 
 export interface PaletteContext {
   level: ContextLevel;

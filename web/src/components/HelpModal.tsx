@@ -120,6 +120,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
                 description="Toggle sidebar"
               />
               <ShortcutRow
+                keys={<Kbd>Alt+V</Kbd>}
+                description="Clipboard history"
+              />
+              <ShortcutRow
                 keys={<Kbd>?</Kbd>}
                 description="Show this help"
               />

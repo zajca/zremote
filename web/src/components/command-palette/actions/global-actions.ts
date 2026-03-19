@@ -1,4 +1,4 @@
-import { ArrowLeftRight, BarChart3, Clock, HelpCircle, Laptop, Monitor, Search, Settings } from "lucide-react";
+import { ArrowLeftRight, BarChart3, ClipboardList, Clock, HelpCircle, Laptop, Monitor, Search, Settings } from "lucide-react";
 import type { Host } from "../../../lib/api";
 import type { ShortcutSession } from "../../../hooks/useShortcutSessions";
 import type { ActionDeps, PaletteAction } from "../types";
@@ -72,6 +72,19 @@ export function getGlobalActions(
       deps.close();
       deps.openHelp();
     },
+  });
+
+  actions.push({
+    id: "global:clipboard",
+    label: "Clipboard History",
+    icon: ClipboardList,
+    keywords: ["clipboard", "copy", "paste", "history"],
+    group: "actions",
+    shortcut: { alt: true, key: "v" },
+    onSelect: () => {
+      deps.pushContext({ level: "clipboard" });
+    },
+    drillDown: { level: "clipboard" },
   });
 
   // Switch Session action (before session items)

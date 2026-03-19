@@ -131,6 +131,16 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
       });
     }
 
+    // Alt+V → Clipboard history
+    sa.push({
+      shortcut: { alt: true, key: "v" },
+      onSelect: () => {
+        const store = useCommandPaletteStore.getState();
+        store.setOpen(true);
+        store.pushContext({ level: "clipboard" });
+      },
+    });
+
     // Ctrl+Shift+S → Switch Session filter
     sa.push({
       shortcut: { mod: true, shift: true, key: "s" },
@@ -496,6 +506,10 @@ export function CommandPalette({ onOpenHelp }: CommandPaletteProps) {
             }
             break;
           }
+
+          case "clipboard":
+            // No fetch needed — data is local in zustand stores
+            break;
         }
       } catch (err) {
         console.warn("Failed to fetch palette context data:", err);

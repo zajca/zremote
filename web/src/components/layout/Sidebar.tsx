@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { BarChart3, Clock, HelpCircle, Laptop, Monitor, PanelLeftClose, Pin, Settings } from "lucide-react";
+import { BarChart3, Clock, ClipboardList, HelpCircle, Laptop, Monitor, PanelLeftClose, Pin, Settings } from "lucide-react";
 import { Link } from "react-router";
 import { useHosts } from "../../hooks/useHosts";
 import { useMode } from "../../hooks/useMode";
@@ -7,6 +7,7 @@ import { useRealtimeUpdates } from "../../hooks/useRealtimeUpdates";
 import { PROJECT_UPDATE_EVENT } from "../../hooks/useProjects";
 import { SESSION_UPDATE_EVENT } from "../../hooks/useSessions";
 import { HostItem } from "../sidebar/HostItem";
+import { useCommandPaletteStore } from "../../stores/command-palette-store";
 
 interface SidebarProps {
   pinned: boolean;
@@ -85,6 +86,21 @@ export function Sidebar({ pinned, onPin, onUnpin, onOpenHelp }: SidebarProps) {
           <Clock size={16} />
           History
         </Link>
+        <button
+          onClick={() => {
+            const store = useCommandPaletteStore.getState();
+            store.setOpen(true);
+            store.pushContext({ level: "clipboard" });
+          }}
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
+          aria-label="Open clipboard history"
+        >
+          <ClipboardList size={16} />
+          <span className="flex-1 text-left">Clipboard</span>
+          <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px] text-text-tertiary">
+            Alt+V
+          </kbd>
+        </button>
         <Link
           to="/settings"
           className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary transition-colors duration-150 hover:bg-bg-hover hover:text-text-primary"
