@@ -49,6 +49,12 @@ export function CommandPaletteFooter({ canGoBack, canDrillDown, contextLevel }: 
         )}
       </div>
       <div className="flex items-center gap-2">
+        <span className="flex items-center gap-1">
+          <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]">
+            Shift+Alt+N
+          </kbd>
+          <span>Quick Claude</span>
+        </span>
         <span className="text-text-tertiary">{LEVEL_LABELS[contextLevel]}</span>
         <span className="flex items-center gap-1">
           <kbd className="rounded bg-bg-tertiary px-1.5 py-0.5 font-mono text-[10px]">

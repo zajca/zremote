@@ -96,6 +96,13 @@ export interface RunActionResponse {
   pid: number;
 }
 
+export interface ClaudeDefaults {
+  model?: string;
+  allowed_tools?: string[];
+  skip_permissions?: boolean;
+  custom_flags?: string;
+}
+
 export interface ProjectSettings {
   shell?: string;
   working_dir?: string;
@@ -105,6 +112,7 @@ export interface ProjectSettings {
   worktree?: WorktreeSettings;
   linear?: LinearSettings;
   prompts?: PromptTemplate[];
+  claude?: ClaudeDefaults;
 }
 
 export interface ConfigValue {
