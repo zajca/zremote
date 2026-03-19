@@ -195,7 +195,7 @@ mod tests {
     async fn resolve_script_options_echo() {
         let env = HashMap::new();
         let result = resolve_script_options(
-            "echo -e 'alpha\\tFirst\\nbeta\\tSecond'",
+            "printf 'alpha\\tFirst\\nbeta\\tSecond\\n'",
             Path::new("/tmp"),
             &env,
         )
@@ -244,7 +244,7 @@ mod tests {
                     default: None,
                     required: true,
                     options: vec![],
-                    script: Some("echo -e 'a\\tAlpha\\nb\\tBeta'".to_string()),
+                    script: Some("printf 'a\\tAlpha\\nb\\tBeta\\n'".to_string()),
                 },
                 ActionInput {
                     name: "msg".to_string(),
