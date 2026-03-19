@@ -67,7 +67,11 @@ export function CommandPaletteItem({ action }: CommandPaletteItemProps) {
                 {action.label}
               </span>
               {action.showAgenticIndicator && (
-                <Sparkles size={12} className="shrink-0 text-accent" />
+                action.agenticWaiting ? (
+                  <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-status-warning" />
+                ) : (
+                  <Sparkles size={12} className="shrink-0 text-accent" />
+                )
               )}
             </span>
             {action.description && (

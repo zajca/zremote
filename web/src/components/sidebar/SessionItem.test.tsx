@@ -174,14 +174,14 @@ describe("SessionItem", () => {
     expect(screen.getByText("/bin/bash")).toBeInTheDocument();
   });
 
-  test("shows active loop count badge when loops are active", () => {
+  test("shows Working indicator when loops are active", () => {
     mockLoops = [mockLoop({ status: "working" })];
     render(
       <MemoryRouter>
         <SessionItem session={baseSession} hostId="host-1" />
       </MemoryRouter>,
     );
-    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("Working")).toBeInTheDocument();
   });
 
   test("shows Bot icon when session is a Claude task", () => {

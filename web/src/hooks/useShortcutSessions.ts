@@ -12,6 +12,7 @@ export interface ShortcutSession {
   workingDir?: string;
   status: "active" | "suspended";
   hasAgenticLoop?: boolean;
+  agenticStatus?: "working" | "waiting" | null;
   projectId?: string;
 }
 
@@ -105,10 +106,28 @@ export function useShortcutSessions(
   // Check agentic loop status for each session
   const sessionsWithAgentic = useMemo(() => {
     return sessions.map((s) => {
-      const hasLoop = Array.from(activeLoops.values()).some(
-        (loop) => loop.session_id === s.sessionId && loop.status === "working",
+      const sessionLoops = Array.from(activeLoops.values()).filter(
+        (loop) =>
+          loop.session_id === s.sessionId &&
+          loop.status !== "completed" &&
+          loop.status !== "error",
       );
-      return { ...s, hasAgenticLoop: hasLoop };
+      const hasWaiting = sessionLoops.some(
+        (loop) => loop.status === "waiting_for_input",
+      );
+      const hasWorking = sessionLoops.some(
+        (loop) => loop.status === "working",
+      );
+      const agenticStatus: "working" | "waiting" | null = hasWaiting
+        ? "waiting"
+        : hasWorking
+          ? "working"
+          : null;
+      return {
+        ...s,
+        hasAgenticLoop: sessionLoops.length > 0,
+        agenticStatus,
+      };
     });
   }, [sessions, activeLoops]);
 

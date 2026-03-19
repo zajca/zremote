@@ -108,14 +108,22 @@ export const SessionItem = memo(function SessionItem({
           </Badge>
           {activeLoops.length > 0 && (
             <span
-              className={`ml-auto inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium ${
+              className={`ml-auto flex items-center gap-1 text-[10px] font-medium ${
                 waitingLoops.length > 0
-                  ? "animate-pulse bg-status-warning/20 text-status-warning"
-                  : "bg-accent/20 text-accent"
+                  ? "text-status-warning"
+                  : "text-accent"
               }`}
             >
-              <Bot size={10} className="mr-0.5" />
-              {activeLoops.length}
+              {waitingLoops.length > 0 ? (
+                <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-status-warning" />
+              ) : (
+                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-transparent border-t-accent" />
+              )}
+              <span className="max-w-[80px] truncate">
+                {waitingLoops.length > 0
+                  ? (waitingLoops[0]?.tool_name ?? "Waiting")
+                  : "Working"}
+              </span>
             </span>
           )}
         </button>
