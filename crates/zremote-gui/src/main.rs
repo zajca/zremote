@@ -5,6 +5,7 @@ mod app_state;
 mod assets;
 mod events_ws;
 mod icons;
+mod persistence;
 mod terminal_ws;
 #[allow(dead_code)]
 mod theme;
@@ -12,7 +13,7 @@ mod theme;
 mod types;
 mod views;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
@@ -21,6 +22,7 @@ use gpui::*;
 use api::ApiClient;
 use app_state::AppState;
 use assets::Assets;
+use persistence::Persistence;
 use types::ServerEvent;
 use views::main_view::MainView;
 
@@ -99,28 +101,60 @@ fn main() {
 
     tracing::info!(mode = %mode, "connected to server");
 
+    // Load persistent GUI state.
+    let mut persistence = Persistence::load();
+    persistence.update(|s| s.server_url = Some(server_url.clone()));
+
     // Start events WebSocket on background tokio task
     let (event_tx, event_rx) = flume::bounded::<ServerEvent>(256);
     let api = ApiClient::new(&server_url);
     let events_url = api.events_ws_url();
     rt.spawn(events_ws::run_events_ws(events_url, event_tx));
 
+    let restored_width = persistence.state().window_width;
+    let restored_height = persistence.state().window_height;
+
     let app_state = Arc::new(AppState {
         api,
         tokio_handle,
         event_rx,
         mode,
+        persistence: Mutex::new(persistence),
     });
 
     let exit_after = cli.exit_after;
 
     // Launch GPUI application on main thread
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        let app_state = app_state.clone();
-        cx.open_window(window_options(), move |window, cx| {
-            cx.new(|cx| MainView::new(app_state, window, cx))
-        })
+        let app_state_for_quit = app_state.clone();
+        let app_state_clone = app_state.clone();
+        cx.open_window(
+            window_options(restored_width, restored_height),
+            move |window, cx| cx.new(|cx| MainView::new(app_state_clone, window, cx)),
+        )
         .expect("failed to open window");
+
+        // Save state on quit.
+        let _quit_sub = cx.on_app_quit({
+            move |cx: &mut App| {
+                // Try to read window bounds for persistence.
+                if let Some(win) = cx.windows().first().copied()
+                    && let Ok(bounds) = win.update(cx, |_root: AnyView, window: &mut Window, _cx: &mut App| {
+                        window.bounds()
+                    })
+                    && let Ok(mut p) = app_state_for_quit.persistence.lock()
+                {
+                    p.update(|s| {
+                        s.window_width = Some(f32::from(bounds.size.width));
+                        s.window_height = Some(f32::from(bounds.size.height));
+                    });
+                    if let Err(e) = p.save_if_changed() {
+                        tracing::warn!(error = %e, "failed to save GUI state on quit");
+                    }
+                }
+                async {}
+            }
+        });
 
         if let Some(seconds) = exit_after {
             cx.spawn(async move |cx: &mut AsyncApp| {
@@ -132,13 +166,15 @@ fn main() {
     });
 }
 
-fn window_options() -> WindowOptions {
+fn window_options(restored_width: Option<f32>, restored_height: Option<f32>) -> WindowOptions {
+    let width = restored_width.unwrap_or(1200.0);
+    let height = restored_height.unwrap_or(800.0);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
             Point::default(),
             Size {
-                width: px(1200.0),
-                height: px(800.0),
+                width: px(width),
+                height: px(height),
             },
         ))),
         app_id: Some("zremote-gui".to_string()),

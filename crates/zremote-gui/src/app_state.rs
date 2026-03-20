@@ -1,4 +1,7 @@
+use std::sync::Mutex;
+
 use crate::api::ApiClient;
+use crate::persistence::Persistence;
 use crate::types::ServerEvent;
 
 /// Shared application state accessible from all GPUI views.
@@ -11,4 +14,6 @@ pub struct AppState {
     pub event_rx: flume::Receiver<ServerEvent>,
     /// Server mode: "server" or "local".
     pub mode: String,
+    /// Persistent GUI state (window size, selected session, etc.).
+    pub persistence: Mutex<Persistence>,
 }

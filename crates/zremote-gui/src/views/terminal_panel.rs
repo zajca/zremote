@@ -49,6 +49,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::vte::ansi::Processor;
 use gpui::*;
@@ -57,6 +58,7 @@ use crate::terminal_ws::{self, TerminalWsHandle};
 use crate::theme;
 use crate::types::TerminalEvent;
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
+use crate::views::url_detector::UrlDetector;
 
 /// Cursor blink interval (standard terminal blink rate).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -67,6 +69,10 @@ const DEFAULT_ROWS: u16 = 40;
 
 /// Lines to scroll per mouse wheel tick.
 const SCROLL_LINES_PER_TICK: i32 = 3;
+
+/// Debounce delay for WebSocket resize messages (ms).
+/// Local term.resize() is immediate; only the server message is debounced.
+const RESIZE_DEBOUNCE_MS: u64 = 150;
 
 /// Shared layout info set by the element during paint, read by mouse event handlers.
 #[derive(Clone, Copy, Default)]
@@ -102,6 +108,20 @@ pub struct TerminalPanel {
     cell_run_cache: Rc<RefCell<CellRunCache>>,
     /// Per-character glyph cache (persists across renders, shared with TerminalElement).
     glyph_cache: Rc<RefCell<GlyphCache>>,
+    /// Debounced resize sender (interposes between element and WS resize channel).
+    resize_debounce_tx: flume::Sender<(u16, u16)>,
+    /// URL detector for Ctrl+hover URL detection.
+    url_detector: Rc<RefCell<UrlDetector>>,
+    /// Index of the currently hovered URL match (shared with mouse handlers).
+    hovered_url_idx: Rc<Cell<Option<usize>>>,
+    /// Whether search overlay is open.
+    search_open: bool,
+    /// Search overlay view entity.
+    search_overlay: Option<Entity<super::search_overlay::SearchOverlay>>,
+    /// Current search matches in the terminal.
+    search_matches: Vec<Match>,
+    /// Index of the currently focused search match.
+    search_current_idx: Option<usize>,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
 }
@@ -120,6 +140,38 @@ impl TerminalPanel {
 
         let ws_handle = terminal_ws::connect(ws_url, tokio_handle);
         let focus_handle = cx.focus_handle();
+
+        // Resize debouncing: element sends to debounce_tx (immediate local resize),
+        // tokio task forwards to real resize_tx after 150ms of inactivity.
+        let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
+        let real_resize_tx = ws_handle.resize_tx.clone();
+        tokio_handle.spawn(async move {
+            loop {
+                // Wait for first resize event.
+                let Ok(mut dims) = resize_debounce_rx.recv_async().await else {
+                    break;
+                };
+                // Debounce: keep replacing dims while new events arrive within the timeout.
+                loop {
+                    match tokio::time::timeout(
+                        Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                        resize_debounce_rx.recv_async(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(new_dims)) => dims = new_dims,
+                        Ok(Err(_)) => {
+                            let _ = real_resize_tx.send(dims);
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = real_resize_tx.send(dims);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         // Reset cursor to visible on any keystroke so it doesn't blink while typing.
         let keystroke_subscription = cx.observe_keystrokes(
@@ -143,6 +195,13 @@ impl TerminalPanel {
             content_generation: Arc::new(AtomicU64::new(0)),
             cell_run_cache: Rc::new(RefCell::new(CellRunCache::new())),
             glyph_cache: Rc::new(RefCell::new(GlyphCache::new())),
+            resize_debounce_tx,
+            url_detector: Rc::new(RefCell::new(UrlDetector::new())),
+            hovered_url_idx: Rc::new(Cell::new(None)),
+            search_open: false,
+            search_overlay: None,
+            search_matches: Vec::new(),
+            search_current_idx: None,
             _keystroke_subscription: keystroke_subscription,
         }
     }
@@ -330,26 +389,218 @@ impl Focusable for TerminalPanel {
     }
 }
 
+impl TerminalPanel {
+    /// Open the search overlay.
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        if self.search_open {
+            return;
+        }
+        self.search_open = true;
+        let overlay = cx.new(|cx| {
+            super::search_overlay::SearchOverlay::new(cx)
+        });
+        cx.subscribe(&overlay, Self::on_search_event).detach();
+        self.search_overlay = Some(overlay);
+        cx.notify();
+    }
+
+    /// Close the search overlay and clear search state.
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.search_overlay = None;
+        self.search_matches.clear();
+        self.search_current_idx = None;
+        // Focus will be restored to terminal on next render via auto-focus.
+        cx.notify();
+    }
+
+    /// Handle events from the search overlay.
+    fn on_search_event(
+        &mut self,
+        _emitter: Entity<super::search_overlay::SearchOverlay>,
+        event: &super::search_overlay::SearchOverlayEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use super::search_overlay::SearchOverlayEvent;
+        match event {
+            SearchOverlayEvent::QueryChanged(query) => {
+                self.update_search_matches(query, cx);
+            }
+            SearchOverlayEvent::NextMatch => {
+                self.navigate_search_match(true, cx);
+            }
+            SearchOverlayEvent::PrevMatch => {
+                self.navigate_search_match(false, cx);
+            }
+            SearchOverlayEvent::Close => {
+                self.close_search(cx);
+            }
+        }
+    }
+
+    /// Recompute search matches for the given query using alacritty's RegexIter.
+    fn update_search_matches(&mut self, query: &str, cx: &mut Context<Self>) {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Direction, Line, Point};
+        use alacritty_terminal::term::search::{RegexIter, RegexSearch};
+
+        self.search_matches.clear();
+        self.search_current_idx = None;
+
+        if query.is_empty() {
+            if let Some(overlay) = &self.search_overlay {
+                overlay.update(cx, |o, cx| o.set_match_info(0, 0, cx));
+            }
+            cx.notify();
+            return;
+        }
+
+        // Escape special regex characters for literal search.
+        let escaped = escape_regex(query);
+        let Ok(mut regex) = RegexSearch::new(&escaped) else {
+            if let Some(overlay) = &self.search_overlay {
+                overlay.update(cx, |o, cx| o.set_match_info(0, 0, cx));
+            }
+            cx.notify();
+            return;
+        };
+
+        if let Ok(term) = self.term.lock() {
+            let rows = term.screen_lines();
+            let cols = term.columns();
+            if rows > 0 && cols > 0 {
+                let topmost = term.topmost_line();
+                let start = Point::new(topmost, Column(0));
+                let end = Point::new(Line(rows as i32 - 1), Column(cols - 1));
+                let iter = RegexIter::new(start, end, Direction::Right, &term, &mut regex);
+                for m in iter {
+                    self.search_matches.push(m);
+                    if self.search_matches.len() >= 10_000 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Select the match nearest to viewport center.
+        if !self.search_matches.is_empty() && let Ok(term) = self.term.lock() {
+                let display_offset = term.grid().display_offset() as i32;
+                let rows = term.screen_lines() as i32;
+                let center_line = Line(-display_offset + rows / 2);
+                let mut best = 0usize;
+                let mut best_dist = i32::MAX;
+                for (i, m) in self.search_matches.iter().enumerate() {
+                    let d = (m.start().line.0 - center_line.0).abs();
+                    if d < best_dist {
+                        best_dist = d;
+                        best = i;
+                    }
+                }
+                self.search_current_idx = Some(best);
+        }
+
+        let total = self.search_matches.len();
+        let current = self.search_current_idx.map_or(0, |i| i + 1);
+        if let Some(overlay) = &self.search_overlay {
+            overlay.update(cx, |o, cx| o.set_match_info(current, total, cx));
+        }
+
+        self.scroll_to_current_match();
+        cx.notify();
+    }
+
+    /// Navigate to the next or previous search match.
+    fn navigate_search_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let total = self.search_matches.len();
+        let idx = match self.search_current_idx {
+            Some(i) => {
+                if forward {
+                    (i + 1) % total
+                } else {
+                    (i + total - 1) % total
+                }
+            }
+            None => 0,
+        };
+        self.search_current_idx = Some(idx);
+
+        if let Some(overlay) = &self.search_overlay {
+            overlay.update(cx, |o, cx| o.set_match_info(idx + 1, total, cx));
+        }
+
+        self.scroll_to_current_match();
+        cx.notify();
+    }
+
+    /// Scroll the terminal to show the current search match.
+    fn scroll_to_current_match(&self) {
+        use alacritty_terminal::grid::Scroll;
+        let Some(idx) = self.search_current_idx else { return };
+        let Some(m) = self.search_matches.get(idx) else { return };
+        if let Ok(mut term) = self.term.lock() {
+            let display_offset = term.grid().display_offset() as i32;
+            let rows = term.screen_lines() as i32;
+            let match_line = m.start().line.0;
+            let viewport_top = -display_offset;
+            let viewport_bottom = viewport_top + rows - 1;
+            if match_line < viewport_top || match_line > viewport_bottom {
+                // Scroll so match is in the middle of the viewport.
+                let target_offset = -(match_line - rows / 2);
+                let delta = target_offset - display_offset;
+                if delta != 0 {
+                    term.scroll_display(Scroll::Delta(delta));
+                }
+            }
+        }
+    }
+}
+
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_output_reader(cx);
         self.start_cursor_blink(cx);
 
-        // Auto-focus on first render
-        if !self.focus_handle.is_focused(window) && !self.closed {
+        // Auto-focus on first render (unless search overlay is open).
+        if !self.focus_handle.is_focused(window) && !self.closed && !self.search_open {
             self.focus_handle.focus(window);
         }
 
+        // Compute hovered URL match for the element.
+        let hovered_url_match: Option<Match> = self.hovered_url_idx.get().and_then(|idx| {
+            let detector = self.url_detector.borrow();
+            detector.cached_match(idx)
+        });
+
+        // Clone search state for the element.
+        let search_matches = if self.search_open {
+            self.search_matches.clone()
+        } else {
+            Vec::new()
+        };
+        let search_current_idx = if self.search_open {
+            self.search_current_idx
+        } else {
+            None
+        };
+
         let terminal_el = TerminalElement::new(
             self.term.clone(),
-            self.ws_handle.resize_tx.clone(),
+            self.resize_debounce_tx.clone(),
             self.cursor_visible,
             self.layout_info.clone(),
             self.pending_scroll_delta.clone(),
             self.content_generation.clone(),
             self.cell_run_cache.clone(),
             self.glyph_cache.clone(),
+            hovered_url_match,
+            search_matches,
+            search_current_idx,
         );
+
+        let has_hovered_url = self.hovered_url_idx.get().is_some();
 
         let mut content = div()
             .id("terminal-content")
@@ -363,21 +614,49 @@ impl Render for TerminalPanel {
             .on_key_down({
                 let input_tx = self.ws_handle.input_tx.clone();
                 let term = self.term.clone();
+                let search_open = self.search_open;
+                let entity = cx.entity().downgrade();
                 move |event: &KeyDownEvent, _window: &mut Window, cx: &mut App| {
-                    // Ctrl+Shift+C: copy selection to clipboard
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
-                    if mods.control && mods.shift && key.eq_ignore_ascii_case("c") {
-                        if let Ok(t) = term.lock() {
-                            if let Some(text) = t.selection_to_string() {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            }
-                        }
+
+                    // Ctrl+F: open search
+                    if mods.control && !mods.shift && key == "f" {
+                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            this.open_search(cx);
+                        });
+                        return;
+                    }
+
+                    // Don't send keys to PTY while search is open
+                    if search_open {
+                        return;
+                    }
+
+                    // Ctrl+Shift+C: copy selection to clipboard
+                    if mods.control
+                        && mods.shift
+                        && key.eq_ignore_ascii_case("c")
+                        && let Ok(t) = term.lock()
+                        && let Some(text) = t.selection_to_string()
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
                         return;
                     }
 
                     if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke) {
                         let _ = input_tx.send(bytes);
+                    }
+                }
+            })
+            // Clear URL hover when control is released
+            .on_key_up({
+                let hovered_url_idx = self.hovered_url_idx.clone();
+                let entity_id = cx.entity_id();
+                move |event: &KeyUpEvent, _window: &mut Window, cx: &mut App| {
+                    if event.keystroke.key.as_str() == "control" && hovered_url_idx.get().is_some() {
+                        hovered_url_idx.set(None);
+                        cx.notify(entity_id);
                     }
                 }
             })
@@ -388,12 +667,30 @@ impl Render for TerminalPanel {
                     focus.focus(window);
                 }
             })
-            // Left mouse button: start text selection
+            // Left mouse button: start text selection or open URL
             .on_mouse_down(MouseButton::Left, {
                 let term = self.term.clone();
                 let layout_info = self.layout_info.clone();
                 let entity_id = cx.entity_id();
+                let url_detector = self.url_detector.clone();
+                let hovered_url_idx = self.hovered_url_idx.clone();
                 move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                    // Ctrl+click: open hovered URL
+                    if event.modifiers.control
+                        && let Some(idx) = hovered_url_idx.get()
+                    {
+                        if let Ok(t) = term.lock() {
+                            let detector = url_detector.borrow();
+                            let url = detector.url_text(&t, idx);
+                            drop(t);
+                            drop(detector);
+                            if !url.is_empty() {
+                                open::that_in_background(&url);
+                            }
+                        }
+                        return;
+                    }
+
                     let info = layout_info.get();
                     if info.cell_width == px(0.0) {
                         return;
@@ -429,47 +726,85 @@ impl Render for TerminalPanel {
                     cx.notify(entity_id);
                 }
             })
-            // Mouse move while dragging: update selection end point
+            // Mouse move: selection drag + URL hover detection
             .on_mouse_move({
                 let term = self.term.clone();
                 let layout_info = self.layout_info.clone();
                 let entity_id = cx.entity_id();
+                let url_detector = self.url_detector.clone();
+                let hovered_url_idx = self.hovered_url_idx.clone();
+                let content_generation = self.content_generation.clone();
                 move |event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
-                    // Only update selection while left button is held
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        return;
-                    }
-
-                    let info = layout_info.get();
-                    if info.cell_width == px(0.0) {
-                        return;
-                    }
-
-                    if let Ok(mut t) = term.lock() {
-                        if t.selection.is_none() {
+                    // Selection drag takes priority
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        let info = layout_info.get();
+                        if info.cell_width == px(0.0) {
                             return;
                         }
 
-                        let display_offset = t.grid().display_offset();
-                        let cols = t.columns();
-                        let rows = t.screen_lines();
+                        if let Ok(mut t) = term.lock() {
+                            if t.selection.is_none() {
+                                return;
+                            }
 
-                        let (grid_point, side) = TerminalPanel::pixel_to_grid(
-                            event.position,
-                            info.bounds.origin,
-                            info.cell_width,
-                            info.cell_height,
-                            cols,
-                            rows,
-                            display_offset,
-                        );
+                            let display_offset = t.grid().display_offset();
+                            let cols = t.columns();
+                            let rows = t.screen_lines();
 
-                        if let Some(ref mut selection) = t.selection {
-                            selection.update(grid_point, side);
+                            let (grid_point, side) = TerminalPanel::pixel_to_grid(
+                                event.position,
+                                info.bounds.origin,
+                                info.cell_width,
+                                info.cell_height,
+                                cols,
+                                rows,
+                                display_offset,
+                            );
+
+                            if let Some(ref mut selection) = t.selection {
+                                selection.update(grid_point, side);
+                            }
                         }
+
+                        cx.notify(entity_id);
+                        return;
                     }
 
-                    cx.notify(entity_id);
+                    // URL hover detection (Ctrl+hover)
+                    if event.modifiers.control {
+                        let info = layout_info.get();
+                        if info.cell_width == px(0.0) {
+                            return;
+                        }
+
+                        if let Ok(t) = term.lock() {
+                            let display_offset = t.grid().display_offset();
+                            let content_gen = content_generation.load(Ordering::Relaxed);
+                            let cols = t.columns();
+                            let rows = t.screen_lines();
+
+                            let (grid_point, _) = TerminalPanel::pixel_to_grid(
+                                event.position,
+                                info.bounds.origin,
+                                info.cell_width,
+                                info.cell_height,
+                                cols,
+                                rows,
+                                display_offset,
+                            );
+
+                            let mut detector = url_detector.borrow_mut();
+                            detector.detect(&t, display_offset, content_gen);
+                            let new_idx = detector.match_at_point(grid_point).map(|(i, _)| i);
+                            if hovered_url_idx.get() != new_idx {
+                                hovered_url_idx.set(new_idx);
+                                cx.notify(entity_id);
+                            }
+                        }
+                    } else if hovered_url_idx.get().is_some() {
+                        hovered_url_idx.set(None);
+                        cx.notify(entity_id);
+                    }
                 }
             })
             // Left mouse up: finalize selection (selection stays for copy)
@@ -478,14 +813,10 @@ impl Render for TerminalPanel {
                 let term = self.term.clone();
                 move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
                     // Clear empty selections (single click without drag)
-                    if let Ok(mut t) = term.lock() {
-                        let should_clear = t
-                            .selection
-                            .as_ref()
-                            .map_or(false, |s| s.is_empty());
-                        if should_clear {
-                            t.selection = None;
-                        }
+                    if let Ok(mut t) = term.lock()
+                        && t.selection.as_ref().is_some_and(|s| s.is_empty())
+                    {
+                        t.selection = None;
                     }
                     cx.notify(entity_id);
                 }
@@ -545,8 +876,12 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            .focus(|style| style.border_color(theme::accent()).border_1())
+            .focus(|style: StyleRefinement| style.border_color(theme::accent()).border_1())
             .child(terminal_el);
+
+        if has_hovered_url {
+            content = content.cursor(CursorStyle::PointingHand);
+        }
 
         if self.closed {
             content = content.child(
@@ -558,6 +893,28 @@ impl Render for TerminalPanel {
             );
         }
 
-        content
+        // Wrap in a vertical container with optional search overlay on top.
+        let mut wrapper = div().flex().flex_col().size_full();
+        if let Some(overlay) = &self.search_overlay {
+            wrapper = wrapper.child(overlay.clone());
+        }
+        wrapper = wrapper.child(content);
+        wrapper
     }
+}
+
+/// Escape special regex characters for literal string matching.
+fn escape_regex(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 8);
+    for ch in input.chars() {
+        match ch {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^'
+            | '$' => {
+                result.push('\\');
+                result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
 }
