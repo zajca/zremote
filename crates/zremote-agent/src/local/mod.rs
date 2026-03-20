@@ -1,6 +1,5 @@
 mod routes;
 mod state;
-mod static_files;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -38,13 +37,12 @@ fn expand_tilde(path: &str) -> PathBuf {
 
 /// Start the local mode HTTP server.
 ///
-/// This runs an Axum server with embedded web UI, SQLite database,
-/// and all necessary endpoints for managing local terminal sessions
-/// and agentic loop monitoring.
+/// This runs an Axum server with SQLite database and all necessary
+/// endpoints for managing local terminal sessions and agentic loop monitoring.
+/// The GPUI desktop client connects to this server via REST + WebSocket.
 pub async fn run_local(
     port: u16,
     db_path: &str,
-    web_dir: Option<&str>,
     bind: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_file = expand_tilde(db_path);
@@ -196,7 +194,7 @@ pub async fn run_local(
     upsert_local_host(&pool, &host_id, &hostname).await?;
 
     // Build router
-    let router = build_router(state, web_dir)?;
+    let router = build_router(state)?;
 
     // Parse bind address
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
@@ -224,9 +222,8 @@ pub async fn run_local(
 
 fn build_router(
     state: Arc<LocalAppState>,
-    web_dir: Option<&str>,
 ) -> Result<Router, Box<dyn std::error::Error>> {
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
         // Hosts endpoints (synthetic local host)
@@ -455,24 +452,7 @@ fn build_router(
             get(routes::terminal::ws_handler),
         )
         // Events WebSocket
-        .route("/ws/events", get(routes::events::ws_handler));
-
-    // Static file serving: filesystem or embedded
-    if let Some(dir) = web_dir {
-        let dir_path = PathBuf::from(dir);
-        if !dir_path.is_dir() {
-            return Err(format!("web directory does not exist: {dir}").into());
-        }
-        tracing::info!(web_dir = %dir, "serving web UI from filesystem");
-        router = router.fallback(move |uri: axum::http::Uri| {
-            static_files::filesystem_static_handler(uri, dir_path.clone())
-        });
-    } else {
-        tracing::info!("serving embedded web UI");
-        router = router.fallback(static_files::static_handler);
-    }
-
-    let router = router
+        .route("/ws/events", get(routes::events::ws_handler))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -913,13 +893,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_router_with_embedded_assets() {
+    async fn build_router_works() {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
 
-        let router = build_router(state, None).unwrap();
+        let router = build_router(state).unwrap();
 
         // Test /health endpoint
         let response = router
@@ -936,24 +916,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_router_with_invalid_web_dir_fails() {
-        let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
-        let shutdown = CancellationToken::new();
-        let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
-
-        let result = build_router(state, Some("/nonexistent/path"));
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn router_api_mode_endpoint() {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
 
-        let router = build_router(state, None).unwrap();
+        let router = build_router(state).unwrap();
 
         let response = router
             .oneshot(
@@ -980,7 +949,7 @@ mod tests {
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
 
-        let router = build_router(state, None).unwrap();
+        let router = build_router(state).unwrap();
 
         let response = router
             .oneshot(
@@ -1009,7 +978,7 @@ mod tests {
         let host_id = Uuid::new_v4();
         let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
 
-        let router = build_router(state, None).unwrap();
+        let router = build_router(state).unwrap();
 
         let response = router
             .oneshot(

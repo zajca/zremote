@@ -5,50 +5,44 @@ Remote machine management platform with terminal sessions, agentic loop control,
 ## Architecture
 
 ```
-SERVER MODE:  Browser <--HTTP/WS--> Server (Axum) <--WS--> Agent (on remote host)
+SERVER MODE:  GPUI App <--REST/WS--> Server (Axum) <--WS--> Agent (on remote host)
 
-LOCAL MODE:   Browser <--HTTP/WS--> Agent (Axum HTTP/WS server)
-                                    |-- Serves web UI (rust-embed)
-                                    |-- REST API (/api/*)
-                                    |-- Terminal WS (/ws/terminal/:id)
-                                    |-- Events WS (/ws/events)
-                                    |-- SQLite (~/.zremote/local.db)
-                                    |-- PTY sessions (direct)
-                                    |-- Agentic detection
-                                    |-- Projects / Knowledge
+LOCAL MODE:   GPUI App <--REST/WS--> Agent (Axum HTTP/WS server)
+                                     |-- REST API (/api/*)
+                                     |-- Terminal WS (/ws/terminal/:id)
+                                     |-- Events WS (/ws/events)
+                                     |-- SQLite (~/.zremote/local.db)
+                                     |-- PTY sessions (direct)
+                                     |-- Agentic detection
+                                     |-- Projects / Knowledge
 ```
 
+- **GUI** (`zremote-gui`): Native GPUI desktop client. Connects to server or agent via REST + WebSocket. Terminal rendering via alacritty_terminal with per-character glyph caching and LRU cell run cache.
 - **Core** (`zremote-core`): Shared types, DB init, error handling, query functions, message processing. Used by both server and agent.
-- **Server** (`zremote-server`): Central hub for multi-host deployments. Axum web server with SQLite, manages multiple agents and browser clients.
-- **Agent** (`zremote-agent`): Runs on each machine. In server mode, connects to server via WebSocket. In local mode, serves the web UI and all APIs directly.
+- **Server** (`zremote-server`): Central hub for multi-host deployments. Axum web server with SQLite, manages multiple agents and GPUI clients.
+- **Agent** (`zremote-agent`): Runs on each machine. In server mode, connects to server via WebSocket. In local mode, serves all APIs directly.
 - **Protocol** (`zremote-protocol`): Shared message types for WebSocket communication between server and agent.
-- **Web** (`web/`): React + TypeScript frontend with xterm.js terminal, zustand state, recharts analytics. Detects mode automatically via `/api/mode`.
 
 ## Quick Start
 
 ```bash
-nix develop                           # Enter dev shell (Rust, Bun, SQLite, etc.)
+nix develop                           # Enter dev shell (Rust, system libs, etc.)
 ```
 
-### Local Mode (single machine, no server needed)
+### GPUI Desktop Client
 
 ```bash
-# Build web UI first (embedded into agent binary)
-cd web && bun install && bun run build && cd ..
+# Build and run (connects to localhost:3000 by default)
+cargo run -p zremote-gui
 
-# Run agent in local mode
-cargo run -p zremote-agent -- local --port 3000
+# Connect to a specific server
+cargo run -p zremote-gui -- --server http://myserver:3000
 
-# Open browser at http://127.0.0.1:3000
-```
+# Or use env var (same as agent uses, WS path is auto-stripped)
+ZREMOTE_SERVER_URL=ws://myserver:3000/ws/agent cargo run -p zremote-gui
 
-For development with hot-reload:
-```bash
-# Terminal 1: Agent with filesystem-served UI
-cargo run -p zremote-agent -- local --port 3000 --web-dir ./web/dist/
-
-# Terminal 2: Vite dev server (proxies API to agent)
-cd web && bun run dev                 # :5173 proxies to :3000
+# Production server (uses env vars from config file)
+env $(cat ~/.config/zremote/.env | xargs) cargo run -p zremote-gui
 ```
 
 ### Server Mode (multi-host)
@@ -60,8 +54,18 @@ ZREMOTE_TOKEN=secret cargo run -p zremote-server
 # Agent (on remote host or another terminal)
 ZREMOTE_SERVER_URL=ws://localhost:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent
 
-# Web UI
-cd web && bun install && bun run dev  # Vite dev server on :5173, proxies to :3000
+# GPUI client
+cargo run -p zremote-gui -- --server http://localhost:3000
+```
+
+### Local Mode (single machine, no server needed)
+
+```bash
+# Run agent in local mode
+cargo run -p zremote-agent -- local --port 3000
+
+# Connect GPUI client
+cargo run -p zremote-gui -- --server http://localhost:3000
 ```
 
 ### MCP Server Mode
@@ -73,19 +77,24 @@ cargo run -p zremote-agent -- mcp-serve --project /path/to/project
 
 ## Development Workflow
 
+### GPUI Client Development
+
 ```bash
-./scripts/dev-setup.sh       # First-time setup (checks tools, installs deps, builds)
-./scripts/dev.sh             # Full hot-reload: agent :3000 + Vite :5173
-./scripts/dev.sh 3001        # Override agent port
-./scripts/dev-backend.sh     # Backend only: agent :3000 with embedded UI
+nix develop                              # Required for system libs (xcb, xkbcommon, freetype)
+cargo run -p zremote-gui                 # Build and run
+cargo check -p zremote-gui               # Fast check (no linking, no system libs needed)
+cargo clippy -p zremote-gui              # Lint
 ```
 
-**Full dev** (`dev.sh`): Open `http://localhost:5173` -- Vite proxies API/WS to agent, frontend hot-reloads on save.
-**Backend only** (`dev-backend.sh`): Open `http://localhost:3000` -- embedded UI, no Vite needed.
+**System library dependencies** (provided by nix develop): `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, `libfreetype`. Without these, `cargo check` works but `cargo build` fails at linking.
 
-### Simultaneous Dev + Production
+**Headless testing**: `cargo run -p zremote-gui -- --exit-after 5` auto-exits after N seconds (for screenshot capture).
 
-Local mode dev runs on a separate port with its own DB (`~/.zremote/local.db`), no conflict with production agent on the same host.
+### Backend Development
+
+```bash
+./scripts/dev-setup.sh       # First-time setup (checks tools, installs deps)
+```
 
 ### Protocol Compatibility
 
@@ -110,11 +119,11 @@ Local mode dev runs on a separate port with its own DB (`~/.zremote/local.db`), 
 | Variable | Required | Used by | Default | Description |
 |---|---|---|---|---|
 | `ZREMOTE_TOKEN` | Yes | Server + Agent | - | Shared authentication token |
-| `ZREMOTE_SERVER_URL` | Yes | Agent | - | WebSocket URL, e.g. `ws://host:3000/ws/agent` |
+| `ZREMOTE_SERVER_URL` | Yes | Agent + GUI | - | WebSocket URL, e.g. `ws://host:3000/ws/agent` |
 | `DATABASE_URL` | No | Server | `sqlite:zremote.db` | SQLite connection string |
 | `ZREMOTE_PORT` | No | Server | `3000` | HTTP/WS listen port |
 | `TELEGRAM_BOT_TOKEN` | No | Server | - | Enables Telegram bot integration |
-| `RUST_LOG` | No | Both | `info` | Tracing filter level |
+| `RUST_LOG` | No | All | `info` | Tracing filter level |
 
 ### Local Mode
 
@@ -122,12 +131,42 @@ Local mode dev runs on a separate port with its own DB (`~/.zremote/local.db`), 
 |---|---|---|---|
 | `RUST_LOG` | No | `info` | Tracing filter level |
 
-Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (127.0.0.1), `--web-dir` (embedded)
+Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (127.0.0.1)
+
+### GUI CLI
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `--server` | `ZREMOTE_SERVER_URL` | `http://localhost:3000` | Server URL (http/ws, path auto-stripped) |
+| `--exit-after` | - | - | Auto-exit after N seconds (headless testing) |
 
 ## Crate Structure
 
 ```
 crates/
+  zremote-gui/          Native GPUI desktop client
+    Cargo.toml           deps: gpui, alacritty_terminal, tokio, reqwest, flume, rust-embed, clap
+    assets/
+      icons/             12 Lucide SVG icons (embedded via rust-embed)
+    src/
+      main.rs            CLI (clap), tokio runtime, GPUI Application launch, AssetSource registration
+      app_state.rs       AppState: API client, tokio handle, event receiver, mode
+      api.rs             ApiClient: REST client (reqwest) for hosts, sessions, projects
+      types.rs           Host, Session, Project, ServerEvent, TerminalServerMessage, TerminalClientMessage
+      theme.rs           Color palette (16 functions) mapped from CSS @theme tokens
+      icons.rs           Icon enum (12 variants: Plus, X, Pin, PinOff, GitBranch, FolderGit,
+                         SquareTerminal, Server, Wifi, WifiOff, ChevronRight, Loader) + icon() helper
+      assets.rs          rust-embed AssetSource impl for GPUI
+      terminal_ws.rs     Terminal WebSocket: connect() → TerminalWsHandle (input_tx, output_rx, resize_tx)
+      events_ws.rs       Events WebSocket with auto-reconnect (exponential backoff 1s-30s)
+      views/
+        mod.rs           Module re-exports
+        main_view.rs     Root view: sidebar + terminal panel, SidebarEvent routing, event polling
+        sidebar.rs       Hierarchical sidebar: hosts → projects → sessions, pin/unpin, create/close
+        terminal_panel.rs  Terminal state: PTY output reader, cursor blink, keyboard/mouse/scroll input
+        terminal_element.rs  GPUI Element: monospace grid rendering, CellRunCache (LRU 8),
+                             GlyphCache (per-char ~500 entries), paint pipeline (bg → text → selection → cursor)
+
   zremote-protocol/     Shared types: AgentMessage, ServerMessage, AgenticAgentMessage, etc.
     src/
       lib.rs             Top-level re-exports
@@ -170,7 +209,7 @@ crates/
       routes/
         agents.rs        Agent WebSocket handler, heartbeat monitor, message routing
         sessions.rs      Session CRUD - delegates to core::queries::sessions
-        terminal.rs      Terminal WebSocket relay (browser <-> agent)
+        terminal.rs      Terminal WebSocket relay (GUI client <-> agent)
         agentic.rs       Loop queries - delegates to core::queries::loops
         permissions.rs   Permission rules - delegates to core::queries::permissions
         projects.rs      Project management - delegates to core::queries::projects
@@ -193,7 +232,7 @@ crates/
       pty.rs             PtySession wrapper (portable-pty), spawn_blocking for I/O
       tmux.rs            TmuxSession - persistent sessions via tmux, FIFO-based I/O
       session.rs         SessionManager - SessionBackend enum (Pty|Tmux), discover_existing()
-      build.rs           Ensures web/dist/ exists for rust-embed
+      build.rs           Build-time checks
       agentic/           Loop detection & processing
         detector.rs      BFS process tree inspection for agentic tools
         manager.rs       AgenticLoopManager - detection, output processing, user actions
@@ -224,12 +263,12 @@ crates/
         mod.rs           run_local() - Axum server, PTY output loop, agentic detection,
                          hooks server, graceful shutdown
         state.rs         LocalAppState - DB, sessions, agentic, hooks, knowledge
-        static_files.rs  rust-embed web UI serving + filesystem dev mode, SPA fallback
+        static_files.rs  Static file serving (legacy, not used by GPUI client)
         routes/
           health.rs      /health, /api/mode (returns "local")
           hosts.rs       Synthetic single host
           sessions.rs    Session CRUD + direct PTY spawning
-          terminal.rs    WebSocket terminal relay (browser <-> PTY, no server hop)
+          terminal.rs    WebSocket terminal relay (client <-> PTY, no server hop)
           events.rs      ServerEvent broadcast WebSocket
           agentic.rs     Loop queries, metrics, user actions
           projects.rs    Project scan/git - calls ProjectScanner/GitInspector directly
@@ -241,43 +280,104 @@ crates/
           claude_sessions.rs  Claude task lifecycle + discovery
 ```
 
-## Web Structure
+## GPUI Desktop Client
+
+### Data Flow
 
 ```
-web/src/
-  App.tsx               Main layout, routing, ModeProvider wrapper
-  main.tsx              Entry point
-  lib/
-    api.ts              REST API client (namespace pattern: api.hosts, api.sessions, etc.)
-    connection.ts       Mode detection (detectMode -> /api/mode, cached)
-  stores/
-    agentic-store.ts    Zustand store for loops, tool calls, transcripts
-    knowledge-store.ts  Zustand store for knowledge base, memories, indexing
-    claude-task-store.ts  Zustand store for Claude tasks lifecycle
-  hooks/
-    useMode.ts          ModeProvider context + useMode() hook (mode, isLocal)
-    useHosts.ts         Fetch hosts list
-    useSessions.ts      Fetch sessions for host (listens to real-time events)
-    useProjects.ts      Fetch projects for host (listens to real-time events)
-    useAgenticLoops.ts  Fetch loops for session (15s fallback polling)
-    useRealtimeUpdates.ts  Master WebSocket listener for all ServerEvent types
-    useWebSocket.ts     Low-level WebSocket abstraction with auto-reconnect
-  components/
-    Terminal.tsx         xterm.js terminal wrapper
-    agentic/            AgenticLoopPanel, TranscriptView, ToolCallQueue, CostTracker, ContextUsageBar
-    sidebar/            HostItem, SessionItem, ProjectItem
-    layout/             AppLayout, Sidebar, CommandPalette, ReconnectBanner, Toast, ErrorBoundary
-    settings/           SettingsPage (hides per-host overrides in local mode)
-    ui/                 Button, Input, Badge, IconButton, StatusDot
-  pages/                WelcomePage, HostPage, SessionPage, AgenticLoopPage, ProjectPage,
-                        AnalyticsDashboard (lazy), HistoryBrowser (lazy)
-  types/
-    agentic.ts          AgenticLoop, ToolCall, TranscriptEntry, PermissionRule
-    knowledge.ts        KnowledgeBase, KnowledgeMemory, SearchResult
-    claude-session.ts   ClaudeTask, CreateClaudeTaskRequest, DiscoveredClaudeSession
+┌─ Tokio runtime (background threads)
+│  ├─ events_ws::run_events_ws() → ServerEvent flume channel (256)
+│  └─ terminal_ws connections (one per active session)
+│     ├─ Writer task: input_rx + resize_rx → JSON WS frames
+│     └─ Reader task: JSON WS frames → base64-decode → TerminalEvent output_rx
+│
+├─ GPUI main thread
+│  └─ MainView (root)
+│     ├─ Event polling: reads flume event_rx → dispatches to sidebar
+│     ├─ SidebarView
+│     │  ├─ Loads: hosts, sessions, projects (async via tokio handle)
+│     │  ├─ Manages: pin/unpin, create/close session
+│     │  └─ Emits: SessionSelected, SessionClosed
+│     └─ TerminalPanel (active session)
+│        ├─ PTY output reader: reads output_rx → advances alacritty Term → cx.notify()
+│        ├─ Cursor blink: toggles every 500ms
+│        ├─ Input: keyboard encoding, mouse selection, pixel scroll → line delta
+│        └─ TerminalElement (GPUI Element impl)
+│           ├─ request_layout(): measures cell size from font metrics
+│           ├─ prepaint(): resizes term to available bounds
+│           └─ paint(): drain scroll → lock term → cache cell runs → paint layers
 ```
 
-Stack: React 19, TypeScript 5.8, Vite 6, Tailwind CSS 4, zustand 5, xterm.js 6, recharts 3, cmdk 1.1
+### SVG Icon System
+
+GPUI's `svg()` element loads SVGs via `AssetSource`, renders as alpha-channel masks, and tints with `.text_color()`. Icons are Lucide SVGs embedded via `rust-embed`.
+
+```rust
+// Usage
+use crate::icons::{Icon, icon};
+
+icon(Icon::Plus).size(px(14.0)).text_color(theme::text_secondary())
+```
+
+**Adding new icons:**
+1. Download SVG from Lucide (`https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/{name}.svg`)
+2. Save to `crates/zremote-gui/assets/icons/{name}.svg`
+3. Add variant to `Icon` enum in `icons.rs` with path mapping
+4. Use `icon(Icon::NewVariant)` in views
+
+**Important:** `gpui::Result` is a re-export of `anyhow::Result`. Do not add `anyhow` as a direct dependency.
+
+### Terminal Rendering
+
+The terminal uses `alacritty_terminal::Term` for VTE processing and GPUI's `Element` trait for rendering.
+
+**Font**: JetBrainsMono Nerd Font Mono, 14px. Cell size derived from advance width of 'M' and ascent + |descent|.
+
+**Caching strategy** (critical for smooth 60fps):
+- **CellRunCache** (LRU, 8 slots): Keyed by `(display_offset, content_generation)`. Caches the full viewport's cell runs. Handles scrollback without rebuilding.
+- **GlyphCache** (per-character, ~500 entries): Keyed by `(char, bold, italic, wide, color)`. ~100% hit rate after first frame.
+- **content_generation** (AtomicU64): Bumped on every PTY output. Cache checks this to invalidate.
+
+**Scroll strategy** (lock-free):
+1. Pixel deltas accumulate in `scroll_px` (Rc<Cell<f32>>)
+2. Converted to line deltas when crossing `cell_height`
+3. Stored in `pending_scroll_delta` (AtomicI32) -- no mutex needed
+4. Drained once per `paint()` → `term.scroll_display(Scroll::Delta)`
+
+**Paint pipeline** (strict order):
+1. `paint_backgrounds()` -- fill rectangles for non-default bg cells
+2. `paint_text()` -- two-pass: shape missing glyphs, then paint cached glyphs + decorations
+3. `paint_selection()` -- semi-transparent highlight
+4. `paint_cursor()` -- block/beam/underline, hidden when scrolled back
+
+### Theme
+
+Color palette in `theme.rs` maps to the same tokens as the server's CSS theme:
+
+| Function | Hex | Usage |
+|---|---|---|
+| `bg_primary()` | `#111113` | Main background |
+| `bg_secondary()` | `#16161a` | Sidebar, panels |
+| `bg_tertiary()` | `#1a1a1e` | Hover states, selected items |
+| `text_primary()` | `#eeeeee` | Primary text |
+| `text_secondary()` | `#8b8b8b` | Secondary text, labels |
+| `text_tertiary()` | `#5a5a5a` | Muted text, metadata |
+| `accent()` | `#5e6ad2` | Accent color (pins, active states) |
+| `border()` | `#2a2a2e` | Borders, separators |
+| `success()` | `#4ade80` | Online, active status |
+| `error()` | `#ef4444` | Close hover, error states |
+| `warning()` | `#fbbf24` | Dirty git indicator |
+| `terminal_bg()` | `#0a0a0b` | Terminal background |
+| `terminal_cursor()` | `#cccccc` | Terminal cursor |
+
+### GPUI Patterns
+
+- **Thread model**: GPUI owns the main thread. Tokio runtime on background threads. Use `tokio_handle.spawn()` for async I/O, then `this.update(cx, ...)` to apply results.
+- **Reactivity**: `cx.notify()` triggers re-render. Called after state changes, PTY output, cursor blink, event polling.
+- **Parent-child comms**: `cx.emit(SidebarEvent::SessionSelected { ... })` + `cx.subscribe(&sidebar, ...)` in parent.
+- **Weak refs in async**: `cx.spawn()` closures receive `WeakEntity<Self>` -- use `this.update(cx, ...)` which no-ops if entity is dropped.
+- **Focus**: `FocusHandle` for keyboard capture. Terminal auto-focuses on session selection.
+- **Channels**: `flume::bounded` for tokio<->GPUI communication (256 capacity for events, terminal I/O).
 
 ## Database
 
@@ -304,13 +404,12 @@ SQLite with WAL journal mode. Migrations auto-run at startup. Migrations live in
 - **AgenticLoopStore**: `Arc<DashMap<AgenticLoopId, AgenticLoopState>>` - lock-free concurrent map for high-frequency loop updates.
 - **PTY I/O**: Uses `tokio::task::spawn_blocking` because PTY read is blocking. 4KB read buffer. Signals EOF with empty vec.
 - **Tmux persistence**: When tmux is available, sessions spawn inside `tmux -L zremote` and survive agent restarts. Agent detaches on shutdown, reattaches on reconnect. Falls back to raw PTY when tmux is unavailable.
-- **Session suspension**: When a persistent-session agent disconnects, server marks sessions as `suspended` (not `closed`), keeps scrollback, notifies browsers. On reconnect, agent sends `SessionsRecovered` and sessions resume seamlessly.
+- **Session suspension**: When a persistent-session agent disconnects, server marks sessions as `suspended` (not `closed`), keeps scrollback, notifies clients. On reconnect, agent sends `SessionsRecovered` and sessions resume seamlessly.
 - **Auth**: SHA-256 hash stored in DB, constant-time comparison via `subtle` crate. Token never logged.
-- **Reconnection**: Agent reconnects with exponential backoff (1s min, 300s max, 25% jitter).
-- **Event broadcast**: `tokio::sync::broadcast` channel (1024 capacity) for server events to browser WebSocket clients.
+- **Reconnection**: Agent reconnects with exponential backoff (1s min, 300s max, 25% jitter). Events WebSocket (GPUI client) reconnects with 1s-30s backoff.
+- **Event broadcast**: `tokio::sync::broadcast` channel (1024 capacity) for server events to connected clients.
 - **Channels**: mpsc channels for outbound (256), PTY output (256), agentic messages (64). Sender task multiplexes onto WebSocket.
-- **Local mode direct PTY**: In local mode, browser connects directly to agent's PTY sessions (no server hop). PTY output loop reads output, appends to scrollback, sends to browser senders, and feeds to agentic manager.
-- **Mode detection**: Web UI calls `GET /api/mode` on load. Returns `{"mode":"server"}` or `{"mode":"local"}`. Cached for session lifetime. Drives conditional rendering (single host, no Telegram settings, etc.).
+- **Mode detection**: GPUI client calls `GET /api/mode` at startup. Returns `{"mode":"server"}` or `{"mode":"local"}`. Cached for app lifetime.
 
 ## Persistent Terminal Sessions (tmux)
 
@@ -336,7 +435,7 @@ tmux must be installed on the remote host. The agent auto-detects it at startup 
 1. **Agent starts**: `detect_tmux()` checks for tmux in PATH
 2. **Session created**: `tmux -L zremote new-session -d -s zremote-{uuid}` instead of `portable-pty`
 3. **I/O**: Write directly to `/dev/pts/N` (raw bytes), read via FIFO (`pipe-pane`)
-4. **Agent disconnects**: Sessions marked `suspended` on server, browsers notified, scrollback preserved
+4. **Agent disconnects**: Sessions marked `suspended` on server, clients notified, scrollback preserved
 5. **Agent reconnects**: `tmux -L zremote list-sessions` discovers surviving sessions, sends `SessionsRecovered` to server, sessions resume as `active`
 6. **User closes session**: `tmux kill-session` (respects user intent)
 7. **Stale cleanup**: Sessions older than 24h are killed on agent startup
@@ -357,24 +456,9 @@ tmux must be installed on the remote host. The agent auto-detects it at startup 
 | `closed` | Session terminated (user close, process exit, or unrecovered after agent reconnect) |
 | `error` | Session failed to create |
 
-### Verification
-
-```bash
-# Check if tmux backend is active (agent logs at startup)
-# "tmux detected, persistent sessions enabled"
-
-# List active zremote tmux sessions
-tmux -L zremote ls
-
-# Simulate agent crash and recovery
-kill -9 <agent_pid>          # Sessions survive in tmux
-tmux -L zremote ls          # Still there
-# Restart agent              # Auto-discovers and resumes sessions
-```
-
 ### Agentic loop detection
 
-Unchanged. `detector.rs` does BFS from shell PID. With tmux, shell PID is a child of the tmux server (not agent). BFS still works because detection scans from the shell PID. The 3-second polling in `check_sessions()` re-detects running agentic tools after recovery.
+`detector.rs` does BFS from shell PID. With tmux, shell PID is a child of the tmux server (not agent). BFS still works because detection scans from the shell PID. The 3-second polling in `check_sessions()` re-detects running agentic tools after recovery.
 
 ## Protocol Conventions
 
@@ -386,51 +470,37 @@ Unchanged. `detector.rs` does BFS from shell PID. With tmux, shell PID is a chil
 ## Testing
 
 ```bash
-cargo test --workspace          # 1117 Rust tests (610 agent + 176 core + 94 protocol + 237 server)
-cargo clippy --workspace        # Lint (all=deny, pedantic=warn)
-cd web && bun run test          # Vitest (515 tests)
-cd web && bun run typecheck     # tsc --noEmit
+cargo test --workspace              # Rust tests (agent + core + protocol + server)
+cargo clippy --workspace            # Lint (all=deny, pedantic=warn)
+
+# GUI only
+cargo check -p zremote-gui          # Fast compilation check (no system libs needed)
+cargo clippy -p zremote-gui         # Lint GUI crate
 
 # Coverage
-cargo llvm-cov --workspace --html    # Rust coverage → target/llvm-cov/html/
-cargo llvm-cov --workspace           # Rust coverage text summary
-cd web && bun run test:coverage       # Frontend coverage → web/coverage/
-
-# Full coverage gate check (tests + thresholds)
-./scripts/check-coverage.sh          # Backend ≥80%, Frontend ≥75%
-./scripts/check-coverage.sh --quick  # Tests only, skip coverage measurement
+cargo llvm-cov --workspace --html   # Rust coverage → target/llvm-cov/html/
+cargo llvm-cov --workspace          # Rust coverage text summary
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.
 
-### Coverage Thresholds
-
-| Target | Threshold | Current |
-|--------|-----------|---------|
-| Backend (lines) | 80% | ~84% |
-| Frontend (statements) | 75% | ~82% |
-
-**Enforcement:**
-- **Pre-commit hook** (`.git/hooks/pre-commit`): runs `cargo fmt --check`, `cargo clippy`, `cargo test`, and frontend `typecheck` + `test` (when web/ files changed). Does NOT run coverage (too slow).
-- **Frontend thresholds** in `vite.config.ts`: `bun run test:coverage` fails if coverage drops below 75% statements/lines or 70% branches/functions.
-- **Manual gate**: `./scripts/check-coverage.sh` runs full coverage for both backend and frontend, fails on regression below thresholds.
-- Run `./scripts/check-coverage.sh` before merging significant changes.
-
 ## Build
 
 ```bash
-# Full workspace build
+nix develop                          # Enter dev shell (required for system libs)
+
+# GUI client
+cargo build -p zremote-gui           # Native binary with embedded SVG assets
+
+# Full workspace
 cargo build --workspace
 
-# Agent with local mode (default feature, includes embedded web UI)
-cd web && bun run build           # Produces web/dist/ (required for rust-embed)
-cargo build -p zremote-agent     # Embeds web/dist/ into binary
+# Agent with local mode
+cargo build -p zremote-agent
 
 # Agent without local mode (smaller binary, server mode only)
 cargo build -p zremote-agent --no-default-features
 ```
-
-The `local` cargo feature (default-on) enables: `rust-embed`, `mime_guess`, `tower-http`, `sqlx` as optional deps on the agent. The `build.rs` ensures `web/dist/` directory exists at compile time.
 
 ## Implementation Workflow
 
@@ -464,20 +534,18 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 - **Code review**: Spawn `developer:code-reviewer` teammate on the worktree changes
   - Checks: dead code, missing wiring, type duplication, incomplete extraction, security issues
   - If review finds issues: send message to implementation teammate (resume) to fix. No merge until clean.
-- **UX review** (for phases that touch UI or API surface):
+- **UX review** (for phases that touch UI):
   - Spawn a teammate to analyze the user-facing changes from the perspective of the end user
   - Checks:
-    - API consistency: Are new endpoints consistent with existing ones? Same naming, same response shapes, same error format.
     - UI coherence: Does the new UI fit the existing design language? No orphaned states, no dead-end flows, loading/error/empty states handled.
-    - Discoverability: Can the user find and use the new feature without reading docs? Are there entry points (sidebar, command palette, navigation)?
-    - Mode parity: If the feature exists in both server and local mode, does it behave the same from the user's perspective?
+    - Discoverability: Can the user find and use the new feature? Are there entry points (sidebar, keyboard shortcuts)?
+    - Mode parity: If the feature exists in both server and local mode, does it behave the same?
     - Degradation: What happens when the backend is unavailable, data is empty, or an operation fails? Does the UI communicate this clearly?
-  - The UX reviewer reads the modified component/route/API files plus the RFC, and reports issues with specific file:line references
+  - The UX reviewer reads the modified view/element files plus the RFC, and reports issues with specific file:line references
   - UX issues block merge the same way code review issues do
 - **Security review**: Spawn `developer:code-security` teammate on the worktree changes
   - Checks:
-    - Path traversal: Any file serving, file reads, or path construction from user input must validate resolved path stays within allowed directory.
-    - Injection: SQL (parameterized queries only), command injection (no shell interpolation of user input), XSS (sanitize before rendering).
+    - Injection: SQL (parameterized queries only), command injection (no shell interpolation of user input).
     - Auth/authz: New endpoints must enforce the same auth as existing ones. Local mode endpoints must not leak to network (bind 127.0.0.1).
     - Secrets: No tokens, keys, or credentials in logs, error messages, or responses. Check tracing calls and error formatting.
     - Denial of service: Unbounded allocations from user input (scrollback limits, query result limits, request body size).
@@ -489,7 +557,7 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 ### Merge (after all reviews pass)
 - Team lead commits in worktree with descriptive message (what changed, why, key design decisions)
 - Merge to main (fast-forward when possible)
-- Run full verification on main: `cargo test --workspace`, `cargo clippy --workspace`, `bun run typecheck`
+- Run full verification on main: `cargo test --workspace`, `cargo clippy --workspace`
 - Clean up worktree and branch
 - Mark task as completed, assign next phase to teammate or spawn new one
 
@@ -518,11 +586,11 @@ The team lead (you, the main agent) is the single point of accountability. Teamm
 **Completeness -- zero tolerance for partial delivery:**
 - The RFC is the contract. If the RFC says "6 functions in queries/foo.rs", there must be exactly 6 public functions. Not 4 with a "remaining 2 are trivial" comment.
 - Test coverage must match the RFC test plan item-for-item. A teammate claiming "covered by existing tests" must cite the exact test function. Verify by reading it.
-- Frontend components must handle loading, error, and empty states unless the RFC explicitly excludes one.
+- GPUI views must handle loading, error, and empty states unless the RFC explicitly excludes one.
 
 **No partial merges:**
 - If review finds issues, ALL must be fixed in the same worktree before merge. No "merge now, fix in next phase" or TODO comments for known gaps.
-- If a fix introduces new failures (tests, clippy, typecheck), those are also blocking. The worktree must be green.
+- If a fix introduces new failures (tests, clippy), those are also blocking. The worktree must be green.
 - Exception: cosmetic suggestions (naming preferences, comment wording) may be deferred with explicit acknowledgment in the commit message.
 
 **Scope discipline:**
@@ -530,12 +598,11 @@ The team lead (you, the main agent) is the single point of accountability. Teamm
 - Reject omissions equally: "this was harder than expected so I simplified" is not acceptable. If the RFC scope is wrong, escalate to the user for amendment -- do not silently reduce scope.
 
 **Review depth -- what to look for in diffs:**
-- Missing `mod.rs` or `lib.rs` re-exports (code exists but not wired into module tree).
+- Missing `mod.rs` re-exports (code exists but not wired into module tree).
 - Missing route registrations in `main.rs` (handler exists but no route points to it).
-- Deserialization mismatches: field names in Rust structs vs JSON keys vs TypeScript types vs SQL columns.
+- Deserialization mismatches: field names in Rust structs vs JSON keys vs SQL columns.
 - Off-by-one in protocol: agent sends `FooResult`, server matches on `FooResponse` -- compiles fine, silently drops messages at runtime.
 - Tests that assert `Ok(())` without checking the actual result value.
-- Frontend API calls with wrong HTTP method or path that will 404 at runtime.
 
 **Rollback protocol:**
 - Fundamental architectural problem (wrong crate boundary, security vulnerability in design): revert worktree, update RFC if needed, re-assign with corrected instructions.
@@ -547,56 +614,43 @@ The UX bar for this project is **top-in-class** -- every interaction must feel p
 
 **Verification protocol (mandatory for every UI-touching phase):**
 - Walk through every interaction path: initial load, data arrives, empty state, error state, window resize, navigate away and back. Each must be visually complete.
-- Verify the UX reviewer covered all states, not just the happy path. If the reviewer report mentions 2 states but the component has 5, send the reviewer back.
-- Open the component at mobile-width (`max-w-sm`) and wide (`> 1400px`). Layout must not break, overflow, or waste space at either extreme.
-- Check that new UI is reachable: sidebar entry, route, command palette registration -- at least one entry point. No orphaned pages.
+- Verify the UX reviewer covered all states, not just the happy path. If the reviewer report mentions 2 states but the view has 5, send the reviewer back.
+- Test at different window sizes. Layout must not break, overflow, or waste space.
+- Check that new UI is reachable: sidebar entry, keyboard shortcut -- at least one entry point. No orphaned views.
 
 **Visual quality bar:**
 
-| Area | Standard | Reference |
-|------|----------|-----------|
-| **Loading** | Skeleton loaders that match the shape of loaded content. No bare "Loading..." text. Zero layout shift when data arrives. | *Current codebase uses text loading -- new components must use skeletons.* |
-| **Empty states** | Icon (lucide-react, 32px) + primary message (`text-sm text-text-secondary`) + CTA button. Centered with `gap-4 pt-24`. | `HostPage.tsx` lines 75-83 |
-| **Error states** | Inline recovery UI for page-level failures (retry button + explanation). Toast-only is insufficient for errors that block the entire view. | Toasts for transient errors, inline for blocking errors. |
-| **Transitions** | `duration-150` for color/opacity fades, `duration-200` for size/layout changes. No pop-in/pop-out. All interactive elements use `transition-colors duration-150` or `transition-all duration-150`. | `Button.tsx`, `IconButton.tsx` |
-| **Spacing** | Tailwind scale only. Cards: `p-4`. Page containers: `p-6`. Headers: `px-6 py-4`. List items: `px-3 py-2`. Gaps: `gap-1.5` through `gap-4`. No arbitrary pixel values. | `HostPage.tsx`, `SessionItem.tsx` |
-| **Typography** | 4-level hierarchy: `text-lg font-semibold` (page title), `text-sm` (body), `text-sm text-text-secondary` (secondary), `text-xs text-text-tertiary` (metadata/labels). Monospace data: `font-mono`. | Sidebar, HostPage, AgenticLoopPanel |
-| **Colors** | All colors from `index.css` `@theme` tokens. No hardcoded hex anywhere -- including recharts chart fills, strokes, and tooltip backgrounds. Use `getComputedStyle` or CSS custom properties. | `--color-accent: #5e6ad2`, `--color-bg-tertiary: #1a1a1e`, etc. |
+| Area | Standard |
+|------|----------|
+| **Loading** | Visual loading indicator (icon, animation). No bare text "Loading...". Zero layout shift when data arrives. |
+| **Empty states** | Icon + primary message + action hint. Centered in available space. |
+| **Error states** | Inline recovery UI for view-level failures. Toast-only is insufficient for errors that block the entire view. |
+| **Spacing** | Use GPUI `px()` values consistently. Follow existing sidebar patterns for reference. |
+| **Typography** | Hierarchy: semibold 14px (titles), 13px (headers), 12px (body), 11px (metadata), 10px (tertiary). |
+| **Colors** | All colors from `theme.rs` functions. No hardcoded hex in view code. |
+| **Icons** | Use `icon(Icon::X)` from `icons.rs`. Add new Lucide SVGs for new actions. |
 
 **Anti-patterns to reject** (block merge if found):
-1. Text-only loading states (`"Loading..."` without skeleton structure)
-2. Missing empty states (component renders blank when data array is empty)
-3. Toast-only page errors (page-level fetch failure shows only a toast, no inline recovery)
-4. Inline styles for layout (`style={{ marginTop: 12 }}` instead of Tailwind classes)
-5. Hardcoded color values (`#5e6ad2`, `rgb(90, 106, 210)` instead of `text-accent`, `bg-accent`)
-6. Missing hover/focus/disabled states on interactive elements
-7. Layout shift on load (content jumps when data arrives because container size changes)
-8. Unstyled scrollbars in panels (use `scrollbar-thin` or custom scrollbar classes)
-9. Icon buttons without `aria-label` (every `IconButton` / clickable icon must have one)
-10. Inconsistent border radius (mixing `rounded-md`, `rounded-lg`, `rounded-xl` without pattern)
-11. Orphaned visual states (component shows stale data from previous selection during loading)
-12. Duplicated utility code (`formatTokens`, `statusBadgeVariant`, `formatDuration`, `formatCost` -- extract to shared utils, do not copy between components)
+1. Text-only loading states without visual indicator
+2. Missing empty states (view renders blank when data is empty)
+3. Hardcoded color values instead of `theme::*()` functions
+4. Missing hover states on interactive elements
+5. Layout shift on load (content jumps when data arrives)
+6. Icon-only buttons without tooltip or clear visual affordance
+7. Orphaned visual states (view shows stale data during loading)
+8. Duplicated utility code -- extract to shared module
 
-**Accessibility baseline** (non-negotiable, block merge if missing):
-- Every interactive element reachable via keyboard (Tab order logical, no focus traps)
-- Visible focus rings: `focus-visible:ring-2 focus-visible:outline-none` on all interactive elements
-- `aria-label` on every icon-only button (reference: `IconButton.tsx` pattern)
-- `role="alert"` or `aria-live="polite"` on status changes that happen asynchronously (toast, inline error, loading-to-loaded transitions)
-- Color is never the sole indicator of state (pair with icon, text, or shape)
-- Minimum click target: `h-7 w-7` for icon buttons, `h-8` for text buttons (reference: `Button.tsx` size variants)
-- Form inputs have associated `<label>` with `htmlFor` (reference: `Input.tsx` pattern)
-
-**Performance perception:**
-- Visual feedback within 100ms for any action that triggers a fetch (spinner, skeleton, or optimistic update)
-- Optimistic updates for mutations where possible (toggle, delete, reorder) -- revert on error
-- Terminal component (`Terminal.tsx`) must never re-render from parent state changes. Memo and isolate.
-- Real-time data (WebSocket messages, PTY output) must use `requestAnimationFrame` batching -- never trigger React re-render per message
+**Performance:**
+- Visual feedback within 100ms for any action that triggers a fetch
+- Terminal element must never re-render from parent state changes (use caches and AtomicU64 generation)
+- PTY output must use `cx.notify()` batching -- never trigger re-render per byte
+- Scroll must be lock-free (AtomicI32 pending_scroll_delta pattern)
 
 ## Coding Conventions
 
 - Rust edition 2024, resolver v2
 - `unsafe_code = "deny"` workspace-wide
 - Clippy: `all = deny`, `pedantic = warn` (with `module_name_repetitions`, `must_use_candidate`, `missing_errors_doc`, `missing_panics_doc` allowed)
-- TypeScript strict mode, ESLint + Prettier
 - JSON structured logging with `tracing` (never log tokens or secrets)
 - Graceful shutdown via `CancellationToken` + SIGINT/SIGTERM handling
+- GPUI views: use `theme::*()` for all colors, `icon()` helper for all icons, `px()` for sizing

@@ -5,7 +5,7 @@ use axum::extract::State;
 
 use super::super::state::LocalAppState;
 
-/// Returns `{"mode": "local"}` so the web UI can detect local mode.
+/// Returns `{"mode": "local"}` so clients can detect local mode.
 pub async fn api_mode() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "mode": "local" }))
 }

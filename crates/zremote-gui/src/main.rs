@@ -2,7 +2,9 @@
 mod api;
 #[allow(dead_code)]
 mod app_state;
+mod assets;
 mod events_ws;
+mod icons;
 mod terminal_ws;
 #[allow(dead_code)]
 mod theme;
@@ -18,6 +20,7 @@ use gpui::*;
 
 use api::ApiClient;
 use app_state::AppState;
+use assets::Assets;
 use types::ServerEvent;
 use views::main_view::MainView;
 
@@ -112,7 +115,7 @@ fn main() {
     let exit_after = cli.exit_after;
 
     // Launch GPUI application on main thread
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         let app_state = app_state.clone();
         cx.open_window(window_options(), move |window, cx| {
             cx.new(|cx| MainView::new(app_state, window, cx))

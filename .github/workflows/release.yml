@@ -12,35 +12,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-web:
-    name: Build Web UI
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-        working-directory: web
-      - run: bun run build
-        working-directory: web
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist/
-          retention-days: 1
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: build-web
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist/
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features
@@ -48,14 +27,9 @@ jobs:
   test-rust:
     name: Test + Coverage (Rust)
     runs-on: ubuntu-latest
-    needs: build-web
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist/
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -88,23 +62,9 @@ jobs:
             exit 1
           fi
 
-  test-web:
-    name: Test + Coverage (Web)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-        working-directory: web
-      - run: bun run typecheck
-        working-directory: web
-      - name: Run tests with coverage (thresholds in vite.config.ts)
-        run: bun run test:coverage
-        working-directory: web
-
   build:
     name: Build (${{ matrix.target }})
-    needs: [lint, test-rust, test-web]
+    needs: [lint, test-rust]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -132,11 +92,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: web/dist/
 
       - name: Install cross
         if: matrix.use-cross
