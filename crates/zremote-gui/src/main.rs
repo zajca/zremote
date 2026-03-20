@@ -11,6 +11,7 @@ mod types;
 mod views;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use gpui::*;
@@ -31,6 +32,10 @@ struct Cli {
         default_value = "http://localhost:3000"
     )]
     server: String,
+
+    /// Auto-exit after N seconds (for headless screenshot capture).
+    #[arg(long)]
+    exit_after: Option<u64>,
 }
 
 /// Extract base HTTP URL from a server URL that may include a WS path.
@@ -104,6 +109,8 @@ fn main() {
         mode,
     });
 
+    let exit_after = cli.exit_after;
+
     // Launch GPUI application on main thread
     Application::new().run(move |cx: &mut App| {
         let app_state = app_state.clone();
@@ -111,6 +118,14 @@ fn main() {
             cx.new(|cx| MainView::new(app_state, window, cx))
         })
         .expect("failed to open window");
+
+        if let Some(seconds) = exit_after {
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                Timer::after(Duration::from_secs(seconds)).await;
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        }
     });
 }
 

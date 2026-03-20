@@ -43,6 +43,9 @@
             pkgs.libxcb
             pkgs.alsa-lib
             pkgs.cmake
+            # Headless screenshot testing (cage compositor + grim capture)
+            pkgs.cage
+            pkgs.grim
           ];
 
           shellHook = ''
