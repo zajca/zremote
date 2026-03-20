@@ -11,9 +11,11 @@ use gpui::*;
 use crate::theme;
 
 const FONT_SIZE: f32 = 14.0;
-const FONT_FAMILY: &str = "JetBrains Mono";
+const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 const CURSOR_BAR_WIDTH: f32 = 2.0;
 const CURSOR_UNDERLINE_HEIGHT: f32 = 2.0;
+/// Extra vertical padding per cell for comfortable line spacing (logical pixels).
+const CELL_PADDING_Y: f32 = 0.0;
 
 /// A run of consecutive cells on the same row sharing the same style.
 struct CellRun {
@@ -21,7 +23,13 @@ struct CellRun {
     fg: Hsla,
     bg: Option<Hsla>,
     bold: bool,
+    italic: bool,
     dim: bool,
+    underline: bool,
+    wavy_underline: bool,
+    strikethrough: bool,
+    /// All characters in this run are double-width (CJK / emoji).
+    wide: bool,
     col_start: usize,
     col_count: usize,
     row: usize,
@@ -32,6 +40,8 @@ struct CellRun {
 pub struct TerminalElement {
     term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
     resize_tx: flume::Sender<(u16, u16)>,
+    /// Whether the cursor should be painted (controlled by blink timer in the panel).
+    cursor_visible: bool,
 }
 
 pub struct TerminalElementLayoutState {
@@ -43,8 +53,13 @@ impl TerminalElement {
     pub fn new(
         term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
         resize_tx: flume::Sender<(u16, u16)>,
+        cursor_visible: bool,
     ) -> Self {
-        Self { term, resize_tx }
+        Self {
+            term,
+            resize_tx,
+            cursor_visible,
+        }
     }
 
     fn font() -> Font {
@@ -67,20 +82,40 @@ impl TerminalElement {
         }
     }
 
+    fn italic_font() -> Font {
+        Font {
+            family: SharedString::from(FONT_FAMILY),
+            features: FontFeatures::default(),
+            fallbacks: None,
+            weight: FontWeight::default(),
+            style: FontStyle::Italic,
+        }
+    }
+
+    fn bold_italic_font() -> Font {
+        Font {
+            family: SharedString::from(FONT_FAMILY),
+            features: FontFeatures::default(),
+            fallbacks: None,
+            weight: FontWeight::BOLD,
+            style: FontStyle::Italic,
+        }
+    }
+
     /// Measure monospace cell dimensions using font metrics.
     /// Uses advance() for precise glyph advance width instead of shape_line layout width.
-    /// On HiDPI displays, font metrics include the display scale factor,
-    /// so we divide by scale_factor to get logical pixel dimensions.
+    /// Font metrics (advance, ascent, descent) are computed from font_size in logical pixels,
+    /// so no scale factor correction is needed.
+    /// Adds CELL_PADDING_Y for comfortable line spacing.
     pub fn measure_cell(window: &mut Window) -> Option<(Pixels, Pixels)> {
         let text_system = window.text_system();
         let font = Self::font();
         let font_size = px(FONT_SIZE);
         let font_id = text_system.resolve_font(&font);
-        let scale = window.scale_factor();
-        let cell_width = text_system.advance(font_id, font_size, 'M').ok()?.width / scale;
+        let cell_width = text_system.advance(font_id, font_size, 'M').ok()?.width;
         let ascent = text_system.ascent(font_id, font_size);
         let descent = text_system.descent(font_id, font_size);
-        let cell_height = (ascent + descent.abs()) / scale;
+        let cell_height = ascent + descent.abs() + px(CELL_PADDING_Y);
         Some((cell_width, cell_height))
     }
 
@@ -90,11 +125,13 @@ impl TerminalElement {
     }
 
     /// Extract cell runs from the terminal grid, batching adjacent cells with the same style.
+    /// Accounts for `display_offset` so scrolled-back content is rendered correctly.
     fn build_cell_runs(
         term: &alacritty_terminal::Term<VoidListener>,
     ) -> Vec<CellRun> {
         let cols = term.columns();
         let rows = term.screen_lines();
+        let display_offset = term.grid().display_offset() as i32;
         let bg_default = ansi_to_hsla(AnsiColor::Named(NamedColor::Background));
         let mut runs = Vec::new();
 
@@ -102,26 +139,68 @@ impl TerminalElement {
             let mut current: Option<CellRun> = None;
 
             for col in 0..cols {
-                let point = Point::new(Line(row as i32), Column(col));
+                // Adjust line index by display_offset to read scrollback content.
+                // When display_offset > 0, viewport row 0 maps to Line(-display_offset)
+                // in the grid (scrollback history).
+                let point = Point::new(Line(row as i32 - display_offset), Column(col));
                 let cell = &term.grid()[point];
-                let ch = if cell.c == '\0' { ' ' } else { cell.c };
-                let fg = ansi_to_hsla(cell.fg);
                 let flags = cell.flags;
-                let bold = flags.contains(CellFlags::BOLD);
-                let dim = flags.contains(CellFlags::DIM);
 
-                let bg_color = ansi_to_hsla(cell.bg);
+                // Skip spacer cells for wide characters - extend previous run
+                if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    if let Some(ref mut run) = current {
+                        run.col_count += 1;
+                    }
+                    continue;
+                }
+
+                let ch = if cell.c == '\0' { ' ' } else { cell.c };
+                let bold = flags.contains(CellFlags::BOLD);
+                let italic = flags.contains(CellFlags::ITALIC);
+                let dim = flags.contains(CellFlags::DIM);
+                let wide = flags.contains(CellFlags::WIDE_CHAR);
+                let underline = flags.intersects(
+                    CellFlags::UNDERLINE
+                        | CellFlags::DOUBLE_UNDERLINE
+                        | CellFlags::UNDERCURL
+                        | CellFlags::DOTTED_UNDERLINE
+                        | CellFlags::DASHED_UNDERLINE,
+                );
+                let wavy_underline = flags.contains(CellFlags::UNDERCURL);
+                let strikethrough = flags.contains(CellFlags::STRIKEOUT);
+                let inverse = flags.contains(CellFlags::INVERSE);
+                let hidden = flags.contains(CellFlags::HIDDEN);
+
+                // Resolve colors, handling INVERSE (swap fg/bg)
+                let (mut fg, bg_color) = if inverse {
+                    // Reverse video: swap foreground and background colors
+                    (ansi_to_hsla(cell.bg), ansi_to_hsla(cell.fg))
+                } else {
+                    (ansi_to_hsla(cell.fg), ansi_to_hsla(cell.bg))
+                };
+
+                // Hidden text: make fg match bg so text is invisible
+                if hidden {
+                    fg = bg_color;
+                }
+
                 let bg = if color_eq(bg_color, bg_default) {
                     None
                 } else {
                     Some(bg_color)
                 };
 
+                // Check if current run can be extended
                 if let Some(ref mut run) = current {
                     if color_eq(fg, run.fg)
                         && run.bg == bg
                         && run.bold == bold
+                        && run.italic == italic
                         && run.dim == dim
+                        && run.underline == underline
+                        && run.wavy_underline == wavy_underline
+                        && run.strikethrough == strikethrough
+                        && run.wide == wide
                     {
                         run.text.push(ch);
                         run.col_count += 1;
@@ -136,7 +215,12 @@ impl TerminalElement {
                     fg,
                     bg,
                     bold,
+                    italic,
                     dim,
+                    underline,
+                    wavy_underline,
+                    strikethrough,
+                    wide,
                     col_start: col,
                     col_count: 1,
                     row,
@@ -180,16 +264,19 @@ impl TerminalElement {
         let font_size = px(FONT_SIZE);
         let normal_font = Self::font();
         let bold_font = Self::bold_font();
+        let italic_font = Self::italic_font();
+        let bold_italic_font = Self::bold_italic_font();
 
         for run in runs {
             if run.text.chars().all(|c| c == ' ') {
                 continue;
             }
 
-            let font = if run.bold {
-                bold_font.clone()
-            } else {
-                normal_font.clone()
+            let font = match (run.bold, run.italic) {
+                (true, true) => bold_italic_font.clone(),
+                (true, false) => bold_font.clone(),
+                (false, true) => italic_font.clone(),
+                (false, false) => normal_font.clone(),
             };
 
             let mut color = run.fg;
@@ -197,20 +284,46 @@ impl TerminalElement {
                 color.a *= 0.6;
             }
 
+            let underline = if run.underline {
+                Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(color),
+                    wavy: run.wavy_underline,
+                })
+            } else {
+                None
+            };
+
+            let strikethrough = if run.strikethrough {
+                Some(StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(color),
+                })
+            } else {
+                None
+            };
+
             let text_run = TextRun {
                 len: run.text.len(),
                 font,
                 color,
                 background_color: None,
-                underline: None,
-                strikethrough: None,
+                underline,
+                strikethrough,
+            };
+
+            // Wide characters need 2x cell width for glyph positioning
+            let glyph_width = if run.wide {
+                cell_width * 2.0
+            } else {
+                cell_width
             };
 
             let shaped = window.text_system().shape_line(
                 SharedString::from(run.text.clone()),
                 font_size,
                 &[text_run],
-                Some(cell_width),
+                Some(glyph_width),
             );
 
             let x = bounds.origin.x + cell_width * run.col_start as f32;
@@ -228,6 +341,11 @@ impl TerminalElement {
         cell_height: Pixels,
         window: &mut Window,
     ) {
+        // Hide cursor when scrolled back into history.
+        if term.grid().display_offset() > 0 {
+            return;
+        }
+
         let content = term.renderable_content();
         let cursor = &content.cursor;
 
@@ -303,15 +421,17 @@ impl Element for TerminalElement {
         let (cell_width, cell_height) = Self::measure_cell_internal(window);
 
         // Fill available parent space
-        let mut style = Style::default();
-        style.flex_grow = 1.0;
-        style.size = Size {
-            width: Length::Auto,
-            height: Length::Auto,
-        };
-        style.overflow = gpui::Point {
-            x: Overflow::Hidden,
-            y: Overflow::Hidden,
+        let style = Style {
+            flex_grow: 1.0,
+            size: Size {
+                width: Length::Auto,
+                height: Length::Auto,
+            },
+            overflow: gpui::Point {
+                x: Overflow::Hidden,
+                y: Overflow::Hidden,
+            },
+            ..Style::default()
         };
 
         let layout_id = window.request_layout(style, [], cx);
@@ -337,19 +457,17 @@ impl Element for TerminalElement {
         let new_cols = (bounds.size.width / state.cell_width).floor() as u16;
         let new_rows = (bounds.size.height / state.cell_height).floor() as u16;
 
-        if new_cols > 0 && new_rows > 0 {
-            if let Ok(mut term) = self.term.lock() {
-                let current_cols = term.columns() as u16;
-                let current_rows = term.screen_lines() as u16;
+        if new_cols > 0 && new_rows > 0 && let Ok(mut term) = self.term.lock() {
+            let current_cols = term.columns() as u16;
+            let current_rows = term.screen_lines() as u16;
 
-                if new_cols != current_cols || new_rows != current_rows {
-                    let size = TermSize::new(
-                        usize::from(new_cols),
-                        usize::from(new_rows),
-                    );
-                    term.resize(size);
-                    let _ = self.resize_tx.send((new_cols, new_rows));
-                }
+            if new_cols != current_cols || new_rows != current_rows {
+                let size = TermSize::new(
+                    usize::from(new_cols),
+                    usize::from(new_rows),
+                );
+                term.resize(size);
+                let _ = self.resize_tx.send((new_cols, new_rows));
             }
         }
     }
@@ -382,8 +500,10 @@ impl Element for TerminalElement {
         // Paint text
         Self::paint_text(&runs, &bounds, cell_width, cell_height, window, cx);
 
-        // Paint cursor
-        Self::paint_cursor(&term, &bounds, cell_width, cell_height, window);
+        // Paint cursor (skip when blink timer has it hidden)
+        if self.cursor_visible {
+            Self::paint_cursor(&term, &bounds, cell_width, cell_height, window);
+        }
     }
 }
 
