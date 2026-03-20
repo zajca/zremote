@@ -1,8 +1,12 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::vte::ansi::Processor;
@@ -23,6 +27,14 @@ const DEFAULT_ROWS: u16 = 40;
 /// Lines to scroll per mouse wheel tick.
 const SCROLL_LINES_PER_TICK: i32 = 3;
 
+/// Shared layout info set by the element during paint, read by mouse event handlers.
+#[derive(Clone, Copy, Default)]
+pub struct TerminalLayoutInfo {
+    pub cell_width: Pixels,
+    pub cell_height: Pixels,
+    pub bounds: Bounds<Pixels>,
+}
+
 pub struct TerminalPanel {
     session_id: String,
     term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
@@ -34,6 +46,8 @@ pub struct TerminalPanel {
     cursor_visible: bool,
     /// Whether the blink timer task has been spawned.
     blink_started: bool,
+    /// Layout info from the terminal element, shared via Rc<Cell> for mouse handlers.
+    layout_info: Rc<Cell<TerminalLayoutInfo>>,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
 }
@@ -69,6 +83,7 @@ impl TerminalPanel {
             reader_started: false,
             cursor_visible: true,
             blink_started: false,
+            layout_info: Rc::new(Cell::new(TerminalLayoutInfo::default())),
             _keystroke_subscription: keystroke_subscription,
         }
     }
@@ -160,6 +175,43 @@ impl TerminalPanel {
         }
     }
 
+    /// Convert a mouse pixel position (relative to the terminal content origin)
+    /// to a grid Point and Side. The padding offset must be subtracted by the caller.
+    fn pixel_to_grid(
+        position: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        term_cols: usize,
+        term_rows: usize,
+        display_offset: usize,
+    ) -> (Point, Side) {
+        let rel_x = position.x - origin.x;
+        let rel_y = position.y - origin.y;
+
+        let col = (rel_x / cell_width).floor() as i32;
+        let row = (rel_y / cell_height).floor() as i32;
+
+        // Clamp to valid grid range
+        let col = col.clamp(0, term_cols.saturating_sub(1) as i32) as usize;
+        let row = row.clamp(0, term_rows.saturating_sub(1) as i32) as usize;
+
+        // Determine which side of the cell the click is on
+        let cell_x = rel_x - cell_width * col as f32;
+        let side = if cell_x < cell_width / 2.0 {
+            Side::Left
+        } else {
+            Side::Right
+        };
+
+        // Convert viewport row to grid line, accounting for scrollback offset.
+        // When display_offset > 0, viewport row 0 maps to Line(-display_offset).
+        let line = Line(row as i32 - display_offset as i32);
+        let point = Point::new(line, Column(col));
+
+        (point, side)
+    }
+
     fn encode_keystroke(keystroke: &Keystroke) -> Option<Vec<u8>> {
         let key = keystroke.key.as_str();
         let modifiers = &keystroke.modifiers;
@@ -230,6 +282,7 @@ impl Render for TerminalPanel {
             self.term.clone(),
             self.ws_handle.resize_tx.clone(),
             self.cursor_visible,
+            self.layout_info.clone(),
         );
 
         let mut content = div()
@@ -243,16 +296,132 @@ impl Render for TerminalPanel {
             .overflow_hidden()
             .on_key_down({
                 let input_tx = self.ws_handle.input_tx.clone();
-                move |event: &KeyDownEvent, _window: &mut Window, _cx: &mut App| {
+                let term = self.term.clone();
+                move |event: &KeyDownEvent, _window: &mut Window, cx: &mut App| {
+                    // Ctrl+Shift+C: copy selection to clipboard
+                    let key = event.keystroke.key.as_str();
+                    let mods = &event.keystroke.modifiers;
+                    if mods.control && mods.shift && key.eq_ignore_ascii_case("c") {
+                        if let Ok(t) = term.lock() {
+                            if let Some(text) = t.selection_to_string() {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            }
+                        }
+                        return;
+                    }
+
                     if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke) {
                         let _ = input_tx.send(bytes);
                     }
                 }
             })
+            // Focus on any mouse button press
             .on_any_mouse_down({
                 let focus = self.focus_handle.clone();
                 move |_event: &MouseDownEvent, window: &mut Window, _cx: &mut App| {
                     focus.focus(window);
+                }
+            })
+            // Left mouse button: start text selection
+            .on_mouse_down(MouseButton::Left, {
+                let term = self.term.clone();
+                let layout_info = self.layout_info.clone();
+                let entity_id = cx.entity_id();
+                move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                    let info = layout_info.get();
+                    if info.cell_width == px(0.0) {
+                        return;
+                    }
+
+                    if let Ok(mut t) = term.lock() {
+                        let display_offset = t.grid().display_offset();
+                        let cols = t.columns();
+                        let rows = t.screen_lines();
+
+                        let (grid_point, side) = TerminalPanel::pixel_to_grid(
+                            event.position,
+                            info.bounds.origin,
+                            info.cell_width,
+                            info.cell_height,
+                            cols,
+                            rows,
+                            display_offset,
+                        );
+
+                        // Double-click: word (semantic) selection
+                        // Triple-click: line selection
+                        let selection_type = match event.click_count {
+                            2 => SelectionType::Semantic,
+                            3 => SelectionType::Lines,
+                            _ => SelectionType::Simple,
+                        };
+
+                        let selection = Selection::new(selection_type, grid_point, side);
+                        t.selection = Some(selection);
+                    }
+
+                    cx.notify(entity_id);
+                }
+            })
+            // Mouse move while dragging: update selection end point
+            .on_mouse_move({
+                let term = self.term.clone();
+                let layout_info = self.layout_info.clone();
+                let entity_id = cx.entity_id();
+                move |event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
+                    // Only update selection while left button is held
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        return;
+                    }
+
+                    let info = layout_info.get();
+                    if info.cell_width == px(0.0) {
+                        return;
+                    }
+
+                    if let Ok(mut t) = term.lock() {
+                        if t.selection.is_none() {
+                            return;
+                        }
+
+                        let display_offset = t.grid().display_offset();
+                        let cols = t.columns();
+                        let rows = t.screen_lines();
+
+                        let (grid_point, side) = TerminalPanel::pixel_to_grid(
+                            event.position,
+                            info.bounds.origin,
+                            info.cell_width,
+                            info.cell_height,
+                            cols,
+                            rows,
+                            display_offset,
+                        );
+
+                        if let Some(ref mut selection) = t.selection {
+                            selection.update(grid_point, side);
+                        }
+                    }
+
+                    cx.notify(entity_id);
+                }
+            })
+            // Left mouse up: finalize selection (selection stays for copy)
+            .on_mouse_up(MouseButton::Left, {
+                let entity_id = cx.entity_id();
+                let term = self.term.clone();
+                move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                    // Clear empty selections (single click without drag)
+                    if let Ok(mut t) = term.lock() {
+                        let should_clear = t
+                            .selection
+                            .as_ref()
+                            .map_or(false, |s| s.is_empty());
+                        if should_clear {
+                            t.selection = None;
+                        }
+                    }
+                    cx.notify(entity_id);
                 }
             })
             .on_scroll_wheel({
