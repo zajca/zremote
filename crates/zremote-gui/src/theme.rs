@@ -41,6 +41,10 @@ pub fn error() -> Rgba {
     rgb(0xef4444)
 }
 
+pub fn warning() -> Rgba {
+    rgb(0xfbbf24)
+}
+
 pub fn terminal_bg() -> Rgba {
     rgb(0x0a0a0b)
 }

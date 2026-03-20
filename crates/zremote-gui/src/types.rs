@@ -22,6 +22,33 @@ pub struct Session {
     pub pid: Option<i64>,
     pub created_at: Option<String>,
     pub closed_at: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+}
+
+/// Project as returned by the ZRemote API.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub host_id: String,
+    pub path: String,
+    pub name: String,
+    pub project_type: String,
+    pub parent_project_id: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub git_is_dirty: bool,
+}
+
+/// Request body for updating a project.
+#[derive(Debug, Serialize)]
+pub struct UpdateProjectRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 /// Request body for creating a new session.
@@ -63,6 +90,8 @@ pub enum ServerEvent {
     HostDisconnected { host_id: String },
     #[serde(rename = "host_status_changed")]
     HostStatusChanged { host_id: String, status: String },
+    #[serde(rename = "projects_updated")]
+    ProjectsUpdated { host_id: String },
     #[serde(other)]
     Unknown,
 }

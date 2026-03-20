@@ -4,14 +4,29 @@ use gpui::*;
 
 use crate::app_state::AppState;
 use crate::theme;
-use crate::types::{CreateSessionRequest, Host, ServerEvent, Session};
+use crate::types::{
+    CreateSessionRequest, Host, Project, ServerEvent, Session, UpdateProjectRequest,
+};
 use crate::views::main_view::SidebarEvent;
 
-/// Sidebar view: hosts list with their sessions, "New Session" button.
+/// A project with its associated sessions.
+struct ProjectNode {
+    project: Project,
+    sessions: Vec<Session>,
+}
+
+/// Computed layout items for a single host.
+struct HostItems {
+    project_nodes: Vec<ProjectNode>,
+    orphan_sessions: Vec<Session>,
+}
+
+/// Sidebar view: hosts list with projects, sessions, pin/unpin.
 pub struct SidebarView {
     app_state: Arc<AppState>,
     hosts: Vec<Host>,
     sessions: Vec<Session>,
+    projects: Vec<Project>,
     selected_session_id: Option<String>,
     loading: bool,
 }
@@ -22,6 +37,7 @@ impl SidebarView {
             app_state,
             hosts: Vec::new(),
             sessions: Vec::new(),
+            projects: Vec::new(),
             selected_session_id: None,
             loading: true,
         };
@@ -34,17 +50,20 @@ impl SidebarView {
         let api = self.app_state.api.clone();
         let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            // Dispatch HTTP calls to the tokio runtime (reqwest needs it)
-            let (hosts, all_sessions) = handle
+            let (hosts, all_sessions, all_projects) = handle
                 .spawn(async move {
                     let hosts = api.list_hosts().await.unwrap_or_default();
                     let mut all_sessions = Vec::new();
+                    let mut all_projects = Vec::new();
                     for host in &hosts {
-                        if let Ok(sessions) = api.list_sessions(&host.id).await {
-                            all_sessions.extend(sessions);
-                        }
+                        let (sessions, projects) = tokio::join!(
+                            api.list_sessions(&host.id),
+                            api.list_projects(&host.id),
+                        );
+                        all_sessions.extend(sessions.unwrap_or_default());
+                        all_projects.extend(projects.unwrap_or_default());
                     }
-                    (hosts, all_sessions)
+                    (hosts, all_sessions, all_projects)
                 })
                 .await
                 .unwrap_or_default();
@@ -52,6 +71,7 @@ impl SidebarView {
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                 this.hosts = hosts;
                 this.sessions = all_sessions;
+                this.projects = all_projects;
                 this.loading = false;
 
                 // Auto-select first active session if none is selected
@@ -80,14 +100,20 @@ impl SidebarView {
             | ServerEvent::SessionUpdated { .. }
             | ServerEvent::HostConnected { .. }
             | ServerEvent::HostDisconnected { .. }
-            | ServerEvent::HostStatusChanged { .. } => {
+            | ServerEvent::HostStatusChanged { .. }
+            | ServerEvent::ProjectsUpdated { .. } => {
                 self.load_data(cx);
             }
             ServerEvent::Unknown => {}
         }
     }
 
-    fn create_session(&mut self, host_id: &str, cx: &mut Context<Self>) {
+    fn create_session(
+        &mut self,
+        host_id: &str,
+        working_dir: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.app_state.api.clone();
         let host_id = host_id.to_string();
         let handle = self.app_state.tokio_handle.clone();
@@ -97,7 +123,7 @@ impl SidebarView {
                 shell: None,
                 cols: 80,
                 rows: 24,
-                working_dir: None,
+                working_dir,
             };
             let host_id_for_api = host_id.clone();
             let result = handle
@@ -153,12 +179,109 @@ impl SidebarView {
         .detach();
     }
 
-    fn render_host_section(
-        &self,
-        host: &Host,
-        sessions: &[&Session],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn toggle_pin(&mut self, project_id: &str, current_pinned: bool, cx: &mut Context<Self>) {
+        let api = self.app_state.api.clone();
+        let project_id = project_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let req = UpdateProjectRequest {
+                pinned: Some(!current_pinned),
+            };
+            let result = handle
+                .spawn({
+                    let project_id = project_id.clone();
+                    async move { api.update_project(&project_id, &req).await }
+                })
+                .await
+                .unwrap();
+            match result {
+                Ok(_) => {
+                    let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                        this.load_data(cx);
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, project_id, "failed to update project pin");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Compute the hierarchical layout for a host.
+    fn compute_items(&self, host_id: &str) -> HostItems {
+        let active_sessions: Vec<Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.host_id == host_id && s.status == "active")
+            .cloned()
+            .collect();
+
+        let host_projects: Vec<&Project> =
+            self.projects.iter().filter(|p| p.host_id == host_id).collect();
+
+        // Sessions grouped by project_id
+        let mut sessions_by_project: std::collections::HashMap<String, Vec<Session>> =
+            std::collections::HashMap::new();
+        let mut orphan_sessions = Vec::new();
+
+        for session in active_sessions {
+            if let Some(ref pid) = session.project_id {
+                sessions_by_project
+                    .entry(pid.clone())
+                    .or_default()
+                    .push(session);
+            } else {
+                orphan_sessions.push(session);
+            }
+        }
+
+        // Build project nodes: pinned roots, then active roots, then worktrees
+        let mut pinned_roots = Vec::new();
+        let mut active_roots = Vec::new();
+        let mut worktrees = Vec::new();
+
+        for project in &host_projects {
+            let sessions = sessions_by_project
+                .remove(&project.id)
+                .unwrap_or_default();
+            let is_worktree = project.parent_project_id.is_some();
+
+            if is_worktree {
+                // Worktrees only shown if they have sessions
+                if !sessions.is_empty() {
+                    worktrees.push(ProjectNode {
+                        project: (*project).clone(),
+                        sessions,
+                    });
+                }
+            } else if project.pinned {
+                // Pinned roots always shown
+                pinned_roots.push(ProjectNode {
+                    project: (*project).clone(),
+                    sessions,
+                });
+            } else if !sessions.is_empty() {
+                // Non-pinned roots only if they have sessions
+                active_roots.push(ProjectNode {
+                    project: (*project).clone(),
+                    sessions,
+                });
+            }
+        }
+
+        let mut project_nodes = Vec::new();
+        project_nodes.append(&mut pinned_roots);
+        project_nodes.append(&mut active_roots);
+        project_nodes.append(&mut worktrees);
+
+        HostItems {
+            project_nodes,
+            orphan_sessions,
+        }
+    }
+
+    fn render_host_section(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
         let host_id = host.id.clone();
         let is_online = host.status == "online";
 
@@ -168,10 +291,60 @@ impl SidebarView {
             theme::text_tertiary()
         };
 
+        let items = self.compute_items(&host_id);
+        let has_projects = !items.project_nodes.is_empty();
+        let has_orphans = !items.orphan_sessions.is_empty();
+        let is_empty = !has_projects && !has_orphans;
+
+        let mut children: Vec<AnyElement> = Vec::new();
+
+        // Project nodes
+        for node in &items.project_nodes {
+            let is_worktree = node.project.parent_project_id.is_some();
+            children.push(
+                self.render_project_item(node, is_worktree, &host_id, cx)
+                    .into_any_element(),
+            );
+        }
+
+        // Separator before orphan sessions (only if we have both projects and orphans)
+        if has_projects && has_orphans {
+            children.push(
+                div()
+                    .mx(px(12.0))
+                    .my(px(4.0))
+                    .h(px(1.0))
+                    .bg(theme::border())
+                    .into_any_element(),
+            );
+        }
+
+        // Orphan sessions
+        for session in &items.orphan_sessions {
+            children.push(
+                self.render_session_item(session, &host_id, px(28.0), cx)
+                    .into_any_element(),
+            );
+        }
+
+        // Empty state
+        if is_empty && is_online {
+            children.push(
+                div()
+                    .px(px(28.0))
+                    .py(px(6.0))
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(11.0))
+                    .child("No active sessions")
+                    .into_any_element(),
+            );
+        }
+
         div()
             .flex()
             .flex_col()
             .w_full()
+            // Host header
             .child(
                 div()
                     .flex()
@@ -194,15 +367,9 @@ impl SidebarView {
                             .child(host.hostname.clone()),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(sessions.iter().map(|session| {
-                        self.render_session_item(session, &host_id, cx)
-                            .into_any_element()
-                    })),
-            )
+            // Content
+            .child(div().flex().flex_col().children(children))
+            // New Session button
             .child(
                 div()
                     .id(SharedString::from(format!("new-session-{host_id}")))
@@ -219,16 +386,187 @@ impl SidebarView {
                     .on_click({
                         let host_id = host_id.clone();
                         cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.create_session(&host_id, cx);
+                            this.create_session(&host_id, None, cx);
                         })
                     }),
             )
+    }
+
+    fn render_project_actions(
+        &self,
+        project_id: &str,
+        pinned: bool,
+        host_id: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project_id = project_id.to_string();
+        let host_id = host_id.to_string();
+        let project_path = project_path.to_string();
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .invisible()
+            .group_hover("project-row", |mut s| {
+                s.visibility = Some(gpui::Visibility::Visible);
+                s
+            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("pin-{project_id}")))
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .cursor_pointer()
+                    .text_color(if pinned {
+                        theme::accent()
+                    } else {
+                        theme::text_tertiary()
+                    })
+                    .text_size(px(10.0))
+                    .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
+                    .child(if pinned { "unpin" } else { "pin" })
+                    .on_click({
+                        let project_id = project_id.clone();
+                        cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            this.toggle_pin(&project_id, pinned, cx);
+                        })
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("new-in-{project_id}")))
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .cursor_pointer()
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(10.0))
+                    .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
+                    .child("+")
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.create_session(&host_id, Some(project_path.clone()), cx);
+                    })),
+            )
+    }
+
+    fn render_project_item(
+        &self,
+        node: &ProjectNode,
+        is_worktree: bool,
+        host_id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project = &node.project;
+        let project_id = project.id.clone();
+
+        let is_pinned = project.pinned;
+
+        // Git info
+        let branch_text = project.git_branch.clone().unwrap_or_default();
+        let dirty_indicator = if project.git_is_dirty { " *" } else { "" };
+        let git_display = if branch_text.is_empty() {
+            String::new()
+        } else {
+            format!("{branch_text}{dirty_indicator}")
+        };
+
+        // Left side: prefix + name + git info
+        let mut left = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .min_w(px(0.0))
+            .overflow_hidden();
+
+        // Pin indicator: small accent dot; worktree: arrow prefix
+        if is_pinned {
+            left = left.child(
+                div()
+                    .w(px(4.0))
+                    .h(px(4.0))
+                    .flex_shrink_0()
+                    .rounded(px(2.0))
+                    .bg(theme::accent()),
+            );
+        } else if is_worktree {
+            left = left.child(
+                div()
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(10.0))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .child("->"),
+            );
+        }
+
+        left = left.child(
+            div()
+                .text_color(theme::text_primary())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .child(project.name.clone()),
+        );
+
+        if !git_display.is_empty() {
+            let git_color = if project.git_is_dirty {
+                theme::warning()
+            } else {
+                theme::text_tertiary()
+            };
+            left = left.child(
+                div()
+                    .text_color(git_color)
+                    .text_size(px(10.0))
+                    .truncate()
+                    .child(git_display),
+            );
+        }
+
+        let row = div()
+            .id(SharedString::from(format!("project-{project_id}")))
+            .group("project-row")
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl(px(16.0))
+            .pr(px(8.0))
+            .h(px(24.0))
+            .mx(px(4.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .overflow_hidden()
+            .hover(|s| s.bg(theme::bg_tertiary()))
+            .child(left)
+            .child(self.render_project_actions(
+                &project_id,
+                project.pinned,
+                host_id,
+                &project.path,
+                cx,
+            ));
+
+        let mut container = div().flex().flex_col().w_full().child(row);
+
+        for session in &node.sessions {
+            container = container.child(
+                self.render_session_item(session, host_id, px(40.0), cx)
+                    .into_any_element(),
+            );
+        }
+
+        container
     }
 
     fn render_session_item(
         &self,
         session: &Session,
         host_id: &str,
+        indent: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_selected = self.selected_session_id.as_deref() == Some(&session.id);
@@ -283,9 +621,9 @@ impl SidebarView {
             .flex()
             .items_center()
             .justify_between()
-            .pl(px(28.0))
+            .pl(indent)
             .pr(px(12.0))
-            .py(px(4.0))
+            .h(px(24.0))
             .cursor_pointer()
             .rounded(px(4.0))
             .mx(px(4.0))
@@ -308,11 +646,13 @@ impl SidebarView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
+                    .min_w(px(0.0))
                     .overflow_hidden()
                     .child(
                         div()
                             .w(px(6.0))
                             .h(px(6.0))
+                            .flex_shrink_0()
                             .rounded(px(3.0))
                             .bg(status_color),
                     )
@@ -320,7 +660,7 @@ impl SidebarView {
                         div()
                             .text_color(text_color)
                             .text_size(px(12.0))
-                            .overflow_hidden()
+                            .truncate()
                             .child(display_name),
                     ),
             )
@@ -330,12 +670,6 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_sessions: Vec<&Session> = self
-            .sessions
-            .iter()
-            .filter(|s| s.status == "active")
-            .collect();
-
         div()
             .flex()
             .flex_col()
@@ -373,10 +707,11 @@ impl Render for SidebarView {
             )
             .child(
                 div()
+                    .id("sidebar-content")
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .py(px(4.0))
                     .children(if self.hosts.is_empty() && !self.loading {
                         vec![
@@ -392,13 +727,7 @@ impl Render for SidebarView {
                         self.hosts
                             .iter()
                             .map(|host| {
-                                let host_sessions: Vec<&Session> = active_sessions
-                                    .iter()
-                                    .filter(|s| s.host_id == host.id)
-                                    .copied()
-                                    .collect();
-                                self.render_host_section(host, &host_sessions, cx)
-                                    .into_any_element()
+                                self.render_host_section(host, cx).into_any_element()
                             })
                             .collect()
                     }),
