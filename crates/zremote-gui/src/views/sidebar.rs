@@ -3,6 +3,7 @@ use std::sync::Arc;
 use gpui::*;
 
 use crate::app_state::AppState;
+use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::types::{
     CreateSessionRequest, Host, Project, ServerEvent, Session, UpdateProjectRequest,
@@ -379,10 +380,14 @@ impl SidebarView {
                     .py(px(4.0))
                     .rounded(px(4.0))
                     .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
                     .text_color(theme::text_secondary())
                     .text_size(px(12.0))
                     .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                    .child("+ New Session")
+                    .child(icon(Icon::Plus).size(px(14.0)))
+                    .child("New Session")
                     .on_click({
                         let host_id = host_id.clone();
                         cx.listener(move |this, _event: &ClickEvent, _window, cx| {
@@ -416,18 +421,19 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("pin-{project_id}")))
-                    .px(px(4.0))
-                    .py(px(2.0))
+                    .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
-                    .text_color(if pinned {
-                        theme::accent()
-                    } else {
-                        theme::text_tertiary()
-                    })
-                    .text_size(px(10.0))
                     .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                    .child(if pinned { "unpin" } else { "pin" })
+                    .child(
+                        icon(if pinned { Icon::PinOff } else { Icon::Pin })
+                            .size(px(14.0))
+                            .text_color(if pinned {
+                                theme::accent()
+                            } else {
+                                theme::text_tertiary()
+                            }),
+                    )
                     .on_click({
                         let project_id = project_id.clone();
                         cx.listener(move |this, _event: &ClickEvent, _window, cx| {
@@ -438,14 +444,15 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("new-in-{project_id}")))
-                    .px(px(4.0))
-                    .py(px(2.0))
+                    .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
-                    .text_color(theme::text_tertiary())
-                    .text_size(px(10.0))
                     .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                    .child("+")
+                    .child(
+                        icon(Icon::Plus)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary()),
+                    )
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                         this.create_session(&host_id, Some(project_path.clone()), cx);
                     })),
@@ -481,24 +488,20 @@ impl SidebarView {
             .min_w(px(0.0))
             .overflow_hidden();
 
-        // Pin indicator: small accent dot; worktree: arrow prefix
+        // Pin indicator icon; worktree: folder-git icon
         if is_pinned {
             left = left.child(
-                div()
-                    .w(px(4.0))
-                    .h(px(4.0))
+                icon(Icon::Pin)
+                    .size(px(12.0))
                     .flex_shrink_0()
-                    .rounded(px(2.0))
-                    .bg(theme::accent()),
+                    .text_color(theme::accent()),
             );
         } else if is_worktree {
             left = left.child(
-                div()
-                    .text_color(theme::text_tertiary())
-                    .text_size(px(10.0))
+                icon(Icon::FolderGit)
+                    .size(px(12.0))
                     .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .child("->"),
+                    .text_color(theme::text_tertiary()),
             );
         }
 
@@ -520,10 +523,23 @@ impl SidebarView {
             };
             left = left.child(
                 div()
-                    .text_color(git_color)
-                    .text_size(px(10.0))
-                    .truncate()
-                    .child(git_display),
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .overflow_hidden()
+                    .child(
+                        icon(Icon::GitBranch)
+                            .size(px(10.0))
+                            .flex_shrink_0()
+                            .text_color(git_color),
+                    )
+                    .child(
+                        div()
+                            .text_color(git_color)
+                            .text_size(px(10.0))
+                            .truncate()
+                            .child(git_display),
+                    ),
             );
         }
 
@@ -600,11 +616,13 @@ impl SidebarView {
         let close_button: AnyElement = if is_active {
             div()
                 .id(SharedString::from(format!("close-{session_id}")))
-                .text_color(theme::text_tertiary())
-                .text_size(px(12.0))
                 .cursor_pointer()
+                .child(
+                    icon(Icon::X)
+                        .size(px(14.0))
+                        .text_color(theme::text_tertiary()),
+                )
                 .hover(|s| s.text_color(theme::error()))
-                .child("x")
                 .on_click({
                     let session_id = session_id.clone();
                     cx.listener(move |this, _event: &ClickEvent, _window, cx| {
@@ -694,16 +712,17 @@ impl Render for SidebarView {
                             .font_weight(FontWeight::BOLD)
                             .child("ZRemote"),
                     )
-                    .child(
-                        div()
+                    .child(if self.loading {
+                        icon(Icon::Loader)
+                            .size(px(14.0))
                             .text_color(theme::text_tertiary())
-                            .text_size(px(11.0))
-                            .child(if self.loading {
-                                "loading..."
-                            } else {
-                                "connected"
-                            }),
-                    ),
+                            .into_any_element()
+                    } else {
+                        icon(Icon::Wifi)
+                            .size(px(14.0))
+                            .text_color(theme::success())
+                            .into_any_element()
+                    }),
             )
             .child(
                 div()

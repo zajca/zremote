@@ -20,7 +20,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     })
 }
 
-/// Returns `{"mode": "server"}` so the web UI can detect server mode.
+/// Returns `{"mode": "server"}` so clients can detect server mode.
 pub async fn api_mode() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "mode": "server" }))
 }
