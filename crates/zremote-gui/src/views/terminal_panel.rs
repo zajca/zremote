@@ -16,7 +16,7 @@ use gpui::*;
 use crate::terminal_ws::{self, TerminalWsHandle};
 use crate::theme;
 use crate::types::TerminalEvent;
-use crate::views::terminal_element::{CellRunCache, ShapedLineCache, TerminalElement};
+use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
 
 /// Cursor blink interval (standard terminal blink rate).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -58,10 +58,10 @@ pub struct TerminalPanel {
     /// Generation counter incremented when terminal content changes (PTY output, resize).
     /// Used by cell run cache to detect staleness.
     content_generation: Arc<AtomicU64>,
-    /// Cached cell runs from previous frame (persists across renders, shared with TerminalElement).
-    cell_run_cache: Rc<RefCell<Option<CellRunCache>>>,
-    /// Cached shaped text lines (persists across renders, shared with TerminalElement).
-    shaped_cache: Rc<RefCell<ShapedLineCache>>,
+    /// Cached cell runs from recent frames (LRU, shared with TerminalElement).
+    cell_run_cache: Rc<RefCell<CellRunCache>>,
+    /// Per-character glyph cache (persists across renders, shared with TerminalElement).
+    glyph_cache: Rc<RefCell<GlyphCache>>,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
 }
@@ -101,8 +101,8 @@ impl TerminalPanel {
             scroll_px: Rc::new(Cell::new(0.0)),
             pending_scroll_delta: Arc::new(AtomicI32::new(0)),
             content_generation: Arc::new(AtomicU64::new(0)),
-            cell_run_cache: Rc::new(RefCell::new(None)),
-            shaped_cache: Rc::new(RefCell::new(ShapedLineCache::new())),
+            cell_run_cache: Rc::new(RefCell::new(CellRunCache::new())),
+            glyph_cache: Rc::new(RefCell::new(GlyphCache::new())),
             _keystroke_subscription: keystroke_subscription,
         }
     }
@@ -308,7 +308,7 @@ impl Render for TerminalPanel {
             self.pending_scroll_delta.clone(),
             self.content_generation.clone(),
             self.cell_run_cache.clone(),
-            self.shaped_cache.clone(),
+            self.glyph_cache.clone(),
         );
 
         let mut content = div()

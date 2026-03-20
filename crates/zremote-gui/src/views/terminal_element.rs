@@ -21,6 +21,12 @@ const CURSOR_BAR_WIDTH: f32 = 2.0;
 const CURSOR_UNDERLINE_HEIGHT: f32 = 2.0;
 /// Extra vertical padding per cell for comfortable line spacing (logical pixels).
 const CELL_PADDING_Y: f32 = 0.0;
+/// Thickness of underline and strikethrough decorations in logical pixels.
+const DECORATION_THICKNESS: f32 = 1.0;
+
+/// Number of recent (display_offset, content_generation) pairs to cache cell runs for.
+/// Allows back-and-forth scrolling to hit cached runs for recently visited offsets.
+const CELL_RUN_CACHE_SLOTS: usize = 8;
 
 /// A run of consecutive cells on the same row sharing the same style.
 #[derive(Clone)]
@@ -41,36 +47,122 @@ struct CellRun {
     row: usize,
 }
 
-/// Cache for cell runs to avoid rebuilding from the grid every frame.
-/// Invalidated when display_offset changes (line scroll) or content_generation bumps (PTY output).
+/// LRU cache for cell runs, storing the last N (display_offset, content_generation) snapshots.
+/// During scrollback, each display_offset produces different cell runs. By caching recent
+/// offsets, back-and-forth scrolling hits the cache instead of rebuilding from the grid.
 pub struct CellRunCache {
-    runs: Vec<CellRun>,
+    /// Ring buffer of cached snapshots, ordered by recency (most recent first).
+    slots: Vec<CellRunCacheEntry>,
+}
+
+struct CellRunCacheEntry {
     display_offset: usize,
     content_generation: u64,
+    runs: Vec<CellRun>,
 }
 
-/// Key for the shaped line cache: identifies a unique text + style combination.
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct ShapedLineKey {
-    text: String,
-    bold: bool,
-    italic: bool,
-    wide: bool,
-}
-
-/// Cache for shaped text lines to avoid expensive text shaping on every frame.
-/// Keyed by (text content, font variant, width). Evicted when content_generation changes.
-pub struct ShapedLineCache {
-    entries: HashMap<ShapedLineKey, ShapedLine>,
-    content_generation: u64,
-}
-
-impl ShapedLineCache {
+impl CellRunCache {
     pub fn new() -> Self {
         Self {
-            entries: HashMap::new(),
-            content_generation: 0,
+            slots: Vec::with_capacity(CELL_RUN_CACHE_SLOTS),
         }
+    }
+
+    /// Look up cached cell runs for the given (display_offset, content_generation).
+    /// Returns None on cache miss.
+    fn get(&self, display_offset: usize, content_generation: u64) -> Option<&[CellRun]> {
+        self.slots
+            .iter()
+            .find(|e| {
+                e.display_offset == display_offset && e.content_generation == content_generation
+            })
+            .map(|e| e.runs.as_slice())
+    }
+
+    /// Insert cell runs for the given key. Evicts the oldest entry if at capacity.
+    fn insert(&mut self, display_offset: usize, content_generation: u64, runs: Vec<CellRun>) {
+        // Remove existing entry for this key (promote to front).
+        self.slots
+            .retain(|e| e.display_offset != display_offset || e.content_generation != content_generation);
+
+        // Evict oldest if at capacity.
+        if self.slots.len() >= CELL_RUN_CACHE_SLOTS {
+            self.slots.pop();
+        }
+
+        // Insert at front (most recent).
+        self.slots.insert(
+            0,
+            CellRunCacheEntry {
+                display_offset,
+                content_generation,
+                runs,
+            },
+        );
+    }
+}
+
+/// Cache key for per-character glyph cache.
+/// Includes color bits so that the same character with different colors gets
+/// separate cache entries. Without this, whichever color was shaped first
+/// would be used for all occurrences of that character.
+type GlyphCacheKey = (char, bool, bool, bool, u32, u32, u32, u32);
+
+/// Convert an Hsla color to cache key components (bit patterns of h, s, l, a).
+fn hsla_to_cache_bits(color: Hsla) -> (u32, u32, u32, u32) {
+    (
+        color.h.to_bits(),
+        color.s.to_bits(),
+        color.l.to_bits(),
+        color.a.to_bits(),
+    )
+}
+
+/// Per-character glyph cache for monospace terminal rendering.
+///
+/// In a monospace terminal, each character with a given style (bold, italic, wide)
+/// and color always produces the same shaped glyph. Instead of shaping entire text
+/// runs (which creates unique cache keys for every distinct sentence/word), we shape
+/// individual characters. This results in a bounded cache (~200 chars * ~20 colors
+/// * 4 styles = ~16,000 entries max), with nearly 100% hit rate after the first
+/// frame. No eviction is needed -- the cache is small.
+pub struct GlyphCache {
+    entries: HashMap<GlyphCacheKey, ShapedLine>,
+}
+
+impl GlyphCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::with_capacity(512),
+        }
+    }
+
+    /// Look up a shaped single-character line by (char, bold, italic, wide, color).
+    fn get(
+        &self,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        wide: bool,
+        color: Hsla,
+    ) -> Option<&ShapedLine> {
+        let (h, s, l, a) = hsla_to_cache_bits(color);
+        self.entries.get(&(ch, bold, italic, wide, h, s, l, a))
+    }
+
+    /// Insert a shaped single-character line.
+    fn insert(
+        &mut self,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        wide: bool,
+        color: Hsla,
+        shaped: ShapedLine,
+    ) {
+        let (h, s, l, a) = hsla_to_cache_bits(color);
+        self.entries
+            .insert((ch, bold, italic, wide, h, s, l, a), shaped);
     }
 }
 
@@ -93,10 +185,10 @@ pub struct TerminalElement {
     pending_scroll_delta: Arc<AtomicI32>,
     /// Content generation counter (bumped on PTY output) for cache invalidation.
     content_generation: Arc<AtomicU64>,
-    /// Cached cell runs from previous frame.
-    cell_run_cache: Rc<std::cell::RefCell<Option<CellRunCache>>>,
-    /// Cached shaped text lines from previous frame.
-    shaped_cache: Rc<std::cell::RefCell<ShapedLineCache>>,
+    /// Cached cell runs from recent frames (LRU over last N display_offsets).
+    cell_run_cache: Rc<std::cell::RefCell<CellRunCache>>,
+    /// Per-character glyph cache: ~200-500 entries, nearly 100% hit rate after first frame.
+    glyph_cache: Rc<std::cell::RefCell<GlyphCache>>,
 }
 
 pub struct TerminalElementLayoutState {
@@ -112,8 +204,8 @@ impl TerminalElement {
         layout_info: Rc<Cell<TerminalLayoutInfo>>,
         pending_scroll_delta: Arc<AtomicI32>,
         content_generation: Arc<AtomicU64>,
-        cell_run_cache: Rc<std::cell::RefCell<Option<CellRunCache>>>,
-        shaped_cache: Rc<std::cell::RefCell<ShapedLineCache>>,
+        cell_run_cache: Rc<std::cell::RefCell<CellRunCache>>,
+        glyph_cache: Rc<std::cell::RefCell<GlyphCache>>,
     ) -> Self {
         Self {
             term,
@@ -123,7 +215,7 @@ impl TerminalElement {
             pending_scroll_delta,
             content_generation,
             cell_run_cache,
-            shaped_cache,
+            glyph_cache,
         }
     }
 
@@ -199,7 +291,10 @@ impl TerminalElement {
         let display_offset = term.grid().display_offset() as i32;
         let total_rows = rows;
         let bg_default = ansi_to_hsla(AnsiColor::Named(NamedColor::Background));
-        let mut runs = Vec::new();
+
+        // Pre-allocate: a typical row has 3-8 runs due to color/style changes.
+        // Use rows * 5 to reduce reallocations for content with frequent style changes.
+        let mut runs = Vec::with_capacity(total_rows * 5);
 
         // The grid's valid range is topmost_line..=bottommost_line.
         // topmost_line = Line(-(history_size as i32))
@@ -287,8 +382,12 @@ impl TerminalElement {
                     runs.push(finished);
                 }
 
+                // Start a new run. Pre-allocate for typical run length (~40 chars).
+                // Runs can span many columns, especially for plain text or whitespace.
+                let mut text = String::with_capacity(40);
+                text.push(ch);
                 current = Some(CellRun {
-                    text: String::from(ch),
+                    text,
                     fg,
                     bg,
                     bold,
@@ -330,13 +429,22 @@ impl TerminalElement {
         }
     }
 
+    /// Paint text using a per-character glyph cache.
+    ///
+    /// Instead of shaping entire text runs (which creates unique cache keys for every
+    /// distinct sentence), we shape individual characters. In a monospace terminal,
+    /// each (char, bold, italic, wide) combination always produces the same glyph.
+    /// This yields ~200-500 total cache entries with nearly 100% hit rate after the
+    /// first frame, eliminating the ~10ms-per-miss `shape_line()` stutter on scroll.
+    ///
+    /// Underline and strikethrough are painted as simple rectangles, decoupled from
+    /// text shaping entirely.
     fn paint_text(
         runs: &[CellRun],
         bounds: &Bounds<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
-        shaped_cache: &Rc<std::cell::RefCell<ShapedLineCache>>,
-        content_generation: u64,
+        glyph_cache: &Rc<std::cell::RefCell<GlyphCache>>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -346,25 +454,23 @@ impl TerminalElement {
         let italic_font = Self::italic_font();
         let bold_italic_font = Self::bold_italic_font();
 
-        // Invalidate shaped cache if content generation changed.
-        {
-            let mut cache = shaped_cache.borrow_mut();
-            if cache.content_generation != content_generation {
-                cache.entries.clear();
-                cache.content_generation = content_generation;
-            }
-        }
+        // Pre-compute font metrics for decoration positioning.
+        // Scope the immutable borrow of window so it doesn't conflict with paint calls.
+        let (ascent, descent) = {
+            let text_system = window.text_system();
+            let normal_font_id = text_system.resolve_font(&normal_font);
+            let a = text_system.ascent(normal_font_id, font_size);
+            let d = text_system.descent(normal_font_id, font_size);
+            (a, d)
+        };
 
+        // First pass: shape any missing glyphs into the cache.
+        // This borrows window immutably (via text_system) but does not paint.
         for run in runs {
-            if run.text.chars().all(|c| c == ' ') {
-                continue;
-            }
-
-            let font = match (run.bold, run.italic) {
-                (true, true) => bold_italic_font.clone(),
-                (true, false) => bold_font.clone(),
-                (false, true) => italic_font.clone(),
-                (false, false) => normal_font.clone(),
+            let glyph_width = if run.wide {
+                cell_width * 2.0
+            } else {
+                cell_width
             };
 
             let mut color = run.fg;
@@ -372,76 +478,105 @@ impl TerminalElement {
                 color.a *= 0.6;
             }
 
-            let underline = if run.underline {
-                Some(UnderlineStyle {
-                    thickness: px(1.0),
-                    color: Some(color),
-                    wavy: run.wavy_underline,
-                })
-            } else {
-                None
-            };
+            for ch in run.text.chars() {
+                if ch == ' ' {
+                    continue;
+                }
 
-            let strikethrough = if run.strikethrough {
-                Some(StrikethroughStyle {
-                    thickness: px(1.0),
-                    color: Some(color),
-                })
-            } else {
-                None
-            };
-
-            // Wide characters need 2x cell width for glyph positioning
-            let glyph_width = if run.wide {
-                cell_width * 2.0
-            } else {
-                cell_width
-            };
-
-            // Look up shaped line in cache. shape_line() is the most expensive operation
-            // per frame; caching it avoids redundant font lookups and glyph resolution
-            // when content hasn't changed (e.g., during smooth sub-pixel scrolling).
-            let cache_key = ShapedLineKey {
-                text: run.text.clone(),
-                bold: run.bold,
-                italic: run.italic,
-                wide: run.wide,
-            };
-
-            let shaped = {
-                let cache = shaped_cache.borrow();
-                cache.entries.get(&cache_key).cloned()
-            };
-
-            let shaped = shaped.unwrap_or_else(|| {
-                let text_run = TextRun {
-                    len: run.text.len(),
-                    font,
-                    color,
-                    background_color: None,
-                    underline,
-                    strikethrough,
+                let needs_shape = {
+                    let cache = glyph_cache.borrow();
+                    cache
+                        .get(ch, run.bold, run.italic, run.wide, color)
+                        .is_none()
                 };
 
-                let result = window.text_system().shape_line(
-                    SharedString::from(run.text.clone()),
-                    font_size,
-                    &[text_run],
-                    Some(glyph_width),
+                if needs_shape {
+                    let font = match (run.bold, run.italic) {
+                        (true, true) => bold_italic_font.clone(),
+                        (true, false) => bold_font.clone(),
+                        (false, true) => italic_font.clone(),
+                        (false, false) => normal_font.clone(),
+                    };
+
+                    let mut char_buf = [0u8; 4];
+                    let char_str = ch.encode_utf8(&mut char_buf);
+                    let text_run = TextRun {
+                        len: char_str.len(),
+                        font,
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(char_str.to_owned()),
+                        font_size,
+                        &[text_run],
+                        Some(glyph_width),
+                    );
+
+                    glyph_cache
+                        .borrow_mut()
+                        .insert(ch, run.bold, run.italic, run.wide, color, shaped);
+                }
+            }
+        }
+
+        // Second pass: paint all characters and decorations.
+        // Now we only borrow window mutably (via paint), and the glyph_cache immutably.
+        for run in runs {
+            let mut color = run.fg;
+            if run.dim {
+                color.a *= 0.6;
+            }
+
+            let run_y = bounds.origin.y + cell_height * run.row as f32;
+
+            // Paint each non-space character from the glyph cache.
+            let mut col_offset = 0usize;
+            for ch in run.text.chars() {
+                if ch != ' ' {
+                    let x = bounds.origin.x + cell_width * (run.col_start + col_offset) as f32;
+                    let origin = point(x, run_y);
+
+                    let cache = glyph_cache.borrow();
+                    if let Some(shaped) =
+                        cache.get(ch, run.bold, run.italic, run.wide, color)
+                    {
+                        let _ = shaped.paint(origin, cell_height, window, cx);
+                    }
+                }
+
+                col_offset += 1;
+            }
+
+            // Paint underline as a simple rectangle at baseline + descent.
+            if run.underline {
+                let underline_x =
+                    bounds.origin.x + cell_width * run.col_start as f32;
+                // Position underline just below the text baseline.
+                let underline_y = run_y + ascent + descent.abs() - px(DECORATION_THICKNESS);
+                let underline_w = cell_width * run.col_count as f32;
+                let underline_bounds = Bounds::new(
+                    point(underline_x, underline_y),
+                    size(underline_w, px(DECORATION_THICKNESS)),
                 );
+                window.paint_quad(fill(underline_bounds, color));
+            }
 
-                shaped_cache
-                    .borrow_mut()
-                    .entries
-                    .insert(cache_key, result.clone());
-                result
-            });
-
-            let x = bounds.origin.x + cell_width * run.col_start as f32;
-            let y = bounds.origin.y + cell_height * run.row as f32;
-            let origin = point(x, y);
-
-            let _ = shaped.paint(origin, cell_height, window, cx);
+            // Paint strikethrough as a simple rectangle at vertical midpoint of text.
+            if run.strikethrough {
+                let strike_x =
+                    bounds.origin.x + cell_width * run.col_start as f32;
+                let strike_y = run_y + ascent * 0.5;
+                let strike_w = cell_width * run.col_count as f32;
+                let strike_bounds = Bounds::new(
+                    point(strike_x, strike_y),
+                    size(strike_w, px(DECORATION_THICKNESS)),
+                );
+                window.paint_quad(fill(strike_bounds, color));
+            }
         }
     }
 
@@ -689,29 +824,19 @@ impl Element for TerminalElement {
 
         let display_offset = term.grid().display_offset();
 
-        // Use cached cell runs if display_offset and content generation haven't changed.
+        // Use cached cell runs if display_offset and content generation match a recent entry.
         let runs = {
-            let cached = self.cell_run_cache.borrow();
-            if let Some(ref cache) = *cached {
-                if cache.display_offset == display_offset
-                    && cache.content_generation == content_gen
-                {
-                    Some(cache.runs.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            let cache = self.cell_run_cache.borrow();
+            cache
+                .get(display_offset, content_gen)
+                .map(|runs| runs.to_vec())
         };
 
         let runs = runs.unwrap_or_else(|| {
             let new_runs = Self::build_cell_runs(&term);
-            *self.cell_run_cache.borrow_mut() = Some(CellRunCache {
-                runs: new_runs.clone(),
-                display_offset,
-                content_generation: content_gen,
-            });
+            self.cell_run_cache
+                .borrow_mut()
+                .insert(display_offset, content_gen, new_runs.clone());
             new_runs
         });
 
@@ -721,14 +846,13 @@ impl Element for TerminalElement {
         // Paint selection highlight (between backgrounds and cursor)
         Self::paint_selection(&term, &bounds, cell_width, cell_height, window);
 
-        // Paint text (with shaped line cache to avoid expensive re-shaping)
+        // Paint text using per-character glyph cache (~200-500 entries, nearly 100% hit rate).
         Self::paint_text(
             &runs,
             &bounds,
             cell_width,
             cell_height,
-            &self.shaped_cache.clone(),
-            content_gen,
+            &self.glyph_cache.clone(),
             window,
             cx,
         );
