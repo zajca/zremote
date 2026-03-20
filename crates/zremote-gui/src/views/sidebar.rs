@@ -53,6 +53,20 @@ impl SidebarView {
                 this.hosts = hosts;
                 this.sessions = all_sessions;
                 this.loading = false;
+
+                // Auto-select first active session if none is selected
+                if this.selected_session_id.is_none() {
+                    if let Some(session) = this.sessions.iter().find(|s| s.status == "active") {
+                        let session_id = session.id.clone();
+                        let host_id = session.host_id.clone();
+                        this.selected_session_id = Some(session_id.clone());
+                        cx.emit(SidebarEvent::SessionSelected {
+                            session_id,
+                            host_id,
+                        });
+                    }
+                }
+
                 cx.notify();
             });
         })
