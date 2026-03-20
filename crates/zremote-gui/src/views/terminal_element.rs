@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::VoidListener;
@@ -9,6 +11,7 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor}
 use gpui::*;
 
 use crate::theme;
+use crate::views::terminal_panel::TerminalLayoutInfo;
 
 const FONT_SIZE: f32 = 14.0;
 const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
@@ -42,6 +45,8 @@ pub struct TerminalElement {
     resize_tx: flume::Sender<(u16, u16)>,
     /// Whether the cursor should be painted (controlled by blink timer in the panel).
     cursor_visible: bool,
+    /// Shared layout info written during paint, read by mouse event handlers in the panel.
+    layout_info: Rc<Cell<TerminalLayoutInfo>>,
 }
 
 pub struct TerminalElementLayoutState {
@@ -54,11 +59,13 @@ impl TerminalElement {
         term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
         resize_tx: flume::Sender<(u16, u16)>,
         cursor_visible: bool,
+        layout_info: Rc<Cell<TerminalLayoutInfo>>,
     ) -> Self {
         Self {
             term,
             resize_tx,
             cursor_visible,
+            layout_info,
         }
     }
 
@@ -334,6 +341,72 @@ impl TerminalElement {
         }
     }
 
+    /// Paint semi-transparent highlight rectangles over selected cells.
+    fn paint_selection(
+        term: &alacritty_terminal::Term<VoidListener>,
+        bounds: &Bounds<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        window: &mut Window,
+    ) {
+        let content = term.renderable_content();
+        let selection = match content.selection {
+            Some(sel) => sel,
+            None => return,
+        };
+
+        let cols = term.columns();
+        let rows = term.screen_lines();
+        let display_offset = term.grid().display_offset() as i32;
+
+        // Selection highlight color: semi-transparent white
+        let highlight = hsla(0.6, 0.5, 0.5, 0.35);
+
+        // The selection range is in absolute grid coordinates.
+        // Convert to viewport-relative rows for painting.
+        for viewport_row in 0..rows {
+            let grid_line = Line(viewport_row as i32 - display_offset);
+
+            // Determine the column range selected on this line
+            let (col_start, col_end) = if selection.is_block {
+                // Block selection: same column range on every line within the selection
+                if grid_line < selection.start.line || grid_line > selection.end.line {
+                    continue;
+                }
+                (selection.start.column.0, selection.end.column.0)
+            } else {
+                // Simple/semantic/lines selection
+                if grid_line < selection.start.line || grid_line > selection.end.line {
+                    continue;
+                }
+
+                let start_col = if grid_line == selection.start.line {
+                    selection.start.column.0
+                } else {
+                    0
+                };
+
+                let end_col = if grid_line == selection.end.line {
+                    selection.end.column.0
+                } else {
+                    cols.saturating_sub(1)
+                };
+
+                (start_col, end_col)
+            };
+
+            if col_start > col_end {
+                continue;
+            }
+
+            let x = bounds.origin.x + cell_width * col_start as f32;
+            let y = bounds.origin.y + cell_height * viewport_row as f32;
+            let w = cell_width * (col_end - col_start + 1) as f32;
+            let rect = Bounds::new(point(x, y), size(w, cell_height));
+            window.paint_quad(fill(rect, highlight));
+        }
+    }
+
     fn paint_cursor(
         term: &alacritty_terminal::Term<VoidListener>,
         bounds: &Bounds<Pixels>,
@@ -485,6 +558,13 @@ impl Element for TerminalElement {
         let cell_width = state.cell_width;
         let cell_height = state.cell_height;
 
+        // Store layout info for mouse event handlers in the panel.
+        self.layout_info.set(TerminalLayoutInfo {
+            cell_width,
+            cell_height,
+            bounds,
+        });
+
         // Paint terminal background
         let bg: Hsla = theme::terminal_bg().into();
         window.paint_quad(fill(bounds, bg));
@@ -496,6 +576,9 @@ impl Element for TerminalElement {
 
         // Paint cell backgrounds
         Self::paint_backgrounds(&runs, &bounds, cell_width, cell_height, window);
+
+        // Paint selection highlight (between backgrounds and cursor)
+        Self::paint_selection(&term, &bounds, cell_width, cell_height, window);
 
         // Paint text
         Self::paint_text(&runs, &bounds, cell_width, cell_height, window, cx);
