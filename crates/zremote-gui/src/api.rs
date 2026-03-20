@@ -1,4 +1,4 @@
-use crate::types::{CreateSessionRequest, Host, ModeResponse, Session};
+use crate::types::{CreateSessionRequest, Host, ModeResponse, Project, Session, UpdateProjectRequest};
 
 /// HTTP client for the `ZRemote` REST API.
 #[derive(Clone)]
@@ -71,6 +71,37 @@ impl ApiClient {
             .json()
             .await?;
         Ok(session)
+    }
+
+    /// List projects for a host.
+    pub async fn list_projects(&self, host_id: &str) -> Result<Vec<Project>, ApiError> {
+        let projects: Vec<Project> = self
+            .client
+            .get(format!("{}/api/hosts/{host_id}/projects", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(projects)
+    }
+
+    /// Update a project (e.g. pin/unpin).
+    pub async fn update_project(
+        &self,
+        project_id: &str,
+        req: &UpdateProjectRequest,
+    ) -> Result<Project, ApiError> {
+        let project: Project = self
+            .client
+            .patch(format!("{}/api/projects/{project_id}", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(project)
     }
 
     /// Close (delete) a session.
