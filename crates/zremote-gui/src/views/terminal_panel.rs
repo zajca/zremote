@@ -1,3 +1,43 @@
+//! Terminal panel: input handling, WebSocket I/O, and state management.
+//!
+//! # Cache ownership
+//!
+//! Both [`CellRunCache`] and [`GlyphCache`] live here in `TerminalPanel` (which persists
+//! across frames) and are shared with [`TerminalElement`] via `Rc<RefCell<>>`. This is
+//! critical because GPUI recreates the element on every `render()` call -- if caches
+//! lived in the element, they'd be empty every frame (0% hit rate, ~1s stutter from
+//! reshaping 200+ text runs). The `Rc<RefCell<>>` pattern avoids mutex overhead since
+//! rendering is single-threaded in GPUI.
+//!
+//! # Scroll event pipeline
+//!
+//! ```text
+//! Trackpad/wheel event
+//!   → on_scroll_wheel() handler
+//!   → accumulate pixel delta in scroll_px: Rc<Cell<f32>>
+//!   → when accumulated >= cell_height, convert to line delta
+//!   → add line delta to pending_scroll_delta: Arc<AtomicI32> (lock-free)
+//!   → cx.notify() schedules repaint
+//!   → paint() drains AtomicI32, locks term once, calls scroll_display()
+//! ```
+//!
+//! This pipeline avoids mutex lock contention between scroll events and the PTY output
+//! reader thread (which also locks the term to feed data into the terminal emulator).
+//!
+//! # Cursor blink
+//!
+//! A detached async task toggles `cursor_visible` every 500ms using `Timer::after()`.
+//! On any keystroke, `observe_keystrokes` resets `cursor_visible = true` so the cursor
+//! stays solid while the user is actively typing. The blink timer continues independently
+//! and resumes blinking naturally after typing stops.
+//!
+//! # Selection (mouse handling)
+//!
+//! Left click creates a selection at the grid position (supporting double-click for word
+//! and triple-click for line selection). Mouse drag updates the selection endpoint.
+//! Mouse up clears empty selections (plain click without drag). Ctrl+Shift+C copies
+//! selected text to the system clipboard via `term.selection_to_string()`.
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};

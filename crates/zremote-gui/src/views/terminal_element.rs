@@ -1,3 +1,94 @@
+//! Terminal rendering element for the GPUI monospace grid.
+//!
+//! # Architecture overview
+//!
+//! The terminal is rendered as a fixed monospace pixel grid. Each cell occupies exactly
+//! `cell_width x cell_height` pixels. The rendering pipeline runs in strict order:
+//!
+//! 1. **Backgrounds** -- filled rectangles for cells with non-default background colors
+//! 2. **Selection** -- semi-transparent overlay on selected cells
+//! 3. **Text** -- individual character glyphs from the per-character cache
+//! 4. **Cursor** -- block/beam/underline, with blink support
+//!
+//! # Scrolling (Zed-style, whole-line only)
+//!
+//! Scroll events are handled WITHOUT sub-pixel offsets. Trackpad pixel deltas accumulate
+//! in `scroll_px` until they cross a `cell_height` boundary, then convert to a whole-line
+//! delta stored in `pending_scroll_delta: AtomicI32`. The `paint()` method drains this
+//! atomic once per frame and calls `term.scroll_display()` under a single mutex lock.
+//!
+//! **Why no sub-pixel scrolling?** We tried it (fractional Y offset applied to all paint
+//! calls) and it caused: (a) constant repaints for tiny offset changes, (b) text jitter
+//! from anti-aliasing at fractional positions on 1.5x displays, (c) extra complexity
+//! for rendering a partial row at the bottom. Alacritty's `display_offset` is integer
+//! (line count), and native terminals (foot, alacritty, kitty) all scroll by whole lines.
+//! Zed's terminal uses the same approach. The fast repaint with cached glyphs gives the
+//! illusion of smoothness.
+//!
+//! **Why AtomicI32 for scroll delta?** The scroll event handler runs on the main thread
+//! but the PTY output reader also locks the term mutex. By accumulating scroll deltas in
+//! an atomic (lock-free), event handlers never contend with the PTY thread. The mutex is
+//! only acquired once per frame in `paint()`.
+//!
+//! # Caching strategy
+//!
+//! Two caches eliminate expensive per-frame work:
+//!
+//! ## Per-character glyph cache ([`GlyphCache`])
+//!
+//! Key: `(char, bold, italic, wide, color_h, color_s, color_l, color_a)`.
+//! In a monospace terminal, each character+style+color combo always produces the same
+//! shaped glyph. Instead of shaping entire text runs (where "Hello" and "hello" are
+//! different cache keys), we shape individual characters. This yields ~500 total entries
+//! with nearly 100% hit rate after the first frame. No eviction needed.
+//!
+//! **Why color is in the key:** GPUI's `ShapedLine` bakes color into `decoration_runs`
+//! during shaping, and `decoration_runs` is `pub(crate)` so color cannot be overridden
+//! at paint time. Without color in the key, all occurrences of 'e' would render in
+//! whatever color was shaped first.
+//!
+//! **Why two-pass painting:** Pass 1 shapes missing glyphs (borrows `window` immutably
+//! via `text_system()`). Pass 2 paints cached glyphs (borrows `window` mutably via
+//! `paint()`). Rust's borrow checker prevents doing both in one pass. Underline and
+//! strikethrough are painted as simple rectangles in pass 2, decoupled from text shaping.
+//!
+//! ## Cell run cache ([`CellRunCache`])
+//!
+//! 8-slot LRU keyed by `(display_offset, content_generation)`. Each slot stores the
+//! complete `Vec<CellRun>` for one viewport state. During scrollback, each offset
+//! produces different cell runs (different grid lines visible). The LRU handles
+//! back-and-forth scrolling (page up, page down, page up) without rebuilding.
+//! `content_generation` invalidates when PTY output arrives.
+//!
+//! # Font metrics
+//!
+//! Cell dimensions use `advance('M')` for width and `ascent + |descent|` for height.
+//! `CELL_PADDING_Y = 0.0` matches native terminals (foot, alacritty) and maximizes
+//! visible rows (41 vs 35 with padding=4.0).
+//!
+//! **Critical: do NOT divide font metrics by scale_factor.** GPUI's `advance()`,
+//! `ascent()`, `descent()` already return logical pixels (calculated as
+//! `font_units / units_per_em * font_size`). Dividing by scale_factor was a bug that
+//! made cells 1.5x too small on HiDPI displays.
+//!
+//! # Visual testing
+//!
+//! Run `scripts/terminal-test-patterns.sh` in a terminal session to output comprehensive
+//! ANSI test patterns (16-color, 256-color, true color gradients, text styles, Unicode
+//! box drawing, monospace alignment grid). Take screenshots with `grim` and compare
+//! against a native terminal (foot) reference.
+//!
+//! Checklist:
+//! - Characters fill cells with no gaps (monospace grid aligned)
+//! - Box drawing lines connect at intersections (no gaps)
+//! - Bold/italic/underline/strikethrough/dim/reverse all distinguishable
+//! - 256-color palette and true color gradients render smoothly
+//! - MMMM/iiii/WWWW lines are exactly the same width (monospace verification)
+//! - Background colors fill entire cells (no sub-cell gaps)
+//!
+//! Known limitation: GPUI's `UnderlineStyle` only supports solid and wavy. Double,
+//! dotted, and dashed underlines fall back to solid.
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
