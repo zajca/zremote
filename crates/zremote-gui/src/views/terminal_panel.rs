@@ -1,10 +1,11 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::Config as TermConfig;
@@ -15,7 +16,7 @@ use gpui::*;
 use crate::terminal_ws::{self, TerminalWsHandle};
 use crate::theme;
 use crate::types::TerminalEvent;
-use crate::views::terminal_element::TerminalElement;
+use crate::views::terminal_element::{CellRunCache, ShapedLineCache, TerminalElement};
 
 /// Cursor blink interval (standard terminal blink rate).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -48,6 +49,19 @@ pub struct TerminalPanel {
     blink_started: bool,
     /// Layout info from the terminal element, shared via Rc<Cell> for mouse handlers.
     layout_info: Rc<Cell<TerminalLayoutInfo>>,
+    /// Accumulated pixel scroll from trackpad (used to convert fractional pixels to
+    /// whole-line deltas, following Zed's approach). Not used for sub-pixel rendering.
+    scroll_px: Rc<Cell<f32>>,
+    /// Pending whole-line scroll delta accumulated by event handlers (no mutex lock needed).
+    /// Drained by paint() which applies it to the term under a single lock.
+    pending_scroll_delta: Arc<AtomicI32>,
+    /// Generation counter incremented when terminal content changes (PTY output, resize).
+    /// Used by cell run cache to detect staleness.
+    content_generation: Arc<AtomicU64>,
+    /// Cached cell runs from previous frame (persists across renders, shared with TerminalElement).
+    cell_run_cache: Rc<RefCell<Option<CellRunCache>>>,
+    /// Cached shaped text lines (persists across renders, shared with TerminalElement).
+    shaped_cache: Rc<RefCell<ShapedLineCache>>,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
 }
@@ -84,6 +98,11 @@ impl TerminalPanel {
             cursor_visible: true,
             blink_started: false,
             layout_info: Rc::new(Cell::new(TerminalLayoutInfo::default())),
+            scroll_px: Rc::new(Cell::new(0.0)),
+            pending_scroll_delta: Arc::new(AtomicI32::new(0)),
+            content_generation: Arc::new(AtomicU64::new(0)),
+            cell_run_cache: Rc::new(RefCell::new(None)),
+            shaped_cache: Rc::new(RefCell::new(ShapedLineCache::new())),
             _keystroke_subscription: keystroke_subscription,
         }
     }
@@ -100,6 +119,7 @@ impl TerminalPanel {
 
         let output_rx = self.ws_handle.output_rx.clone();
         let term = self.term.clone();
+        let content_generation = self.content_generation.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut processor: Processor = Processor::new();
@@ -110,6 +130,8 @@ impl TerminalPanel {
                         if let Ok(mut term) = term.lock() {
                             processor.advance(&mut *term, &bytes);
                         }
+                        // Bump generation so cell run cache invalidates.
+                        content_generation.fetch_add(1, Ordering::Relaxed);
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
@@ -283,6 +305,10 @@ impl Render for TerminalPanel {
             self.ws_handle.resize_tx.clone(),
             self.cursor_visible,
             self.layout_info.clone(),
+            self.pending_scroll_delta.clone(),
+            self.content_generation.clone(),
+            self.cell_run_cache.clone(),
+            self.shaped_cache.clone(),
         );
 
         let mut content = div()
@@ -425,26 +451,56 @@ impl Render for TerminalPanel {
                 }
             })
             .on_scroll_wheel({
-                let term = self.term.clone();
                 let entity_id = cx.entity_id();
+                let layout_info = self.layout_info.clone();
+                let scroll_px = self.scroll_px.clone();
+                let pending_scroll_delta = self.pending_scroll_delta.clone();
                 move |event: &ScrollWheelEvent, _window: &mut Window, cx: &mut App| {
-                    let delta_lines = match event.delta {
-                        ScrollDelta::Lines(delta) => {
-                            // Negative y = scroll up (show older content).
-                            // Negate because alacritty Scroll::Delta positive = scroll up.
-                            (-delta.y * SCROLL_LINES_PER_TICK as f32).round() as i32
-                        }
-                        ScrollDelta::Pixels(delta) => {
-                            // Convert pixel delta to lines (approximate with 18px line height).
-                            let dy: f32 = delta.y.into();
-                            (-dy / 18.0).round() as i32
-                        }
+                    let info = layout_info.get();
+                    let cell_h = if info.cell_height > px(0.0) {
+                        info.cell_height
+                    } else {
+                        px(18.0)
                     };
 
-                    if delta_lines != 0 {
-                        if let Ok(mut term) = term.lock() {
-                            term.scroll_display(Scroll::Delta(delta_lines));
+                    // Scroll multiplier: for discrete mouse wheels (Lines delta), each
+                    // tick reports 1 line, so multiply to get SCROLL_LINES_PER_TICK.
+                    // For trackpad (Pixels delta), the OS already provides proportional
+                    // pixel values, so use 1.0 to avoid double-scaling.
+                    let multiplier = match event.delta {
+                        ScrollDelta::Lines(_) => SCROLL_LINES_PER_TICK as f32,
+                        ScrollDelta::Pixels(_) => 1.0,
+                    };
+
+                    // Following Zed's approach: accumulate pixel deltas and convert to
+                    // whole-line scroll deltas. No sub-pixel rendering offset -- alacritty's
+                    // display_offset always moves by whole lines.
+                    let line_delta = match event.touch_phase {
+                        TouchPhase::Started => {
+                            // Reset accumulator at gesture start.
+                            scroll_px.set(0.0);
+                            None
                         }
+                        TouchPhase::Moved => {
+                            let pixel_delta = event.delta.pixel_delta(cell_h);
+                            let old_offset = (px(scroll_px.get()) / cell_h) as i32;
+                            let new_scroll_px =
+                                scroll_px.get() + f32::from(pixel_delta.y) * multiplier;
+                            let new_offset = (px(new_scroll_px) / cell_h) as i32;
+                            // Keep accumulator bounded to viewport height to avoid overflow.
+                            let viewport_h =
+                                f32::from(info.bounds.size.height).max(f32::from(cell_h));
+                            scroll_px.set(new_scroll_px % viewport_h);
+                            let delta = new_offset - old_offset;
+                            if delta != 0 { Some(delta) } else { None }
+                        }
+                        TouchPhase::Ended => None,
+                    };
+
+                    if let Some(lines) = line_delta {
+                        // Negate: positive pixel_delta.y = scroll content down (show newer),
+                        // but Scroll::Delta(positive) = scroll up (show older/history).
+                        pending_scroll_delta.fetch_add(-lines, Ordering::Relaxed);
                         cx.notify(entity_id);
                     }
                 }
