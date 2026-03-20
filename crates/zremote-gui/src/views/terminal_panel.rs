@@ -1,48 +1,49 @@
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::Config as TermConfig;
-use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::Processor;
 use gpui::*;
 
 use crate::terminal_ws::{self, TerminalWsHandle};
 use crate::theme;
 use crate::types::TerminalEvent;
+use crate::views::terminal_element::TerminalElement;
 
-/// Default terminal dimensions.
+/// Default terminal dimensions (used until first resize fits to container).
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
-
-/// Cell height for monospace font at 14px.
-const CELL_HEIGHT: f32 = 18.0;
 
 pub struct TerminalPanel {
     session_id: String,
     term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
     ws_handle: TerminalWsHandle,
-    rows: u16,
+    focus_handle: FocusHandle,
     closed: bool,
     reader_started: bool,
 }
 
 impl TerminalPanel {
-    pub fn new(session_id: String, ws_url: String, tokio_handle: &tokio::runtime::Handle) -> Self {
+    pub fn new(
+        session_id: String,
+        ws_url: String,
+        tokio_handle: &tokio::runtime::Handle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let config = TermConfig::default();
         let size = TermSize::new(usize::from(DEFAULT_COLS), usize::from(DEFAULT_ROWS));
         let term = alacritty_terminal::Term::new(config, &size, VoidListener);
         let term = Arc::new(Mutex::new(term));
 
         let ws_handle = terminal_ws::connect(ws_url, tokio_handle);
+        let focus_handle = cx.focus_handle();
 
         Self {
             session_id,
             term,
             ws_handle,
-            rows: DEFAULT_ROWS,
+            focus_handle,
             closed: false,
             reader_started: false,
         }
@@ -152,191 +153,35 @@ impl TerminalPanel {
             }
         }
     }
-
-    /// Build styled row elements from the terminal grid.
-    /// Groups consecutive cells with the same style into spans for efficiency.
-    fn render_row(&self, row_idx: i32, term: &alacritty_terminal::Term<VoidListener>) -> Div {
-        let cols = term.columns();
-        let mut spans: Vec<AnyElement> = Vec::new();
-        let mut current_text = String::new();
-        let mut current_fg = AnsiColor::Named(NamedColor::Foreground);
-        let mut current_flags = CellFlags::empty();
-        let mut first = true;
-
-        for col in 0..cols {
-            let point = Point::new(Line(row_idx), Column(col));
-            let cell = &term.grid()[point];
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
-            let fg = cell.fg;
-            let flags = cell.flags;
-
-            if first {
-                current_fg = fg;
-                current_flags = flags;
-                first = false;
-            }
-
-            // When style changes, flush the current span
-            if fg != current_fg || flags != current_flags {
-                if !current_text.is_empty() {
-                    spans.push(self.make_span(&current_text, current_fg, current_flags));
-                    current_text.clear();
-                }
-                current_fg = fg;
-                current_flags = flags;
-            }
-
-            current_text.push(ch);
-        }
-
-        // Flush remaining text (trim trailing spaces)
-        let trimmed = current_text.trim_end();
-        if !trimmed.is_empty() {
-            spans.push(self.make_span(trimmed, current_fg, current_flags));
-        }
-
-        // If the entire row is empty, render a space to maintain height
-        if spans.is_empty() {
-            spans.push(div().child(SharedString::from(" ")).into_any_element());
-        }
-
-        div()
-            .w_full()
-            .h(px(CELL_HEIGHT))
-            .flex()
-            .text_size(px(14.0))
-            .children(spans)
-    }
-
-    fn make_span(&self, text: &str, fg: AnsiColor, flags: CellFlags) -> AnyElement {
-        let color = ansi_to_gpui_color(fg);
-        let mut el = div()
-            .text_color(color)
-            .child(SharedString::from(text.to_string()));
-
-        if flags.contains(CellFlags::BOLD) {
-            el = el.font_weight(FontWeight::BOLD);
-        }
-
-        if flags.contains(CellFlags::DIM) {
-            el = el.opacity(0.6);
-        }
-
-        el.into_any_element()
-    }
 }
 
-/// Convert alacritty ANSI color to GPUI Rgba.
-fn ansi_to_gpui_color(color: AnsiColor) -> Rgba {
-    match color {
-        AnsiColor::Named(name) => named_color_to_rgba(name),
-        AnsiColor::Spec(rgb) => Rgba {
-            r: f32::from(rgb.r) / 255.0,
-            g: f32::from(rgb.g) / 255.0,
-            b: f32::from(rgb.b) / 255.0,
-            a: 1.0,
-        },
-        AnsiColor::Indexed(idx) => indexed_color_to_rgba(idx),
-    }
-}
-
-fn named_color_to_rgba(name: NamedColor) -> Rgba {
-    match name {
-        NamedColor::Black => rgb(0x1a1a1e),
-        NamedColor::Red => rgb(0xef4444),
-        NamedColor::Green => rgb(0x4ade80),
-        NamedColor::Yellow => rgb(0xfacc15),
-        NamedColor::Blue => rgb(0x60a5fa),
-        NamedColor::Magenta => rgb(0xc084fc),
-        NamedColor::Cyan => rgb(0x22d3ee),
-        NamedColor::White => rgb(0xcccccc),
-        NamedColor::BrightBlack => rgb(0x555555),
-        NamedColor::BrightRed => rgb(0xf87171),
-        NamedColor::BrightGreen => rgb(0x86efac),
-        NamedColor::BrightYellow => rgb(0xfde68a),
-        NamedColor::BrightBlue => rgb(0x93c5fd),
-        NamedColor::BrightMagenta => rgb(0xd8b4fe),
-        NamedColor::BrightCyan => rgb(0x67e8f9),
-        NamedColor::BrightWhite => rgb(0xffffff),
-        NamedColor::Foreground | NamedColor::BrightForeground => rgb(0xeeeeee),
-        NamedColor::Background => rgb(0x0a0a0b),
-        NamedColor::Cursor => rgb(0xcccccc),
-        NamedColor::DimBlack => rgb(0x111111),
-        NamedColor::DimRed => rgb(0xb91c1c),
-        NamedColor::DimGreen => rgb(0x16a34a),
-        NamedColor::DimYellow => rgb(0xca8a04),
-        NamedColor::DimBlue => rgb(0x2563eb),
-        NamedColor::DimMagenta => rgb(0x9333ea),
-        NamedColor::DimCyan => rgb(0x0891b2),
-        NamedColor::DimWhite => rgb(0x888888),
-        NamedColor::DimForeground => rgb(0x888888),
-    }
-}
-
-fn indexed_color_to_rgba(idx: u8) -> Rgba {
-    // 16 standard colors -> delegate to named
-    if idx < 16 {
-        // Safety: NamedColor maps 0-15 to the 16 standard colors
-        let named = match idx {
-            0 => NamedColor::Black,
-            1 => NamedColor::Red,
-            2 => NamedColor::Green,
-            3 => NamedColor::Yellow,
-            4 => NamedColor::Blue,
-            5 => NamedColor::Magenta,
-            6 => NamedColor::Cyan,
-            7 => NamedColor::White,
-            8 => NamedColor::BrightBlack,
-            9 => NamedColor::BrightRed,
-            10 => NamedColor::BrightGreen,
-            11 => NamedColor::BrightYellow,
-            12 => NamedColor::BrightBlue,
-            13 => NamedColor::BrightMagenta,
-            14 => NamedColor::BrightCyan,
-            _ => NamedColor::BrightWhite,
-        };
-        return named_color_to_rgba(named);
-    }
-
-    // 216 color cube (indices 16-231)
-    if idx < 232 {
-        let idx = idx - 16;
-        let r = (idx / 36) * 51;
-        let g = ((idx / 6) % 6) * 51;
-        let b = (idx % 6) * 51;
-        return Rgba {
-            r: f32::from(r) / 255.0,
-            g: f32::from(g) / 255.0,
-            b: f32::from(b) / 255.0,
-            a: 1.0,
-        };
-    }
-
-    // 24 grayscale (indices 232-255)
-    let gray = 8 + (idx - 232) * 10;
-    Rgba {
-        r: f32::from(gray) / 255.0,
-        g: f32::from(gray) / 255.0,
-        b: f32::from(gray) / 255.0,
-        a: 1.0,
+impl Focusable for TerminalPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 impl Render for TerminalPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_output_reader(cx);
 
-        let term = self.term.lock().unwrap();
-        let rows = self.rows;
+        // Auto-focus on first render
+        if !self.focus_handle.is_focused(window) && !self.closed {
+            self.focus_handle.focus(window);
+        }
+
+        let terminal_el = TerminalElement::new(
+            self.term.clone(),
+            self.ws_handle.resize_tx.clone(),
+        );
 
         let mut content = div()
             .id("terminal-content")
+            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::terminal_bg())
-            .font_family("JetBrains Mono")
-            .text_size(px(14.0))
             .p(px(4.0))
             .overflow_hidden()
             .on_key_down({
@@ -346,11 +191,15 @@ impl Render for TerminalPanel {
                         let _ = input_tx.send(bytes);
                     }
                 }
-            });
-
-        for row in 0..i32::from(rows) {
-            content = content.child(self.render_row(row, &term));
-        }
+            })
+            .on_any_mouse_down({
+                let focus = self.focus_handle.clone();
+                move |_event: &MouseDownEvent, window: &mut Window, _cx: &mut App| {
+                    focus.focus(window);
+                }
+            })
+            .focus(|style| style.border_color(theme::accent()).border_1())
+            .child(terminal_el);
 
         if self.closed {
             content = content.child(

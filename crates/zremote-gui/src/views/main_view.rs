@@ -61,8 +61,9 @@ impl MainView {
         let ws_url = self.app_state.api.terminal_ws_url(session_id);
         let session_id = session_id.to_string();
 
+        let tokio_handle = self.app_state.tokio_handle.clone();
         let terminal =
-            cx.new(|_cx| TerminalPanel::new(session_id, ws_url, &self.app_state.tokio_handle));
+            cx.new(|cx| TerminalPanel::new(session_id, ws_url, &tokio_handle, cx));
 
         self.terminal = Some(terminal);
         cx.notify();
