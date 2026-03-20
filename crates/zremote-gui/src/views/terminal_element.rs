@@ -1,9 +1,11 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::test::TermSize;
@@ -21,6 +23,7 @@ const CURSOR_UNDERLINE_HEIGHT: f32 = 2.0;
 const CELL_PADDING_Y: f32 = 0.0;
 
 /// A run of consecutive cells on the same row sharing the same style.
+#[derive(Clone)]
 struct CellRun {
     text: String,
     fg: Hsla,
@@ -38,8 +41,47 @@ struct CellRun {
     row: usize,
 }
 
+/// Cache for cell runs to avoid rebuilding from the grid every frame.
+/// Invalidated when display_offset changes (line scroll) or content_generation bumps (PTY output).
+pub struct CellRunCache {
+    runs: Vec<CellRun>,
+    display_offset: usize,
+    content_generation: u64,
+}
+
+/// Key for the shaped line cache: identifies a unique text + style combination.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct ShapedLineKey {
+    text: String,
+    bold: bool,
+    italic: bool,
+    wide: bool,
+}
+
+/// Cache for shaped text lines to avoid expensive text shaping on every frame.
+/// Keyed by (text content, font variant, width). Evicted when content_generation changes.
+pub struct ShapedLineCache {
+    entries: HashMap<ShapedLineKey, ShapedLine>,
+    content_generation: u64,
+}
+
+impl ShapedLineCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            content_generation: 0,
+        }
+    }
+}
+
 /// Custom GPUI Element that renders terminal cells on a fixed monospace pixel grid.
 /// Fills available parent space and dynamically resizes the alacritty Term to fit.
+///
+/// Scrolling follows Zed's approach: pixel deltas from trackpad/mouse are accumulated
+/// and converted to whole-line scroll deltas. No sub-pixel rendering offset is used --
+/// alacritty's display_offset always moves by whole lines, and the grid is rendered
+/// at exact line boundaries. This eliminates constant repaints from fractional offsets
+/// and matches how native terminals feel.
 pub struct TerminalElement {
     term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
     resize_tx: flume::Sender<(u16, u16)>,
@@ -47,6 +89,14 @@ pub struct TerminalElement {
     cursor_visible: bool,
     /// Shared layout info written during paint, read by mouse event handlers in the panel.
     layout_info: Rc<Cell<TerminalLayoutInfo>>,
+    /// Pending whole-line scroll delta from event handlers (applied in paint under single lock).
+    pending_scroll_delta: Arc<AtomicI32>,
+    /// Content generation counter (bumped on PTY output) for cache invalidation.
+    content_generation: Arc<AtomicU64>,
+    /// Cached cell runs from previous frame.
+    cell_run_cache: Rc<std::cell::RefCell<Option<CellRunCache>>>,
+    /// Cached shaped text lines from previous frame.
+    shaped_cache: Rc<std::cell::RefCell<ShapedLineCache>>,
 }
 
 pub struct TerminalElementLayoutState {
@@ -60,12 +110,20 @@ impl TerminalElement {
         resize_tx: flume::Sender<(u16, u16)>,
         cursor_visible: bool,
         layout_info: Rc<Cell<TerminalLayoutInfo>>,
+        pending_scroll_delta: Arc<AtomicI32>,
+        content_generation: Arc<AtomicU64>,
+        cell_run_cache: Rc<std::cell::RefCell<Option<CellRunCache>>>,
+        shaped_cache: Rc<std::cell::RefCell<ShapedLineCache>>,
     ) -> Self {
         Self {
             term,
             resize_tx,
             cursor_visible,
             layout_info,
+            pending_scroll_delta,
+            content_generation,
+            cell_run_cache,
+            shaped_cache,
         }
     }
 
@@ -139,17 +197,29 @@ impl TerminalElement {
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_offset = term.grid().display_offset() as i32;
+        let total_rows = rows;
         let bg_default = ansi_to_hsla(AnsiColor::Named(NamedColor::Background));
         let mut runs = Vec::new();
 
-        for row in 0..rows {
+        // The grid's valid range is topmost_line..=bottommost_line.
+        // topmost_line = Line(-(history_size as i32))
+        // bottommost_line = Line(screen_lines - 1)
+        let bottommost = rows as i32 - 1;
+
+        for row in 0..total_rows {
+            // Check that the line we're about to access is within the grid bounds.
+            let line_idx = row as i32 - display_offset;
+            if line_idx > bottommost {
+                break; // Past the bottom of the grid; no more rows to render.
+            }
+
             let mut current: Option<CellRun> = None;
 
             for col in 0..cols {
                 // Adjust line index by display_offset to read scrollback content.
                 // When display_offset > 0, viewport row 0 maps to Line(-display_offset)
                 // in the grid (scrollback history).
-                let point = Point::new(Line(row as i32 - display_offset), Column(col));
+                let point = Point::new(Line(line_idx), Column(col));
                 let cell = &term.grid()[point];
                 let flags = cell.flags;
 
@@ -265,6 +335,8 @@ impl TerminalElement {
         bounds: &Bounds<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
+        shaped_cache: &Rc<std::cell::RefCell<ShapedLineCache>>,
+        content_generation: u64,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -273,6 +345,15 @@ impl TerminalElement {
         let bold_font = Self::bold_font();
         let italic_font = Self::italic_font();
         let bold_italic_font = Self::bold_italic_font();
+
+        // Invalidate shaped cache if content generation changed.
+        {
+            let mut cache = shaped_cache.borrow_mut();
+            if cache.content_generation != content_generation {
+                cache.entries.clear();
+                cache.content_generation = content_generation;
+            }
+        }
 
         for run in runs {
             if run.text.chars().all(|c| c == ' ') {
@@ -310,15 +391,6 @@ impl TerminalElement {
                 None
             };
 
-            let text_run = TextRun {
-                len: run.text.len(),
-                font,
-                color,
-                background_color: None,
-                underline,
-                strikethrough,
-            };
-
             // Wide characters need 2x cell width for glyph positioning
             let glyph_width = if run.wide {
                 cell_width * 2.0
@@ -326,12 +398,44 @@ impl TerminalElement {
                 cell_width
             };
 
-            let shaped = window.text_system().shape_line(
-                SharedString::from(run.text.clone()),
-                font_size,
-                &[text_run],
-                Some(glyph_width),
-            );
+            // Look up shaped line in cache. shape_line() is the most expensive operation
+            // per frame; caching it avoids redundant font lookups and glyph resolution
+            // when content hasn't changed (e.g., during smooth sub-pixel scrolling).
+            let cache_key = ShapedLineKey {
+                text: run.text.clone(),
+                bold: run.bold,
+                italic: run.italic,
+                wide: run.wide,
+            };
+
+            let shaped = {
+                let cache = shaped_cache.borrow();
+                cache.entries.get(&cache_key).cloned()
+            };
+
+            let shaped = shaped.unwrap_or_else(|| {
+                let text_run = TextRun {
+                    len: run.text.len(),
+                    font,
+                    color,
+                    background_color: None,
+                    underline,
+                    strikethrough,
+                };
+
+                let result = window.text_system().shape_line(
+                    SharedString::from(run.text.clone()),
+                    font_size,
+                    &[text_run],
+                    Some(glyph_width),
+                );
+
+                shaped_cache
+                    .borrow_mut()
+                    .entries
+                    .insert(cache_key, result.clone());
+                result
+            });
 
             let x = bounds.origin.x + cell_width * run.col_start as f32;
             let y = bounds.origin.y + cell_height * run.row as f32;
@@ -569,10 +673,47 @@ impl Element for TerminalElement {
         let bg: Hsla = theme::terminal_bg().into();
         window.paint_quad(fill(bounds, bg));
 
-        let term = self.term.lock().unwrap();
+        // Read the current content generation for cache checks.
+        let content_gen = self.content_generation.load(Ordering::Relaxed);
 
-        // Build batched cell runs (reads rows/cols from term directly)
-        let runs = Self::build_cell_runs(&term);
+        // Apply deferred scroll delta under a single lock. This is the key optimization:
+        // scroll event handlers no longer lock the mutex -- they atomically accumulate
+        // a line delta which we drain here, reducing lock contention with the PTY output thread.
+        let pending_delta = self.pending_scroll_delta.swap(0, Ordering::Relaxed);
+
+        let mut term = self.term.lock().unwrap();
+
+        if pending_delta != 0 {
+            term.scroll_display(Scroll::Delta(pending_delta));
+        }
+
+        let display_offset = term.grid().display_offset();
+
+        // Use cached cell runs if display_offset and content generation haven't changed.
+        let runs = {
+            let cached = self.cell_run_cache.borrow();
+            if let Some(ref cache) = *cached {
+                if cache.display_offset == display_offset
+                    && cache.content_generation == content_gen
+                {
+                    Some(cache.runs.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let runs = runs.unwrap_or_else(|| {
+            let new_runs = Self::build_cell_runs(&term);
+            *self.cell_run_cache.borrow_mut() = Some(CellRunCache {
+                runs: new_runs.clone(),
+                display_offset,
+                content_generation: content_gen,
+            });
+            new_runs
+        });
 
         // Paint cell backgrounds
         Self::paint_backgrounds(&runs, &bounds, cell_width, cell_height, window);
@@ -580,13 +721,23 @@ impl Element for TerminalElement {
         // Paint selection highlight (between backgrounds and cursor)
         Self::paint_selection(&term, &bounds, cell_width, cell_height, window);
 
-        // Paint text
-        Self::paint_text(&runs, &bounds, cell_width, cell_height, window, cx);
+        // Paint text (with shaped line cache to avoid expensive re-shaping)
+        Self::paint_text(
+            &runs,
+            &bounds,
+            cell_width,
+            cell_height,
+            &self.shaped_cache.clone(),
+            content_gen,
+            window,
+            cx,
+        );
 
         // Paint cursor (skip when blink timer has it hidden)
         if self.cursor_visible {
             Self::paint_cursor(&term, &bounds, cell_width, cell_height, window);
         }
+
     }
 }
 
