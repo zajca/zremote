@@ -8813,6 +8813,7 @@ dependencies = [
  "flume",
  "futures-util",
  "gpui",
+ "open",
  "reqwest",
  "rust-embed",
  "serde",

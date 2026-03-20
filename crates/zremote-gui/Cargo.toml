@@ -26,3 +26,4 @@ flume.workspace = true
 rust-embed.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
+open = "5"

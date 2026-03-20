@@ -1,4 +1,6 @@
 pub mod main_view;
+pub mod search_overlay;
 pub mod sidebar;
 pub mod terminal_element;
 pub mod terminal_panel;
+pub mod url_detector;

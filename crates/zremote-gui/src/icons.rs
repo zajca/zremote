@@ -13,7 +13,10 @@ pub enum Icon {
     Wifi,
     WifiOff,
     ChevronRight,
+    ChevronUp,
+    ChevronDown,
     Loader,
+    Search,
 }
 
 impl Icon {
@@ -30,7 +33,10 @@ impl Icon {
             Self::Wifi => "icons/wifi.svg",
             Self::WifiOff => "icons/wifi-off.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
+            Self::ChevronUp => "icons/chevron-up.svg",
+            Self::ChevronDown => "icons/chevron-down.svg",
             Self::Loader => "icons/loader.svg",
+            Self::Search => "icons/search.svg",
         }
     }
 }

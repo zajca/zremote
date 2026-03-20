@@ -5,9 +5,7 @@ use gpui::*;
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
-use crate::types::{
-    CreateSessionRequest, Host, Project, ServerEvent, Session, UpdateProjectRequest,
-};
+use crate::types::{CreateSessionRequest, Host, Project, ServerEvent, Session};
 use crate::views::main_view::SidebarEvent;
 
 /// A project with its associated sessions.
@@ -22,7 +20,7 @@ struct HostItems {
     orphan_sessions: Vec<Session>,
 }
 
-/// Sidebar view: hosts list with projects, sessions, pin/unpin.
+/// Sidebar view: hosts list with projects and sessions.
 pub struct SidebarView {
     app_state: Arc<AppState>,
     hosts: Vec<Host>,
@@ -34,12 +32,19 @@ pub struct SidebarView {
 
 impl SidebarView {
     pub fn new(app_state: Arc<AppState>, cx: &mut Context<Self>) -> Self {
+        // Restore previously selected session from persistence.
+        let restored_session_id = app_state
+            .persistence
+            .lock()
+            .ok()
+            .and_then(|p| p.state().active_session_id.clone());
+
         let mut view = Self {
             app_state,
             hosts: Vec::new(),
             sessions: Vec::new(),
             projects: Vec::new(),
-            selected_session_id: None,
+            selected_session_id: restored_session_id,
             loading: true,
         };
         view.load_data(cx);
@@ -75,7 +80,24 @@ impl SidebarView {
                 this.projects = all_projects;
                 this.loading = false;
 
-                // Auto-select first active session if none is selected
+                // If a session was restored from persistence, try to re-select it.
+                if let Some(ref restored_id) = this.selected_session_id {
+                    if let Some(session) = this.sessions.iter().find(|s| {
+                        s.id == *restored_id && s.status == "active"
+                    }) {
+                        let session_id = session.id.clone();
+                        let host_id = session.host_id.clone();
+                        cx.emit(SidebarEvent::SessionSelected {
+                            session_id,
+                            host_id,
+                        });
+                    } else {
+                        // Restored session no longer exists/active, clear it.
+                        this.selected_session_id = None;
+                    }
+                }
+
+                // Auto-select first active session if none is selected.
                 if this.selected_session_id.is_none()
                     && let Some(session) = this.sessions.iter().find(|s| s.status == "active")
                 {
@@ -180,35 +202,6 @@ impl SidebarView {
         .detach();
     }
 
-    fn toggle_pin(&mut self, project_id: &str, current_pinned: bool, cx: &mut Context<Self>) {
-        let api = self.app_state.api.clone();
-        let project_id = project_id.to_string();
-        let handle = self.app_state.tokio_handle.clone();
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let req = UpdateProjectRequest {
-                pinned: Some(!current_pinned),
-            };
-            let result = handle
-                .spawn({
-                    let project_id = project_id.clone();
-                    async move { api.update_project(&project_id, &req).await }
-                })
-                .await
-                .unwrap();
-            match result {
-                Ok(_) => {
-                    let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                        this.load_data(cx);
-                    });
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, project_id, "failed to update project pin");
-                }
-            }
-        })
-        .detach();
-    }
-
     /// Compute the hierarchical layout for a host.
     fn compute_items(&self, host_id: &str) -> HostItems {
         let active_sessions: Vec<Session> = self
@@ -237,7 +230,7 @@ impl SidebarView {
             }
         }
 
-        // Build project nodes: pinned roots, then active roots, then worktrees
+        // Build project nodes: pinned roots + roots with sessions, worktrees only with sessions
         let mut pinned_roots = Vec::new();
         let mut active_roots = Vec::new();
         let mut worktrees = Vec::new();
@@ -249,7 +242,6 @@ impl SidebarView {
             let is_worktree = project.parent_project_id.is_some();
 
             if is_worktree {
-                // Worktrees only shown if they have sessions
                 if !sessions.is_empty() {
                     worktrees.push(ProjectNode {
                         project: (*project).clone(),
@@ -257,13 +249,11 @@ impl SidebarView {
                     });
                 }
             } else if project.pinned {
-                // Pinned roots always shown
                 pinned_roots.push(ProjectNode {
                     project: (*project).clone(),
                     sessions,
                 });
             } else if !sessions.is_empty() {
-                // Non-pinned roots only if they have sessions
                 active_roots.push(ProjectNode {
                     project: (*project).clone(),
                     sessions,
@@ -285,17 +275,17 @@ impl SidebarView {
     fn render_host_section(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
         let host_id = host.id.clone();
         let is_online = host.status == "online";
-
-        let status_color = if is_online {
-            theme::success()
-        } else {
-            theme::text_tertiary()
-        };
+        let is_local = self.app_state.mode == "local";
 
         let items = self.compute_items(&host_id);
         let has_projects = !items.project_nodes.is_empty();
         let has_orphans = !items.orphan_sessions.is_empty();
         let is_empty = !has_projects && !has_orphans;
+
+        // Indentation depends on mode
+        let project_indent = 12.0_f32;
+        let session_indent = 28.0_f32;
+        let orphan_indent = if is_local { 16.0 } else { 20.0 };
 
         let mut children: Vec<AnyElement> = Vec::new();
 
@@ -303,7 +293,7 @@ impl SidebarView {
         for node in &items.project_nodes {
             let is_worktree = node.project.parent_project_id.is_some();
             children.push(
-                self.render_project_item(node, is_worktree, &host_id, cx)
+                self.render_project_item(node, is_worktree, &host_id, project_indent, session_indent, cx)
                     .into_any_element(),
             );
         }
@@ -323,7 +313,7 @@ impl SidebarView {
         // Orphan sessions
         for session in &items.orphan_sessions {
             children.push(
-                self.render_session_item(session, &host_id, px(28.0), cx)
+                self.render_session_item(session, &host_id, px(orphan_indent), cx)
                     .into_any_element(),
             );
         }
@@ -332,8 +322,8 @@ impl SidebarView {
         if is_empty && is_online {
             children.push(
                 div()
-                    .px(px(28.0))
-                    .py(px(6.0))
+                    .px(px(orphan_indent))
+                    .py(px(4.0))
                     .text_color(theme::text_tertiary())
                     .text_size(px(11.0))
                     .child("No active sessions")
@@ -341,18 +331,43 @@ impl SidebarView {
             );
         }
 
+        let mut container = div().flex().flex_col().w_full();
+
+        // Host header only in server mode
+        if !is_local {
+            container = container.child(self.render_host_header(host, cx));
+        }
+
+        // Content
+        container = container.child(div().flex().flex_col().children(children));
+
+        container
+    }
+
+    #[allow(clippy::unused_self)]
+    fn render_host_header(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
+        let host_id = host.id.clone();
+        let is_online = host.status == "online";
+
+        let status_color = if is_online {
+            theme::success()
+        } else {
+            theme::text_tertiary()
+        };
+
         div()
+            .id(SharedString::from(format!("host-header-{host_id}")))
+            .group("host-header")
             .flex()
-            .flex_col()
-            .w_full()
-            // Host header
+            .items_center()
+            .justify_between()
+            .px(px(12.0))
+            .py(px(4.0))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .px(px(12.0))
-                    .py(px(6.0))
                     .child(
                         div()
                             .w(px(8.0))
@@ -368,28 +383,24 @@ impl SidebarView {
                             .child(host.hostname.clone()),
                     ),
             )
-            // Content
-            .child(div().flex().flex_col().children(children))
-            // New Session button
             .child(
                 div()
                     .id(SharedString::from(format!("new-session-{host_id}")))
-                    .mx(px(12.0))
-                    .my(px(4.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
+                    .p(px(2.0))
+                    .rounded(px(3.0))
                     .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .text_color(theme::text_secondary())
-                    .text_size(px(12.0))
-                    .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                    .child(icon(Icon::Plus).size(px(14.0)))
-                    .child("New Session")
+                    .invisible()
+                    .group_hover("host-header", |mut s| {
+                        s.visibility = Some(gpui::Visibility::Visible);
+                        s
+                    })
+                    .hover(|s| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::Plus)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary()),
+                    )
                     .on_click({
-                        let host_id = host_id.clone();
                         cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                             this.create_session(&host_id, None, cx);
                         })
@@ -397,10 +408,10 @@ impl SidebarView {
             )
     }
 
-    fn render_project_actions(
+    #[allow(clippy::unused_self)]
+    fn render_project_new_session_button(
         &self,
         project_id: &str,
-        pinned: bool,
         host_id: &str,
         project_path: &str,
         cx: &mut Context<Self>,
@@ -410,9 +421,6 @@ impl SidebarView {
         let project_path = project_path.to_string();
 
         div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
             .invisible()
             .group_hover("project-row", |mut s| {
                 s.visibility = Some(gpui::Visibility::Visible);
@@ -420,34 +428,11 @@ impl SidebarView {
             })
             .child(
                 div()
-                    .id(SharedString::from(format!("pin-{project_id}")))
-                    .p(px(2.0))
-                    .rounded(px(3.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                    .child(
-                        icon(if pinned { Icon::PinOff } else { Icon::Pin })
-                            .size(px(14.0))
-                            .text_color(if pinned {
-                                theme::accent()
-                            } else {
-                                theme::text_tertiary()
-                            }),
-                    )
-                    .on_click({
-                        let project_id = project_id.clone();
-                        cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.toggle_pin(&project_id, pinned, cx);
-                        })
-                    }),
-            )
-            .child(
-                div()
                     .id(SharedString::from(format!("new-in-{project_id}")))
                     .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
+                    .hover(|s| s.bg(theme::bg_tertiary()))
                     .child(
                         icon(Icon::Plus)
                             .size(px(14.0))
@@ -464,12 +449,12 @@ impl SidebarView {
         node: &ProjectNode,
         is_worktree: bool,
         host_id: &str,
+        project_indent: f32,
+        session_indent: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let project = &node.project;
         let project_id = project.id.clone();
-
-        let is_pinned = project.pinned;
 
         // Git info
         let branch_text = project.git_branch.clone().unwrap_or_default();
@@ -480,7 +465,7 @@ impl SidebarView {
             format!("{branch_text}{dirty_indicator}")
         };
 
-        // Left side: prefix + name + git info
+        // Left side: prefix icon + name + git info
         let mut left = div()
             .flex()
             .items_center()
@@ -488,15 +473,8 @@ impl SidebarView {
             .min_w(px(0.0))
             .overflow_hidden();
 
-        // Pin indicator icon; worktree: folder-git icon
-        if is_pinned {
-            left = left.child(
-                icon(Icon::Pin)
-                    .size(px(12.0))
-                    .flex_shrink_0()
-                    .text_color(theme::accent()),
-            );
-        } else if is_worktree {
+        // Worktree: folder-git icon
+        if is_worktree {
             left = left.child(
                 icon(Icon::FolderGit)
                     .size(px(12.0))
@@ -549,7 +527,7 @@ impl SidebarView {
             .flex()
             .items_center()
             .justify_between()
-            .pl(px(16.0))
+            .pl(px(project_indent))
             .pr(px(8.0))
             .h(px(24.0))
             .mx(px(4.0))
@@ -558,9 +536,8 @@ impl SidebarView {
             .overflow_hidden()
             .hover(|s| s.bg(theme::bg_tertiary()))
             .child(left)
-            .child(self.render_project_actions(
+            .child(self.render_project_new_session_button(
                 &project_id,
-                project.pinned,
                 host_id,
                 &project.path,
                 cx,
@@ -570,7 +547,7 @@ impl SidebarView {
 
         for session in &node.sessions {
             container = container.child(
-                self.render_session_item(session, host_id, px(40.0), cx)
+                self.render_session_item(session, host_id, px(session_indent), cx)
                     .into_any_element(),
             );
         }
@@ -641,7 +618,7 @@ impl SidebarView {
             .justify_between()
             .pl(indent)
             .pr(px(12.0))
-            .h(px(24.0))
+            .h(px(22.0))
             .cursor_pointer()
             .rounded(px(4.0))
             .mx(px(4.0))
@@ -688,7 +665,42 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let is_local = self.app_state.mode == "local";
+
+        let content: Vec<AnyElement> = if self.hosts.is_empty() && !self.loading {
+            vec![div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_color(theme::text_tertiary())
+                .text_size(px(12.0))
+                .child("No hosts connected")
+                .into_any_element()]
+        } else if is_local {
+            // Local mode: no dividers, no host headers
+            self.hosts
+                .iter()
+                .map(|host| self.render_host_section(host, cx).into_any_element())
+                .collect()
+        } else {
+            // Server mode: dividers between hosts
+            let mut items: Vec<AnyElement> = Vec::new();
+            for (i, host) in self.hosts.iter().enumerate() {
+                if i > 0 {
+                    items.push(
+                        div()
+                            .mx(px(8.0))
+                            .my(px(6.0))
+                            .h(px(1.0))
+                            .bg(theme::border())
+                            .into_any_element(),
+                    );
+                }
+                items.push(self.render_host_section(host, cx).into_any_element());
+            }
+            items
+        };
+
+        let mut sidebar = div()
             .flex()
             .flex_col()
             .w(px(250.0))
@@ -732,24 +744,46 @@ impl Render for SidebarView {
                     .flex_1()
                     .overflow_y_scroll()
                     .py(px(4.0))
-                    .children(if self.hosts.is_empty() && !self.loading {
-                        vec![
-                            div()
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .text_color(theme::text_tertiary())
-                                .text_size(px(12.0))
-                                .child("No hosts connected")
-                                .into_any_element(),
-                        ]
-                    } else {
-                        self.hosts
-                            .iter()
-                            .map(|host| {
-                                self.render_host_section(host, cx).into_any_element()
+                    .children(content),
+            );
+
+        // Local mode: "New Session" button at bottom of sidebar
+        if is_local
+            && let Some(host) = self.hosts.first()
+        {
+            let host_id = host.id.clone();
+            sidebar = sidebar.child(
+                div()
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .child(
+                        div()
+                            .id("new-session-local")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_color(theme::text_secondary())
+                            .text_size(px(12.0))
+                            .hover(|s| {
+                                s.bg(theme::bg_tertiary()).text_color(theme::text_primary())
                             })
-                            .collect()
-                    }),
-            )
+                            .child(icon(Icon::Plus).size(px(14.0)))
+                            .child("New Session")
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    this.create_session(&host_id, None, cx);
+                                },
+                            )),
+                    ),
+            );
+        }
+
+        sidebar
     }
 }

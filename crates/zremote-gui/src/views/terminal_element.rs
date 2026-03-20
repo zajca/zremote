@@ -99,6 +99,7 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use gpui::*;
@@ -214,9 +215,9 @@ fn hsla_to_cache_bits(color: Hsla) -> (u32, u32, u32, u32) {
 /// In a monospace terminal, each character with a given style (bold, italic, wide)
 /// and color always produces the same shaped glyph. Instead of shaping entire text
 /// runs (which creates unique cache keys for every distinct sentence/word), we shape
-/// individual characters. This results in a bounded cache (~200 chars * ~20 colors
-/// * 4 styles = ~16,000 entries max), with nearly 100% hit rate after the first
-/// frame. No eviction is needed -- the cache is small.
+/// individual characters. This results in a bounded cache
+/// (~200 chars x ~20 colors x 4 styles = ~16,000 entries max), with nearly 100%
+/// hit rate after the first frame. No eviction is needed -- the cache is small.
 pub struct GlyphCache {
     entries: HashMap<GlyphCacheKey, ShapedLine>,
 }
@@ -280,6 +281,12 @@ pub struct TerminalElement {
     cell_run_cache: Rc<std::cell::RefCell<CellRunCache>>,
     /// Per-character glyph cache: ~200-500 entries, nearly 100% hit rate after first frame.
     glyph_cache: Rc<std::cell::RefCell<GlyphCache>>,
+    /// URL match to underline on Ctrl+hover (from panel's UrlDetector).
+    hovered_url_match: Option<Match>,
+    /// All search matches (from panel's search state).
+    search_matches: Vec<Match>,
+    /// Index of the currently focused search match.
+    search_current_idx: Option<usize>,
 }
 
 pub struct TerminalElementLayoutState {
@@ -288,6 +295,7 @@ pub struct TerminalElementLayoutState {
 }
 
 impl TerminalElement {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
         resize_tx: flume::Sender<(u16, u16)>,
@@ -297,6 +305,9 @@ impl TerminalElement {
         content_generation: Arc<AtomicU64>,
         cell_run_cache: Rc<std::cell::RefCell<CellRunCache>>,
         glyph_cache: Rc<std::cell::RefCell<GlyphCache>>,
+        hovered_url_match: Option<Match>,
+        search_matches: Vec<Match>,
+        search_current_idx: Option<usize>,
     ) -> Self {
         Self {
             term,
@@ -307,6 +318,9 @@ impl TerminalElement {
             content_generation,
             cell_run_cache,
             glyph_cache,
+            hovered_url_match,
+            search_matches,
+            search_current_idx,
         }
     }
 
@@ -625,8 +639,7 @@ impl TerminalElement {
             let run_y = bounds.origin.y + cell_height * run.row as f32;
 
             // Paint each non-space character from the glyph cache.
-            let mut col_offset = 0usize;
-            for ch in run.text.chars() {
+            for (col_offset, ch) in run.text.chars().enumerate() {
                 if ch != ' ' {
                     let x = bounds.origin.x + cell_width * (run.col_start + col_offset) as f32;
                     let origin = point(x, run_y);
@@ -638,8 +651,6 @@ impl TerminalElement {
                         let _ = shaped.paint(origin, cell_height, window, cx);
                     }
                 }
-
-                col_offset += 1;
             }
 
             // Paint underline as a simple rectangle at baseline + descent.
@@ -734,6 +745,108 @@ impl TerminalElement {
             let w = cell_width * (col_end - col_start + 1) as f32;
             let rect = Bounds::new(point(x, y), size(w, cell_height));
             window.paint_quad(fill(rect, highlight));
+        }
+    }
+
+    /// Paint a 1px accent-colored underline beneath each cell of a URL match.
+    fn paint_url_underline(
+        url_match: &Match,
+        bounds: &Bounds<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        display_offset: usize,
+        rows: usize,
+        window: &mut Window,
+    ) {
+        let color: Hsla = theme::accent().into();
+        let start = url_match.start();
+        let end = url_match.end();
+
+        for viewport_row in 0..rows {
+            let grid_line = Line(viewport_row as i32 - display_offset as i32);
+
+            if grid_line < start.line || grid_line > end.line {
+                continue;
+            }
+
+            let col_start = if grid_line == start.line {
+                start.column.0
+            } else {
+                0
+            };
+            let col_end = if grid_line == end.line {
+                end.column.0
+            } else {
+                continue; // skip lines without end column info for safety
+            };
+
+            if col_start > col_end {
+                continue;
+            }
+
+            let x = bounds.origin.x + cell_width * col_start as f32;
+            let y = bounds.origin.y + cell_height * (viewport_row as f32 + 1.0) - px(1.0);
+            let w = cell_width * (col_end - col_start + 1) as f32;
+            let rect = Bounds::new(point(x, y), size(w, px(1.0)));
+            window.paint_quad(fill(rect, color));
+        }
+    }
+
+    /// Paint semi-transparent highlights on search matches.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_search_highlights(
+        matches: &[Match],
+        current_idx: Option<usize>,
+        bounds: &Bounds<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        display_offset: usize,
+        rows: usize,
+        cols: usize,
+        window: &mut Window,
+    ) {
+        let highlight_color = hsla(0.12, 0.8, 0.5, 0.3); // yellow-orange, semi-transparent
+        let current_color = hsla(0.12, 0.9, 0.6, 0.5); // brighter for current match
+
+        for (match_idx, m) in matches.iter().enumerate() {
+            let is_current = current_idx == Some(match_idx);
+            let color = if is_current {
+                current_color
+            } else {
+                highlight_color
+            };
+
+            let start = m.start();
+            let end = m.end();
+
+            for viewport_row in 0..rows {
+                let grid_line = Line(viewport_row as i32 - display_offset as i32);
+
+                if grid_line < start.line || grid_line > end.line {
+                    continue;
+                }
+
+                let col_start = if grid_line == start.line {
+                    start.column.0
+                } else {
+                    0
+                };
+                let col_end = if grid_line == end.line {
+                    end.column.0
+                } else {
+                    cols.saturating_sub(1)
+                };
+
+                if col_start > col_end {
+                    continue;
+                }
+
+                let x = bounds.origin.x + cell_width * col_start as f32;
+                let y = bounds.origin.y + cell_height * viewport_row as f32;
+                let w = cell_width * (col_end - col_start + 1) as f32;
+                let rect = Bounds::new(point(x, y), size(w, cell_height));
+                window.paint_quad(fill(rect, color));
+            }
         }
     }
 
@@ -931,8 +1044,26 @@ impl Element for TerminalElement {
             new_runs
         });
 
+        let rows = term.screen_lines();
+        let cols = term.columns();
+
         // Paint cell backgrounds
         Self::paint_backgrounds(&runs, &bounds, cell_width, cell_height, window);
+
+        // Paint search match highlights (between backgrounds and text)
+        if !self.search_matches.is_empty() {
+            Self::paint_search_highlights(
+                &self.search_matches,
+                self.search_current_idx,
+                &bounds,
+                cell_width,
+                cell_height,
+                display_offset,
+                rows,
+                cols,
+                window,
+            );
+        }
 
         // Paint selection highlight (between backgrounds and cursor)
         Self::paint_selection(&term, &bounds, cell_width, cell_height, window);
@@ -947,6 +1078,19 @@ impl Element for TerminalElement {
             window,
             cx,
         );
+
+        // Paint URL underline on Ctrl+hover
+        if let Some(ref url_match) = self.hovered_url_match {
+            Self::paint_url_underline(
+                url_match,
+                &bounds,
+                cell_width,
+                cell_height,
+                display_offset,
+                rows,
+                window,
+            );
+        }
 
         // Paint cursor (skip when blink timer has it hidden)
         if self.cursor_visible {

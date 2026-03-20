@@ -61,6 +61,12 @@ impl MainView {
         let ws_url = self.app_state.api.terminal_ws_url(session_id);
         let session_id = session_id.to_string();
 
+        // Persist active session.
+        if let Ok(mut p) = self.app_state.persistence.lock() {
+            p.update(|s| s.active_session_id = Some(session_id.clone()));
+            let _ = p.save_if_changed();
+        }
+
         let tokio_handle = self.app_state.tokio_handle.clone();
         let terminal =
             cx.new(|cx| TerminalPanel::new(session_id, ws_url, &tokio_handle, cx));
