@@ -1,3 +1,6 @@
+pub mod command_palette;
+pub mod double_shift;
+pub mod fuzzy;
 pub mod main_view;
 pub mod search_overlay;
 pub mod sidebar;
