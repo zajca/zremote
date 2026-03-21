@@ -141,6 +141,7 @@ impl SidebarView {
         let host_id = host_id.to_string();
         let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let working_dir_clone = working_dir.clone();
             let req = CreateSessionRequest {
                 name: None,
                 shell: None,
@@ -154,7 +155,19 @@ impl SidebarView {
                 .await
                 .unwrap();
             match result {
-                Ok(session) => {
+                Ok(resp) => {
+                    let session = Session {
+                        id: resp.id,
+                        host_id: host_id.clone(),
+                        name: None,
+                        shell: None,
+                        status: resp.status,
+                        pid: None,
+                        created_at: None,
+                        closed_at: None,
+                        project_id: None,
+                        working_dir: working_dir_clone,
+                    };
                     let session_id = session.id.clone();
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                         this.sessions.push(session);
@@ -207,7 +220,7 @@ impl SidebarView {
         let active_sessions: Vec<Session> = self
             .sessions
             .iter()
-            .filter(|s| s.host_id == host_id && s.status == "active")
+            .filter(|s| s.host_id == host_id && s.status != "closed" && s.status != "error")
             .cloned()
             .collect();
 
