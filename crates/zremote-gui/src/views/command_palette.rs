@@ -12,6 +12,9 @@
     clippy::wildcard_imports
 )]
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 
@@ -127,22 +130,11 @@ pub enum PaletteAction {
 
 #[derive(Debug, Clone)]
 pub enum PaletteItem {
-    Session(SessionItem),
-    Project(ProjectItem),
+    /// Index into `snapshot.sessions` (filtered to active/suspended).
+    Session { session_idx: usize },
+    /// Index into `snapshot.projects`.
+    Project { project_idx: usize },
     Action(PaletteAction),
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionItem {
-    pub session: Session,
-    pub host_name: String,
-    pub project_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProjectItem {
-    pub project: Project,
-    pub host_name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,40 +145,37 @@ struct ResultItem {
     item: PaletteItem,
     title: String,
     subtitle: String,
-    fuzzy_match: Option<FuzzyMatch>,
 }
 
 struct CategoryGroup {
     category: PaletteCategory,
-    items: Vec<ResultItem>,
+    indices: Vec<usize>,
+    source: ItemSource,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ItemSource {
+    Session,
+    Project,
+    Action,
+}
+
+struct ScoredEntry {
+    index: usize,
+    source: ItemSource,
+    fuzzy_match: FuzzyMatch,
 }
 
 enum PaletteResults {
     Grouped(Vec<CategoryGroup>),
-    Scored(Vec<ResultItem>),
+    Scored(Vec<ScoredEntry>),
 }
 
 impl PaletteResults {
     fn selectable_count(&self) -> usize {
         match self {
-            Self::Grouped(groups) => groups.iter().map(|g| g.items.len()).sum(),
+            Self::Grouped(groups) => groups.iter().map(|g| g.indices.len()).sum(),
             Self::Scored(items) => items.len(),
-        }
-    }
-
-    fn item_at(&self, index: usize) -> Option<&ResultItem> {
-        match self {
-            Self::Grouped(groups) => {
-                let mut offset = 0;
-                for group in groups {
-                    if index < offset + group.items.len() {
-                        return group.items.get(index - offset);
-                    }
-                    offset += group.items.len();
-                }
-                None
-            }
-            Self::Scored(items) => items.get(index),
         }
     }
 
@@ -200,53 +189,56 @@ impl PaletteResults {
 // ---------------------------------------------------------------------------
 
 pub struct PaletteSnapshot {
-    pub hosts: Vec<Host>,
-    pub sessions: Vec<Session>,
-    pub projects: Vec<Project>,
+    pub hosts: Rc<Vec<Host>>,
+    pub sessions: Rc<Vec<Session>>,
+    pub projects: Rc<Vec<Project>>,
     pub mode: String,
     pub active_session_id: Option<String>,
-    pub recent_sessions: Vec<RecentSession>,
+    host_names: HashMap<String, String>,
+    project_names: HashMap<String, String>,
+    recent_set: HashSet<String>,
 }
 
 impl PaletteSnapshot {
     pub fn capture(
-        hosts: Vec<Host>,
-        sessions: Vec<Session>,
-        projects: Vec<Project>,
+        hosts: Rc<Vec<Host>>,
+        sessions: Rc<Vec<Session>>,
+        projects: Rc<Vec<Project>>,
         mode: String,
         active_session_id: Option<String>,
-        recent_sessions: Vec<RecentSession>,
+        recent_sessions: &[RecentSession],
     ) -> Self {
+        let host_names: HashMap<String, String> =
+            hosts.iter().map(|h| (h.id.clone(), h.hostname.clone())).collect();
+        let project_names: HashMap<String, String> =
+            projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+        let recent_set: HashSet<String> =
+            recent_sessions.iter().map(|r| r.session_id.clone()).collect();
         Self {
             hosts,
             sessions,
             projects,
             mode,
             active_session_id,
-            recent_sessions,
+            host_names,
+            project_names,
+            recent_set,
         }
     }
 
     fn host_name(&self, host_id: &str) -> String {
-        self.hosts
-            .iter()
-            .find(|h| h.id == host_id)
-            .map_or_else(|| host_id[..8.min(host_id.len())].to_string(), |h| {
-                h.hostname.clone()
-            })
+        self.host_names
+            .get(host_id)
+            .cloned()
+            .unwrap_or_else(|| host_id[..8.min(host_id.len())].to_string())
     }
 
     fn project_name(&self, project_id: &str) -> Option<String> {
-        self.projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .map(|p| p.name.clone())
+        self.project_names.get(project_id).cloned()
     }
 
     fn is_recent(&self, session_id: &str) -> bool {
-        self.recent_sessions
-            .iter()
-            .any(|r| r.session_id == session_id)
+        self.recent_set.contains(session_id)
     }
 
     fn online_hosts(&self) -> Vec<&Host> {
@@ -289,6 +281,10 @@ pub struct CommandPalette {
     hovered_index: Option<usize>,
     sub_view: PaletteSubView,
     snapshot: PaletteSnapshot,
+    /// Pre-built item lists, created once at palette open time.
+    session_items: Vec<ResultItem>,
+    project_items: Vec<ResultItem>,
+    action_items: Vec<ResultItem>,
     results: PaletteResults,
     /// Cached tab counts to avoid rebuilding item lists during render.
     tab_counts: [usize; 4],
@@ -301,10 +297,15 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(snapshot: PaletteSnapshot, initial_tab: PaletteTab, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let session_count = snapshot.sessions.iter()
-            .filter(|s| s.status == "active" || s.status == "suspended")
-            .count();
-        let project_count = snapshot.projects.len();
+        let session_items = build_session_items(&snapshot);
+        let project_items = build_project_items(&snapshot);
+        let action_items = build_action_items(&snapshot);
+        let tab_counts = [
+            0,
+            session_items.len(),
+            project_items.len(),
+            action_items.len(),
+        ];
         let mut palette = Self {
             focus_handle,
             query: String::new(),
@@ -313,11 +314,12 @@ impl CommandPalette {
             hovered_index: None,
             sub_view: PaletteSubView::Main,
             snapshot,
+            session_items,
+            project_items,
+            action_items,
             results: PaletteResults::Grouped(Vec::new()),
-            tab_counts: [0, session_count, project_count, 0],
+            tab_counts,
         };
-        // Action count depends on snapshot state, compute after struct init.
-        palette.tab_counts[3] = palette.build_action_items().len();
         palette.recompute_results();
         palette
     }
@@ -339,12 +341,6 @@ impl CommandPalette {
 // ---------------------------------------------------------------------------
 
 impl CommandPalette {
-    fn set_query(&mut self, query: String) {
-        self.query = query;
-        self.selected_index = 0;
-        self.recompute_results();
-    }
-
     fn move_selection(&mut self, delta: i32) {
         let count = self.results.selectable_count();
         if count == 0 {
@@ -356,24 +352,56 @@ impl CommandPalette {
     }
 
     fn execute_selected(&mut self, cx: &mut Context<Self>) {
-        let item = self.results.item_at(self.selected_index).map(|r| r.item.clone());
+        let item = self.resolve_item(self.selected_index).map(|r| r.item.clone());
         if let Some(item) = item {
             self.execute_item(&item, cx);
         }
     }
 
+    /// Look up the `ResultItem` for a given flat index in the current results.
+    fn resolve_item(&self, index: usize) -> Option<&ResultItem> {
+        match &self.results {
+            PaletteResults::Grouped(groups) => {
+                let mut offset = 0;
+                for group in groups {
+                    if index < offset + group.indices.len() {
+                        let item_idx = group.indices[index - offset];
+                        return match group.source {
+                            ItemSource::Session => self.session_items.get(item_idx),
+                            ItemSource::Project => self.project_items.get(item_idx),
+                            ItemSource::Action => self.action_items.get(item_idx),
+                        };
+                    }
+                    offset += group.indices.len();
+                }
+                None
+            }
+            PaletteResults::Scored(entries) => {
+                let entry = entries.get(index)?;
+                match entry.source {
+                    ItemSource::Session => self.session_items.get(entry.index),
+                    ItemSource::Project => self.project_items.get(entry.index),
+                    ItemSource::Action => self.action_items.get(entry.index),
+                }
+            }
+        }
+    }
+
+
     fn execute_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
         match item {
-            PaletteItem::Session(si) => {
+            PaletteItem::Session { session_idx } => {
+                let session = &self.snapshot.sessions[*session_idx];
                 cx.emit(CommandPaletteEvent::SelectSession {
-                    session_id: si.session.id.clone(),
-                    host_id: si.session.host_id.clone(),
+                    session_id: session.id.clone(),
+                    host_id: session.host_id.clone(),
                 });
             }
-            PaletteItem::Project(pi) => {
+            PaletteItem::Project { project_idx } => {
+                let project = &self.snapshot.projects[*project_idx];
                 cx.emit(CommandPaletteEvent::CreateSessionInProject {
-                    host_id: pi.project.host_id.clone(),
-                    working_dir: pi.project.path.clone(),
+                    host_id: project.host_id.clone(),
+                    working_dir: project.path.clone(),
                 });
             }
             PaletteItem::Action(action) => match action {
@@ -448,179 +476,76 @@ impl CommandPalette {
     fn compute_grouped(&self) -> PaletteResults {
         let mut groups: Vec<CategoryGroup> = Vec::new();
 
-        let session_items = self.build_session_items();
-        let project_items = self.build_project_items();
-        let action_items = self.build_action_items();
-
         match self.active_tab {
             PaletteTab::All => {
-                // Recent sessions
-                let recent: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            self.snapshot.is_recent(&si.session.id)
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !recent.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Recent,
-                        items: recent,
-                    });
-                }
-
-                // Active (not in recent)
-                let active: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            si.session.status == "active"
-                                && !self.snapshot.is_recent(&si.session.id)
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !active.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Active,
-                        items: active,
-                    });
-                }
-
-                // Suspended
-                let suspended: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            si.session.status == "suspended"
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !suspended.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Suspended,
-                        items: suspended,
-                    });
-                }
+                self.push_session_groups(&mut groups);
 
                 // Projects (pinned first)
-                let mut projects = project_items;
-                projects.sort_by(|a, b| {
-                    let a_pinned = if let PaletteItem::Project(pi) = &a.item {
-                        pi.project.pinned
+                let mut proj_indices: Vec<usize> = (0..self.project_items.len()).collect();
+                proj_indices.sort_by(|&a, &b| {
+                    let a_pinned = if let PaletteItem::Project { project_idx } = &self.project_items[a].item {
+                        self.snapshot.projects[*project_idx].pinned
                     } else {
                         false
                     };
-                    let b_pinned = if let PaletteItem::Project(pi) = &b.item {
-                        pi.project.pinned
+                    let b_pinned = if let PaletteItem::Project { project_idx } = &self.project_items[b].item {
+                        self.snapshot.projects[*project_idx].pinned
                     } else {
                         false
                     };
                     b_pinned.cmp(&a_pinned)
                 });
-                if !projects.is_empty() {
+                if !proj_indices.is_empty() {
                     groups.push(CategoryGroup {
                         category: PaletteCategory::AllProjects,
-                        items: projects,
+                        indices: proj_indices,
+                        source: ItemSource::Project,
                     });
                 }
 
                 // Actions
-                if !action_items.is_empty() {
+                if !self.action_items.is_empty() {
                     groups.push(CategoryGroup {
                         category: PaletteCategory::Actions,
-                        items: action_items,
+                        indices: (0..self.action_items.len()).collect(),
+                        source: ItemSource::Action,
                     });
                 }
             }
             PaletteTab::Sessions => {
-                let recent: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            self.snapshot.is_recent(&si.session.id)
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !recent.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Recent,
-                        items: recent,
-                    });
-                }
-
-                let active: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            si.session.status == "active"
-                                && !self.snapshot.is_recent(&si.session.id)
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !active.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Active,
-                        items: active,
-                    });
-                }
-
-                let suspended: Vec<ResultItem> = session_items
-                    .iter()
-                    .filter(|r| {
-                        if let PaletteItem::Session(si) = &r.item {
-                            si.session.status == "suspended"
-                        } else {
-                            false
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !suspended.is_empty() {
-                    groups.push(CategoryGroup {
-                        category: PaletteCategory::Suspended,
-                        items: suspended,
-                    });
-                }
+                self.push_session_groups(&mut groups);
             }
             PaletteTab::Projects => {
-                let all = self.build_project_items();
-                let (pinned, unpinned): (Vec<ResultItem>, Vec<ResultItem>) = all
-                    .into_iter()
-                    .partition(|r| matches!(&r.item, PaletteItem::Project(pi) if pi.project.pinned));
+                let mut pinned = Vec::new();
+                let mut unpinned = Vec::new();
+                for (i, item) in self.project_items.iter().enumerate() {
+                    if matches!(&item.item, PaletteItem::Project { project_idx } if self.snapshot.projects[*project_idx].pinned) {
+                        pinned.push(i);
+                    } else {
+                        unpinned.push(i);
+                    }
+                }
                 if !pinned.is_empty() {
                     groups.push(CategoryGroup {
                         category: PaletteCategory::Pinned,
-                        items: pinned,
+                        indices: pinned,
+                        source: ItemSource::Project,
                     });
                 }
                 if !unpinned.is_empty() {
                     groups.push(CategoryGroup {
                         category: PaletteCategory::AllProjects,
-                        items: unpinned,
+                        indices: unpinned,
+                        source: ItemSource::Project,
                     });
                 }
             }
             PaletteTab::Actions => {
-                if !action_items.is_empty() {
+                if !self.action_items.is_empty() {
                     groups.push(CategoryGroup {
                         category: PaletteCategory::Actions,
-                        items: action_items,
+                        indices: (0..self.action_items.len()).collect(),
+                        source: ItemSource::Action,
                     });
                 }
             }
@@ -629,8 +554,50 @@ impl CommandPalette {
         PaletteResults::Grouped(groups)
     }
 
+    /// Partition session indices into Recent / Active / Suspended groups.
+    fn push_session_groups(&self, groups: &mut Vec<CategoryGroup>) {
+        let mut recent = Vec::new();
+        let mut active = Vec::new();
+        let mut suspended = Vec::new();
+
+        for (i, item) in self.session_items.iter().enumerate() {
+            if let PaletteItem::Session { session_idx } = &item.item {
+                let session = &self.snapshot.sessions[*session_idx];
+                if self.snapshot.is_recent(&session.id) {
+                    recent.push(i);
+                } else if session.status == "active" {
+                    active.push(i);
+                } else if session.status == "suspended" {
+                    suspended.push(i);
+                }
+            }
+        }
+
+        if !recent.is_empty() {
+            groups.push(CategoryGroup {
+                category: PaletteCategory::Recent,
+                indices: recent,
+                source: ItemSource::Session,
+            });
+        }
+        if !active.is_empty() {
+            groups.push(CategoryGroup {
+                category: PaletteCategory::Active,
+                indices: active,
+                source: ItemSource::Session,
+            });
+        }
+        if !suspended.is_empty() {
+            groups.push(CategoryGroup {
+                category: PaletteCategory::Suspended,
+                indices: suspended,
+                source: ItemSource::Session,
+            });
+        }
+    }
+
     fn compute_scored(&self) -> PaletteResults {
-        let mut all_items = Vec::new();
+        let mut scored: Vec<ScoredEntry> = Vec::new();
 
         let include_sessions =
             self.active_tab == PaletteTab::All || self.active_tab == PaletteTab::Sessions;
@@ -640,147 +607,30 @@ impl CommandPalette {
             self.active_tab == PaletteTab::All || self.active_tab == PaletteTab::Actions;
 
         if include_sessions {
-            all_items.extend(self.build_session_items());
+            for (i, item) in self.session_items.iter().enumerate() {
+                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                    scored.push(ScoredEntry { index: i, source: ItemSource::Session, fuzzy_match: fm });
+                }
+            }
         }
         if include_projects {
-            all_items.extend(self.build_project_items());
+            for (i, item) in self.project_items.iter().enumerate() {
+                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                    scored.push(ScoredEntry { index: i, source: ItemSource::Project, fuzzy_match: fm });
+                }
+            }
         }
         if include_actions {
-            all_items.extend(self.build_action_items());
+            for (i, item) in self.action_items.iter().enumerate() {
+                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                    scored.push(ScoredEntry { index: i, source: ItemSource::Action, fuzzy_match: fm });
+                }
+            }
         }
 
-        let mut scored: Vec<ResultItem> = all_items
-            .into_iter()
-            .filter_map(|mut ri| {
-                let fm = fuzzy_match_item(&self.query, &ri.title, &ri.subtitle)?;
-                ri.fuzzy_match = Some(fm);
-                Some(ri)
-            })
-            .collect();
-
-        scored.sort_by(|a, b| {
-            let sa = a.fuzzy_match.as_ref().map_or(0, |m| m.score);
-            let sb = b.fuzzy_match.as_ref().map_or(0, |m| m.score);
-            sb.cmp(&sa)
-        });
+        scored.sort_by(|a, b| b.fuzzy_match.score.cmp(&a.fuzzy_match.score));
 
         PaletteResults::Scored(scored)
-    }
-
-    fn build_session_items(&self) -> Vec<ResultItem> {
-        self.snapshot
-            .sessions
-            .iter()
-            .filter(|s| s.status == "active" || s.status == "suspended")
-            .map(|s| {
-                let host_name = self.snapshot.host_name(&s.host_id);
-                let project_name = s
-                    .project_id
-                    .as_deref()
-                    .and_then(|pid| self.snapshot.project_name(pid));
-
-                let title = session_title(s);
-                let subtitle = session_subtitle(s, &host_name, project_name.as_deref(), &self.snapshot.mode);
-
-                ResultItem {
-                    item: PaletteItem::Session(SessionItem {
-                        session: s.clone(),
-                        host_name: host_name.clone(),
-                        project_name,
-                    }),
-                    title,
-                    subtitle,
-                    fuzzy_match: None,
-                }
-            })
-            .collect()
-    }
-
-    fn build_project_items(&self) -> Vec<ResultItem> {
-        self.snapshot
-            .projects
-            .iter()
-            .map(|p| {
-                let host_name = self.snapshot.host_name(&p.host_id);
-                let title = p.name.clone();
-                let subtitle = project_subtitle(p, &host_name, &self.snapshot.mode);
-
-                ResultItem {
-                    item: PaletteItem::Project(ProjectItem {
-                        project: p.clone(),
-                        host_name,
-                    }),
-                    title,
-                    subtitle,
-                    fuzzy_match: None,
-                }
-            })
-            .collect()
-    }
-
-    fn build_action_items(&self) -> Vec<ResultItem> {
-        let mut items = Vec::new();
-
-        // New session
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::NewSession),
-            title: "New Terminal Session".to_string(),
-            subtitle: String::new(),
-            fuzzy_match: None,
-        });
-
-        // Close current session
-        if let Some(ref sid) = self.snapshot.active_session_id {
-            items.push(ResultItem {
-                item: PaletteItem::Action(PaletteAction::CloseCurrentSession {
-                    session_id: sid.clone(),
-                }),
-                title: "Close Current Session".to_string(),
-                subtitle: String::new(),
-                fuzzy_match: None,
-            });
-        }
-
-        // Search in terminal
-        if self.snapshot.active_session_id.is_some() {
-            items.push(ResultItem {
-                item: PaletteItem::Action(PaletteAction::SearchInTerminal),
-                title: "Search in Terminal".to_string(),
-                subtitle: "Ctrl+F".to_string(),
-                fuzzy_match: None,
-            });
-        }
-
-        // Toggle pin for each project
-        for p in &self.snapshot.projects {
-            let label = if p.pinned {
-                format!("Unpin {}", p.name)
-            } else {
-                format!("Pin {}", p.name)
-            };
-            items.push(ResultItem {
-                item: PaletteItem::Action(PaletteAction::ToggleProjectPin {
-                    project_id: p.id.clone(),
-                    project_name: p.name.clone(),
-                    currently_pinned: p.pinned,
-                }),
-                title: label,
-                subtitle: String::new(),
-                fuzzy_match: None,
-            });
-        }
-
-        // Reconnect (server mode only)
-        if self.snapshot.mode == "server" {
-            items.push(ResultItem {
-                item: PaletteItem::Action(PaletteAction::Reconnect),
-                title: "Reconnect to Server".to_string(),
-                subtitle: String::new(),
-                fuzzy_match: None,
-            });
-        }
-
-        items
     }
 
     // -- Key handler --------------------------------------------------------
@@ -1016,8 +866,14 @@ impl CommandPalette {
             let is_active = tab == self.active_tab;
             let count = self.count_for_tab(tab);
 
+            let tab_id: SharedString = match tab {
+                PaletteTab::All => "tab-All".into(),
+                PaletteTab::Sessions => "tab-Sess".into(),
+                PaletteTab::Projects => "tab-Proj".into(),
+                PaletteTab::Actions => "tab-Act".into(),
+            };
             let pill = div()
-                .id(SharedString::from(format!("tab-{}", tab.short_label())))
+                .id(tab_id)
                 .cursor_pointer()
                 .flex()
                 .items_center()
@@ -1039,11 +895,12 @@ impl CommandPalette {
                 })
                 .child(tab.label())
                 .when(tab != PaletteTab::All && count > 0, |s: Stateful<Div>| {
+                    let count_str: SharedString = count.to_string().into();
                     s.child(
                         div()
                             .text_size(px(10.0))
                             .text_color(theme::text_tertiary())
-                            .child(format!("{count}")),
+                            .child(count_str),
                     )
                 })
                 .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
@@ -1115,18 +972,32 @@ impl CommandPalette {
                 for (gi, group) in groups.iter().enumerate() {
                     container =
                         container.child(self.render_category_header(group.category.label(), gi == 0));
-                    for item in &group.items {
-                        container = container
-                            .child(self.render_item_row(item, flat_index, cx));
-                        flat_index += 1;
+                    let items = match group.source {
+                        ItemSource::Session => &self.session_items,
+                        ItemSource::Project => &self.project_items,
+                        ItemSource::Action => &self.action_items,
+                    };
+                    for &idx in &group.indices {
+                        if let Some(item) = items.get(idx) {
+                            container = container
+                                .child(self.render_item_row(item, flat_index, None, cx));
+                            flat_index += 1;
+                        }
                     }
                 }
             }
-            PaletteResults::Scored(items) => {
-                for item in items {
-                    container = container
-                        .child(self.render_item_row(item, flat_index, cx));
-                    flat_index += 1;
+            PaletteResults::Scored(entries) => {
+                for entry in entries {
+                    let items = match entry.source {
+                        ItemSource::Session => &self.session_items,
+                        ItemSource::Project => &self.project_items,
+                        ItemSource::Action => &self.action_items,
+                    };
+                    if let Some(item) = items.get(entry.index) {
+                        container = container
+                            .child(self.render_item_row(item, flat_index, Some(&entry.fuzzy_match), cx));
+                        flat_index += 1;
+                    }
                 }
             }
         }
@@ -1151,14 +1022,14 @@ impl CommandPalette {
         &self,
         item: &ResultItem,
         index: usize,
+        fuzzy_match: Option<&FuzzyMatch>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_selected = index == self.selected_index;
         let is_hovered = self.hovered_index == Some(index);
-        let cloned_item = item.item.clone();
         let title = item.title.clone();
         let subtitle = item.subtitle.clone();
-        let fuzzy_match = item.fuzzy_match.clone();
+        let fuzzy_match = fuzzy_match.cloned();
 
         let mut row = div()
             .id(ElementId::NamedInteger("palette-item".into(), index as u64))
@@ -1182,13 +1053,13 @@ impl CommandPalette {
             }))
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 this.selected_index = index;
-                this.execute_item(&cloned_item, cx);
+                this.execute_selected(cx);
             }));
 
         // Icon
         let item_icon = match &item.item {
-            PaletteItem::Session(_) => Icon::SquareTerminal,
-            PaletteItem::Project(_) => Icon::Folder,
+            PaletteItem::Session { .. } => Icon::SquareTerminal,
+            PaletteItem::Project { .. } => Icon::Folder,
             PaletteItem::Action(a) => match a {
                 PaletteAction::NewSession => Icon::Plus,
                 PaletteAction::CloseCurrentSession { .. } => Icon::X,
@@ -1238,11 +1109,11 @@ impl CommandPalette {
 
         // Accessories
         match &item.item {
-            PaletteItem::Session(si) => {
-                row = row.child(self.render_session_accessory(&si.session));
+            PaletteItem::Session { session_idx } => {
+                row = row.child(self.render_session_accessory(&self.snapshot.sessions[*session_idx]));
             }
-            PaletteItem::Project(pi) => {
-                row = row.child(self.render_project_accessory(&pi.project));
+            PaletteItem::Project { project_idx } => {
+                row = row.child(self.render_project_accessory(&self.snapshot.projects[*project_idx]));
             }
             PaletteItem::Action(a) => {
                 row = row.child(self.render_action_accessory(a));
@@ -1626,18 +1497,106 @@ impl Render for CommandPalette {
 }
 
 // ---------------------------------------------------------------------------
-// Clone support for ResultItem (needed for grouped filtering)
+// Item builders (called once at palette creation)
 // ---------------------------------------------------------------------------
 
-impl Clone for ResultItem {
-    fn clone(&self) -> Self {
-        Self {
-            item: self.item.clone(),
-            title: self.title.clone(),
-            subtitle: self.subtitle.clone(),
-            fuzzy_match: self.fuzzy_match.clone(),
-        }
+fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
+    snapshot
+        .sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.status == "active" || s.status == "suspended")
+        .map(|(idx, s)| {
+            let host_name = snapshot.host_name(&s.host_id);
+            let project_name = s
+                .project_id
+                .as_deref()
+                .and_then(|pid| snapshot.project_name(pid));
+
+            let title = session_title(s);
+            let subtitle = session_subtitle(s, &host_name, project_name.as_deref(), &snapshot.mode);
+
+            ResultItem {
+                item: PaletteItem::Session { session_idx: idx },
+                title,
+                subtitle,
+            }
+        })
+        .collect()
+}
+
+fn build_project_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
+    snapshot
+        .projects
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let host_name = snapshot.host_name(&p.host_id);
+            let title = p.name.clone();
+            let subtitle = project_subtitle(p, &host_name, &snapshot.mode);
+
+            ResultItem {
+                item: PaletteItem::Project { project_idx: idx },
+                title,
+                subtitle,
+            }
+        })
+        .collect()
+}
+
+fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
+    let mut items = Vec::new();
+
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::NewSession),
+        title: "New Terminal Session".to_string(),
+        subtitle: String::new(),
+    });
+
+    if let Some(ref sid) = snapshot.active_session_id {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::CloseCurrentSession {
+                session_id: sid.clone(),
+            }),
+            title: "Close Current Session".to_string(),
+            subtitle: String::new(),
+        });
     }
+
+    if snapshot.active_session_id.is_some() {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::SearchInTerminal),
+            title: "Search in Terminal".to_string(),
+            subtitle: "Ctrl+F".to_string(),
+        });
+    }
+
+    for p in snapshot.projects.iter() {
+        let label = if p.pinned {
+            format!("Unpin {}", p.name)
+        } else {
+            format!("Pin {}", p.name)
+        };
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::ToggleProjectPin {
+                project_id: p.id.clone(),
+                project_name: p.name.clone(),
+                currently_pinned: p.pinned,
+            }),
+            title: label,
+            subtitle: String::new(),
+        });
+    }
+
+    if snapshot.mode == "server" {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::Reconnect),
+            title: "Reconnect to Server".to_string(),
+            subtitle: String::new(),
+        });
+    }
+
+    items
 }
 
 // ---------------------------------------------------------------------------
@@ -1757,18 +1716,36 @@ fn render_highlighted_text(
 
     let fm = fuzzy_match.unwrap();
     let chars: Vec<char> = title.chars().collect();
+    let title_len = chars.len();
+
+    // Filter indices to title range only (fuzzy_match_item returns indices into
+    // combined "title subtitle" string, so subtitle indices are out of range).
+    let title_indices: Vec<usize> = fm
+        .matched_indices
+        .iter()
+        .copied()
+        .filter(|&idx| idx < title_len)
+        .collect();
+
     let mut spans = div()
         .flex()
         .items_center()
         .overflow_hidden()
         .whitespace_nowrap();
 
+    let mut match_cursor = 0;
     let mut i = 0;
-    while i < chars.len() {
-        if fm.matched_indices.contains(&i) {
-            // Collect consecutive matched chars
+    while i < title_len {
+        let is_match = match_cursor < title_indices.len()
+            && title_indices[match_cursor] == i;
+
+        if is_match {
             let start = i;
-            while i < chars.len() && fm.matched_indices.contains(&i) {
+            while i < title_len
+                && match_cursor < title_indices.len()
+                && title_indices[match_cursor] == i
+            {
+                match_cursor += 1;
                 i += 1;
             }
             let matched_text: String = chars[start..i].iter().collect();
@@ -1780,11 +1757,13 @@ fn render_highlighted_text(
                     .child(matched_text),
             );
         } else {
-            // Collect consecutive unmatched chars
             let start = i;
-            while i < chars.len() && !fm.matched_indices.contains(&i) {
-                i += 1;
-            }
+            let next_match = if match_cursor < title_indices.len() {
+                title_indices[match_cursor]
+            } else {
+                title_len
+            };
+            i = next_match;
             let unmatched_text: String = chars[start..i].iter().collect();
             spans = spans.child(
                 div()
