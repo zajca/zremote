@@ -337,7 +337,13 @@ impl TerminalPanel {
         let key = keystroke.key.as_str();
         let modifiers = &keystroke.modifiers;
 
-        if modifiers.control {
+        // Shift+Tab (backtab) must be handled before the Ctrl branch.
+        if key == "tab" && modifiers.shift {
+            return Some(b"\x1b[Z".to_vec());
+        }
+
+        // Ctrl+letter: send the corresponding control character (ASCII 0x01-0x1a).
+        if modifiers.control && !modifiers.shift && !modifiers.alt {
             return match key {
                 "c" => Some(vec![0x03]),
                 "d" => Some(vec![0x04]),
@@ -351,26 +357,118 @@ impl TerminalPanel {
                 "r" => Some(vec![0x12]),
                 "p" => Some(vec![0x10]),
                 "n" => Some(vec![0x0e]),
+                "b" => Some(vec![0x02]),
+                "f" => Some(vec![0x06]),
+                "g" => Some(vec![0x07]),
+                "h" => Some(vec![0x08]),
+                "i" => Some(vec![0x09]),
+                "j" => Some(vec![0x0a]),
+                "o" => Some(vec![0x0f]),
+                "q" => Some(vec![0x11]),
+                "s" => Some(vec![0x13]),
+                "t" => Some(vec![0x14]),
+                "v" => Some(vec![0x16]),
+                "x" => Some(vec![0x18]),
+                "y" => Some(vec![0x19]),
                 _ => None,
             };
         }
 
+        // Compute xterm modifier parameter for special keys.
+        // 1=none, 2=Shift, 3=Alt, 5=Ctrl, and combinations thereof.
+        let modifier_param = {
+            let mut m = 1u8;
+            if modifiers.shift {
+                m += 1;
+            }
+            if modifiers.alt {
+                m += 2;
+            }
+            if modifiers.control {
+                m += 4;
+            }
+            m
+        };
+        let has_modifiers = modifier_param > 1;
+
+        // Special keys with CSI sequences that support modifier parameters.
+        // Format: \x1b[1;{mod}{letter} for arrow/home/end, \x1b[{num};{mod}~ for others.
         match key {
             "enter" => Some(vec![b'\r']),
             "tab" => Some(vec![b'\t']),
-            "backspace" => Some(vec![0x7f]),
+            "backspace" => {
+                if modifiers.alt {
+                    Some(b"\x1b\x7f".to_vec()) // Alt+Backspace: ESC + DEL
+                } else {
+                    Some(vec![0x7f])
+                }
+            }
             "escape" => Some(vec![0x1b]),
-            "space" => Some(vec![b' ']),
+            "space" => {
+                if modifiers.control {
+                    Some(vec![0x00]) // Ctrl+Space: NUL
+                } else {
+                    Some(vec![b' '])
+                }
+            }
+            "up" if has_modifiers => Some(format!("\x1b[1;{modifier_param}A").into_bytes()),
             "up" => Some(b"\x1b[A".to_vec()),
+            "down" if has_modifiers => Some(format!("\x1b[1;{modifier_param}B").into_bytes()),
             "down" => Some(b"\x1b[B".to_vec()),
+            "right" if has_modifiers => Some(format!("\x1b[1;{modifier_param}C").into_bytes()),
             "right" => Some(b"\x1b[C".to_vec()),
+            "left" if has_modifiers => Some(format!("\x1b[1;{modifier_param}D").into_bytes()),
             "left" => Some(b"\x1b[D".to_vec()),
+            "home" if has_modifiers => Some(format!("\x1b[1;{modifier_param}H").into_bytes()),
             "home" => Some(b"\x1b[H".to_vec()),
+            "end" if has_modifiers => Some(format!("\x1b[1;{modifier_param}F").into_bytes()),
             "end" => Some(b"\x1b[F".to_vec()),
-            "pageup" => Some(b"\x1b[5~".to_vec()),
-            "pagedown" => Some(b"\x1b[6~".to_vec()),
+            "insert" if has_modifiers => Some(format!("\x1b[2;{modifier_param}~").into_bytes()),
+            "insert" => Some(b"\x1b[2~".to_vec()),
+            "delete" if has_modifiers => Some(format!("\x1b[3;{modifier_param}~").into_bytes()),
             "delete" => Some(b"\x1b[3~".to_vec()),
+            "pageup" if has_modifiers => Some(format!("\x1b[5;{modifier_param}~").into_bytes()),
+            "pageup" => Some(b"\x1b[5~".to_vec()),
+            "pagedown" if has_modifiers => Some(format!("\x1b[6;{modifier_param}~").into_bytes()),
+            "pagedown" => Some(b"\x1b[6~".to_vec()),
+            "f1" if has_modifiers => Some(format!("\x1b[1;{modifier_param}P").into_bytes()),
+            "f1" => Some(b"\x1bOP".to_vec()),
+            "f2" if has_modifiers => Some(format!("\x1b[1;{modifier_param}Q").into_bytes()),
+            "f2" => Some(b"\x1bOQ".to_vec()),
+            "f3" if has_modifiers => Some(format!("\x1b[1;{modifier_param}R").into_bytes()),
+            "f3" => Some(b"\x1bOR".to_vec()),
+            "f4" if has_modifiers => Some(format!("\x1b[1;{modifier_param}S").into_bytes()),
+            "f4" => Some(b"\x1bOS".to_vec()),
+            "f5" if has_modifiers => Some(format!("\x1b[15;{modifier_param}~").into_bytes()),
+            "f5" => Some(b"\x1b[15~".to_vec()),
+            "f6" if has_modifiers => Some(format!("\x1b[17;{modifier_param}~").into_bytes()),
+            "f6" => Some(b"\x1b[17~".to_vec()),
+            "f7" if has_modifiers => Some(format!("\x1b[18;{modifier_param}~").into_bytes()),
+            "f7" => Some(b"\x1b[18~".to_vec()),
+            "f8" if has_modifiers => Some(format!("\x1b[19;{modifier_param}~").into_bytes()),
+            "f8" => Some(b"\x1b[19~".to_vec()),
+            "f9" if has_modifiers => Some(format!("\x1b[20;{modifier_param}~").into_bytes()),
+            "f9" => Some(b"\x1b[20~".to_vec()),
+            "f10" if has_modifiers => Some(format!("\x1b[21;{modifier_param}~").into_bytes()),
+            "f10" => Some(b"\x1b[21~".to_vec()),
+            "f11" if has_modifiers => Some(format!("\x1b[23;{modifier_param}~").into_bytes()),
+            "f11" => Some(b"\x1b[23~".to_vec()),
+            "f12" if has_modifiers => Some(format!("\x1b[24;{modifier_param}~").into_bytes()),
+            "f12" => Some(b"\x1b[24~".to_vec()),
             _ => {
+                // Alt+key: prefix with ESC
+                if modifiers.alt {
+                    if let Some(ch) = &keystroke.key_char {
+                        let mut bytes = vec![0x1b];
+                        bytes.extend_from_slice(ch.as_bytes());
+                        return Some(bytes);
+                    } else if key.len() == 1 {
+                        let mut bytes = vec![0x1b];
+                        bytes.extend_from_slice(key.as_bytes());
+                        return Some(bytes);
+                    }
+                }
+
                 if let Some(ch) = &keystroke.key_char {
                     Some(ch.as_bytes().to_vec())
                 } else if key.len() == 1 {
