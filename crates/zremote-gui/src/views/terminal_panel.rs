@@ -35,8 +35,10 @@
 //!
 //! Left click creates a selection at the grid position (supporting double-click for word
 //! and triple-click for line selection). Mouse drag updates the selection endpoint.
-//! Mouse up clears empty selections (plain click without drag). Ctrl+Shift+C copies
-//! selected text to the system clipboard via `term.selection_to_string()`.
+//! Mouse up clears empty selections (plain click without drag) and auto-copies
+//! non-empty selections to the system clipboard. Ctrl+C copies selected text
+//! (or sends SIGINT when nothing is selected). Ctrl+V pastes from clipboard
+//! with bracketed paste support.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -49,6 +51,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::vte::ansi::Processor;
@@ -714,6 +717,7 @@ impl Render for TerminalPanel {
                 let term = self.term.clone();
                 let search_open = self.search_open;
                 let entity = cx.entity().downgrade();
+                let entity_id = cx.entity_id();
                 move |event: &KeyDownEvent, _window: &mut Window, cx: &mut App| {
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
@@ -731,14 +735,51 @@ impl Render for TerminalPanel {
                         return;
                     }
 
-                    // Ctrl+Shift+C: copy selection to clipboard
+                    // Ctrl+C: copy selection if any, else send SIGINT
+                    // Ctrl+Shift+C: also copy selection
                     if mods.control
-                        && mods.shift
-                        && key.eq_ignore_ascii_case("c")
-                        && let Ok(t) = term.lock()
-                        && let Some(text) = t.selection_to_string()
+                        && !mods.alt
+                        && (key == "c" || key.eq_ignore_ascii_case("c") && mods.shift)
                     {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        if let Ok(mut t) = term.lock() {
+                            if let Some(text) = t.selection_to_string() {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                t.selection = None;
+                                cx.notify(entity_id);
+                                return;
+                            }
+                        }
+                        // No selection: Ctrl+C sends SIGINT, Ctrl+Shift+C does nothing
+                        if !mods.shift {
+                            let _ = input_tx.send(vec![0x03]);
+                        }
+                        return;
+                    }
+
+                    // Ctrl+V / Ctrl+Shift+V: paste from clipboard
+                    if mods.control
+                        && !mods.alt
+                        && (key == "v" || key.eq_ignore_ascii_case("v") && mods.shift)
+                    {
+                        if let Some(item) = cx.read_from_clipboard() {
+                            if let Some(text) = item.text() {
+                                if !text.is_empty() {
+                                    let bracketed = term
+                                        .lock()
+                                        .ok()
+                                        .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+                                    let mut bytes = Vec::with_capacity(text.len() + 12);
+                                    if bracketed {
+                                        bytes.extend_from_slice(b"\x1b[200~");
+                                    }
+                                    bytes.extend_from_slice(text.as_bytes());
+                                    if bracketed {
+                                        bytes.extend_from_slice(b"\x1b[201~");
+                                    }
+                                    let _ = input_tx.send(bytes);
+                                }
+                            }
+                        }
                         return;
                     }
 
@@ -905,16 +946,19 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            // Left mouse up: finalize selection (selection stays for copy)
+            // Left mouse up: finalize selection, auto-copy to clipboard
             .on_mouse_up(MouseButton::Left, {
                 let entity_id = cx.entity_id();
                 let term = self.term.clone();
                 move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
-                    // Clear empty selections (single click without drag)
-                    if let Ok(mut t) = term.lock()
-                        && t.selection.as_ref().is_some_and(|s| s.is_empty())
-                    {
-                        t.selection = None;
+                    if let Ok(mut t) = term.lock() {
+                        if t.selection.as_ref().is_some_and(|s| s.is_empty()) {
+                            // Clear empty selections (single click without drag)
+                            t.selection = None;
+                        } else if let Some(text) = t.selection_to_string() {
+                            // Auto-copy non-empty selection to clipboard
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
                     }
                     cx.notify(entity_id);
                 }
