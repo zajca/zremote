@@ -1,4 +1,4 @@
-use crate::types::{CreateSessionRequest, Host, ModeResponse, Project, Session, UpdateProjectRequest};
+use crate::types::{CreateSessionRequest, CreateSessionResponse, Host, ModeResponse, Project, Session, UpdateProjectRequest};
 
 /// HTTP client for the `ZRemote` REST API.
 #[derive(Clone)]
@@ -60,8 +60,8 @@ impl ApiClient {
         &self,
         host_id: &str,
         req: &CreateSessionRequest,
-    ) -> Result<Session, ApiError> {
-        let session: Session = self
+    ) -> Result<CreateSessionResponse, ApiError> {
+        let resp: CreateSessionResponse = self
             .client
             .post(format!("{}/api/hosts/{host_id}/sessions", self.base_url))
             .json(req)
@@ -70,7 +70,7 @@ impl ApiClient {
             .error_for_status()?
             .json()
             .await?;
-        Ok(session)
+        Ok(resp)
     }
 
     /// List projects for a host.

@@ -51,6 +51,14 @@ pub struct UpdateProjectRequest {
     pub pinned: Option<bool>,
 }
 
+/// Minimal response from POST /api/hosts/{host_id}/sessions.
+/// Backends omit `host_id` and other fields, so we deserialize only what's guaranteed.
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionResponse {
+    pub id: String,
+    pub status: String,
+}
+
 /// Request body for creating a new session.
 #[derive(Debug, Serialize)]
 pub struct CreateSessionRequest {
