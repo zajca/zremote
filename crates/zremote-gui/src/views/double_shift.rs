@@ -71,11 +71,11 @@ impl DoubleShiftDetector {
             }
 
             // This was a clean bare shift tap
-            if let Some(last) = self.last_bare_shift_tap.get() {
-                if last.elapsed().as_millis() < DOUBLE_SHIFT_TIMEOUT_MS {
-                    self.last_bare_shift_tap.set(None);
-                    return true;
-                }
+            if let Some(last) = self.last_bare_shift_tap.get()
+                && last.elapsed().as_millis() < DOUBLE_SHIFT_TIMEOUT_MS
+            {
+                self.last_bare_shift_tap.set(None);
+                return true;
             }
 
             self.last_bare_shift_tap.set(Some(Instant::now()));

@@ -57,7 +57,8 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::vte::ansi::Processor;
 use gpui::*;
 
-use crate::terminal_ws::{self, TerminalWsHandle};
+use crate::icons::{Icon, icon};
+use crate::terminal_handle::TerminalHandle;
 use crate::theme;
 use crate::types::TerminalEvent;
 use crate::views::command_palette::PaletteTab;
@@ -90,7 +91,7 @@ pub struct TerminalLayoutInfo {
 pub struct TerminalPanel {
     session_id: String,
     term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
-    ws_handle: TerminalWsHandle,
+    handle: TerminalHandle,
     focus_handle: FocusHandle,
     closed: bool,
     reader_started: bool,
@@ -136,7 +137,7 @@ pub struct TerminalPanel {
 impl TerminalPanel {
     pub fn new(
         session_id: String,
-        ws_url: String,
+        handle: TerminalHandle,
         tokio_handle: &tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -145,13 +146,12 @@ impl TerminalPanel {
         let term = alacritty_terminal::Term::new(config, &size, VoidListener);
         let term = Arc::new(Mutex::new(term));
 
-        let ws_handle = terminal_ws::connect(ws_url, tokio_handle);
         let focus_handle = cx.focus_handle();
 
         // Resize debouncing: element sends to debounce_tx (immediate local resize),
         // tokio task forwards to real resize_tx after 150ms of inactivity.
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
-        let real_resize_tx = ws_handle.resize_tx.clone();
+        let real_resize_tx = handle.resize_tx().clone();
         tokio_handle.spawn(async move {
             loop {
                 // Wait for first resize event.
@@ -190,7 +190,7 @@ impl TerminalPanel {
         Self {
             session_id,
             term,
-            ws_handle,
+            handle,
             focus_handle,
             closed: false,
             reader_started: false,
@@ -224,7 +224,7 @@ impl TerminalPanel {
         }
         self.reader_started = true;
 
-        let output_rx = self.ws_handle.output_rx.clone();
+        let output_rx = self.handle.output_rx().clone();
         let term = self.term.clone();
         let content_generation = self.content_generation.clone();
 
@@ -717,6 +717,7 @@ impl Render for TerminalPanel {
         let mut content = div()
             .id("terminal-content")
             .track_focus(&self.focus_handle)
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -724,7 +725,7 @@ impl Render for TerminalPanel {
             .p(px(4.0))
             .overflow_hidden()
             .on_key_down({
-                let input_tx = self.ws_handle.input_tx.clone();
+                let input_tx = self.handle.input_tx().clone();
                 let term = self.term.clone();
                 let search_open = self.search_open;
                 let entity = cx.entity().downgrade();
@@ -802,13 +803,13 @@ impl Render for TerminalPanel {
                         && !mods.alt
                         && (key == "c" || key.eq_ignore_ascii_case("c") && mods.shift)
                     {
-                        if let Ok(mut t) = term.lock() {
-                            if let Some(text) = t.selection_to_string() {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                t.selection = None;
-                                cx.notify(entity_id);
-                                return;
-                            }
+                        if let Ok(mut t) = term.lock()
+                            && let Some(text) = t.selection_to_string()
+                        {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            t.selection = None;
+                            cx.notify(entity_id);
+                            return;
                         }
                         // No selection: Ctrl+C sends SIGINT, Ctrl+Shift+C does nothing
                         if !mods.shift {
@@ -822,24 +823,23 @@ impl Render for TerminalPanel {
                         && !mods.alt
                         && (key == "v" || key.eq_ignore_ascii_case("v") && mods.shift)
                     {
-                        if let Some(item) = cx.read_from_clipboard() {
-                            if let Some(text) = item.text() {
-                                if !text.is_empty() {
-                                    let bracketed = term
-                                        .lock()
-                                        .ok()
-                                        .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
-                                    let mut bytes = Vec::with_capacity(text.len() + 12);
-                                    if bracketed {
-                                        bytes.extend_from_slice(b"\x1b[200~");
-                                    }
-                                    bytes.extend_from_slice(text.as_bytes());
-                                    if bracketed {
-                                        bytes.extend_from_slice(b"\x1b[201~");
-                                    }
-                                    let _ = input_tx.send(bytes);
-                                }
+                        if let Some(item) = cx.read_from_clipboard()
+                            && let Some(text) = item.text()
+                            && !text.is_empty()
+                        {
+                            let bracketed = term
+                                .lock()
+                                .ok()
+                                .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+                            let mut bytes = Vec::with_capacity(text.len() + 12);
+                            if bracketed {
+                                bytes.extend_from_slice(b"\x1b[200~");
                             }
+                            bytes.extend_from_slice(text.as_bytes());
+                            if bracketed {
+                                bytes.extend_from_slice(b"\x1b[201~");
+                            }
+                            let _ = input_tx.send(bytes);
                         }
                         return;
                     }
@@ -1113,6 +1113,38 @@ impl Render for TerminalPanel {
                     .child("[Session closed]"),
             );
         }
+
+        // Connection type indicator (bottom-right pill badge).
+        let is_direct = self.handle.is_direct();
+        content = content.child(
+            div()
+                .id("connection-indicator")
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(8.0))
+                .bg(gpui::rgba(0x111113_99))
+                .child(
+                    icon(if is_direct { Icon::Zap } else { Icon::Wifi })
+                        .size(px(10.0))
+                        .text_color(if is_direct {
+                            theme::success()
+                        } else {
+                            theme::text_tertiary()
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme::text_tertiary())
+                        .child(if is_direct { "Direct" } else { "WS" }),
+                ),
+        );
 
         // Wrap in a vertical container with optional search overlay on top.
         let mut wrapper = div().flex().flex_col().size_full();

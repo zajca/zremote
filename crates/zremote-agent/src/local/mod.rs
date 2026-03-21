@@ -244,6 +244,14 @@ fn build_router(
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
         )
+        .route(
+            "/api/sessions/{session_id}/direct-attach",
+            post(routes::sessions::direct_attach),
+        )
+        .route(
+            "/api/sessions/{session_id}/direct-detach",
+            post(routes::sessions::direct_detach),
+        )
         // Agentic loop endpoints
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
@@ -611,6 +619,27 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
                                         });
                                 }
                             }
+                        }
+                    }
+
+                    // Check for orphaned direct-attach sessions (GUI crashed)
+                    let orphaned = {
+                        let mgr = state.session_manager.lock().await;
+                        mgr.find_orphaned_direct_attached()
+                    };
+                    for orphan_id in orphaned {
+                        let mut mgr = state.session_manager.lock().await;
+                        if let Err(e) = mgr.reattach_after_direct(&orphan_id) {
+                            tracing::warn!(
+                                session_id = %orphan_id,
+                                error = %e,
+                                "failed to recover orphaned direct-attach session"
+                            );
+                        } else {
+                            tracing::info!(
+                                session_id = %orphan_id,
+                                "recovered orphaned direct-attach session"
+                            );
                         }
                     }
 

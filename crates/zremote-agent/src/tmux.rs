@@ -61,7 +61,7 @@ fn tmux_cmd() -> Command {
 }
 
 /// Return the per-UID FIFO directory path: `/tmp/zremote-tmux-{uid}/`.
-fn fifo_dir() -> PathBuf {
+pub(crate) fn fifo_dir() -> PathBuf {
     let uid = current_uid();
     PathBuf::from(format!("{FIFO_DIR_PREFIX}-{uid}"))
 }
@@ -292,6 +292,70 @@ impl TmuxSession {
     /// Return the stable pane ID (`%N` format).
     pub fn pane_id(&self) -> &str {
         &self.pane_id
+    }
+
+    /// Return the tmux session name (e.g. "zremote-{uuid}").
+    pub fn tmux_name(&self) -> &str {
+        &self.tmux_name
+    }
+
+    /// Re-establish FIFO reader and pipe-pane after GUI releases direct connection.
+    ///
+    /// This is called when the GUI disconnects from a direct tmux session and the
+    /// agent needs to resume capturing output. It follows the same pattern as
+    /// `reattach()` but operates on an existing `TmuxSession` instance.
+    pub fn reattach_reader(
+        &mut self,
+        output_tx: mpsc::Sender<PtyOutput>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Abort old reader if still running
+        self.reader_handle.abort();
+
+        // Recreate FIFO at original path
+        let dir = fifo_dir();
+        fs::create_dir_all(&dir)?;
+        let fifo_path = dir.join(format!("{}.fifo", self.session_id));
+        let _ = fs::remove_file(&fifo_path);
+        create_fifo(&fifo_path)?;
+
+        // Capture current screen content to bridge any gap
+        if let Ok(cap) = tmux_cmd()
+            .args(["capture-pane", "-t", &self.pane_id, "-p", "-e"])
+            .output()
+            && cap.status.success()
+            && !cap.stdout.is_empty()
+        {
+            let _ = output_tx.try_send(PtyOutput {
+                session_id: self.session_id,
+                pane_id: None,
+                data: cap.stdout,
+            });
+        }
+
+        // Stop any existing pipe-pane, then set up fresh
+        let _ = tmux_cmd().args(["pipe-pane", "-t", &self.pane_id]).output();
+        setup_pipe_pane(&self.pane_id, &fifo_path)?;
+
+        // Spawn new FIFO reader task
+        let reader_handle = spawn_fifo_reader(
+            self.session_id,
+            None,
+            fifo_path.clone(),
+            output_tx.clone(),
+        );
+
+        // Update internal state
+        self.fifo_path = fifo_path;
+        self.reader_handle = reader_handle;
+        self.output_tx = output_tx;
+
+        tracing::info!(
+            session_id = %self.session_id,
+            pane_id = %self.pane_id,
+            "re-attached reader after direct connection released"
+        );
+
+        Ok(())
     }
 
     /// Send raw bytes as input to the tmux pane via `send-keys -H` (hex mode).
@@ -829,7 +893,8 @@ fn setup_pipe_pane(
         .to_str()
         .ok_or_else(|| format!("non-UTF8 FIFO path: {}", fifo_path.display()))?;
 
-    let pipe_cmd = format!("cat >> {fifo_str}");
+    // Shell-quote the path to prevent injection via unexpected characters
+    let pipe_cmd = format!("cat >> '{}'", fifo_str.replace('\'', "'\\''"));
 
     let output = tmux_cmd()
         .args(["pipe-pane", "-t", tmux_name, &pipe_cmd])
