@@ -17,6 +17,9 @@ pub enum Icon {
     ChevronDown,
     Loader,
     Search,
+    Command,
+    Folder,
+    Zap,
 }
 
 impl Icon {
@@ -37,6 +40,9 @@ impl Icon {
             Self::ChevronDown => "icons/chevron-down.svg",
             Self::Loader => "icons/loader.svg",
             Self::Search => "icons/search.svg",
+            Self::Command => "icons/command.svg",
+            Self::Folder => "icons/folder.svg",
+            Self::Zap => "icons/zap.svg",
         }
     }
 }

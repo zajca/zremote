@@ -60,6 +60,8 @@ use gpui::*;
 use crate::terminal_ws::{self, TerminalWsHandle};
 use crate::theme;
 use crate::types::TerminalEvent;
+use crate::views::command_palette::PaletteTab;
+use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
 use crate::views::url_detector::UrlDetector;
 
@@ -125,6 +127,8 @@ pub struct TerminalPanel {
     search_matches: Vec<Match>,
     /// Index of the currently focused search match.
     search_current_idx: Option<usize>,
+    /// Double-shift detection for command palette.
+    double_shift: DoubleShiftDetector,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
 }
@@ -205,6 +209,7 @@ impl TerminalPanel {
             search_overlay: None,
             search_matches: Vec::new(),
             search_current_idx: None,
+            double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
         }
     }
@@ -484,6 +489,12 @@ impl TerminalPanel {
     }
 }
 
+pub enum TerminalPanelEvent {
+    OpenCommandPalette { tab: PaletteTab },
+}
+
+impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
+
 impl Focusable for TerminalPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -492,7 +503,7 @@ impl Focusable for TerminalPanel {
 
 impl TerminalPanel {
     /// Open the search overlay.
-    fn open_search(&mut self, cx: &mut Context<Self>) {
+    pub fn open_search(&mut self, cx: &mut Context<Self>) {
         if self.search_open {
             return;
         }
@@ -718,14 +729,64 @@ impl Render for TerminalPanel {
                 let search_open = self.search_open;
                 let entity = cx.entity().downgrade();
                 let entity_id = cx.entity_id();
+                let double_shift_kd = self.double_shift.clone();
                 move |event: &KeyDownEvent, _window: &mut Window, cx: &mut App| {
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
+
+                    // Track key presses during shift hold for double-shift detection.
+                    // GPUI on_key_down only fires for non-modifier keys, so every
+                    // event here means a real key was pressed (not bare shift).
+                    double_shift_kd.on_key_down_during_shift();
 
                     // Ctrl+F: open search
                     if mods.control && !mods.shift && key == "f" {
                         let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.open_search(cx);
+                        });
+                        return;
+                    }
+
+                    // Ctrl+K: open command palette (All tab)
+                    if mods.control && !mods.shift && !mods.alt && key == "k" {
+                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.search_open {
+                                this.close_search(cx);
+                            }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::All });
+                        });
+                        return;
+                    }
+
+                    // Ctrl+Shift+E: open command palette (Sessions tab)
+                    if mods.control && mods.shift && !mods.alt && key == "e" {
+                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.search_open {
+                                this.close_search(cx);
+                            }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Sessions });
+                        });
+                        return;
+                    }
+
+                    // Ctrl+Shift+P: open command palette (Projects tab)
+                    if mods.control && mods.shift && !mods.alt && key == "p" {
+                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.search_open {
+                                this.close_search(cx);
+                            }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Projects });
+                        });
+                        return;
+                    }
+
+                    // Ctrl+Shift+A: open command palette (Actions tab)
+                    if mods.control && mods.shift && !mods.alt && key == "a" {
+                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.search_open {
+                                this.close_search(cx);
+                            }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Actions });
                         });
                         return;
                     }
@@ -788,14 +849,32 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            // Clear URL hover when control is released
-            .on_key_up({
+            // Modifier key tracking: double-shift detection + URL hover on ctrl release.
+            // GPUI does NOT fire on_key_down/on_key_up for bare modifier keys (X11 and
+            // Wayland both filter them with keysym.is_modifier_key()). The only event
+            // for modifier state changes is ModifiersChangedEvent.
+            .on_modifiers_changed({
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 let entity_id = cx.entity_id();
-                move |event: &KeyUpEvent, _window: &mut Window, cx: &mut App| {
-                    if event.keystroke.key.as_str() == "control" && hovered_url_idx.get().is_some() {
+                let entity_mc = cx.entity().downgrade();
+                let double_shift_mc = self.double_shift.clone();
+                move |event: &ModifiersChangedEvent, _window: &mut Window, cx: &mut App| {
+                    let mods = &event.modifiers;
+
+                    // Clear URL hover when control is released
+                    if !mods.control && hovered_url_idx.get().is_some() {
                         hovered_url_idx.set(None);
                         cx.notify(entity_id);
+                    }
+
+                    // Double-shift detection via modifier transitions
+                    if double_shift_mc.on_modifiers_changed(
+                        mods.shift, mods.control, mods.alt, mods.platform,
+                    ) {
+                        let _ = entity_mc.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.search_open { this.close_search(cx); }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::All });
+                        });
                     }
                 }
             })

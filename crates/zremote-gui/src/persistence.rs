@@ -11,7 +11,16 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecentSession {
+    pub session_id: String,
+    /// Unix timestamp in seconds.
+    pub timestamp: i64,
+}
 
 /// Current format version.
 const FORMAT_VERSION: u32 = 1;
@@ -28,6 +37,8 @@ pub struct GuiState {
     pub window_width: Option<f32>,
     #[serde(default)]
     pub window_height: Option<f32>,
+    #[serde(default)]
+    pub recent_sessions: Vec<RecentSession>,
 }
 
 impl GuiState {
@@ -36,6 +47,7 @@ impl GuiState {
             && self.active_session_id.is_none()
             && self.window_width.is_none()
             && self.window_height.is_none()
+            && self.recent_sessions.is_empty()
     }
 }
 
@@ -85,6 +97,29 @@ impl Persistence {
     pub fn update(&mut self, f: impl FnOnce(&mut GuiState)) {
         f(&mut self.state);
         self.data_version += 1;
+    }
+
+    /// Record a session access, moving it to the front of the recent list.
+    /// Keeps at most 10 entries.
+    pub fn record_session_access(&mut self, session_id: &str) {
+        self.state
+            .recent_sessions
+            .retain(|r| r.session_id != session_id);
+        self.state.recent_sessions.insert(
+            0,
+            RecentSession {
+                session_id: session_id.to_string(),
+                timestamp: i64::try_from(
+                    SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs()),
+                )
+                .unwrap_or(0),
+            },
+        );
+        self.state.recent_sessions.truncate(10);
+        self.data_version += 1;
+        let _ = self.save_if_changed();
     }
 
     /// Save to disk if state has changed since last save.

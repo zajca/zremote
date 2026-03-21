@@ -31,6 +31,22 @@ pub struct SidebarView {
 }
 
 impl SidebarView {
+    pub fn hosts(&self) -> &[Host] {
+        &self.hosts
+    }
+
+    pub fn sessions(&self) -> &[Session] {
+        &self.sessions
+    }
+
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    pub fn selected_session_id(&self) -> Option<&str> {
+        self.selected_session_id.as_deref()
+    }
+
     pub fn new(app_state: Arc<AppState>, cx: &mut Context<Self>) -> Self {
         // Restore previously selected session from persistence.
         let restored_session_id = app_state
@@ -131,7 +147,7 @@ impl SidebarView {
         }
     }
 
-    fn create_session(
+    pub fn create_session(
         &mut self,
         host_id: &str,
         working_dir: Option<String>,
@@ -187,7 +203,7 @@ impl SidebarView {
         .detach();
     }
 
-    fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let api = self.app_state.api.clone();
         let session_id = session_id.to_string();
         let handle = self.app_state.tokio_handle.clone();
