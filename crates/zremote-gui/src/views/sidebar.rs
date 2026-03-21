@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
@@ -23,23 +24,23 @@ struct HostItems {
 /// Sidebar view: hosts list with projects and sessions.
 pub struct SidebarView {
     app_state: Arc<AppState>,
-    hosts: Vec<Host>,
-    sessions: Vec<Session>,
-    projects: Vec<Project>,
+    hosts: Rc<Vec<Host>>,
+    sessions: Rc<Vec<Session>>,
+    projects: Rc<Vec<Project>>,
     selected_session_id: Option<String>,
     loading: bool,
 }
 
 impl SidebarView {
-    pub fn hosts(&self) -> &[Host] {
+    pub fn hosts_rc(&self) -> &Rc<Vec<Host>> {
         &self.hosts
     }
 
-    pub fn sessions(&self) -> &[Session] {
+    pub fn sessions_rc(&self) -> &Rc<Vec<Session>> {
         &self.sessions
     }
 
-    pub fn projects(&self) -> &[Project] {
+    pub fn projects_rc(&self) -> &Rc<Vec<Project>> {
         &self.projects
     }
 
@@ -57,9 +58,9 @@ impl SidebarView {
 
         let mut view = Self {
             app_state,
-            hosts: Vec::new(),
-            sessions: Vec::new(),
-            projects: Vec::new(),
+            hosts: Rc::new(Vec::new()),
+            sessions: Rc::new(Vec::new()),
+            projects: Rc::new(Vec::new()),
             selected_session_id: restored_session_id,
             loading: true,
         };
@@ -91,9 +92,9 @@ impl SidebarView {
                 .unwrap_or_default();
 
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                this.hosts = hosts;
-                this.sessions = all_sessions;
-                this.projects = all_projects;
+                this.hosts = Rc::new(hosts);
+                this.sessions = Rc::new(all_sessions);
+                this.projects = Rc::new(all_projects);
                 this.loading = false;
 
                 // If a session was restored from persistence, try to re-select it.
@@ -186,7 +187,7 @@ impl SidebarView {
                     };
                     let session_id = session.id.clone();
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                        this.sessions.push(session);
+                        Rc::make_mut(&mut this.sessions).push(session);
                         this.selected_session_id = Some(session_id.clone());
                         cx.emit(SidebarEvent::SessionSelected {
                             session_id,
@@ -220,7 +221,7 @@ impl SidebarView {
                 return;
             }
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                this.sessions.retain(|s| s.id != session_id);
+                Rc::make_mut(&mut this.sessions).retain(|s| s.id != session_id);
                 if this.selected_session_id.as_deref() == Some(&session_id) {
                     this.selected_session_id = None;
                 }

@@ -1,5 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
@@ -122,7 +123,7 @@ impl MainView {
             return;
         }
 
-        // Build snapshot from sidebar + persistence
+        // Build snapshot from sidebar + persistence (Rc::clone = O(1), no data copying)
         let snapshot = self.sidebar.read(cx);
         let recent_sessions = self
             .app_state
@@ -132,12 +133,12 @@ impl MainView {
             .map(|p| p.state().recent_sessions.clone())
             .unwrap_or_default();
         let palette_snapshot = PaletteSnapshot::capture(
-            snapshot.hosts().to_vec(),
-            snapshot.sessions().to_vec(),
-            snapshot.projects().to_vec(),
+            Rc::clone(snapshot.hosts_rc()),
+            Rc::clone(snapshot.sessions_rc()),
+            Rc::clone(snapshot.projects_rc()),
             self.app_state.mode.clone(),
             snapshot.selected_session_id().map(String::from),
-            recent_sessions,
+            &recent_sessions,
         );
         let palette = cx.new(|cx| CommandPalette::new(palette_snapshot, tab, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();
