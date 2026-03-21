@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::mpsc;
 use zremote_protocol::SessionId;
@@ -23,10 +23,17 @@ pub enum SessionBackend {
     Tmux(TmuxSession),
 }
 
+/// Connection info returned to the GUI for direct tmux attachment.
+pub struct DirectAttachInfo {
+    pub session_name: String,
+    pub pane_id: String,
+}
+
 pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
     output_tx: mpsc::Sender<PtyOutput>,
     use_tmux: bool,
+    direct_attached: HashSet<SessionId>,
 }
 
 impl SessionManager {
@@ -35,6 +42,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             output_tx,
             use_tmux,
+            direct_attached: HashSet::new(),
         }
     }
 
@@ -244,6 +252,93 @@ impl SessionManager {
         self.use_tmux
     }
 
+    /// Detach agent's FIFO reader, allowing GUI to connect directly to tmux.
+    /// Returns connection info for the GUI.
+    pub fn detach_for_direct(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<DirectAttachInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let backend = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let tmux_session = match backend {
+            SessionBackend::Tmux(session) => session,
+            SessionBackend::Pty(_) => {
+                return Err("direct attach only supported for tmux sessions".into());
+            }
+        };
+
+        let info = DirectAttachInfo {
+            session_name: tmux_session.tmux_name().to_string(),
+            pane_id: tmux_session.pane_id().to_string(),
+        };
+
+        // Detach agent's reader (stops pipe-pane, removes FIFO, aborts reader)
+        tmux_session.detach();
+
+        self.direct_attached.insert(*session_id);
+
+        tracing::info!(
+            session_id = %session_id,
+            session_name = %info.session_name,
+            "detached for direct GUI connection"
+        );
+
+        Ok(info)
+    }
+
+    /// Re-attach agent's FIFO reader after GUI disconnects from direct connection.
+    pub fn reattach_after_direct(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.direct_attached.remove(session_id) {
+            return Err(format!("session {session_id} is not directly attached").into());
+        }
+
+        let backend = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("session {session_id} not found"))?;
+
+        let tmux_session = match backend {
+            SessionBackend::Tmux(session) => session,
+            SessionBackend::Pty(_) => {
+                return Err("direct detach only supported for tmux sessions".into());
+            }
+        };
+
+        tmux_session.reattach_reader(self.output_tx.clone())?;
+
+        tracing::info!(
+            session_id = %session_id,
+            "re-attached after direct GUI connection released"
+        );
+
+        Ok(())
+    }
+
+    /// Check if a session is currently directly attached by the GUI.
+    pub fn is_direct_attached(&self, session_id: &SessionId) -> bool {
+        self.direct_attached.contains(session_id)
+    }
+
+    /// Find sessions that are marked as directly attached but whose GUI FIFO
+    /// no longer exists (GUI crashed without calling direct-detach).
+    pub fn find_orphaned_direct_attached(&self) -> Vec<SessionId> {
+        let fifo_dir = crate::tmux::fifo_dir();
+        self.direct_attached
+            .iter()
+            .filter(|session_id| {
+                let gui_fifo = fifo_dir.join(format!("{session_id}-gui.fifo"));
+                !gui_fifo.exists()
+            })
+            .copied()
+            .collect()
+    }
+
     /// Return the number of active sessions.
     #[cfg(test)]
     pub fn count(&self) -> usize {
@@ -417,5 +512,35 @@ mod tests {
             err.to_string().contains(&session_id.to_string()),
             "error should contain session id, got: {err}"
         );
+    }
+
+    #[test]
+    fn detach_for_direct_nonexistent_session() {
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.detach_for_direct(&session_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reattach_after_direct_not_attached() {
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.reattach_after_direct(&session_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_direct_attached_false_by_default() {
+        let mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        assert!(!mgr.is_direct_attached(&session_id));
+    }
+
+    #[test]
+    fn find_orphaned_empty_when_no_direct() {
+        let mgr = make_manager();
+        let orphans = mgr.find_orphaned_direct_attached();
+        assert!(orphans.is_empty());
     }
 }

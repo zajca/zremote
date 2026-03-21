@@ -184,6 +184,7 @@ impl SidebarView {
                         closed_at: None,
                         project_id: None,
                         working_dir: working_dir_clone,
+                        tmux_name: None,
                     };
                     let session_id = session.id.clone();
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {

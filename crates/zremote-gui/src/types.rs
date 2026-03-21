@@ -26,6 +26,8 @@ pub struct Session {
     pub project_id: Option<String>,
     #[serde(default)]
     pub working_dir: Option<String>,
+    #[serde(default)]
+    pub tmux_name: Option<String>,
 }
 
 /// Project as returned by the ZRemote API.

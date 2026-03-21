@@ -6,6 +6,8 @@ mod assets;
 mod events_ws;
 mod icons;
 mod persistence;
+mod terminal_direct;
+mod terminal_handle;
 mod terminal_ws;
 #[allow(dead_code)]
 mod theme;

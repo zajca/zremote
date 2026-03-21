@@ -74,21 +74,28 @@ impl MainView {
     }
 
     fn open_terminal(&mut self, session_id: &str, _host_id: &str, cx: &mut Context<Self>) {
-        let ws_url = self.app_state.api.terminal_ws_url(session_id);
-        let session_id = session_id.to_string();
+        let session_id_owned = session_id.to_string();
 
         // Persist active session.
         if let Ok(mut p) = self.app_state.persistence.lock() {
-            p.update(|s| s.active_session_id = Some(session_id.clone()));
+            p.update(|s| s.active_session_id = Some(session_id_owned.clone()));
             let _ = p.save_if_changed();
         }
 
-        let tokio_handle = self.app_state.tokio_handle.clone();
-        let terminal = cx.new(|cx| TerminalPanel::new(session_id, ws_url, &tokio_handle, cx));
+        let app_state = self.app_state.clone();
 
-        cx.subscribe(&terminal, Self::on_terminal_event).detach();
-        self.terminal = Some(terminal);
-        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let handle = try_direct_or_ws(&app_state, &session_id_owned).await;
+            let tokio_handle = app_state.tokio_handle.clone();
+            let sid = session_id_owned;
+            let _ = this.update(cx, |this, cx| {
+                let terminal = cx.new(|cx| TerminalPanel::new(sid, handle, &tokio_handle, cx));
+                cx.subscribe(&terminal, Self::on_terminal_event).detach();
+                this.terminal = Some(terminal);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_event_polling(app_state: &Arc<AppState>, cx: &mut Context<Self>) {
@@ -334,6 +341,75 @@ impl Render for MainView {
         }
 
         root
+    }
+}
+
+/// Try to establish a direct tmux connection; fall back to WebSocket on any failure.
+async fn try_direct_or_ws(
+    app_state: &std::sync::Arc<AppState>,
+    session_id: &str,
+) -> crate::terminal_handle::TerminalHandle {
+    use crate::terminal_handle::TerminalHandle;
+
+    // Only attempt direct connection in local mode
+    if app_state.mode != "local" {
+        let ws_url = app_state.api.terminal_ws_url(session_id);
+        let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+        return TerminalHandle::WebSocket(ws);
+    }
+
+    // Check if session uses tmux
+    let session = match app_state.api.get_session(session_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch session, falling back to WebSocket");
+            let ws_url = app_state.api.terminal_ws_url(session_id);
+            let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+            return TerminalHandle::WebSocket(ws);
+        }
+    };
+
+    if session.tmux_name.is_none() {
+        tracing::debug!("session has no tmux_name, using WebSocket");
+        let ws_url = app_state.api.terminal_ws_url(session_id);
+        let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+        return TerminalHandle::WebSocket(ws);
+    }
+
+    // Check tmux availability on this machine
+    if !crate::terminal_direct::tmux_available() {
+        tracing::debug!("tmux not available locally, using WebSocket");
+        let ws_url = app_state.api.terminal_ws_url(session_id);
+        let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+        return TerminalHandle::WebSocket(ws);
+    }
+
+    // Request direct attach from agent
+    let attach_resp = match app_state.api.direct_attach(session_id).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(error = %e, "direct-attach failed, falling back to WebSocket");
+            let ws_url = app_state.api.terminal_ws_url(session_id);
+            let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+            return TerminalHandle::WebSocket(ws);
+        }
+    };
+
+    // Connect directly to tmux
+    let info = attach_resp.into_connection_info();
+    match crate::terminal_direct::connect(info, session_id.to_string(), &app_state.tokio_handle) {
+        Ok(direct) => {
+            tracing::info!(session_id = %session_id, "using direct tmux connection");
+            TerminalHandle::Direct(direct)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "direct tmux connect failed, falling back to WebSocket");
+            // Clean up: tell agent to re-attach
+            let _ = app_state.api.direct_detach(session_id).await;
+            let ws_url = app_state.api.terminal_ws_url(session_id);
+            let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
+            TerminalHandle::WebSocket(ws)
+        }
     }
 }
 
