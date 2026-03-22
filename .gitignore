@@ -1,12 +1,6 @@
 # Rust
 /target/
 
-# Web / Bun
-web/node_modules/
-web/dist/
-web/dist-node/
-web/.vite/
-
 # IDE
 .idea/
 .vscode/
@@ -30,15 +24,11 @@ logs/
 *.db-shm
 *.db-wal
 
-# TypeScript build info
-*.tsbuildinfo
-
 # Nix
 result
 
 # Coverage
 coverage/
-web/coverage/
 lcov.info
 
 # Claude Code - keep skills, ignore the rest

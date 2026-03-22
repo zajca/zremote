@@ -1,0 +1,53 @@
+use gpui::Svg;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Icon {
+    Plus,
+    X,
+    Pin,
+    PinOff,
+    GitBranch,
+    FolderGit,
+    SquareTerminal,
+    Server,
+    Wifi,
+    WifiOff,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
+    Loader,
+    Search,
+    Command,
+    Folder,
+    Zap,
+}
+
+impl Icon {
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Plus => "icons/plus.svg",
+            Self::X => "icons/x.svg",
+            Self::Pin => "icons/pin.svg",
+            Self::PinOff => "icons/pin-off.svg",
+            Self::GitBranch => "icons/git-branch.svg",
+            Self::FolderGit => "icons/folder-git-2.svg",
+            Self::SquareTerminal => "icons/square-terminal.svg",
+            Self::Server => "icons/server.svg",
+            Self::Wifi => "icons/wifi.svg",
+            Self::WifiOff => "icons/wifi-off.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
+            Self::ChevronUp => "icons/chevron-up.svg",
+            Self::ChevronDown => "icons/chevron-down.svg",
+            Self::Loader => "icons/loader.svg",
+            Self::Search => "icons/search.svg",
+            Self::Command => "icons/command.svg",
+            Self::Folder => "icons/folder.svg",
+            Self::Zap => "icons/zap.svg",
+        }
+    }
+}
+
+/// Create a sized SVG element for the given icon.
+pub fn icon(icon: Icon) -> Svg {
+    gpui::svg().path(icon.path())
+}

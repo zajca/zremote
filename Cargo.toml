@@ -5,6 +5,7 @@ members = [
     "crates/zremote-core",
     "crates/zremote-server",
     "crates/zremote-agent",
+    "crates/zremote-gui",
 ]
 
 [workspace.package]
@@ -44,6 +45,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
 
+# GUI
+gpui = "0.2"
+alacritty_terminal = "0.25"
+flume = "0.11"
+
 # Internal
 zremote-protocol = { path = "crates/zremote-protocol" }
 zremote-core = { path = "crates/zremote-core" }
@@ -58,6 +64,21 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package.gpui]
+opt-level = 3
+
+[profile.dev.package.cosmic-text]
+opt-level = 3
+
+[profile.dev.package.alacritty_terminal]
+opt-level = 3
+
+[profile.dev.package.vte]
+opt-level = 3
 
 [profile.release]
 strip = true

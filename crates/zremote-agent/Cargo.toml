@@ -8,7 +8,7 @@ workspace = true
 
 [features]
 default = ["local"]
-local = ["dep:rust-embed", "dep:mime_guess", "dep:tower-http"]
+local = ["dep:tower-http"]
 
 [dependencies]
 zremote-protocol.workspace = true
@@ -36,8 +36,6 @@ base64.workspace = true
 glob-match = "0.2"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
-rust-embed = { workspace = true, optional = true }
-mime_guess = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 
 [dev-dependencies]

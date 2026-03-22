@@ -1384,6 +1384,39 @@ mod tests {
 
     use crate::local::upsert_local_host;
 
+    /// Create an isolated git repository in a temp directory.
+    ///
+    /// Sets `GIT_CEILING_DIRECTORIES` to prevent git from discovering the parent
+    /// worktree/repo, avoiding race conditions when tests run in parallel.
+    fn init_isolated_git_repo(dir: &std::path::Path) {
+        let ceiling = dir.parent().unwrap_or(dir).to_str().unwrap();
+
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CEILING_DIRECTORIES", ceiling)
+                .output()
+                .expect("failed to run git command");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        let path = dir.to_str().unwrap();
+        git(&["init", path]);
+        git(&["-C", path, "config", "user.email", "test@test.com"]);
+        git(&["-C", path, "config", "user.name", "Test"]);
+
+        std::fs::write(dir.join("test.txt"), "hello").unwrap();
+        git(&["-C", path, "add", "."]);
+        // --no-verify prevents the parent repo's pre-commit hook from running
+        // inside the temp test repo
+        git(&["-C", path, "commit", "--no-verify", "-m", "init"]);
+    }
+
     async fn test_state() -> Arc<LocalAppState> {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
@@ -2082,36 +2115,9 @@ mod tests {
         let state = test_state().await;
         let host_id = state.host_id.to_string();
 
-        // Create a temp dir and init a git repo
         let dir = tempfile::tempdir().unwrap();
+        init_isolated_git_repo(dir.path());
         let project_path = dir.path().to_str().unwrap().to_string();
-
-        std::process::Command::new("git")
-            .args(["init", &project_path])
-            .output()
-            .unwrap();
-
-        // Configure git for the test repo
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "config", "user.email", "test@test.com"])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "config", "user.name", "Test"])
-            .output()
-            .unwrap();
-
-        // Create a commit so git has state
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "hello").unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "add", "."])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "commit", "-m", "init"])
-            .output()
-            .unwrap();
 
         let app = build_test_router(state);
 
@@ -2146,33 +2152,9 @@ mod tests {
         let host_id = state.host_id.to_string();
         let project_id = Uuid::new_v4().to_string();
 
-        // Create a temp dir and init a git repo
         let dir = tempfile::tempdir().unwrap();
+        init_isolated_git_repo(dir.path());
         let project_path = dir.path().to_str().unwrap().to_string();
-
-        std::process::Command::new("git")
-            .args(["init", &project_path])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "config", "user.email", "test@test.com"])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "config", "user.name", "Test"])
-            .output()
-            .unwrap();
-
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "hello").unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "add", "."])
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-C", &project_path, "commit", "-m", "initial commit"])
-            .output()
-            .unwrap();
 
         q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
             .await
