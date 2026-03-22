@@ -1,5 +1,3 @@
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -92,39 +90,76 @@ async fn run_terminal_ws(
         }
     });
 
-    // Reader: parse WS messages and forward to output channel
+    // Reader: parse WS messages and forward to output channel.
+    // Binary frames carry terminal output (no base64/JSON overhead).
+    // During scrollback replay, chunks are buffered and delivered as one Output event.
+    let mut scrollback_buf: Vec<u8> = Vec::new();
+    let mut in_scrollback = false;
+
     while let Some(msg) = read.next().await {
         match msg {
-            Ok(Message::Text(text)) => match serde_json::from_str::<TerminalServerMessage>(&text) {
-                Ok(TerminalServerMessage::Output { data }) => match BASE64.decode(&data) {
-                    Ok(bytes) => {
-                        if output_tx.send(TerminalEvent::Output(bytes)).is_err() {
-                            break;
+            Ok(Message::Binary(data)) => {
+                // Binary frame: tag byte + payload
+                if data.is_empty() {
+                    continue;
+                }
+                let bytes = match data[0] {
+                    0x01 => &data[1..], // main pane output
+                    0x02 => {
+                        // pane output: skip pane_id (1 byte len + pid)
+                        if data.len() < 2 {
+                            continue;
                         }
+                        let pid_len = usize::from(data[1]);
+                        if data.len() < 2 + pid_len {
+                            continue;
+                        }
+                        &data[2 + pid_len..]
                     }
-                    Err(e) => {
-                        warn!(error = %e, "failed to decode base64 terminal output");
-                    }
-                },
-                Ok(TerminalServerMessage::SessionClosed { exit_code }) => {
-                    let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code });
+                    _ => continue,
+                };
+                if in_scrollback {
+                    scrollback_buf.extend_from_slice(bytes);
+                } else if output_tx.send(TerminalEvent::Output(bytes.to_vec())).is_err() {
                     break;
                 }
-                Ok(TerminalServerMessage::ScrollbackStart) => {
-                    let _ = output_tx.send(TerminalEvent::ScrollbackStart);
+            }
+            Ok(Message::Text(text)) => {
+                match serde_json::from_str::<TerminalServerMessage>(&text) {
+                    Ok(TerminalServerMessage::Output { .. }) => {
+                        // Output now arrives as binary frames; ignore any legacy text output
+                    }
+                    Ok(TerminalServerMessage::SessionClosed { exit_code }) => {
+                        let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code });
+                        break;
+                    }
+                    Ok(TerminalServerMessage::ScrollbackStart) => {
+                        in_scrollback = true;
+                        scrollback_buf.clear();
+                        let _ = output_tx.send(TerminalEvent::ScrollbackStart);
+                    }
+                    Ok(TerminalServerMessage::ScrollbackEnd) => {
+                        if in_scrollback {
+                            if !scrollback_buf.is_empty() {
+                                let buf = std::mem::take(&mut scrollback_buf);
+                                if output_tx.send(TerminalEvent::Output(buf)).is_err() {
+                                    break;
+                                }
+                            }
+                            in_scrollback = false;
+                        }
+                        let _ = output_tx.send(TerminalEvent::ScrollbackEnd);
+                    }
+                    Ok(
+                        TerminalServerMessage::Unknown
+                        | TerminalServerMessage::SessionSuspended
+                        | TerminalServerMessage::SessionResumed,
+                    ) => {}
+                    Err(e) => {
+                        warn!(error = %e, text = %text, "failed to parse terminal message");
+                    }
                 }
-                Ok(TerminalServerMessage::ScrollbackEnd) => {
-                    let _ = output_tx.send(TerminalEvent::ScrollbackEnd);
-                }
-                Ok(
-                    TerminalServerMessage::Unknown
-                    | TerminalServerMessage::SessionSuspended
-                    | TerminalServerMessage::SessionResumed,
-                ) => {}
-                Err(e) => {
-                    warn!(error = %e, text = %text, "failed to parse terminal message");
-                }
-            },
+            }
             Ok(Message::Close(_)) => {
                 info!("terminal WebSocket closed by server");
                 break;

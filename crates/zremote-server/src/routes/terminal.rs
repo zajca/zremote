@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use zremote_protocol::ServerMessage;
 
-use crate::state::{AppState, BrowserMessage};
+use crate::state::{AppState, BrowserMessage, encode_binary_output};
 
 /// Buffer size for the browser message channel.
 const BROWSER_CHANNEL_SIZE: usize = 256;
@@ -132,19 +132,13 @@ async fn handle_terminal_connection(
             return;
         }
 
-        // Merge all chunks into a single blob to avoid ANSI escape fragmentation
-        let mut merged = Vec::new();
+        // Send each scrollback chunk as an individual binary frame (no merge allocation).
+        // The client buffers between ScrollbackStart/End and feeds alacritty once.
         for chunk in &scrollback_data {
-            merged.extend_from_slice(chunk);
-        }
-        let output_msg = BrowserMessage::Output {
-            pane_id: None,
-            data: merged,
-        };
-        if let Ok(json) = serde_json::to_string(&output_msg)
-            && socket.send(Message::Text(json.into())).await.is_err()
-        {
-            return;
+            let frame = encode_binary_output(None, chunk);
+            if socket.send(Message::Binary(frame.into())).await.is_err() {
+                return;
+            }
         }
 
         // Send scrollback_end marker
@@ -202,11 +196,10 @@ async fn handle_terminal_connection(
                                 // Flush any buffered output before forwarding input
                                 // to keep output/input ordering correct.
                                 if !output_buf.is_empty() {
-                                    let msg = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
+                                    let frame = encode_binary_output(None, &output_buf);
+                                    output_buf.clear();
                                     coalesce_deadline = None;
-                                    if let Ok(json) = serde_json::to_string(&msg)
-                                        && socket.send(Message::Text(json.into())).await.is_err()
-                                    {
+                                    if socket.send(Message::Binary(frame.into())).await.is_err() {
                                         break;
                                     }
                                 }
@@ -256,11 +249,10 @@ async fn handle_terminal_connection(
                     Some(msg) => {
                         // Non-output messages (session_closed, error) flush buffer first, then send immediately.
                         if !output_buf.is_empty() {
-                            let flush = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
+                            let frame = encode_binary_output(None, &output_buf);
+                            output_buf.clear();
                             coalesce_deadline = None;
-                            if let Ok(json) = serde_json::to_string(&flush)
-                                && socket.send(Message::Text(json.into())).await.is_err()
-                            {
+                            if socket.send(Message::Binary(frame.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -276,11 +268,10 @@ async fn handle_terminal_connection(
             // Flush coalesced output when the window expires
             () = flush_sleep => {
                 if !output_buf.is_empty() {
-                    let msg = BrowserMessage::Output { pane_id: None, data: std::mem::take(&mut output_buf) };
+                    let frame = encode_binary_output(None, &output_buf);
+                    output_buf.clear();
                     coalesce_deadline = None;
-                    if let Ok(json) = serde_json::to_string(&msg)
-                        && socket.send(Message::Text(json.into())).await.is_err()
-                    {
+                    if socket.send(Message::Binary(frame.into())).await.is_err() {
                         break;
                     }
                 }
