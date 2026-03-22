@@ -1,30 +1,22 @@
-use std::fs;
-use std::io::Read;
-use std::path::PathBuf;
+use std::fmt::Write as _;
 use std::process::Command;
 
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::types::TerminalEvent;
 
 const TMUX_SOCKET: &str = "zremote";
-const FIFO_DIR_PREFIX: &str = "/tmp/zremote-tmux";
 
-/// Connection info returned by the agent's direct-attach endpoint.
-pub struct TmuxConnectionInfo {
-    pub socket: String,
-    pub session_name: String,
-    pub pane_id: String,
-}
-
-/// Direct tmux handle: bypasses WebSocket, communicates directly with tmux.
+/// Direct tmux handle: bypasses WebSocket, communicates directly with tmux via control mode.
 pub struct DirectTmuxHandle {
     pub input_tx: flume::Sender<Vec<u8>>,
     pub output_rx: flume::Receiver<TerminalEvent>,
     pub resize_tx: flume::Sender<(u16, u16)>,
     _shutdown_tx: flume::Sender<()>,
-    _reader_handle: JoinHandle<()>,
+    _task_handles: Vec<JoinHandle<()>>,
 }
 
 /// Check if tmux binary is available on the system.
@@ -35,103 +27,175 @@ pub fn tmux_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Connect directly to a tmux session, bypassing WebSocket.
+/// Check if a tmux session exists on the local `zremote` socket.
+/// Returns the pane ID if the session is alive.
+pub fn probe_local_session(session_id: &str) -> Option<String> {
+    let session_name = format!("zremote-{session_id}");
+    let output = tmux_cmd()
+        .args(["list-panes", "-t", &session_name, "-F", "#{pane_id}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let pane_id = String::from_utf8(output.stdout).ok()?;
+    let pane_id = pane_id.trim();
+    if pane_id.is_empty() {
+        return None;
+    }
+    Some(pane_id.to_string())
+}
+
+/// Connect to a local tmux session via control mode (`tmux -C`).
+///
+/// Spawns `tmux -L zremote -C attach-session -t zremote-{session_id}` and communicates
+/// via stdin/stdout. This coexists with the agent's pipe-pane without interference.
 ///
 /// # Errors
 ///
-/// Returns an error if FIFO creation or tmux pipe-pane setup fails.
-pub fn connect(
-    info: TmuxConnectionInfo,
+/// Returns an error if the tmux child process fails to spawn.
+#[allow(clippy::too_many_lines)]
+pub fn connect_standalone(
     session_id: String,
+    pane_id: String,
     tokio_handle: &tokio::runtime::Handle,
 ) -> Result<DirectTmuxHandle, Box<dyn std::error::Error + Send + Sync>> {
+    let session_name = format!("zremote-{session_id}");
+
     let (input_tx, input_rx) = flume::bounded::<Vec<u8>>(256);
     let (output_tx, output_rx) = flume::bounded::<TerminalEvent>(256);
     let (resize_tx, resize_rx) = flume::bounded::<(u16, u16)>(16);
     let (shutdown_tx, shutdown_rx) = flume::bounded::<()>(1);
 
-    let dir = fifo_dir();
-    fs::create_dir_all(&dir)?;
+    // Shared stdin channel: writer, resize, and cleanup tasks all send commands here.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(256);
 
-    let fifo_path = dir.join(format!("{session_id}-gui.fifo"));
-    create_fifo(&fifo_path)?;
+    // Enter tokio runtime context for spawning the async child process.
+    let guard = tokio_handle.enter();
+    let mut child = TokioCommand::new("tmux")
+        .args([
+            "-L",
+            TMUX_SOCKET,
+            "-C",
+            "attach-session",
+            "-t",
+            &session_name,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    drop(guard);
 
-    // Capture current screen content before setting up pipe-pane
-    let pane_id = info.pane_id.clone();
-    if let Ok(cap) = tmux_cmd()
-        .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
-        .output()
-        && cap.status.success()
-        && !cap.stdout.is_empty()
-    {
-        let _ = output_tx.send(TerminalEvent::Output(cap.stdout));
-    }
+    let child_stdin = child.stdin.take().expect("stdin was piped");
+    let child_stdout = child.stdout.take().expect("stdout was piped");
 
-    // Stop any existing pipe-pane, then set up new one pointing to GUI's FIFO
-    let _ = tmux_cmd().args(["pipe-pane", "-t", &pane_id]).output();
-    setup_pipe_pane(&pane_id, &fifo_path)?;
+    // Queue initial capture-pane command (gets current screen content).
+    let _ = stdin_tx.try_send(format!("capture-pane -t {pane_id} -p -e\n"));
 
     info!(session_id = %session_id, pane_id = %pane_id, "direct tmux connection established");
 
-    // Spawn FIFO reader task (blocking I/O). Store handle for abort on cleanup.
-    let reader_fifo = fifo_path.clone();
-    let reader_output_tx = output_tx.clone();
-    let reader_session_id = session_id.clone();
+    let mut handles = Vec::new();
+
+    // -- Stdin writer task: single owner of child stdin --
+    let stdin_handle = tokio_handle.spawn(async move {
+        let mut stdin = child_stdin;
+        while let Some(cmd) = stdin_rx.recv().await {
+            if stdin.write_all(cmd.as_bytes()).await.is_err()
+                || stdin.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+    handles.push(stdin_handle);
+
+    // -- Reader task: parse control mode stdout --
+    let reader_pane_id = pane_id.clone();
+    let reader_output_tx = output_tx;
     let reader_handle = tokio_handle.spawn(async move {
-        tokio::task::spawn_blocking(move || {
-            let file = match fs::File::open(&reader_fifo) {
-                Ok(f) => f,
-                Err(e) => {
-                    error!(session_id = %reader_session_id, error = %e, "failed to open GUI FIFO");
-                    let _ = reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
-                    return;
+        let mut reader = BufReader::new(child_stdout);
+        let mut line = String::new();
+        let mut in_block = false;
+        let mut capture_done = false;
+        let mut block_lines: Vec<String> = Vec::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    // EOF -- child process exited
+                    let _ = reader_output_tx
+                        .send(TerminalEvent::SessionClosed { exit_code: None });
+                    break;
                 }
-            };
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
 
-            let mut reader = std::io::BufReader::new(file);
-            let mut buf = [0u8; 4096];
-
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        // EOF - pipe-pane stopped or tmux session ended
-                        let _ =
-                            reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
-                        break;
-                    }
-                    Ok(n) => {
-                        if reader_output_tx
-                            .send(TerminalEvent::Output(buf[..n].to_vec()))
-                            .is_err()
-                        {
+                    if trimmed.starts_with("%begin ") {
+                        in_block = true;
+                        block_lines.clear();
+                    } else if trimmed.starts_with("%end ") {
+                        // Forward capture-pane response (first block) as terminal output.
+                        if in_block && !capture_done && !block_lines.is_empty() {
+                            capture_done = true;
+                            let mut content = block_lines.join("\n");
+                            content.push('\n');
+                            if reader_output_tx
+                                .send(TerminalEvent::Output(content.into_bytes()))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        in_block = false;
+                        block_lines.clear();
+                    } else if in_block && !capture_done {
+                        block_lines.push(trimmed.to_string());
+                    } else if !in_block {
+                        if let Some(rest) = trimmed.strip_prefix("%output ") {
+                            // Format: %PANE_ID value
+                            if let Some(space_idx) = rest.find(' ') {
+                                let output_pane_id = &rest[..space_idx];
+                                if output_pane_id == reader_pane_id {
+                                    let value = &rest[space_idx + 1..];
+                                    let decoded = decode_tmux_octal(value);
+                                    if reader_output_tx
+                                        .send(TerminalEvent::Output(decoded))
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if trimmed.starts_with("%exit") {
+                            let _ = reader_output_tx
+                                .send(TerminalEvent::SessionClosed { exit_code: None });
                             break;
                         }
-                    }
-                    Err(e) => {
-                        warn!(session_id = %reader_session_id, error = %e, "GUI FIFO read error");
-                        let _ =
-                            reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
-                        break;
+                        // Ignore other notifications (%layout-change, %session-changed, etc.)
                     }
                 }
+                Err(e) => {
+                    warn!(error = %e, "tmux control mode read error");
+                    let _ = reader_output_tx
+                        .send(TerminalEvent::SessionClosed { exit_code: None });
+                    break;
+                }
             }
-        })
-        .await
-        .ok();
+        }
     });
+    handles.push(reader_handle);
 
-    // Spawn input writer task (batches keystrokes into send-keys calls).
-    // On send-keys failure, notify via output channel so the panel shows an error.
-    let writer_pane_id = info.pane_id.clone();
-    let writer_session_id = session_id.clone();
-    let writer_output_tx = output_tx;
-    tokio_handle.spawn(async move {
+    // -- Writer task: batch input → send-keys --
+    let writer_pane_id = pane_id;
+    let writer_stdin_tx = stdin_tx.clone();
+    let writer_handle = tokio_handle.spawn(async move {
         loop {
             let Ok(first) = input_rx.recv_async().await else {
                 break;
             };
 
-            // Batch: drain any additional pending input
             let mut batch = first;
             while let Ok(more) = input_rx.try_recv() {
                 batch.extend(more);
@@ -141,94 +205,51 @@ pub fn connect(
                 continue;
             }
 
-            let pane_id = writer_pane_id.clone();
-            let sid = writer_session_id.clone();
-            // Run send-keys in blocking task to avoid blocking the async runtime
-            let result = tokio::task::spawn_blocking(move || {
-                let mut cmd = tmux_cmd();
-                cmd.args(["send-keys", "-t", &pane_id, "-H"]);
-                for byte in &batch {
-                    cmd.arg(format!("{byte:02x}"));
-                }
-                cmd.output()
-            })
-            .await;
-
-            match result {
-                Ok(Ok(output)) if !output.status.success() => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!(session_id = %sid, error = %stderr, "tmux send-keys failed");
-                    // Signal session closed so the terminal panel shows an error
-                    let _ = writer_output_tx
-                        .send(TerminalEvent::SessionClosed { exit_code: None });
-                    break;
-                }
-                Ok(Err(e)) => {
-                    warn!(session_id = %sid, error = %e, "tmux send-keys error");
-                    let _ = writer_output_tx
-                        .send(TerminalEvent::SessionClosed { exit_code: None });
-                    break;
-                }
-                Err(_) => break,
-                _ => {}
+            // Format as hex-encoded send-keys command.
+            let mut cmd = format!("send-keys -t {writer_pane_id} -H");
+            for b in &batch {
+                let _ = write!(cmd, " {b:02x}");
+            }
+            cmd.push('\n');
+            if writer_stdin_tx.send(cmd).await.is_err() {
+                break;
             }
         }
     });
+    handles.push(writer_handle);
 
-    // Spawn resize task
-    let resize_session_name = info.session_name.clone();
-    let resize_session_id = session_id.clone();
-    tokio_handle.spawn(async move {
+    // -- Resize task --
+    let resize_stdin_tx = stdin_tx.clone();
+    let resize_handle = tokio_handle.spawn(async move {
         while let Ok((cols, rows)) = resize_rx.recv_async().await {
-            let name = resize_session_name.clone();
-            let sid = resize_session_id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                // Resize the window so the pane fills it
-                let output = tmux_cmd()
-                    .args([
-                        "resize-window",
-                        "-t",
-                        &name,
-                        "-x",
-                        &cols.to_string(),
-                        "-y",
-                        &rows.to_string(),
-                    ])
-                    .output();
-                if let Ok(o) = output
-                    && !o.status.success()
-                {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    warn!(session_id = %sid, error = %stderr, "tmux resize-window failed");
-                }
-            })
-            .await;
+            let cmd = format!("refresh-client -C {cols}x{rows}\n");
+            if resize_stdin_tx.send(cmd).await.is_err() {
+                break;
+            }
         }
     });
+    handles.push(resize_handle);
 
-    // Spawn cleanup task that waits for shutdown signal
-    let cleanup_pane_id = info.pane_id;
-    let cleanup_fifo = fifo_path;
-    let cleanup_session_id = session_id;
-    tokio_handle.spawn(async move {
+    // -- Cleanup task: detach and kill child on shutdown --
+    let cleanup_stdin_tx = stdin_tx;
+    let cleanup_handle = tokio_handle.spawn(async move {
         let _ = shutdown_rx.recv_async().await;
-        // Stop pipe-pane
-        let pid = cleanup_pane_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = tmux_cmd().args(["pipe-pane", "-t", &pid]).output();
-        })
-        .await;
-        // Remove GUI FIFO
-        let _ = fs::remove_file(&cleanup_fifo);
-        info!(session_id = %cleanup_session_id, "direct tmux cleanup complete");
+        let _ = cleanup_stdin_tx
+            .send("detach-client\n".to_string())
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut child = child;
+        let _ = child.start_kill();
+        info!(session_id = %session_id, "direct tmux cleanup complete");
     });
+    handles.push(cleanup_handle);
 
     Ok(DirectTmuxHandle {
         input_tx,
         output_rx,
         resize_tx,
         _shutdown_tx: shutdown_tx,
-        _reader_handle: reader_handle,
+        _task_handles: handles,
     })
 }
 
@@ -240,49 +261,32 @@ fn tmux_cmd() -> Command {
     cmd
 }
 
-fn fifo_dir() -> PathBuf {
-    let uid = current_uid();
-    PathBuf::from(format!("{FIFO_DIR_PREFIX}-{uid}"))
-}
-
-fn current_uid() -> String {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map_or_else(|| "0".to_owned(), |s| s.trim().to_owned())
-}
-
-fn create_fifo(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = fs::remove_file(path);
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| format!("non-UTF8 FIFO path: {}", path.display()))?;
-    let output = Command::new("mkfifo").arg(path_str).output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("mkfifo failed for {path_str}: {stderr}").into());
+/// Decode tmux control mode octal escapes.
+///
+/// Scans for `\` followed by exactly 3 octal digits (0-7), converts to byte value.
+/// All other bytes pass through unchanged.
+fn decode_tmux_octal(input: &str) -> Vec<u8> {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && (b'0'..=b'7').contains(&bytes[i + 1])
+            && (b'0'..=b'7').contains(&bytes[i + 2])
+            && (b'0'..=b'7').contains(&bytes[i + 3])
+        {
+            let d1 = u16::from(bytes[i + 1] - b'0');
+            let d2 = u16::from(bytes[i + 2] - b'0');
+            let d3 = u16::from(bytes[i + 3] - b'0');
+            #[allow(clippy::cast_possible_truncation)]
+            let val = ((d1 << 6) | (d2 << 3) | d3) as u8;
+            result.push(val);
+            i += 4;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
     }
-    Ok(())
-}
-
-fn setup_pipe_pane(
-    pane_id: &str,
-    fifo_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let fifo_str = fifo_path
-        .to_str()
-        .ok_or_else(|| format!("non-UTF8 FIFO path: {}", fifo_path.display()))?;
-    // Shell-quote the path to prevent injection via unexpected characters
-    let pipe_cmd = format!("cat >> '{}'", fifo_str.replace('\'', "'\\''"));
-    let output = tmux_cmd()
-        .args(["pipe-pane", "-t", pane_id, &pipe_cmd])
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("tmux pipe-pane failed: {stderr}").into());
-    }
-    Ok(())
+    result
 }

@@ -1116,6 +1116,11 @@ impl Render for TerminalPanel {
 
         // Connection type indicator (bottom-right pill badge).
         let is_direct = self.handle.is_direct();
+        let tooltip_text: &'static str = if is_direct {
+            "Direct tmux connection (FIFO bypass, lower latency)"
+        } else {
+            "WebSocket relay through server/agent"
+        };
         content = content.child(
             div()
                 .id("connection-indicator")
@@ -1128,7 +1133,7 @@ impl Render for TerminalPanel {
                 .px(px(6.0))
                 .py(px(2.0))
                 .rounded(px(8.0))
-                .bg(gpui::rgba(0x111113_99))
+                .bg(gpui::rgba(0x1111_1399))
                 .child(
                     icon(if is_direct { Icon::Zap } else { Icon::Wifi })
                         .size(px(10.0))
@@ -1143,7 +1148,10 @@ impl Render for TerminalPanel {
                         .text_size(px(10.0))
                         .text_color(theme::text_tertiary())
                         .child(if is_direct { "Direct" } else { "WS" }),
-                ),
+                )
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| ConnectionTooltip(tooltip_text)).into()
+                }),
         );
 
         // Wrap in a vertical container with optional search overlay on top.
@@ -1153,6 +1161,24 @@ impl Render for TerminalPanel {
         }
         wrapper = wrapper.child(content);
         wrapper
+    }
+}
+
+/// Minimal view for tooltip rendering (GPUI tooltips require `AnyView`).
+struct ConnectionTooltip(&'static str);
+
+impl Render for ConnectionTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme::bg_tertiary())
+            .border_1()
+            .border_color(theme::border())
+            .text_size(px(11.0))
+            .text_color(theme::text_secondary())
+            .child(self.0)
     }
 }
 

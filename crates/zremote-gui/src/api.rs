@@ -1,23 +1,4 @@
-use crate::terminal_direct::TmuxConnectionInfo;
 use crate::types::{CreateSessionRequest, CreateSessionResponse, Host, ModeResponse, Project, Session, UpdateProjectRequest};
-
-/// Response from POST /api/sessions/{session_id}/direct-attach.
-#[derive(Debug, serde::Deserialize)]
-pub struct DirectAttachResponse {
-    pub socket: String,
-    pub session_name: String,
-    pub pane_id: String,
-}
-
-impl DirectAttachResponse {
-    pub fn into_connection_info(self) -> TmuxConnectionInfo {
-        TmuxConnectionInfo {
-            socket: self.socket,
-            session_name: self.session_name,
-            pane_id: self.pane_id,
-        }
-    }
-}
 
 /// HTTP client for the `ZRemote` REST API.
 #[derive(Clone)]
@@ -151,47 +132,6 @@ impl ApiClient {
         format!("{ws_base}/ws/terminal/{session_id}")
     }
 
-    /// Request direct tmux attach for a session (local mode only).
-    pub async fn direct_attach(&self, session_id: &str) -> Result<DirectAttachResponse, ApiError> {
-        let resp: DirectAttachResponse = self
-            .client
-            .post(format!(
-                "{}/api/sessions/{session_id}/direct-attach",
-                self.base_url
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(resp)
-    }
-
-    /// Release direct tmux connection, let agent re-attach (local mode only).
-    pub async fn direct_detach(&self, session_id: &str) -> Result<(), ApiError> {
-        self.client
-            .post(format!(
-                "{}/api/sessions/{session_id}/direct-detach",
-                self.base_url
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-
-    /// Get a single session by ID.
-    pub async fn get_session(&self, session_id: &str) -> Result<Session, ApiError> {
-        let session: Session = self
-            .client
-            .get(format!("{}/api/sessions/{session_id}", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(session)
-    }
 }
 
 #[derive(Debug)]
