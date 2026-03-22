@@ -22,7 +22,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features --exclude zremote-gui
 
   test-rust:
     name: Test + Coverage (Rust)
@@ -38,7 +38,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           set +e
-          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace 2>&1)
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --exclude zremote-gui 2>&1)
           LLVM_COV_EXIT=$?
           set -e
           echo "$COVERAGE_OUTPUT"
@@ -128,9 +128,48 @@ jobs:
           path: zremote-${{ matrix.target }}.tar.gz
           retention-days: 1
 
+  build-gui:
+    name: Build GPUI Client (x86_64-linux)
+    needs: [lint, test-rust]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui-x86_64-linux
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libfreetype-dev libfontconfig-dev \
+            libwayland-dev wayland-protocols \
+            libvulkan-dev \
+            libasound2-dev \
+            cmake
+
+      - name: Build GPUI client
+        run: cargo build --release -p zremote-gui
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/zremote-gui dist/
+          cd dist && tar czf ../zremote-gui-x86_64-linux.tar.gz *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-gui-x86_64-linux
+          path: zremote-gui-x86_64-linux.tar.gz
+          retention-days: 1
+
   release:
     name: GitHub Release
-    needs: build
+    needs: [build, build-gui]
     runs-on: ubuntu-latest
     permissions:
       contents: write
