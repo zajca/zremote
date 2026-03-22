@@ -37,7 +37,7 @@ enum Commands {
     /// Connect to remote server (default)
     #[default]
     Run,
-    /// Run in local mode with embedded web server
+    /// Run in local mode with HTTP/WS server
     #[cfg(feature = "local")]
     Local {
         /// HTTP/WS listen port
@@ -46,9 +46,6 @@ enum Commands {
         /// SQLite database path
         #[arg(long, default_value = "~/.zremote/local.db")]
         db: String,
-        /// Serve web UI from filesystem (for development)
-        #[arg(long)]
-        web_dir: Option<String>,
         /// Bind address
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
@@ -89,13 +86,8 @@ async fn main() {
     match cli.command.unwrap_or_default() {
         Commands::Run => run_agent().await,
         #[cfg(feature = "local")]
-        Commands::Local {
-            port,
-            db,
-            web_dir,
-            bind,
-        } => {
-            if let Err(e) = local::run_local(port, &db, web_dir.as_deref(), &bind).await {
+        Commands::Local { port, db, bind } => {
+            if let Err(e) = local::run_local(port, &db, &bind).await {
                 tracing::error!(error = %e, "local mode failed");
                 std::process::exit(1);
             }

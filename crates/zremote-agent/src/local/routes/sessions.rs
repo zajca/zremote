@@ -357,6 +357,62 @@ pub async fn purge_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/sessions/{session_id}/direct-attach` - detach agent reader for direct GUI connection.
+pub async fn direct_attach(
+    State(state): State<Arc<LocalAppState>>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    // Verify session exists and is active in DB
+    let row = q::get_session(&state.db, &session_id).await?;
+    if row.status != "active" {
+        return Err(AppError::BadRequest(format!(
+            "session {session_id} is not active (status: {})",
+            row.status
+        )));
+    }
+
+    let mut mgr = state.session_manager.lock().await;
+
+    if mgr.is_direct_attached(&parsed) {
+        return Err(AppError::BadRequest(format!(
+            "session {session_id} is already directly attached"
+        )));
+    }
+
+    let info = mgr
+        .detach_for_direct(&parsed)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "socket": "zremote",
+            "session_name": info.session_name,
+            "pane_id": info.pane_id,
+        })),
+    ))
+}
+
+/// `POST /api/sessions/{session_id}/direct-detach` - re-attach agent reader after GUI disconnects.
+pub async fn direct_detach(
+    State(state): State<Arc<LocalAppState>>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    let mut mgr = state.session_manager.lock().await;
+    mgr.reattach_after_direct(&parsed)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    Ok(StatusCode::OK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

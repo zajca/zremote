@@ -13,6 +13,8 @@ fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        // Prevent git from discovering repos above the target path
+        .env("GIT_CEILING_DIRECTORIES", path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -298,7 +300,8 @@ mod tests {
         run_git(dir, &["config", "user.name", "Test"]).expect("git config name");
         fs::write(dir.join("README.md"), "# Test").expect("write README");
         run_git(dir, &["add", "."]).expect("git add");
-        run_git(dir, &["commit", "-m", "initial commit"]).expect("git commit");
+        // --no-verify prevents the parent repo's pre-commit hook from running
+        run_git(dir, &["commit", "--no-verify", "-m", "initial commit"]).expect("git commit");
     }
 
     #[test]

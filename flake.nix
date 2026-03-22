@@ -33,6 +33,19 @@
             pkgs.sqlite
             pkgs.pkg-config
             pkgs.openssl
+            # GPUI dependencies (GPU-accelerated UI framework)
+            pkgs.vulkan-loader
+            pkgs.wayland
+            pkgs.wayland-protocols
+            pkgs.libxkbcommon
+            pkgs.fontconfig
+            pkgs.freetype
+            pkgs.libxcb
+            pkgs.alsa-lib
+            pkgs.cmake
+            # Headless screenshot testing (cage compositor + grim capture)
+            pkgs.cage
+            pkgs.grim
           ];
 
           shellHook = ''
@@ -40,6 +53,13 @@
             echo "  Rust: $(rustc --version)"
             echo "  Cargo: $(cargo --version)"
             echo "  Bun: $(bun --version)"
+            # GPUI needs Vulkan, Wayland, and font libraries at runtime
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+              pkgs.vulkan-loader
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.fontconfig
+            ]}:$LD_LIBRARY_PATH"
           '';
         };
       }

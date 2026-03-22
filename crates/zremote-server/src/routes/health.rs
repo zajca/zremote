@@ -20,7 +20,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     })
 }
 
-/// Returns `{"mode": "server"}` so the web UI can detect server mode.
+/// Returns `{"mode": "server"}` so clients can detect server mode.
 pub async fn api_mode() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "mode": "server" }))
 }
@@ -62,7 +62,7 @@ mod tests {
     #[tokio::test]
     async fn api_mode_returns_server() {
         let state = test_state().await;
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(Request::get("/api/mode").body(Body::empty()).unwrap())
             .await
@@ -77,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn health_status_is_ok() {
         let state = test_state().await;
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
