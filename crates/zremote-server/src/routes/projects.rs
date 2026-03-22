@@ -622,7 +622,7 @@ pub async fn resolve_action_inputs(
 
     let host_id: Uuid = host_id_str
         .parse()
-        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+        .map_err(|_| AppError::Conflict("invalid host_id in database".to_string()))?;
 
     let sender = state
         .connections
@@ -656,13 +656,13 @@ pub async fn resolve_action_inputs(
         }
         Ok(Err(_)) => {
             state.action_inputs_requests.remove(&request_id);
-            Err(AppError::Internal(
+            Err(AppError::Conflict(
                 "agent disconnected while resolving inputs".to_string(),
             ))
         }
         Err(_) => {
             state.action_inputs_requests.remove(&request_id);
-            Err(AppError::Internal(
+            Err(AppError::Conflict(
                 "resolve action inputs timed out after 15s".to_string(),
             ))
         }
