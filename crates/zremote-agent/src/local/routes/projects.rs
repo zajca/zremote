@@ -1353,8 +1353,8 @@ pub async fn resolve_action_inputs_handler(
         crate::project::settings::read_settings(Path::new(&path_for_settings))
     })
     .await
-    .map_err(|e| AppError::Internal(format!("settings read task failed: {e}")))?
-    .map_err(AppError::Internal)?
+    .map_err(|e| AppError::Conflict(format!("settings read task failed: {e}")))?
+    .map_err(AppError::Conflict)?
     .ok_or_else(|| AppError::NotFound("no project settings found".to_string()))?;
 
     let action = crate::project::actions::find_action(&settings.actions, &action_name)
