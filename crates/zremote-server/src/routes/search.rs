@@ -214,7 +214,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts?q=function")
@@ -241,7 +241,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts?q=nonexistent_xyz")
@@ -266,7 +266,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         // Empty q= triggers search_without_fts which returns all transcripts
         let response = app
             .oneshot(
@@ -291,7 +291,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts")
@@ -315,7 +315,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts?per_page=1&page=1")
@@ -341,7 +341,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts?host=test-host")
@@ -365,7 +365,7 @@ mod tests {
         let state = test_state().await;
         seed_search_data(&state.db).await;
 
-        let app = crate::create_router(state, None);
+        let app = crate::create_router(state);
         let response = app
             .oneshot(
                 axum::http::Request::get("/api/search/transcripts?host=nonexistent")

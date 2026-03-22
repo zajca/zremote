@@ -695,7 +695,7 @@ mod tests {
         let host_id = "11111111-1111-1111-1111-111111111111";
         insert_test_host(&state, host_id, "host", "host").await;
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::delete(format!("/api/hosts/{host_id}"))
@@ -1032,7 +1032,7 @@ mod tests {
             .register(host_id, "connected-host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::delete(format!("/api/hosts/{host_id_str}"))
@@ -1097,7 +1097,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()
@@ -1154,7 +1154,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()
@@ -1201,7 +1201,7 @@ mod tests {
             .register(host_id, "host".to_string(), tx, false)
             .await;
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()
@@ -1312,7 +1312,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = create_router(state.clone(), None);
+        let app = create_router(state.clone());
         let response = app
             .oneshot(
                 Request::delete(format!("/api/projects/{project_id}"))

@@ -235,7 +235,7 @@ mod tests {
     }
 
     fn create_router(state: Arc<AppState>) -> axum::Router {
-        crate::create_router(state, None)
+        crate::create_router(state)
     }
 
     async fn insert_test_host(state: &AppState, id: &str, name: &str, hostname: &str) {
