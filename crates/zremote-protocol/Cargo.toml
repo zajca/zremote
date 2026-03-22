@@ -1,6 +1,6 @@
 [package]
 name = "zremote-protocol"
-version = "0.2.8"
+version = "0.2.10"
 edition.workspace = true
 
 [lints]
