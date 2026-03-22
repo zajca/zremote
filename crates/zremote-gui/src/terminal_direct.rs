@@ -230,9 +230,12 @@ pub fn connect_standalone(
 
     // -- Resize task --
     let resize_stdin_tx = stdin_tx.clone();
+    let resize_session_name = session_name.clone();
     let resize_handle = tokio_handle.spawn(async move {
         while let Ok((cols, rows)) = resize_rx.recv_async().await {
-            let cmd = format!("refresh-client -C {cols}x{rows}\n");
+            let cmd = format!(
+                "resize-window -t {resize_session_name} -x {cols} -y {rows}\nrefresh-client -C {cols}x{rows}\n"
+            );
             if resize_stdin_tx.send(cmd).await.is_err() {
                 break;
             }
