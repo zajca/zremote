@@ -17,7 +17,6 @@ tracing-subscriber.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
-base64.workspace = true
 url.workspace = true
 
 gpui.workspace = true

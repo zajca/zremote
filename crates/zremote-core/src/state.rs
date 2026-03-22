@@ -66,6 +66,58 @@ impl SessionState {
     }
 }
 
+/// Binary frame type tags for WebSocket terminal output.
+pub const BINARY_TAG_OUTPUT: u8 = 0x01;
+pub const BINARY_TAG_PANE_OUTPUT: u8 = 0x02;
+
+/// Encode terminal output as a binary WebSocket frame.
+///
+/// Format:
+/// - Main pane (`pane_id` = None): `[0x01] [raw bytes...]`
+/// - Specific pane: `[0x02] [pane_id_len: u8] [pane_id UTF-8] [raw bytes...]`
+#[must_use]
+pub fn encode_binary_output(pane_id: Option<&str>, data: &[u8]) -> Vec<u8> {
+    match pane_id {
+        None => {
+            let mut frame = Vec::with_capacity(1 + data.len());
+            frame.push(BINARY_TAG_OUTPUT);
+            frame.extend_from_slice(data);
+            frame
+        }
+        Some(pid) => {
+            let pid_bytes = pid.as_bytes();
+            let pid_len = u8::try_from(pid_bytes.len()).unwrap_or(u8::MAX);
+            let mut frame = Vec::with_capacity(2 + usize::from(pid_len) + data.len());
+            frame.push(BINARY_TAG_PANE_OUTPUT);
+            frame.push(pid_len);
+            frame.extend_from_slice(&pid_bytes[..usize::from(pid_len)]);
+            frame.extend_from_slice(data);
+            frame
+        }
+    }
+}
+
+/// Decode a binary WebSocket frame into (`pane_id`, data).
+///
+/// Returns `None` if the frame is empty or has an unknown tag.
+#[must_use]
+pub fn decode_binary_output(frame: &[u8]) -> Option<(Option<String>, &[u8])> {
+    let (&tag, rest) = frame.split_first()?;
+    match tag {
+        BINARY_TAG_OUTPUT => Some((None, rest)),
+        BINARY_TAG_PANE_OUTPUT => {
+            let (&pid_len, rest) = rest.split_first()?;
+            let pid_len = usize::from(pid_len);
+            if rest.len() < pid_len {
+                return None;
+            }
+            let pid = std::str::from_utf8(&rest[..pid_len]).ok()?;
+            Some((Some(pid.to_owned()), &rest[pid_len..]))
+        }
+        _ => None,
+    }
+}
+
 pub mod base64_serde {
     use base64::Engine;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -779,6 +831,68 @@ mod tests {
         assert_eq!(json["status"], "completed");
         assert_eq!(json["summary"], "Fixed the bug");
         assert_eq!(json["total_cost_usd"], 0.42);
+    }
+
+    // --- Binary frame encoding/decoding tests ---
+
+    #[test]
+    fn encode_binary_output_main_pane() {
+        let data = b"hello terminal";
+        let frame = super::encode_binary_output(None, data);
+        assert_eq!(frame[0], super::BINARY_TAG_OUTPUT);
+        assert_eq!(&frame[1..], data);
+    }
+
+    #[test]
+    fn encode_binary_output_specific_pane() {
+        let data = b"pane output";
+        let frame = super::encode_binary_output(Some("%5"), data);
+        assert_eq!(frame[0], super::BINARY_TAG_PANE_OUTPUT);
+        assert_eq!(frame[1], 2); // "%5" is 2 bytes
+        assert_eq!(&frame[2..4], b"%5");
+        assert_eq!(&frame[4..], data);
+    }
+
+    #[test]
+    fn decode_binary_output_main_pane() {
+        let data = b"hello";
+        let frame = super::encode_binary_output(None, data);
+        let (pane_id, decoded) = super::decode_binary_output(&frame).unwrap();
+        assert!(pane_id.is_none());
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_binary_output_specific_pane() {
+        let data = b"output";
+        let frame = super::encode_binary_output(Some("%12"), data);
+        let (pane_id, decoded) = super::decode_binary_output(&frame).unwrap();
+        assert_eq!(pane_id.as_deref(), Some("%12"));
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_binary_output_empty_data() {
+        let frame = super::encode_binary_output(None, b"");
+        let (pane_id, decoded) = super::decode_binary_output(&frame).unwrap();
+        assert!(pane_id.is_none());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_binary_output_empty_frame() {
+        assert!(super::decode_binary_output(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_binary_output_unknown_tag() {
+        assert!(super::decode_binary_output(&[0xFF, 0x01]).is_none());
+    }
+
+    #[test]
+    fn decode_binary_output_truncated_pane_frame() {
+        // Tag + pid_len=5, but only 2 bytes of pid
+        assert!(super::decode_binary_output(&[0x02, 5, b'a', b'b']).is_none());
     }
 
     #[test]
