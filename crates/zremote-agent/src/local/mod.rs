@@ -220,9 +220,7 @@ pub async fn run_local(
     Ok(())
 }
 
-fn build_router(
-    state: Arc<LocalAppState>,
-) -> Result<Router, Box<dyn std::error::Error>> {
+fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error::Error>> {
     let router = Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))

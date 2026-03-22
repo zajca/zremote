@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
@@ -113,7 +113,9 @@ impl PaletteCategory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
-    CloseCurrentSession { session_id: String },
+    CloseCurrentSession {
+        session_id: String,
+    },
     SearchInTerminal,
     NewSession,
     ToggleProjectPin {
@@ -131,9 +133,13 @@ pub enum PaletteAction {
 #[derive(Debug, Clone)]
 pub enum PaletteItem {
     /// Index into `snapshot.sessions` (filtered to active/suspended).
-    Session { session_idx: usize },
+    Session {
+        session_idx: usize,
+    },
     /// Index into `snapshot.projects`.
-    Project { project_idx: usize },
+    Project {
+        project_idx: usize,
+    },
     Action(PaletteAction),
 }
 
@@ -208,12 +214,18 @@ impl PaletteSnapshot {
         active_session_id: Option<String>,
         recent_sessions: &[RecentSession],
     ) -> Self {
-        let host_names: HashMap<String, String> =
-            hosts.iter().map(|h| (h.id.clone(), h.hostname.clone())).collect();
-        let project_names: HashMap<String, String> =
-            projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
-        let recent_set: HashSet<String> =
-            recent_sessions.iter().map(|r| r.session_id.clone()).collect();
+        let host_names: HashMap<String, String> = hosts
+            .iter()
+            .map(|h| (h.id.clone(), h.hostname.clone()))
+            .collect();
+        let project_names: HashMap<String, String> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let recent_set: HashSet<String> = recent_sessions
+            .iter()
+            .map(|r| r.session_id.clone())
+            .collect();
         Self {
             hosts,
             sessions,
@@ -251,12 +263,25 @@ impl PaletteSnapshot {
 // ---------------------------------------------------------------------------
 
 pub enum CommandPaletteEvent {
-    SelectSession { session_id: String, host_id: String },
-    CreateSessionInProject { host_id: String, working_dir: String },
-    CreateSession { host_id: String },
-    CloseSession { session_id: String },
+    SelectSession {
+        session_id: String,
+        host_id: String,
+    },
+    CreateSessionInProject {
+        host_id: String,
+        working_dir: String,
+    },
+    CreateSession {
+        host_id: String,
+    },
+    CloseSession {
+        session_id: String,
+    },
     OpenSearch,
-    ToggleProjectPin { project_id: String, pinned: bool },
+    ToggleProjectPin {
+        project_id: String,
+        pinned: bool,
+    },
     Reconnect,
     Close,
 }
@@ -352,7 +377,9 @@ impl CommandPalette {
     }
 
     fn execute_selected(&mut self, cx: &mut Context<Self>) {
-        let item = self.resolve_item(self.selected_index).map(|r| r.item.clone());
+        let item = self
+            .resolve_item(self.selected_index)
+            .map(|r| r.item.clone());
         if let Some(item) = item {
             self.execute_item(&item, cx);
         }
@@ -386,7 +413,6 @@ impl CommandPalette {
             }
         }
     }
-
 
     fn execute_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
         match item {
@@ -483,16 +509,18 @@ impl CommandPalette {
                 // Projects (pinned first)
                 let mut proj_indices: Vec<usize> = (0..self.project_items.len()).collect();
                 proj_indices.sort_by(|&a, &b| {
-                    let a_pinned = if let PaletteItem::Project { project_idx } = &self.project_items[a].item {
-                        self.snapshot.projects[*project_idx].pinned
-                    } else {
-                        false
-                    };
-                    let b_pinned = if let PaletteItem::Project { project_idx } = &self.project_items[b].item {
-                        self.snapshot.projects[*project_idx].pinned
-                    } else {
-                        false
-                    };
+                    let a_pinned =
+                        if let PaletteItem::Project { project_idx } = &self.project_items[a].item {
+                            self.snapshot.projects[*project_idx].pinned
+                        } else {
+                            false
+                        };
+                    let b_pinned =
+                        if let PaletteItem::Project { project_idx } = &self.project_items[b].item {
+                            self.snapshot.projects[*project_idx].pinned
+                        } else {
+                            false
+                        };
                     b_pinned.cmp(&a_pinned)
                 });
                 if !proj_indices.is_empty() {
@@ -519,7 +547,8 @@ impl CommandPalette {
                 let mut pinned = Vec::new();
                 let mut unpinned = Vec::new();
                 for (i, item) in self.project_items.iter().enumerate() {
-                    if matches!(&item.item, PaletteItem::Project { project_idx } if self.snapshot.projects[*project_idx].pinned) {
+                    if matches!(&item.item, PaletteItem::Project { project_idx } if self.snapshot.projects[*project_idx].pinned)
+                    {
                         pinned.push(i);
                     } else {
                         unpinned.push(i);
@@ -609,21 +638,33 @@ impl CommandPalette {
         if include_sessions {
             for (i, item) in self.session_items.iter().enumerate() {
                 if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
-                    scored.push(ScoredEntry { index: i, source: ItemSource::Session, fuzzy_match: fm });
+                    scored.push(ScoredEntry {
+                        index: i,
+                        source: ItemSource::Session,
+                        fuzzy_match: fm,
+                    });
                 }
             }
         }
         if include_projects {
             for (i, item) in self.project_items.iter().enumerate() {
                 if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
-                    scored.push(ScoredEntry { index: i, source: ItemSource::Project, fuzzy_match: fm });
+                    scored.push(ScoredEntry {
+                        index: i,
+                        source: ItemSource::Project,
+                        fuzzy_match: fm,
+                    });
                 }
             }
         }
         if include_actions {
             for (i, item) in self.action_items.iter().enumerate() {
                 if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
-                    scored.push(ScoredEntry { index: i, source: ItemSource::Action, fuzzy_match: fm });
+                    scored.push(ScoredEntry {
+                        index: i,
+                        source: ItemSource::Action,
+                        fuzzy_match: fm,
+                    });
                 }
             }
         }
@@ -635,7 +676,12 @@ impl CommandPalette {
 
     // -- Key handler --------------------------------------------------------
 
-    fn handle_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
@@ -964,14 +1010,19 @@ impl CommandPalette {
             return self.render_empty_state().into_any_element();
         }
 
-        let mut container = div().id("palette-results").flex_1().flex().flex_col().overflow_y_scroll();
+        let mut container = div()
+            .id("palette-results")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll();
         let mut flat_index: usize = 0;
 
         match &self.results {
             PaletteResults::Grouped(groups) => {
                 for (gi, group) in groups.iter().enumerate() {
-                    container =
-                        container.child(self.render_category_header(group.category.label(), gi == 0));
+                    container = container
+                        .child(self.render_category_header(group.category.label(), gi == 0));
                     let items = match group.source {
                         ItemSource::Session => &self.session_items,
                         ItemSource::Project => &self.project_items,
@@ -979,8 +1030,8 @@ impl CommandPalette {
                     };
                     for &idx in &group.indices {
                         if let Some(item) = items.get(idx) {
-                            container = container
-                                .child(self.render_item_row(item, flat_index, None, cx));
+                            container =
+                                container.child(self.render_item_row(item, flat_index, None, cx));
                             flat_index += 1;
                         }
                     }
@@ -994,8 +1045,12 @@ impl CommandPalette {
                         ItemSource::Action => &self.action_items,
                     };
                     if let Some(item) = items.get(entry.index) {
-                        container = container
-                            .child(self.render_item_row(item, flat_index, Some(&entry.fuzzy_match), cx));
+                        container = container.child(self.render_item_row(
+                            item,
+                            flat_index,
+                            Some(&entry.fuzzy_match),
+                            cx,
+                        ));
                         flat_index += 1;
                     }
                 }
@@ -1044,13 +1099,17 @@ impl CommandPalette {
                     .border_l_2()
                     .border_color(theme::accent())
             })
-            .when(is_hovered && !is_selected, |s: Stateful<Div>| s.bg(theme::bg_tertiary()))
-            .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
-                if this.hovered_index != Some(index) {
-                    this.hovered_index = Some(index);
-                    cx.notify();
-                }
-            }))
+            .when(is_hovered && !is_selected, |s: Stateful<Div>| {
+                s.bg(theme::bg_tertiary())
+            })
+            .on_mouse_move(
+                cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
+                    if this.hovered_index != Some(index) {
+                        this.hovered_index = Some(index);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                 this.selected_index = index;
                 this.execute_selected(cx);
@@ -1064,7 +1123,9 @@ impl CommandPalette {
                 PaletteAction::NewSession => Icon::Plus,
                 PaletteAction::CloseCurrentSession { .. } => Icon::X,
                 PaletteAction::SearchInTerminal => Icon::Search,
-                PaletteAction::ToggleProjectPin { currently_pinned, .. } => {
+                PaletteAction::ToggleProjectPin {
+                    currently_pinned, ..
+                } => {
                     if *currently_pinned {
                         Icon::PinOff
                     } else {
@@ -1110,10 +1171,12 @@ impl CommandPalette {
         // Accessories
         match &item.item {
             PaletteItem::Session { session_idx } => {
-                row = row.child(self.render_session_accessory(&self.snapshot.sessions[*session_idx]));
+                row =
+                    row.child(self.render_session_accessory(&self.snapshot.sessions[*session_idx]));
             }
             PaletteItem::Project { project_idx } => {
-                row = row.child(self.render_project_accessory(&self.snapshot.projects[*project_idx]));
+                row =
+                    row.child(self.render_project_accessory(&self.snapshot.projects[*project_idx]));
             }
             PaletteItem::Action(a) => {
                 row = row.child(self.render_action_accessory(a));
@@ -1137,12 +1200,7 @@ impl CommandPalette {
             .items_center()
             .gap(px(6.0))
             .flex_shrink_0()
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(dot_color),
-            )
+            .child(div().size(px(6.0)).rounded_full().bg(dot_color))
             .when(!duration.is_empty(), |s: Div| {
                 s.child(
                     div()
@@ -1185,12 +1243,7 @@ impl CommandPalette {
         }
 
         if project.git_is_dirty {
-            row = row.child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(theme::warning()),
-            );
+            row = row.child(div().size(px(6.0)).rounded_full().bg(theme::warning()));
         }
 
         row
@@ -1357,7 +1410,12 @@ impl CommandPalette {
         );
 
         // Host list
-        let mut list = div().id("host-list").flex_1().flex().flex_col().overflow_y_scroll();
+        let mut list = div()
+            .id("host-list")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll();
         for (i, host) in filtered.iter().enumerate() {
             let is_selected = i == self.selected_index;
             let host_id = host.id.clone();
@@ -1388,12 +1446,7 @@ impl CommandPalette {
                             .text_color(theme::text_primary())
                             .child(host.hostname.clone()),
                     )
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme::success()),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(theme::success()))
                     .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
                         cx.emit(CommandPaletteEvent::CreateSession {
                             host_id: host_id.clone(),
@@ -1483,11 +1536,9 @@ impl Render for CommandPalette {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.handle_key_down(event, window, cx);
-                }),
-            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_key_down(event, window, cx);
+            }))
             .child(self.render_tab_bar(cx))
             .child(self.render_input_bar())
             .child(self.render_results(cx))
@@ -1609,14 +1660,21 @@ fn session_title(session: &Session) -> String {
         .clone()
         .unwrap_or_else(|| format!("Session {}", &session.id[..8.min(session.id.len())]));
 
-    if session.name.is_some() && let Some(ref shell) = session.shell {
+    if session.name.is_some()
+        && let Some(ref shell) = session.shell
+    {
         return format!("{base} ({shell})");
     }
 
     base
 }
 
-fn session_subtitle(_session: &Session, host_name: &str, project_name: Option<&str>, mode: &str) -> String {
+fn session_subtitle(
+    _session: &Session,
+    host_name: &str,
+    project_name: Option<&str>,
+    mode: &str,
+) -> String {
     if mode == "local" {
         project_name.unwrap_or("").to_string()
     } else {
@@ -1736,8 +1794,7 @@ fn render_highlighted_text(
     let mut match_cursor = 0;
     let mut i = 0;
     while i < title_len {
-        let is_match = match_cursor < title_indices.len()
-            && title_indices[match_cursor] == i;
+        let is_match = match_cursor < title_indices.len() && title_indices[match_cursor] == i;
 
         if is_match {
             let start = i;

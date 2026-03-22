@@ -48,7 +48,13 @@ impl DoubleShiftDetector {
     ///
     /// The `ModifiersChangedEvent` fires whenever any modifier key state changes.
     /// We detect shift press (shift becomes true) and shift release (shift becomes false).
-    pub fn on_modifiers_changed(&self, shift: bool, control: bool, alt: bool, platform: bool) -> bool {
+    pub fn on_modifiers_changed(
+        &self,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        platform: bool,
+    ) -> bool {
         let other_modifier_active = control || alt || platform;
 
         if shift && !self.shift_held.get() {
@@ -64,7 +70,10 @@ impl DoubleShiftDetector {
             self.shift_held.set(false);
 
             // Only count as a bare shift tap if no other keys/modifiers were involved
-            if self.had_key_during_shift.get() || self.had_other_modifier.get() || other_modifier_active {
+            if self.had_key_during_shift.get()
+                || self.had_other_modifier.get()
+                || other_modifier_active
+            {
                 self.had_key_during_shift.set(false);
                 self.had_other_modifier.set(false);
                 return false;

@@ -79,10 +79,8 @@ impl SidebarView {
                     let mut all_sessions = Vec::new();
                     let mut all_projects = Vec::new();
                     for host in &hosts {
-                        let (sessions, projects) = tokio::join!(
-                            api.list_sessions(&host.id),
-                            api.list_projects(&host.id),
-                        );
+                        let (sessions, projects) =
+                            tokio::join!(api.list_sessions(&host.id), api.list_projects(&host.id),);
                         all_sessions.extend(sessions.unwrap_or_default());
                         all_projects.extend(projects.unwrap_or_default());
                     }
@@ -99,9 +97,11 @@ impl SidebarView {
 
                 // If a session was restored from persistence, try to re-select it.
                 if let Some(ref restored_id) = this.selected_session_id {
-                    if let Some(session) = this.sessions.iter().find(|s| {
-                        s.id == *restored_id && s.status == "active"
-                    }) {
+                    if let Some(session) = this
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == *restored_id && s.status == "active")
+                    {
                         let session_id = session.id.clone();
                         let host_id = session.host_id.clone();
                         cx.emit(SidebarEvent::SessionSelected {
@@ -242,8 +242,11 @@ impl SidebarView {
             .cloned()
             .collect();
 
-        let host_projects: Vec<&Project> =
-            self.projects.iter().filter(|p| p.host_id == host_id).collect();
+        let host_projects: Vec<&Project> = self
+            .projects
+            .iter()
+            .filter(|p| p.host_id == host_id)
+            .collect();
 
         // Sessions grouped by project_id
         let mut sessions_by_project: std::collections::HashMap<String, Vec<Session>> =
@@ -267,9 +270,7 @@ impl SidebarView {
         let mut worktrees = Vec::new();
 
         for project in &host_projects {
-            let sessions = sessions_by_project
-                .remove(&project.id)
-                .unwrap_or_default();
+            let sessions = sessions_by_project.remove(&project.id).unwrap_or_default();
             let is_worktree = project.parent_project_id.is_some();
 
             if is_worktree {
@@ -324,8 +325,15 @@ impl SidebarView {
         for node in &items.project_nodes {
             let is_worktree = node.project.parent_project_id.is_some();
             children.push(
-                self.render_project_item(node, is_worktree, &host_id, project_indent, session_indent, cx)
-                    .into_any_element(),
+                self.render_project_item(
+                    node,
+                    is_worktree,
+                    &host_id,
+                    project_indent,
+                    session_indent,
+                    cx,
+                )
+                .into_any_element(),
             );
         }
 
@@ -567,12 +575,7 @@ impl SidebarView {
             .overflow_hidden()
             .hover(|s| s.bg(theme::bg_tertiary()))
             .child(left)
-            .child(self.render_project_new_session_button(
-                &project_id,
-                host_id,
-                &project.path,
-                cx,
-            ));
+            .child(self.render_project_new_session_button(&project_id, host_id, &project.path, cx));
 
         let mut container = div().flex().flex_col().w_full().child(row);
 
@@ -699,13 +702,15 @@ impl Render for SidebarView {
         let is_local = self.app_state.mode == "local";
 
         let content: Vec<AnyElement> = if self.hosts.is_empty() && !self.loading {
-            vec![div()
-                .px(px(12.0))
-                .py(px(8.0))
-                .text_color(theme::text_tertiary())
-                .text_size(px(12.0))
-                .child("No hosts connected")
-                .into_any_element()]
+            vec![
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(12.0))
+                    .child("No hosts connected")
+                    .into_any_element(),
+            ]
         } else if is_local {
             // Local mode: no dividers, no host headers
             self.hosts
@@ -779,9 +784,7 @@ impl Render for SidebarView {
             );
 
         // Local mode: "New Session" button at bottom of sidebar
-        if is_local
-            && let Some(host) = self.hosts.first()
-        {
+        if is_local && let Some(host) = self.hosts.first() {
             let host_id = host.id.clone();
             sidebar = sidebar.child(
                 div()
@@ -801,9 +804,7 @@ impl Render for SidebarView {
                             .gap(px(4.0))
                             .text_color(theme::text_secondary())
                             .text_size(px(12.0))
-                            .hover(|s| {
-                                s.bg(theme::bg_tertiary()).text_color(theme::text_primary())
-                            })
+                            .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
                             .child(icon(Icon::Plus).size(px(14.0)))
                             .child("New Session")
                             .on_click(cx.listener(

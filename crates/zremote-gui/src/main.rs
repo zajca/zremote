@@ -127,45 +127,48 @@ fn main() {
     let exit_after = cli.exit_after;
 
     // Launch GPUI application on main thread
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        let app_state_for_quit = app_state.clone();
-        let app_state_clone = app_state.clone();
-        cx.open_window(
-            window_options(restored_width, restored_height),
-            move |window, cx| cx.new(|cx| MainView::new(app_state_clone, window, cx)),
-        )
-        .expect("failed to open window");
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            let app_state_for_quit = app_state.clone();
+            let app_state_clone = app_state.clone();
+            cx.open_window(
+                window_options(restored_width, restored_height),
+                move |window, cx| cx.new(|cx| MainView::new(app_state_clone, window, cx)),
+            )
+            .expect("failed to open window");
 
-        // Save state on quit.
-        let _quit_sub = cx.on_app_quit({
-            move |cx: &mut App| {
-                // Try to read window bounds for persistence.
-                if let Some(win) = cx.windows().first().copied()
-                    && let Ok(bounds) = win.update(cx, |_root: AnyView, window: &mut Window, _cx: &mut App| {
-                        window.bounds()
-                    })
-                    && let Ok(mut p) = app_state_for_quit.persistence.lock()
-                {
-                    p.update(|s| {
-                        s.window_width = Some(f32::from(bounds.size.width));
-                        s.window_height = Some(f32::from(bounds.size.height));
-                    });
-                    if let Err(e) = p.save_if_changed() {
-                        tracing::warn!(error = %e, "failed to save GUI state on quit");
+            // Save state on quit.
+            let _quit_sub = cx.on_app_quit({
+                move |cx: &mut App| {
+                    // Try to read window bounds for persistence.
+                    if let Some(win) = cx.windows().first().copied()
+                        && let Ok(bounds) = win
+                            .update(cx, |_root: AnyView, window: &mut Window, _cx: &mut App| {
+                                window.bounds()
+                            })
+                        && let Ok(mut p) = app_state_for_quit.persistence.lock()
+                    {
+                        p.update(|s| {
+                            s.window_width = Some(f32::from(bounds.size.width));
+                            s.window_height = Some(f32::from(bounds.size.height));
+                        });
+                        if let Err(e) = p.save_if_changed() {
+                            tracing::warn!(error = %e, "failed to save GUI state on quit");
+                        }
                     }
+                    async {}
                 }
-                async {}
+            });
+
+            if let Some(seconds) = exit_after {
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    Timer::after(Duration::from_secs(seconds)).await;
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
             }
         });
-
-        if let Some(seconds) = exit_after {
-            cx.spawn(async move |cx: &mut AsyncApp| {
-                Timer::after(Duration::from_secs(seconds)).await;
-                let _ = cx.update(|cx| cx.quit());
-            })
-            .detach();
-        }
-    });
 }
 
 fn window_options(restored_width: Option<f32>, restored_height: Option<f32>) -> WindowOptions {

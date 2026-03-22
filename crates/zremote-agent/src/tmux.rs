@@ -337,12 +337,8 @@ impl TmuxSession {
         setup_pipe_pane(&self.pane_id, &fifo_path)?;
 
         // Spawn new FIFO reader task
-        let reader_handle = spawn_fifo_reader(
-            self.session_id,
-            None,
-            fifo_path.clone(),
-            output_tx.clone(),
-        );
+        let reader_handle =
+            spawn_fifo_reader(self.session_id, None, fifo_path.clone(), output_tx.clone());
 
         // Update internal state
         self.fifo_path = fifo_path;

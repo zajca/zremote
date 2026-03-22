@@ -101,9 +101,7 @@ pub fn connect_standalone(
     let stdin_handle = tokio_handle.spawn(async move {
         let mut stdin = child_stdin;
         while let Some(cmd) = stdin_rx.recv().await {
-            if stdin.write_all(cmd.as_bytes()).await.is_err()
-                || stdin.flush().await.is_err()
-            {
+            if stdin.write_all(cmd.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
                 break;
             }
         }
@@ -125,8 +123,7 @@ pub fn connect_standalone(
             match reader.read_line(&mut line).await {
                 Ok(0) => {
                     // EOF -- child process exited
-                    let _ = reader_output_tx
-                        .send(TerminalEvent::SessionClosed { exit_code: None });
+                    let _ = reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
                     break;
                 }
                 Ok(_) => {
@@ -178,8 +175,7 @@ pub fn connect_standalone(
                 }
                 Err(e) => {
                     warn!(error = %e, "tmux control mode read error");
-                    let _ = reader_output_tx
-                        .send(TerminalEvent::SessionClosed { exit_code: None });
+                    let _ = reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
                     break;
                 }
             }
@@ -234,9 +230,7 @@ pub fn connect_standalone(
     let cleanup_stdin_tx = stdin_tx;
     let cleanup_handle = tokio_handle.spawn(async move {
         let _ = shutdown_rx.recv_async().await;
-        let _ = cleanup_stdin_tx
-            .send("detach-client\n".to_string())
-            .await;
+        let _ = cleanup_stdin_tx.send("detach-client\n".to_string()).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut child = child;
         let _ = child.start_kill();

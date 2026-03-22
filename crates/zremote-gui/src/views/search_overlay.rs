@@ -84,7 +84,10 @@ impl Render for SearchOverlay {
             .border_b_1()
             .border_color(theme::border())
             .on_key_down(cx.listener(
-                |this: &mut Self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+                |this: &mut Self,
+                 event: &KeyDownEvent,
+                 _window: &mut Window,
+                 cx: &mut Context<Self>| {
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
 

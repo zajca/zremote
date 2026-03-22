@@ -1,4 +1,7 @@
-use crate::types::{CreateSessionRequest, CreateSessionResponse, Host, ModeResponse, Project, Session, UpdateProjectRequest};
+use crate::types::{
+    CreateSessionRequest, CreateSessionResponse, Host, ModeResponse, Project, Session,
+    UpdateProjectRequest,
+};
 
 /// HTTP client for the `ZRemote` REST API.
 #[derive(Clone)]
@@ -131,7 +134,6 @@ impl ApiClient {
             .replace("https://", "wss://");
         format!("{ws_base}/ws/terminal/{session_id}")
     }
-
 }
 
 #[derive(Debug)]

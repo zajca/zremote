@@ -91,8 +91,7 @@ impl MainView {
 
         let handle = connect_terminal(&self.app_state, session_id);
         let tokio_handle = self.app_state.tokio_handle.clone();
-        let terminal =
-            cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, cx));
+        let terminal = cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, cx));
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         self.terminal = Some(terminal);
         cx.notify();
@@ -263,30 +262,31 @@ impl Render for MainView {
                 div()
                     .flex_1()
                     .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(
-                        |this, event: &KeyDownEvent, _window, cx| {
-                            let key = event.keystroke.key.as_str();
-                            let mods = &event.keystroke.modifiers;
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        let mods = &event.keystroke.modifiers;
 
-                            // Track key presses during shift hold for double-shift detection.
-                            this.double_shift.on_key_down_during_shift();
+                        // Track key presses during shift hold for double-shift detection.
+                        this.double_shift.on_key_down_during_shift();
 
-                            if mods.control && !mods.shift && key == "k" {
-                                this.open_command_palette(PaletteTab::All, cx);
-                            } else if mods.control && mods.shift && key == "e" {
-                                this.open_command_palette(PaletteTab::Sessions, cx);
-                            } else if mods.control && mods.shift && key == "p" {
-                                this.open_command_palette(PaletteTab::Projects, cx);
-                            } else if mods.control && mods.shift && key == "a" {
-                                this.open_command_palette(PaletteTab::Actions, cx);
-                            }
-                        },
-                    ))
+                        if mods.control && !mods.shift && key == "k" {
+                            this.open_command_palette(PaletteTab::All, cx);
+                        } else if mods.control && mods.shift && key == "e" {
+                            this.open_command_palette(PaletteTab::Sessions, cx);
+                        } else if mods.control && mods.shift && key == "p" {
+                            this.open_command_palette(PaletteTab::Projects, cx);
+                        } else if mods.control && mods.shift && key == "a" {
+                            this.open_command_palette(PaletteTab::Actions, cx);
+                        }
+                    }))
                     .on_modifiers_changed(cx.listener(
                         |this, event: &ModifiersChangedEvent, _window, cx| {
                             let mods = &event.modifiers;
                             if this.double_shift.on_modifiers_changed(
-                                mods.shift, mods.control, mods.alt, mods.platform,
+                                mods.shift,
+                                mods.control,
+                                mods.alt,
+                                mods.platform,
                             ) {
                                 this.open_command_palette(PaletteTab::All, cx);
                             }
