@@ -182,7 +182,10 @@ impl TerminalPanel {
 
         // Reset cursor to visible on any keystroke so it doesn't blink while typing.
         let keystroke_subscription = cx.observe_keystrokes(
-            |this: &mut Self, _event: &KeystrokeEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            |this: &mut Self,
+             _event: &KeystrokeEvent,
+             _window: &mut Window,
+             cx: &mut Context<Self>| {
                 this.reset_cursor_blink(cx);
             },
         );
@@ -508,9 +511,7 @@ impl TerminalPanel {
             return;
         }
         self.search_open = true;
-        let overlay = cx.new(|cx| {
-            super::search_overlay::SearchOverlay::new(cx)
-        });
+        let overlay = cx.new(|cx| super::search_overlay::SearchOverlay::new(cx));
         cx.subscribe(&overlay, Self::on_search_event).detach();
         self.search_overlay = Some(overlay);
         cx.notify();
@@ -595,20 +596,22 @@ impl TerminalPanel {
         }
 
         // Select the match nearest to viewport center.
-        if !self.search_matches.is_empty() && let Ok(term) = self.term.lock() {
-                let display_offset = term.grid().display_offset() as i32;
-                let rows = term.screen_lines() as i32;
-                let center_line = Line(-display_offset + rows / 2);
-                let mut best = 0usize;
-                let mut best_dist = i32::MAX;
-                for (i, m) in self.search_matches.iter().enumerate() {
-                    let d = (m.start().line.0 - center_line.0).abs();
-                    if d < best_dist {
-                        best_dist = d;
-                        best = i;
-                    }
+        if !self.search_matches.is_empty()
+            && let Ok(term) = self.term.lock()
+        {
+            let display_offset = term.grid().display_offset() as i32;
+            let rows = term.screen_lines() as i32;
+            let center_line = Line(-display_offset + rows / 2);
+            let mut best = 0usize;
+            let mut best_dist = i32::MAX;
+            for (i, m) in self.search_matches.iter().enumerate() {
+                let d = (m.start().line.0 - center_line.0).abs();
+                if d < best_dist {
+                    best_dist = d;
+                    best = i;
                 }
-                self.search_current_idx = Some(best);
+            }
+            self.search_current_idx = Some(best);
         }
 
         let total = self.search_matches.len();
@@ -650,8 +653,12 @@ impl TerminalPanel {
     /// Scroll the terminal to show the current search match.
     fn scroll_to_current_match(&self) {
         use alacritty_terminal::grid::Scroll;
-        let Some(idx) = self.search_current_idx else { return };
-        let Some(m) = self.search_matches.get(idx) else { return };
+        let Some(idx) = self.search_current_idx else {
+            return;
+        };
+        let Some(m) = self.search_matches.get(idx) else {
+            return;
+        };
         if let Ok(mut term) = self.term.lock() {
             let display_offset = term.grid().display_offset() as i32;
             let rows = term.screen_lines() as i32;
@@ -754,7 +761,9 @@ impl Render for TerminalPanel {
                             if this.search_open {
                                 this.close_search(cx);
                             }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::All });
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
+                                tab: PaletteTab::All,
+                            });
                         });
                         return;
                     }
@@ -765,7 +774,9 @@ impl Render for TerminalPanel {
                             if this.search_open {
                                 this.close_search(cx);
                             }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Sessions });
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
+                                tab: PaletteTab::Sessions,
+                            });
                         });
                         return;
                     }
@@ -776,7 +787,9 @@ impl Render for TerminalPanel {
                             if this.search_open {
                                 this.close_search(cx);
                             }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Projects });
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
+                                tab: PaletteTab::Projects,
+                            });
                         });
                         return;
                     }
@@ -787,7 +800,9 @@ impl Render for TerminalPanel {
                             if this.search_open {
                                 this.close_search(cx);
                             }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::Actions });
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
+                                tab: PaletteTab::Actions,
+                            });
                         });
                         return;
                     }
@@ -869,11 +884,18 @@ impl Render for TerminalPanel {
 
                     // Double-shift detection via modifier transitions
                     if double_shift_mc.on_modifiers_changed(
-                        mods.shift, mods.control, mods.alt, mods.platform,
+                        mods.shift,
+                        mods.control,
+                        mods.alt,
+                        mods.platform,
                     ) {
                         let _ = entity_mc.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.search_open { this.close_search(cx); }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette { tab: PaletteTab::All });
+                            if this.search_open {
+                                this.close_search(cx);
+                            }
+                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
+                                tab: PaletteTab::All,
+                            });
                         });
                     }
                 }
@@ -1149,9 +1171,7 @@ impl Render for TerminalPanel {
                         .text_color(theme::text_tertiary())
                         .child(if is_direct { "Direct" } else { "WS" }),
                 )
-                .tooltip(move |_window, cx| {
-                    cx.new(|_| ConnectionTooltip(tooltip_text)).into()
-                }),
+                .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text)).into()),
         );
 
         // Wrap in a vertical container with optional search overlay on top.
@@ -1187,8 +1207,7 @@ fn escape_regex(input: &str) -> String {
     let mut result = String::with_capacity(input.len() + 8);
     for ch in input.chars() {
         match ch {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^'
-            | '$' => {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' => {
                 result.push('\\');
                 result.push(ch);
             }

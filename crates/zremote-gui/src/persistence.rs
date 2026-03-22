@@ -155,8 +155,7 @@ impl Persistence {
 
         // Write to .tmp first.
         let tmp = self.path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(&self.state)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&self.state).map_err(std::io::Error::other)?;
 
         {
             let mut file = std::fs::File::create(&tmp)?;

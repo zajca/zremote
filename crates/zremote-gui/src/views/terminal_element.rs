@@ -174,8 +174,9 @@ impl CellRunCache {
     /// Insert cell runs for the given key. Evicts the oldest entry if at capacity.
     fn insert(&mut self, display_offset: usize, content_generation: u64, runs: Vec<CellRun>) {
         // Remove existing entry for this key (promote to front).
-        self.slots
-            .retain(|e| e.display_offset != display_offset || e.content_generation != content_generation);
+        self.slots.retain(|e| {
+            e.display_offset != display_offset || e.content_generation != content_generation
+        });
 
         // Evict oldest if at capacity.
         if self.slots.len() >= CELL_RUN_CACHE_SLOTS {
@@ -388,9 +389,7 @@ impl TerminalElement {
 
     /// Extract cell runs from the terminal grid, batching adjacent cells with the same style.
     /// Accounts for `display_offset` so scrolled-back content is rendered correctly.
-    fn build_cell_runs(
-        term: &alacritty_terminal::Term<VoidListener>,
-    ) -> Vec<CellRun> {
+    fn build_cell_runs(term: &alacritty_terminal::Term<VoidListener>) -> Vec<CellRun> {
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_offset = term.grid().display_offset() as i32;
@@ -645,9 +644,7 @@ impl TerminalElement {
                     let origin = point(x, run_y);
 
                     let cache = glyph_cache.borrow();
-                    if let Some(shaped) =
-                        cache.get(ch, run.bold, run.italic, run.wide, color)
-                    {
+                    if let Some(shaped) = cache.get(ch, run.bold, run.italic, run.wide, color) {
                         let _ = shaped.paint(origin, cell_height, window, cx);
                     }
                 }
@@ -655,8 +652,7 @@ impl TerminalElement {
 
             // Paint underline as a simple rectangle at baseline + descent.
             if run.underline {
-                let underline_x =
-                    bounds.origin.x + cell_width * run.col_start as f32;
+                let underline_x = bounds.origin.x + cell_width * run.col_start as f32;
                 // Position underline just below the text baseline.
                 let underline_y = run_y + ascent + descent.abs() - px(DECORATION_THICKNESS);
                 let underline_w = cell_width * run.col_count as f32;
@@ -669,8 +665,7 @@ impl TerminalElement {
 
             // Paint strikethrough as a simple rectangle at vertical midpoint of text.
             if run.strikethrough {
-                let strike_x =
-                    bounds.origin.x + cell_width * run.col_start as f32;
+                let strike_x = bounds.origin.x + cell_width * run.col_start as f32;
                 let strike_y = run_y + ascent * 0.5;
                 let strike_w = cell_width * run.col_count as f32;
                 let strike_bounds = Bounds::new(
@@ -888,10 +883,7 @@ impl TerminalElement {
                 }
             }
             CursorShape::Beam => {
-                let bar_bounds = Bounds::new(
-                    point(x, y),
-                    size(px(CURSOR_BAR_WIDTH), cell_height),
-                );
+                let bar_bounds = Bounds::new(point(x, y), size(px(CURSOR_BAR_WIDTH), cell_height));
                 window.paint_quad(fill(bar_bounds, cursor_color));
             }
             CursorShape::Underline => {
@@ -973,15 +965,15 @@ impl Element for TerminalElement {
         let new_cols = (bounds.size.width / state.cell_width).floor() as u16;
         let new_rows = (bounds.size.height / state.cell_height).floor() as u16;
 
-        if new_cols > 0 && new_rows > 0 && let Ok(mut term) = self.term.lock() {
+        if new_cols > 0
+            && new_rows > 0
+            && let Ok(mut term) = self.term.lock()
+        {
             let current_cols = term.columns() as u16;
             let current_rows = term.screen_lines() as u16;
 
             if new_cols != current_cols || new_rows != current_rows {
-                let size = TermSize::new(
-                    usize::from(new_cols),
-                    usize::from(new_rows),
-                );
+                let size = TermSize::new(usize::from(new_cols), usize::from(new_rows));
                 term.resize(size);
                 let _ = self.resize_tx.send((new_cols, new_rows));
             }
@@ -1096,7 +1088,6 @@ impl Element for TerminalElement {
         if self.cursor_visible {
             Self::paint_cursor(&term, &bounds, cell_width, cell_height, window);
         }
-
     }
 }
 
