@@ -511,7 +511,7 @@ impl TerminalPanel {
             return;
         }
         self.search_open = true;
-        let overlay = cx.new(|cx| super::search_overlay::SearchOverlay::new(cx));
+        let overlay = cx.new(super::search_overlay::SearchOverlay::new);
         cx.subscribe(&overlay, Self::on_search_event).detach();
         self.search_overlay = Some(overlay);
         cx.notify();
