@@ -153,11 +153,19 @@ impl TerminalPanel {
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
         let real_resize_tx = handle.resize_tx().clone();
         tokio_handle.spawn(async move {
+            let mut first_resize = true;
             loop {
                 // Wait for first resize event.
                 let Ok(mut dims) = resize_debounce_rx.recv_async().await else {
                     break;
                 };
+                // Send very first resize immediately (skip debounce) so PTY knows
+                // the correct size before any output arrives.
+                if first_resize {
+                    first_resize = false;
+                    let _ = real_resize_tx.send(dims);
+                    continue;
+                }
                 // Debounce: keep replacing dims while new events arrive within the timeout.
                 loop {
                     match tokio::time::timeout(
@@ -255,14 +263,21 @@ impl TerminalPanel {
                     }
                     Ok(TerminalEvent::ScrollbackStart) => {
                         if let Ok(mut term) = term.lock() {
-                            let size =
-                                TermSize::new(usize::from(DEFAULT_COLS), usize::from(DEFAULT_ROWS));
+                            let cols = term.columns();
+                            let rows = term.screen_lines();
+                            let size = if cols > 0 && rows > 0 {
+                                TermSize::new(cols, rows)
+                            } else {
+                                TermSize::new(usize::from(DEFAULT_COLS), usize::from(DEFAULT_ROWS))
+                            };
                             *term = alacritty_terminal::Term::new(
                                 TermConfig::default(),
                                 &size,
                                 VoidListener,
                             );
                         }
+                        // Invalidate cell run cache - term was recreated
+                        content_generation.fetch_add(1, Ordering::Relaxed);
                     }
                     Ok(TerminalEvent::ScrollbackEnd) => {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {

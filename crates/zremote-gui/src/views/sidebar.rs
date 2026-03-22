@@ -6,6 +6,8 @@ use gpui::*;
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
+use std::time::Duration;
+
 use crate::types::{CreateSessionRequest, Host, Project, ServerEvent, Session};
 use crate::views::main_view::SidebarEvent;
 
@@ -29,6 +31,7 @@ pub struct SidebarView {
     projects: Rc<Vec<Project>>,
     selected_session_id: Option<String>,
     loading: bool,
+    load_generation: u64,
 }
 
 impl SidebarView {
@@ -63,16 +66,28 @@ impl SidebarView {
             projects: Rc::new(Vec::new()),
             selected_session_id: restored_session_id,
             loading: true,
+            load_generation: 0,
         };
         view.load_data(cx);
         view
     }
 
     fn load_data(&mut self, cx: &mut Context<Self>) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
         self.loading = true;
         let api = self.app_state.api.clone();
         let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            // Debounce: wait 100ms, then check if this is still the latest request.
+            Timer::after(Duration::from_millis(100)).await;
+            let should_proceed = this
+                .update(cx, |this: &mut Self, _cx| this.load_generation == generation)
+                .unwrap_or(false);
+            if !should_proceed {
+                return;
+            }
+
             let (hosts, all_sessions, all_projects) = handle
                 .spawn(async move {
                     let hosts = api.list_hosts().await.unwrap_or_default();
@@ -90,26 +105,35 @@ impl SidebarView {
                 .unwrap_or_default();
 
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                // Stale check after fetch (another load_data may have started).
+                if this.load_generation != generation {
+                    return;
+                }
+
                 this.hosts = Rc::new(hosts);
                 this.sessions = Rc::new(all_sessions);
                 this.projects = Rc::new(all_projects);
                 this.loading = false;
 
-                // If a session was restored from persistence, try to re-select it.
+                // If a session was restored/selected, keep it unless it's truly gone.
                 if let Some(ref restored_id) = this.selected_session_id {
                     if let Some(session) = this
                         .sessions
                         .iter()
-                        .find(|s| s.id == *restored_id && s.status == "active")
+                        .find(|s| s.id == *restored_id && s.status != "closed" && s.status != "error")
                     {
-                        let session_id = session.id.clone();
-                        let host_id = session.host_id.clone();
-                        cx.emit(SidebarEvent::SessionSelected {
-                            session_id,
-                            host_id,
-                        });
+                        // Only emit SessionSelected if the session is active
+                        // (not suspended -- avoid opening terminal for a suspended session).
+                        if session.status == "active" {
+                            let session_id = session.id.clone();
+                            let host_id = session.host_id.clone();
+                            cx.emit(SidebarEvent::SessionSelected {
+                                session_id,
+                                host_id,
+                            });
+                        }
                     } else {
-                        // Restored session no longer exists/active, clear it.
+                        // Session is closed/error/gone, clear selection.
                         this.selected_session_id = None;
                     }
                 }
@@ -138,6 +162,8 @@ impl SidebarView {
             ServerEvent::SessionCreated { .. }
             | ServerEvent::SessionClosed { .. }
             | ServerEvent::SessionUpdated { .. }
+            | ServerEvent::SessionSuspended { .. }
+            | ServerEvent::SessionResumed { .. }
             | ServerEvent::HostConnected { .. }
             | ServerEvent::HostDisconnected { .. }
             | ServerEvent::HostStatusChanged { .. }
@@ -644,10 +670,10 @@ impl SidebarView {
             theme::text_secondary()
         };
 
-        let status_color = if is_active {
-            theme::success()
-        } else {
-            theme::text_tertiary()
+        let status_color = match session.status.as_str() {
+            "active" => theme::success(),
+            "suspended" => theme::warning(),
+            _ => theme::text_tertiary(),
         };
 
         let close_button: AnyElement = if is_active {

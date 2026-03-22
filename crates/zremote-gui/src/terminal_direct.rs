@@ -136,10 +136,24 @@ pub fn connect_standalone(
                         // Forward capture-pane response (first block) as terminal output.
                         if in_block && !capture_done && !block_lines.is_empty() {
                             capture_done = true;
+                            // Frame capture-pane output with ScrollbackStart/End so
+                            // the terminal panel recreates Term at correct window size.
+                            if reader_output_tx
+                                .send(TerminalEvent::ScrollbackStart)
+                                .is_err()
+                            {
+                                break;
+                            }
                             let mut content = block_lines.join("\n");
                             content.push('\n');
                             if reader_output_tx
                                 .send(TerminalEvent::Output(content.into_bytes()))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            if reader_output_tx
+                                .send(TerminalEvent::ScrollbackEnd)
                                 .is_err()
                             {
                                 break;
