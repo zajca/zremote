@@ -173,21 +173,47 @@ impl SidebarView {
                 .unwrap();
             match result {
                 Ok(resp) => {
-                    let session = Session {
-                        id: resp.id,
-                        host_id: host_id.clone(),
-                        name: None,
-                        shell: None,
-                        status: resp.status,
-                        pid: None,
-                        created_at: None,
-                        closed_at: None,
-                        project_id: None,
-                        working_dir: working_dir_clone,
-                        tmux_name: None,
-                    };
-                    let session_id = session.id.clone();
+                    let session_id = resp.id.clone();
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                        // Guard against duplicates: load_data() may have already
+                        // added this session via the SessionCreated WebSocket event.
+                        if this.sessions.iter().any(|s| s.id == session_id) {
+                            this.selected_session_id = Some(session_id.clone());
+                            cx.emit(SidebarEvent::SessionSelected {
+                                session_id,
+                                host_id,
+                            });
+                            cx.notify();
+                            return;
+                        }
+
+                        // Resolve project_id from in-memory projects (mirrors
+                        // server's resolve_project_id SQL logic).
+                        let resolved_project_id =
+                            working_dir_clone.as_deref().and_then(|wd| {
+                                this.projects
+                                    .iter()
+                                    .find(|p| {
+                                        p.host_id == host_id
+                                            && (wd == p.path
+                                                || wd.starts_with(&format!("{}/", p.path)))
+                                    })
+                                    .map(|p| p.id.clone())
+                            });
+
+                        let session = Session {
+                            id: resp.id,
+                            host_id: host_id.clone(),
+                            name: None,
+                            shell: None,
+                            status: "active".to_string(),
+                            pid: None,
+                            created_at: None,
+                            closed_at: None,
+                            project_id: resolved_project_id,
+                            working_dir: working_dir_clone,
+                            tmux_name: None,
+                        };
                         Rc::make_mut(&mut this.sessions).push(session);
                         this.selected_session_id = Some(session_id.clone());
                         cx.emit(SidebarEvent::SessionSelected {
