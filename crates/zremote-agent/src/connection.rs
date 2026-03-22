@@ -343,7 +343,7 @@ pub async fn run_connection(
     let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<crate::session::PtyOutput>(256);
 
     // Session manager
-    let mut session_manager = SessionManager::new(pty_output_tx, use_tmux);
+    let mut session_manager = SessionManager::new(pty_output_tx.clone(), use_tmux);
 
     // Discover and report recovered tmux sessions
     {
@@ -352,7 +352,7 @@ pub async fn run_connection(
             let sessions: Vec<zremote_protocol::RecoveredSession> = recovered
                 .iter()
                 .map(
-                    |(session_id, shell, pid)| zremote_protocol::RecoveredSession {
+                    |(session_id, shell, pid, _)| zremote_protocol::RecoveredSession {
                         session_id: *session_id,
                         shell: shell.clone(),
                         pid: *pid,
@@ -365,6 +365,17 @@ pub async fn run_connection(
                 .is_err()
             {
                 tracing::warn!("outbound channel full, SessionsRecovered dropped");
+            }
+            // Send captured pane content through the output channel so the
+            // server receives it as TerminalOutput and populates scrollback.
+            for (session_id, _, _, captured) in &recovered {
+                if let Some(data) = captured {
+                    let _ = pty_output_tx.try_send(crate::session::PtyOutput {
+                        session_id: *session_id,
+                        pane_id: None,
+                        data: data.clone(),
+                    });
+                }
             }
         }
     }

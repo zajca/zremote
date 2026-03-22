@@ -186,10 +186,17 @@ impl TmuxSession {
 
     /// Reattach to an existing tmux session. Used for session recovery after
     /// agent restart or reconnection.
+    ///
+    /// Returns `(Self, Option<Vec<u8>>)` where the second element is the
+    /// captured visible pane content (via `tmux capture-pane -p -e`). The
+    /// caller is responsible for routing this content appropriately:
+    /// - Local mode: pre-populate the `SessionState` scrollback directly
+    /// - Server mode: send through the output channel to the server
+    #[allow(clippy::type_complexity)]
     pub fn reattach(
         session_id: SessionId,
         output_tx: mpsc::Sender<PtyOutput>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Self, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
         let tmux_name = tmux_session_name(session_id);
 
         // Verify the tmux session exists
@@ -238,20 +245,19 @@ impl TmuxSession {
         // This avoids a race where live tmux output (with cursor positioning
         // sequences) arrives through the FIFO before the capture data, causing
         // conflicting screen content and duplicate cursors in the browser.
-        // Send through output_tx so it flows through the normal PTY output loop
-        // (scrollback + browser senders).
-        if let Ok(cap) = tmux_cmd()
+        // The captured content is returned to the caller for synchronous handling
+        // rather than sent through the async channel, preventing a race where the
+        // browser connects before the output loop processes it.
+        let captured = if let Ok(cap) = tmux_cmd()
             .args(["capture-pane", "-t", &pane_id, "-p", "-e"])
             .output()
             && cap.status.success()
             && !cap.stdout.is_empty()
         {
-            let _ = output_tx.try_send(PtyOutput {
-                session_id,
-                pane_id: None,
-                data: cap.stdout,
-            });
-        }
+            Some(cap.stdout)
+        } else {
+            None
+        };
 
         // Stop any existing pipe-pane, then set up fresh targeting the stable pane_id
         let _ = tmux_cmd().args(["pipe-pane", "-t", &pane_id]).output();
@@ -266,17 +272,20 @@ impl TmuxSession {
         let mut known_pane_ids = HashSet::new();
         known_pane_ids.insert(pane_id.clone());
 
-        Ok(Self {
-            session_id,
-            tmux_name,
-            pane_id,
-            fifo_path,
-            reader_handle,
-            pid,
-            output_tx,
-            extra_panes: Vec::new(),
-            known_pane_ids,
-        })
+        Ok((
+            Self {
+                session_id,
+                tmux_name,
+                pane_id,
+                fifo_path,
+                reader_handle,
+                pid,
+                output_tx,
+                extra_panes: Vec::new(),
+                known_pane_ids,
+            },
+            captured,
+        ))
     }
 
     /// Return the PID of the shell process inside the tmux pane.
@@ -614,7 +623,9 @@ impl Drop for TmuxSession {
 
 /// Discover all existing zremote tmux sessions and reattach to them.
 /// Sessions that fail to reattach are logged and skipped.
-pub fn discover_sessions(output_tx: mpsc::Sender<PtyOutput>) -> Vec<TmuxSession> {
+pub fn discover_sessions(
+    output_tx: mpsc::Sender<PtyOutput>,
+) -> Vec<(TmuxSession, Option<Vec<u8>>)> {
     let names = match list_zremote_sessions() {
         Ok(names) => names,
         Err(e) => {
@@ -636,9 +647,9 @@ pub fn discover_sessions(output_tx: mpsc::Sender<PtyOutput>) -> Vec<TmuxSession>
         };
 
         match TmuxSession::reattach(session_id, output_tx.clone()) {
-            Ok(session) => {
+            Ok((session, captured)) => {
                 tracing::info!(session_id = %session_id, "discovered and reattached tmux session");
-                sessions.push(session);
+                sessions.push((session, captured));
             }
             Err(e) => {
                 tracing::warn!(

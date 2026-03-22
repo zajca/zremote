@@ -149,8 +149,10 @@ impl SessionManager {
     }
 
     /// Discover existing tmux sessions from a previous agent lifecycle.
-    /// Returns a list of (session_id, shell_name, pid) for recovered sessions.
-    pub fn discover_existing(&mut self) -> Vec<(SessionId, String, u32)> {
+    /// Returns a list of `(session_id, shell_name, pid, captured_content)` for
+    /// recovered sessions. The captured content is the visible pane state at
+    /// reattach time; the caller should put it into the scrollback synchronously.
+    pub fn discover_existing(&mut self) -> Vec<(SessionId, String, u32, Option<Vec<u8>>)> {
         if !self.use_tmux {
             return Vec::new();
         }
@@ -161,14 +163,14 @@ impl SessionManager {
         let recovered = crate::tmux::discover_sessions(self.output_tx.clone());
         let mut result = Vec::new();
 
-        for session in recovered {
+        for (session, captured) in recovered {
             let session_id = session.session_id();
             let pid = session.pid();
             // Get shell from /proc/{pid}/comm or default to "shell"
             let shell = std::fs::read_to_string(format!("/proc/{pid}/comm"))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "shell".to_string());
-            result.push((session_id, shell, pid));
+            result.push((session_id, shell, pid, captured));
             self.sessions
                 .insert(session_id, SessionBackend::Tmux(session));
         }

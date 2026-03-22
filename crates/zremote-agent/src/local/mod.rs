@@ -139,10 +139,10 @@ pub async fn run_local(
         mgr.discover_existing()
     };
 
-    let recovered_ids: Vec<String> = recovered.iter().map(|(id, _, _)| id.to_string()).collect();
+    let recovered_ids: Vec<String> = recovered.iter().map(|(id, _, _, _)| id.to_string()).collect();
 
     // Resume recovered sessions in DB and create in-memory state
-    for (session_id, shell, pid) in &recovered {
+    for (session_id, shell, pid, captured) in &recovered {
         sqlx::query(
             "UPDATE sessions SET status = 'active', suspended_at = NULL, \
              pid = ?, shell = ? WHERE id = ?",
@@ -156,6 +156,12 @@ pub async fn run_local(
         let mut sessions = state.sessions.write().await;
         let mut session_state = zremote_core::state::SessionState::new(*session_id, host_id);
         session_state.status = "active".to_string();
+        // Pre-populate scrollback with the captured pane content so the browser
+        // sees the terminal state immediately, even if it connects before the
+        // async output loop processes any FIFO data.
+        if let Some(data) = captured {
+            session_state.append_scrollback(data.clone());
+        }
         sessions.insert(*session_id, session_state);
     }
 
@@ -181,6 +187,7 @@ pub async fn run_local(
             count = recovered.len(),
             "recovered tmux sessions from previous run"
         );
+
     }
 
     // Spawn the PTY output routing loop (includes agentic output processing)
