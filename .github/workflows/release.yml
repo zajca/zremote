@@ -129,17 +129,36 @@ jobs:
           retention-days: 1
 
   build-gui:
-    name: Build GPUI Client (x86_64-linux)
+    name: Build GPUI Client (${{ matrix.label }})
     needs: [lint, test-rust]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64-linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            install-deps: true
+          - label: aarch64-apple-darwin
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            install-deps: false
+          - label: x86_64-apple-darwin
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            install-deps: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: gui-x86_64-linux
+          key: gui-${{ matrix.label }}
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.install-deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -153,18 +172,18 @@ jobs:
             cmake
 
       - name: Build GPUI client
-        run: cargo build --release -p zremote-gui
+        run: cargo build --release --target ${{ matrix.target }} -p zremote-gui
 
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/zremote-gui dist/
-          cd dist && tar czf ../zremote-gui-x86_64-linux.tar.gz *
+          cp target/${{ matrix.target }}/release/zremote-gui dist/
+          cd dist && tar czf ../zremote-gui-${{ matrix.label }}.tar.gz *
 
       - uses: actions/upload-artifact@v4
         with:
-          name: build-gui-x86_64-linux
-          path: zremote-gui-x86_64-linux.tar.gz
+          name: build-gui-${{ matrix.label }}
+          path: zremote-gui-${{ matrix.label }}.tar.gz
           retention-days: 1
 
   release:
