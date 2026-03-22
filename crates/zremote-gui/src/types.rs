@@ -71,31 +71,39 @@ pub struct CreateSessionRequest {
     pub working_dir: Option<String>,
 }
 
+/// Nested host info in server events (matches `zremote-core` `HostInfo`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct HostInfo {
+    pub id: String,
+    pub hostname: String,
+}
+
+/// Nested session info in server events (matches `zremote-core` `SessionInfo`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub host_id: String,
+}
+
 /// Server-sent event from the /ws/events WebSocket.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
     #[serde(rename = "session_created")]
-    SessionCreated {
-        session_id: String,
-        host_id: String,
-        name: Option<String>,
-    },
+    SessionCreated { session: SessionInfo },
     #[serde(rename = "session_closed")]
     SessionClosed {
         session_id: String,
-        host_id: Option<String>,
+        exit_code: Option<i32>,
     },
     #[serde(rename = "session_updated")]
-    SessionUpdated {
-        session_id: String,
-        host_id: Option<String>,
-    },
+    SessionUpdated { session_id: String },
+    #[serde(rename = "session_suspended")]
+    SessionSuspended { session_id: String },
+    #[serde(rename = "session_resumed")]
+    SessionResumed { session_id: String },
     #[serde(rename = "host_connected")]
-    HostConnected {
-        host_id: String,
-        hostname: Option<String>,
-    },
+    HostConnected { host: HostInfo },
     #[serde(rename = "host_disconnected")]
     HostDisconnected { host_id: String },
     #[serde(rename = "host_status_changed")]
