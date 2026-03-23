@@ -12,6 +12,7 @@ use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
 use crate::views::double_shift::DoubleShiftDetector;
+use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 
@@ -22,6 +23,7 @@ pub struct MainView {
     terminal: Option<Entity<TerminalPanel>>,
     focus_handle: FocusHandle,
     command_palette: Option<Entity<CommandPalette>>,
+    session_switcher: Option<Entity<SessionSwitcher>>,
     double_shift: DoubleShiftDetector,
 }
 
@@ -43,6 +45,7 @@ impl MainView {
             terminal: None,
             focus_handle,
             command_palette: None,
+            session_switcher: None,
             double_shift: DoubleShiftDetector::new(),
         }
     }
@@ -126,6 +129,11 @@ impl MainView {
     // -- Command palette ---------------------------------------------------------
 
     fn open_command_palette(&mut self, tab: PaletteTab, cx: &mut Context<Self>) {
+        // Close session switcher if open (mutual exclusion)
+        if self.session_switcher.is_some() {
+            self.close_session_switcher(cx);
+        }
+
         // Toggle: if open on same tab, close
         if let Some(palette) = &self.command_palette {
             if palette.read(cx).active_tab() == tab {
@@ -175,6 +183,9 @@ impl MainView {
             TerminalPanelEvent::OpenCommandPalette { tab } => {
                 self.open_command_palette(*tab, cx);
             }
+            TerminalPanelEvent::OpenSessionSwitcher => {
+                self.open_session_switcher(cx);
+            }
         }
     }
 
@@ -214,11 +225,97 @@ impl MainView {
                     terminal.update(cx, TerminalPanel::open_search);
                 }
             }
+            CommandPaletteEvent::OpenSessionSwitcher => {
+                self.close_command_palette(cx);
+                self.open_session_switcher(cx);
+                return;
+            }
             CommandPaletteEvent::ToggleProjectPin { .. }
             | CommandPaletteEvent::Reconnect
             | CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);
+    }
+
+    // -- Session switcher -------------------------------------------------------
+
+    fn open_session_switcher(&mut self, cx: &mut Context<Self>) {
+        // Close command palette if open (mutual exclusion)
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+
+        // Already open? Close it.
+        if self.session_switcher.is_some() {
+            self.close_session_switcher(cx);
+            return;
+        }
+
+        let snapshot = self.sidebar.read(cx);
+        let recent_sessions = self
+            .app_state
+            .persistence
+            .lock()
+            .ok()
+            .map(|p| p.state().recent_sessions.clone())
+            .unwrap_or_default();
+
+        let current_session_id = self
+            .terminal
+            .as_ref()
+            .map(|t| t.read(cx).session_id().to_string());
+
+        let hosts = Rc::clone(snapshot.hosts_rc());
+        let sessions = Rc::clone(snapshot.sessions_rc());
+        let projects = Rc::clone(snapshot.projects_rc());
+        let mode = self.app_state.mode.clone();
+
+        let switcher = cx.new(|cx| {
+            SessionSwitcher::new(
+                &sessions,
+                &hosts,
+                &projects,
+                &recent_sessions,
+                current_session_id.as_deref(),
+                &mode,
+                cx,
+            )
+        });
+
+        // Need at least 2 entries to switch
+        if switcher.read(cx).entry_count() < 2 {
+            return;
+        }
+
+        cx.subscribe(&switcher, Self::on_switcher_event).detach();
+        self.session_switcher = Some(switcher);
+        cx.notify();
+    }
+
+    fn close_session_switcher(&mut self, cx: &mut Context<Self>) {
+        self.session_switcher = None;
+        // Terminal auto-focuses via its render() when the switcher overlay is removed.
+        cx.notify();
+    }
+
+    fn on_switcher_event(
+        &mut self,
+        _: Entity<SessionSwitcher>,
+        event: &SessionSwitcherEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SessionSwitcherEvent::Select {
+                session_id,
+                host_id,
+                tmux_name,
+            } => {
+                self.record_recent_session(session_id);
+                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
+            }
+            SessionSwitcherEvent::Cancel => {}
+        }
+        self.close_session_switcher(cx);
     }
 
     fn record_recent_session(&self, session_id: &str) {
@@ -278,7 +375,9 @@ impl Render for MainView {
                         // Track key presses during shift hold for double-shift detection.
                         this.double_shift.on_key_down_during_shift();
 
-                        if mods.control && !mods.shift && key == "k" {
+                        if mods.control && !mods.shift && key == "tab" {
+                            this.open_session_switcher(cx);
+                        } else if mods.control && !mods.shift && key == "k" {
                             this.open_command_palette(PaletteTab::All, cx);
                         } else if mods.control && mods.shift && key == "e" {
                             this.open_command_palette(PaletteTab::Sessions, cx);
@@ -344,6 +443,45 @@ impl Render for MainView {
                                     .bg(theme::bg_secondary())
                                     .overflow_hidden()
                                     .child(palette.clone()),
+                            ),
+                    ),
+            );
+        }
+
+        // Session switcher overlay (same backdrop+sibling pattern as command palette)
+        if let Some(switcher) = &self.session_switcher {
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        div()
+                            .id("switcher-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba(0x1111_1366))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.close_session_switcher(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .justify_center()
+                            .pt(px(80.0))
+                            .child(
+                                div()
+                                    .id("switcher-container")
+                                    .w(px(400.0))
+                                    .max_h(px(320.0))
+                                    .rounded(px(8.0))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .bg(theme::bg_secondary())
+                                    .overflow_hidden()
+                                    .child(switcher.clone()),
                             ),
                     ),
             );
