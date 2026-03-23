@@ -23,7 +23,6 @@ gpui.workspace = true
 alacritty_terminal.workspace = true
 flume.workspace = true
 rust-embed.workspace = true
-base64.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 open = "5"
