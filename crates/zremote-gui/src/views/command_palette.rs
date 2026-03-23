@@ -140,6 +140,7 @@ pub enum PaletteAction {
         host_id: String,
         tmux_name: Option<String>,
     },
+    SwitchSession,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +302,7 @@ pub enum CommandPaletteEvent {
         pinned: bool,
     },
     Reconnect,
+    OpenSessionSwitcher,
     Close,
 }
 
@@ -544,6 +546,9 @@ impl CommandPalette {
                         host_id: host_id.clone(),
                         tmux_name: tmux_name.clone(),
                     });
+                }
+                PaletteAction::SwitchSession => {
+                    cx.emit(CommandPaletteEvent::OpenSessionSwitcher);
                 }
             },
         }
@@ -1404,7 +1409,9 @@ impl CommandPalette {
                     Icon::X
                 }
                 PaletteAction::SearchInTerminal => Icon::Search,
-                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
+                PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
+                    Icon::SquareTerminal
+                }
                 PaletteAction::ToggleProjectPin {
                     currently_pinned, ..
                 } => {
@@ -1564,6 +1571,7 @@ impl CommandPalette {
         let shortcut = match action {
             PaletteAction::SearchInTerminal => Some("Ctrl+F"),
             PaletteAction::NewSession => Some("Ctrl+N"),
+            PaletteAction::SwitchSession => Some("Ctrl+Tab"),
             _ => None,
         };
 
@@ -2092,7 +2100,9 @@ impl CommandPalette {
             PaletteItem::Session { .. } => Icon::SquareTerminal,
             PaletteItem::Project { .. } => Icon::Folder,
             PaletteItem::Action(a) => match a {
-                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
+                PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
+                    Icon::SquareTerminal
+                }
                 PaletteAction::CloseSession { .. } | PaletteAction::CloseCurrentSession { .. } => {
                     Icon::X
                 }
@@ -2184,7 +2194,9 @@ impl CommandPalette {
                     Icon::X
                 }
                 PaletteAction::SearchInTerminal => Icon::Search,
-                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
+                PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
+                    Icon::SquareTerminal
+                }
                 PaletteAction::ToggleProjectPin {
                     currently_pinned, ..
                 } => {
@@ -2411,6 +2423,21 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
             item: PaletteItem::Action(PaletteAction::SearchInTerminal),
             title: "Search in Terminal".to_string(),
             subtitle: "Ctrl+F".to_string(),
+            selectable: true,
+        });
+    }
+
+    // Switch Session action (useful when 2+ active sessions exist)
+    let active_count = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.status == "active")
+        .count();
+    if active_count >= 2 {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::SwitchSession),
+            title: "Switch Session".to_string(),
+            subtitle: String::new(),
             selectable: true,
         });
     }

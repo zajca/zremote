@@ -3,6 +3,7 @@ pub mod double_shift;
 pub mod fuzzy;
 pub mod main_view;
 pub mod search_overlay;
+pub mod session_switcher;
 pub mod sidebar;
 pub mod terminal_element;
 pub mod terminal_panel;

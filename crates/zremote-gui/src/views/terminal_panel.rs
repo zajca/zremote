@@ -510,6 +510,7 @@ impl TerminalPanel {
 
 pub enum TerminalPanelEvent {
     OpenCommandPalette { tab: PaletteTab },
+    OpenSessionSwitcher,
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
@@ -767,6 +768,14 @@ impl Render for TerminalPanel {
                     if mods.control && !mods.shift && key == "f" {
                         let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.open_search(cx);
+                        });
+                        return;
+                    }
+
+                    // Ctrl+Tab: session switcher (must be before encode_keystroke)
+                    if mods.control && !mods.shift && !mods.alt && key == "tab" {
+                        let _ = entity.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                            cx.emit(TerminalPanelEvent::OpenSessionSwitcher);
                         });
                         return;
                     }
