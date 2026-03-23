@@ -139,8 +139,12 @@ pub fn connect_standalone(
                             capture_done = true;
                             // Frame capture-pane output with ScrollbackStart/End so
                             // the terminal panel recreates Term at correct window size.
+                            let (pane_cols, pane_rows) = query_tmux_pane_size(&reader_pane_id);
                             if reader_output_tx
-                                .send(TerminalEvent::ScrollbackStart)
+                                .send(TerminalEvent::ScrollbackStart {
+                                    cols: pane_cols,
+                                    rows: pane_rows,
+                                })
                                 .is_err()
                             {
                                 break;
@@ -263,6 +267,32 @@ pub fn connect_standalone(
 }
 
 // -- Internal helpers --
+
+/// Query the current size of a tmux pane. Returns (cols, rows) or (0, 0) on failure.
+fn query_tmux_pane_size(pane_id: &str) -> (u16, u16) {
+    let output = tmux_cmd()
+        .args([
+            "display-message",
+            "-t",
+            pane_id,
+            "-p",
+            "#{pane_width} #{pane_height}",
+        ])
+        .output()
+        .ok();
+    if let Some(output) = output
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.len() == 2
+            && let (Ok(cols), Ok(rows)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>())
+        {
+            return (cols, rows);
+        }
+    }
+    (0, 0)
+}
 
 fn tmux_cmd() -> Command {
     let mut cmd = Command::new("tmux");

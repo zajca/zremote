@@ -147,7 +147,12 @@ pub enum TerminalServerMessage {
     #[serde(rename = "session_closed")]
     SessionClosed { exit_code: Option<i32> },
     #[serde(rename = "scrollback_start")]
-    ScrollbackStart,
+    ScrollbackStart {
+        #[serde(default)]
+        cols: u16,
+        #[serde(default)]
+        rows: u16,
+    },
     #[serde(rename = "scrollback_end")]
     ScrollbackEnd,
     #[serde(rename = "session_suspended")]
@@ -176,7 +181,7 @@ pub enum TerminalClientMessage {
 pub enum TerminalEvent {
     Output(Vec<u8>),
     SessionClosed { exit_code: Option<i32> },
-    ScrollbackStart,
+    ScrollbackStart { cols: u16, rows: u16 },
     ScrollbackEnd,
 }
 

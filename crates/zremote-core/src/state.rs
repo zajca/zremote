@@ -18,6 +18,9 @@ pub struct SessionState {
     pub browser_senders: Vec<mpsc::Sender<BrowserMessage>>,
     pub scrollback: VecDeque<Vec<u8>>,
     pub scrollback_size: usize,
+    /// Last known terminal dimensions (updated on resize, sent with scrollback).
+    pub last_cols: u16,
+    pub last_rows: u16,
     /// Per-pane scrollback buffers for extra tmux panes (pane_id -> (chunks, total_size)).
     pub pane_scrollbacks: HashMap<String, (VecDeque<Vec<u8>>, usize)>,
 }
@@ -31,6 +34,8 @@ impl SessionState {
             browser_senders: Vec::new(),
             scrollback: VecDeque::new(),
             scrollback_size: 0,
+            last_cols: 0,
+            last_rows: 0,
             pane_scrollbacks: HashMap::new(),
         }
     }
@@ -154,7 +159,12 @@ pub enum BrowserMessage {
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "scrollback_start")]
-    ScrollbackStart,
+    ScrollbackStart {
+        #[serde(default)]
+        cols: u16,
+        #[serde(default)]
+        rows: u16,
+    },
     #[serde(rename = "scrollback_end")]
     ScrollbackEnd,
     #[serde(rename = "pane_added")]
@@ -457,7 +467,10 @@ mod tests {
             BrowserMessage::Error {
                 message: "fail".to_string(),
             },
-            BrowserMessage::ScrollbackStart,
+            BrowserMessage::ScrollbackStart {
+                cols: 120,
+                rows: 40,
+            },
             BrowserMessage::ScrollbackEnd,
             BrowserMessage::PaneAdded {
                 pane_id: "%5".to_string(),
@@ -531,9 +544,14 @@ mod tests {
 
     #[test]
     fn browser_message_scrollback_start_serialization() {
-        let msg = BrowserMessage::ScrollbackStart;
+        let msg = BrowserMessage::ScrollbackStart {
+            cols: 120,
+            rows: 40,
+        };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "scrollback_start");
+        assert_eq!(json["cols"], 120);
+        assert_eq!(json["rows"], 40);
     }
 
     #[test]
