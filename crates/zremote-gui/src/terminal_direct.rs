@@ -113,20 +113,21 @@ pub fn connect_standalone(
     let reader_output_tx = output_tx;
     let reader_handle = tokio_handle.spawn(async move {
         let mut reader = BufReader::new(child_stdout);
-        let mut line = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         let mut in_block = false;
         let mut capture_done = false;
         let mut block_lines: Vec<String> = Vec::new();
 
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) => {
                     // EOF -- child process exited
                     let _ = reader_output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
                     break;
                 }
                 Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
                     let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
 
                     if trimmed.starts_with("%begin ") {
