@@ -125,13 +125,15 @@ fn main() {
 
     // Set up test introspection if requested and feature-enabled.
     #[cfg(feature = "test-introspection")]
-    let test_snapshot = if cli.test_introspect {
+    let (test_snapshot, test_app_state) = if cli.test_introspect {
         let snapshot = test_introspection::SharedSnapshot::default();
+        let app_state_snapshot = test_introspection::SharedAppState::default();
         let server_snapshot = snapshot.clone();
-        tokio_handle.spawn(test_server::run(server_snapshot));
-        Some(snapshot)
+        let server_app_state = app_state_snapshot.clone();
+        tokio_handle.spawn(test_server::run(server_snapshot, server_app_state));
+        (Some(snapshot), Some(app_state_snapshot))
     } else {
-        None
+        (None, None)
     };
 
     let app_state = Arc::new(AppState {
@@ -142,6 +144,8 @@ fn main() {
         persistence: Mutex::new(persistence),
         #[cfg(feature = "test-introspection")]
         test_snapshot,
+        #[cfg(feature = "test-introspection")]
+        test_app_state,
     });
 
     let exit_after = cli.exit_after;
@@ -153,7 +157,11 @@ fn main() {
             // Register introspection global if enabled.
             #[cfg(feature = "test-introspection")]
             if let Some(snapshot) = &app_state.test_snapshot {
-                cx.set_global(test_introspection::ElementRegistry::new(snapshot.clone()));
+                let app_state_shared = app_state.test_app_state.clone().unwrap_or_default();
+                cx.set_global(test_introspection::ElementRegistry::new(
+                    snapshot.clone(),
+                    app_state_shared,
+                ));
             }
             let app_state_for_quit = app_state.clone();
             let app_state_clone = app_state.clone();

@@ -20,6 +20,7 @@ use gpui::*;
 
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
+use crate::test_introspection::tracking_overlay;
 use crate::theme;
 use crate::types::{Host, Project, Session};
 
@@ -1372,12 +1373,14 @@ impl CommandPalette {
 
         let mut row = div()
             .id(ElementId::NamedInteger("palette-item".into(), index as u64))
+            .relative()
             .flex()
             .items_center()
             .h(px(32.0))
             .px(px(12.0))
             .gap(px(8.0))
             .cursor_pointer()
+            .child(tracking_overlay(format!("palette-item-{index}")))
             .when(is_selected, |s: Stateful<Div>| {
                 s.bg(theme::bg_tertiary())
                     .border_l_2()

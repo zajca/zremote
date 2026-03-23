@@ -16,21 +16,25 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use crate::test_introspection::SharedSnapshot;
+use crate::test_introspection::{SharedAppState, SharedSnapshot};
 
 /// Shared state for the test HTTP server.
 #[derive(Clone)]
 struct ServerState {
     snapshot: SharedSnapshot,
+    app_state: SharedAppState,
 }
 
 /// Start the introspection HTTP server in the background.
 ///
 /// Writes the bound port to `/tmp/zremote-gui-test-port`.
-pub async fn run(snapshot: SharedSnapshot) {
-    let state = ServerState { snapshot };
+pub async fn run(snapshot: SharedSnapshot, app_state: SharedAppState) {
+    let state = ServerState {
+        snapshot,
+        app_state,
+    };
 
     let app = Router::new()
         .route("/elements", get(get_elements))
@@ -85,13 +89,13 @@ async fn get_element(
     }
 }
 
-#[derive(Serialize)]
-struct AppStateSnapshot {
-    ready: bool,
-}
-
-async fn get_state() -> impl IntoResponse {
-    Json(AppStateSnapshot { ready: true })
+async fn get_state(State(state): State<ServerState>) -> impl IntoResponse {
+    let app_state = state
+        .app_state
+        .read()
+        .expect("app state lock poisoned")
+        .clone();
+    Json(app_state)
 }
 
 #[derive(Deserialize)]
