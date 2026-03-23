@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -91,7 +93,7 @@ async fn run_terminal_ws(
     });
 
     // Reader: parse WS messages and forward to output channel.
-    // Binary frames carry terminal output (no base64/JSON overhead).
+    // Supports both binary frames (new servers) and text/base64 (older servers).
     // During scrollback replay, chunks are buffered and delivered as one Output event.
     let mut scrollback_buf: Vec<u8> = Vec::new();
     let mut in_scrollback = false;
@@ -99,7 +101,7 @@ async fn run_terminal_ws(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Binary(data)) => {
-                // Binary frame: tag byte + payload
+                // Binary frame: tag byte + payload (new server format)
                 if data.is_empty() {
                     continue;
                 }
@@ -128,9 +130,26 @@ async fn run_terminal_ws(
                 }
             }
             Ok(Message::Text(text)) => {
+                tracing::debug!(
+                    len = text.len(),
+                    prefix = %&text[..text.len().min(120)],
+                    "terminal WS: text frame"
+                );
                 match serde_json::from_str::<TerminalServerMessage>(&text) {
-                    Ok(TerminalServerMessage::Output { .. }) => {
-                        // Output now arrives as binary frames; ignore any legacy text output
+                    Ok(TerminalServerMessage::Output { data }) => {
+                        // Text-based output (older servers send base64-encoded data)
+                        match BASE64.decode(&data) {
+                            Ok(bytes) => {
+                                if in_scrollback {
+                                    scrollback_buf.extend_from_slice(&bytes);
+                                } else if output_tx.send(TerminalEvent::Output(bytes)).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "failed to decode base64 terminal output");
+                            }
+                        }
                     }
                     Ok(TerminalServerMessage::SessionClosed { exit_code }) => {
                         let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code });
@@ -159,7 +178,7 @@ async fn run_terminal_ws(
                         | TerminalServerMessage::SessionResumed,
                     ) => {}
                     Err(e) => {
-                        warn!(error = %e, text = %text, "failed to parse terminal message");
+                        warn!(error = %e, "failed to parse terminal message");
                     }
                 }
             }
