@@ -357,6 +357,12 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "test-introspection")]
+        if cx.has_global::<crate::test_introspection::ElementRegistry>() {
+            cx.global_mut::<crate::test_introspection::ElementRegistry>()
+                .begin_frame();
+        }
+
         let mut root = div()
             .flex()
             .size_full()
@@ -485,6 +491,12 @@ impl Render for MainView {
                             ),
                     ),
             );
+        }
+
+        #[cfg(feature = "test-introspection")]
+        if cx.has_global::<crate::test_introspection::ElementRegistry>() {
+            cx.global_mut::<crate::test_introspection::ElementRegistry>()
+                .flush();
         }
 
         root
