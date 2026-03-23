@@ -128,9 +128,20 @@ async fn handle_terminal_connection(
         session.browser_senders.push(tx);
     }
 
+    // Read terminal size for scrollback framing
+    let (scrollback_cols, scrollback_rows) = {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .map_or((0, 0), |s| (s.last_cols, s.last_rows))
+    };
+
     // Send merged scrollback buffer with framing messages
     if !scrollback_data.is_empty() {
-        let start_msg = BrowserMessage::ScrollbackStart;
+        let start_msg = BrowserMessage::ScrollbackStart {
+            cols: scrollback_cols,
+            rows: scrollback_rows,
+        };
         if let Ok(json) = serde_json::to_string(&start_msg)
             && socket.send(Message::Text(json.into())).await.is_err()
         {
@@ -251,6 +262,14 @@ async fn handle_terminal_connection(
                                 };
                                 if let Err(e) = result {
                                     tracing::warn!(error = %e, "failed to resize PTY");
+                                }
+                                // Track terminal size for scrollback replay (main pane only)
+                                if target_pane.is_none() {
+                                    let mut sessions = state.sessions.write().await;
+                                    if let Some(session) = sessions.get_mut(&session_id) {
+                                        session.last_cols = cols;
+                                        session.last_rows = rows;
+                                    }
                                 }
                             }
                             Err(e) => {

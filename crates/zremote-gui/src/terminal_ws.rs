@@ -136,10 +136,10 @@ async fn run_terminal_ws(
                         let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code });
                         break;
                     }
-                    Ok(TerminalServerMessage::ScrollbackStart) => {
+                    Ok(TerminalServerMessage::ScrollbackStart { cols, rows }) => {
                         in_scrollback = true;
                         scrollback_buf.clear();
-                        let _ = output_tx.send(TerminalEvent::ScrollbackStart);
+                        let _ = output_tx.send(TerminalEvent::ScrollbackStart { cols, rows });
                     }
                     Ok(TerminalServerMessage::ScrollbackEnd) => {
                         if in_scrollback {

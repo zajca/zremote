@@ -262,14 +262,25 @@ impl TerminalPanel {
                         });
                         break;
                     }
-                    Ok(TerminalEvent::ScrollbackStart) => {
+                    Ok(TerminalEvent::ScrollbackStart {
+                        cols: sb_cols,
+                        rows: sb_rows,
+                    }) => {
                         if let Ok(mut term) = term.lock() {
-                            let cols = term.columns();
-                            let rows = term.screen_lines();
-                            let size = if cols > 0 && rows > 0 {
-                                TermSize::new(cols, rows)
+                            let size = if sb_cols > 0 && sb_rows > 0 {
+                                // Use server-reported size (the size at which scrollback was captured)
+                                TermSize::new(usize::from(sb_cols), usize::from(sb_rows))
                             } else {
-                                TermSize::new(usize::from(DEFAULT_COLS), usize::from(DEFAULT_ROWS))
+                                let cols = term.columns();
+                                let rows = term.screen_lines();
+                                if cols > 0 && rows > 0 {
+                                    TermSize::new(cols, rows)
+                                } else {
+                                    TermSize::new(
+                                        usize::from(DEFAULT_COLS),
+                                        usize::from(DEFAULT_ROWS),
+                                    )
+                                }
                             };
                             *term = alacritty_terminal::Term::new(
                                 TermConfig::default(),
