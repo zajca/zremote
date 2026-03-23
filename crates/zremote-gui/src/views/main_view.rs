@@ -495,8 +495,19 @@ impl Render for MainView {
 
         #[cfg(feature = "test-introspection")]
         if cx.has_global::<crate::test_introspection::ElementRegistry>() {
-            cx.global_mut::<crate::test_introspection::ElementRegistry>()
-                .flush();
+            let state = crate::test_introspection::AppStateSnapshot {
+                selected_session_id: self
+                    .terminal
+                    .as_ref()
+                    .map(|t| t.read(cx).session_id().to_string()),
+                palette_open: self.command_palette.is_some(),
+                switcher_open: self.session_switcher.is_some(),
+                mode: self.app_state.mode.clone(),
+                terminal_active: self.terminal.is_some(),
+            };
+            let registry = cx.global_mut::<crate::test_introspection::ElementRegistry>();
+            registry.set_app_state(state);
+            registry.flush();
         }
 
         root

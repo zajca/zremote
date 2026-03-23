@@ -5,6 +5,7 @@ use gpui::*;
 
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
+use crate::test_introspection::tracking_overlay;
 use crate::theme;
 use std::time::Duration;
 
@@ -454,11 +455,13 @@ impl SidebarView {
         div()
             .id(SharedString::from(format!("host-header-{host_id}")))
             .group("host-header")
+            .relative()
             .flex()
             .items_center()
             .justify_between()
             .px(px(12.0))
             .py(px(4.0))
+            .child(tracking_overlay(format!("host-header-{host_id}")))
             .child(
                 div()
                     .flex()
@@ -482,6 +485,7 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("new-session-{host_id}")))
+                    .relative()
                     .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
@@ -491,6 +495,7 @@ impl SidebarView {
                         s
                     })
                     .hover(|s| s.bg(theme::bg_tertiary()))
+                    .child(tracking_overlay(format!("new-session-{host_id}")))
                     .child(
                         icon(Icon::Plus)
                             .size(px(14.0))
@@ -525,10 +530,12 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("new-in-{project_id}")))
+                    .relative()
                     .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::bg_tertiary()))
+                    .child(tracking_overlay(format!("new-in-{project_id}")))
                     .child(
                         icon(Icon::Plus)
                             .size(px(14.0))
@@ -620,6 +627,7 @@ impl SidebarView {
         let row = div()
             .id(SharedString::from(format!("project-{project_id}")))
             .group("project-row")
+            .relative()
             .flex()
             .items_center()
             .justify_between()
@@ -631,6 +639,7 @@ impl SidebarView {
             .cursor_pointer()
             .overflow_hidden()
             .hover(|s| s.bg(theme::bg_tertiary()))
+            .child(tracking_overlay(format!("project-{project_id}")))
             .child(left)
             .child(self.render_project_new_session_button(&project_id, host_id, &project.path, cx));
 
@@ -704,6 +713,7 @@ impl SidebarView {
 
         div()
             .id(SharedString::from(format!("session-{session_id}")))
+            .relative()
             .flex()
             .items_center()
             .justify_between()
@@ -715,6 +725,7 @@ impl SidebarView {
             .mx(px(4.0))
             .bg(bg_color)
             .hover(|s| s.bg(theme::bg_tertiary()))
+            .child(tracking_overlay(format!("session-{session_id}")))
             .on_click({
                 let session_id = session_id.clone();
                 let host_id = host_id.clone();
@@ -854,6 +865,7 @@ impl Render for SidebarView {
                     .child(
                         div()
                             .id("new-session-local")
+                            .relative()
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded(px(4.0))
@@ -864,6 +876,7 @@ impl Render for SidebarView {
                             .text_color(theme::text_secondary())
                             .text_size(px(12.0))
                             .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
+                            .child(tracking_overlay("new-session-local"))
                             .child(icon(Icon::Plus).size(px(14.0)))
                             .child("New Session")
                             .on_click(cx.listener(
