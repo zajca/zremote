@@ -120,7 +120,10 @@ async fn run_terminal_ws(
                 };
                 if in_scrollback {
                     scrollback_buf.extend_from_slice(bytes);
-                } else if output_tx.send(TerminalEvent::Output(bytes.to_vec())).is_err() {
+                } else if output_tx
+                    .send(TerminalEvent::Output(bytes.to_vec()))
+                    .is_err()
+                {
                     break;
                 }
             }
