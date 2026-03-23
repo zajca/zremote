@@ -138,6 +138,7 @@ pub enum PaletteAction {
     SwitchToSession {
         session_id: String,
         host_id: String,
+        tmux_name: Option<String>,
     },
 }
 
@@ -282,6 +283,7 @@ pub enum CommandPaletteEvent {
     SelectSession {
         session_id: String,
         host_id: String,
+        tmux_name: Option<String>,
     },
     CreateSessionInProject {
         host_id: String,
@@ -474,6 +476,7 @@ impl CommandPalette {
                 cx.emit(CommandPaletteEvent::SelectSession {
                     session_id: session.id.clone(),
                     host_id: session.host_id.clone(),
+                    tmux_name: session.tmux_name.clone(),
                 });
             }
             PaletteItem::Project { project_idx } => {
@@ -534,10 +537,12 @@ impl CommandPalette {
                 PaletteAction::SwitchToSession {
                     session_id,
                     host_id,
+                    tmux_name,
                 } => {
                     cx.emit(CommandPaletteEvent::SelectSession {
                         session_id: session_id.clone(),
                         host_id: host_id.clone(),
+                        tmux_name: tmux_name.clone(),
                     });
                 }
             },
@@ -2546,6 +2551,7 @@ fn build_session_drill_items_from(
             item: PaletteItem::Action(PaletteAction::SwitchToSession {
                 session_id: session.id.clone(),
                 host_id: session.host_id.clone(),
+                tmux_name: session.tmux_name.clone(),
             }),
             title: "Already Active".to_string(),
             subtitle: String::new(),
@@ -2557,6 +2563,7 @@ fn build_session_drill_items_from(
             item: PaletteItem::Action(PaletteAction::SwitchToSession {
                 session_id: session.id.clone(),
                 host_id: session.host_id.clone(),
+                tmux_name: session.tmux_name.clone(),
             }),
             title: "Switch to Session".to_string(),
             subtitle: String::new(),

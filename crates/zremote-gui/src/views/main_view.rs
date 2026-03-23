@@ -57,6 +57,7 @@ impl MainView {
             SidebarEvent::SessionSelected {
                 session_id,
                 host_id,
+                tmux_name,
             } => {
                 // Skip if this session is already open (prevents duplicate open_terminal
                 // from sidebar re-emitting SessionSelected after data reload).
@@ -66,7 +67,7 @@ impl MainView {
                     return;
                 }
                 self.record_recent_session(session_id);
-                self.open_terminal(session_id, host_id, cx);
+                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
             }
             SidebarEvent::SessionClosed { session_id } => {
                 if let Some(terminal) = &self.terminal {
@@ -80,7 +81,13 @@ impl MainView {
         }
     }
 
-    fn open_terminal(&mut self, session_id: &str, _host_id: &str, cx: &mut Context<Self>) {
+    fn open_terminal(
+        &mut self,
+        session_id: &str,
+        _host_id: &str,
+        tmux_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let session_id_owned = session_id.to_string();
 
         // Persist active session.
@@ -91,7 +98,8 @@ impl MainView {
 
         let handle = connect_terminal(&self.app_state, session_id);
         let tokio_handle = self.app_state.tokio_handle.clone();
-        let terminal = cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, cx));
+        let terminal =
+            cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, tmux_name, cx));
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         self.terminal = Some(terminal);
         cx.notify();
@@ -180,9 +188,10 @@ impl MainView {
             CommandPaletteEvent::SelectSession {
                 session_id,
                 host_id,
+                tmux_name,
             } => {
                 self.record_recent_session(session_id);
-                self.open_terminal(session_id, host_id, cx);
+                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
             }
             CommandPaletteEvent::CreateSessionInProject {
                 host_id,
@@ -376,8 +385,14 @@ fn connect_terminal(
 
 /// Events emitted by the sidebar for the main view to handle.
 pub enum SidebarEvent {
-    SessionSelected { session_id: String, host_id: String },
-    SessionClosed { session_id: String },
+    SessionSelected {
+        session_id: String,
+        host_id: String,
+        tmux_name: Option<String>,
+    },
+    SessionClosed {
+        session_id: String,
+    },
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}

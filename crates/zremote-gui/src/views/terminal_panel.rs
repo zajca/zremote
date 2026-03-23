@@ -129,6 +129,8 @@ pub struct TerminalPanel {
     double_shift: DoubleShiftDetector,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
+    /// Tmux session name (for click-to-copy attach command on Direct badge).
+    tmux_name: Option<String>,
 }
 
 impl TerminalPanel {
@@ -136,6 +138,7 @@ impl TerminalPanel {
         session_id: String,
         handle: TerminalHandle,
         tokio_handle: &tokio::runtime::Handle,
+        tmux_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let config = TermConfig::default();
@@ -219,6 +222,7 @@ impl TerminalPanel {
             search_current_idx: None,
             double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
+            tmux_name,
         }
     }
 
@@ -1152,41 +1156,57 @@ impl Render for TerminalPanel {
 
         // Connection type indicator (bottom-right pill badge).
         let is_direct = self.handle.is_direct();
-        let tooltip_text: &'static str = if is_direct {
-            "Direct tmux connection (FIFO bypass, lower latency)"
+        let tmux_name = self.tmux_name.clone();
+        let tooltip_text = if is_direct {
+            if let Some(ref name) = tmux_name {
+                format!("Direct tmux | Click to copy: tmux -L zremote attach-session -t {name}")
+            } else {
+                "Direct tmux connection (FIFO bypass, lower latency)".to_string()
+            }
         } else {
-            "WebSocket relay through server/agent"
+            "WebSocket relay through server/agent".to_string()
         };
-        content = content.child(
-            div()
-                .id("connection-indicator")
-                .absolute()
-                .bottom(px(8.0))
-                .right(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(8.0))
-                .bg(gpui::rgba(0x1111_1399))
-                .child(
-                    icon(if is_direct { Icon::Zap } else { Icon::Wifi })
-                        .size(px(10.0))
-                        .text_color(if is_direct {
-                            theme::success()
-                        } else {
-                            theme::text_tertiary()
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme::text_tertiary())
-                        .child(if is_direct { "Direct" } else { "WS" }),
-                )
-                .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text)).into()),
-        );
+        let clickable = is_direct && tmux_name.is_some();
+        let mut badge = div()
+            .id("connection-indicator")
+            .absolute()
+            .bottom(px(8.0))
+            .right(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(8.0))
+            .bg(gpui::rgba(0x1111_1399))
+            .child(
+                icon(if is_direct { Icon::Zap } else { Icon::Wifi })
+                    .size(px(10.0))
+                    .text_color(if is_direct {
+                        theme::success()
+                    } else {
+                        theme::text_tertiary()
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child(if is_direct { "Direct" } else { "WS" }),
+            )
+            .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into());
+        if clickable {
+            let attach_cmd = format!(
+                "tmux -L zremote attach-session -t {}",
+                tmux_name.as_deref().unwrap_or_default()
+            );
+            badge = badge.cursor(gpui::CursorStyle::PointingHand).on_click(
+                move |_event, _window, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(attach_cmd.clone()));
+                },
+            );
+        }
+        content = content.child(badge);
 
         // Wrap in a vertical container with optional search overlay on top.
         let mut wrapper = div().flex().flex_col().size_full();
@@ -1199,7 +1219,7 @@ impl Render for TerminalPanel {
 }
 
 /// Minimal view for tooltip rendering (GPUI tooltips require `AnyView`).
-struct ConnectionTooltip(&'static str);
+struct ConnectionTooltip(String);
 
 impl Render for ConnectionTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1212,7 +1232,7 @@ impl Render for ConnectionTooltip {
             .border_color(theme::border())
             .text_size(px(11.0))
             .text_color(theme::text_secondary())
-            .child(self.0)
+            .child(self.0.clone())
     }
 }
 
