@@ -1000,9 +1000,6 @@ impl Element for TerminalElement {
             bounds,
         });
 
-        // Track terminal content bounds for test introspection.
-        crate::test_introspection::track(cx, "terminal-content", bounds);
-
         // Paint terminal background
         let bg: Hsla = theme::terminal_bg().into();
         window.paint_quad(fill(bounds, bg));

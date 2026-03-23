@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::agentic::AgenticServerMessage;
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::{
@@ -163,7 +162,6 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
-    AgenticAction(AgenticServerMessage),
     KnowledgeAction(KnowledgeServerMessage),
     ClaudeAction(ClaudeServerMessage),
     ProjectScan,

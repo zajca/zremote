@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -5,12 +6,18 @@ use gpui::*;
 
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
-use crate::test_introspection::tracking_overlay;
 use crate::theme;
 use std::time::Duration;
 
 use crate::types::{CreateSessionRequest, Host, Project, ServerEvent, Session};
 use crate::views::main_view::SidebarEvent;
+
+/// Tracks the Claude Code agentic loop state for a session.
+struct CcState {
+    loop_id: String,
+    status: String,
+    task_name: Option<String>,
+}
 
 /// A project with its associated sessions.
 struct ProjectNode {
@@ -33,6 +40,8 @@ pub struct SidebarView {
     selected_session_id: Option<String>,
     loading: bool,
     load_generation: u64,
+    /// Claude Code agentic loop state per session_id.
+    cc_states: HashMap<String, CcState>,
 }
 
 impl SidebarView {
@@ -68,6 +77,7 @@ impl SidebarView {
             selected_session_id: restored_session_id,
             loading: true,
             load_generation: 0,
+            cc_states: HashMap::new(),
         };
         view.load_data(cx);
         view
@@ -165,15 +175,64 @@ impl SidebarView {
     pub fn handle_server_event(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
         match event {
             ServerEvent::SessionCreated { .. }
-            | ServerEvent::SessionClosed { .. }
             | ServerEvent::SessionUpdated { .. }
-            | ServerEvent::SessionSuspended { .. }
             | ServerEvent::SessionResumed { .. }
             | ServerEvent::HostConnected { .. }
-            | ServerEvent::HostDisconnected { .. }
             | ServerEvent::HostStatusChanged { .. }
             | ServerEvent::ProjectsUpdated { .. } => {
                 self.load_data(cx);
+            }
+            ServerEvent::SessionClosed { session_id, .. } => {
+                self.cc_states.remove(session_id);
+                self.load_data(cx);
+            }
+            ServerEvent::SessionSuspended { session_id } => {
+                self.cc_states.remove(session_id);
+                self.load_data(cx);
+            }
+            ServerEvent::HostDisconnected { host_id } => {
+                // Remove cc_states for all sessions belonging to this host.
+                let session_ids: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.host_id == *host_id)
+                    .map(|s| s.id.clone())
+                    .collect();
+                for sid in &session_ids {
+                    self.cc_states.remove(sid);
+                }
+                self.load_data(cx);
+            }
+            ServerEvent::LoopDetected { loop_info } => {
+                self.cc_states.insert(
+                    loop_info.session_id.clone(),
+                    CcState {
+                        loop_id: loop_info.id.clone(),
+                        status: loop_info.status.clone(),
+                        task_name: loop_info.task_name.clone(),
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::LoopStateChanged { loop_info } => {
+                self.cc_states.insert(
+                    loop_info.session_id.clone(),
+                    CcState {
+                        loop_id: loop_info.id.clone(),
+                        status: loop_info.status.clone(),
+                        task_name: loop_info.task_name.clone(),
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::LoopEnded { loop_info } => {
+                // Only remove if the loop_id matches (avoid stale removal).
+                if let Some(state) = self.cc_states.get(&loop_info.session_id)
+                    && state.loop_id == loop_info.id
+                {
+                    self.cc_states.remove(&loop_info.session_id);
+                }
+                cx.notify();
             }
             ServerEvent::Unknown => {}
         }
@@ -455,13 +514,11 @@ impl SidebarView {
         div()
             .id(SharedString::from(format!("host-header-{host_id}")))
             .group("host-header")
-            .relative()
             .flex()
             .items_center()
             .justify_between()
             .px(px(12.0))
             .py(px(4.0))
-            .child(tracking_overlay(format!("host-header-{host_id}")))
             .child(
                 div()
                     .flex()
@@ -485,7 +542,6 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("new-session-{host_id}")))
-                    .relative()
                     .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
@@ -495,7 +551,6 @@ impl SidebarView {
                         s
                     })
                     .hover(|s| s.bg(theme::bg_tertiary()))
-                    .child(tracking_overlay(format!("new-session-{host_id}")))
                     .child(
                         icon(Icon::Plus)
                             .size(px(14.0))
@@ -530,12 +585,10 @@ impl SidebarView {
             .child(
                 div()
                     .id(SharedString::from(format!("new-in-{project_id}")))
-                    .relative()
                     .p(px(2.0))
                     .rounded(px(3.0))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::bg_tertiary()))
-                    .child(tracking_overlay(format!("new-in-{project_id}")))
                     .child(
                         icon(Icon::Plus)
                             .size(px(14.0))
@@ -627,7 +680,6 @@ impl SidebarView {
         let row = div()
             .id(SharedString::from(format!("project-{project_id}")))
             .group("project-row")
-            .relative()
             .flex()
             .items_center()
             .justify_between()
@@ -639,7 +691,6 @@ impl SidebarView {
             .cursor_pointer()
             .overflow_hidden()
             .hover(|s| s.bg(theme::bg_tertiary()))
-            .child(tracking_overlay(format!("project-{project_id}")))
             .child(left)
             .child(self.render_project_new_session_button(&project_id, host_id, &project.path, cx));
 
@@ -671,6 +722,9 @@ impl SidebarView {
             .name
             .clone()
             .unwrap_or_else(|| format!("Session {}", &session.id[..8]));
+
+        // Claude Code agentic state for this session
+        let cc_state = self.cc_states.get(&session.id);
 
         let bg_color = if is_selected {
             theme::bg_tertiary()
@@ -713,7 +767,6 @@ impl SidebarView {
 
         div()
             .id(SharedString::from(format!("session-{session_id}")))
-            .relative()
             .flex()
             .items_center()
             .justify_between()
@@ -725,7 +778,6 @@ impl SidebarView {
             .mx(px(4.0))
             .bg(bg_color)
             .hover(|s| s.bg(theme::bg_tertiary()))
-            .child(tracking_overlay(format!("session-{session_id}")))
             .on_click({
                 let session_id = session_id.clone();
                 let host_id = host_id.clone();
@@ -740,8 +792,8 @@ impl SidebarView {
                     cx.notify();
                 })
             })
-            .child(
-                div()
+            .child({
+                let mut left = div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -759,10 +811,43 @@ impl SidebarView {
                         div()
                             .text_color(text_color)
                             .text_size(px(12.0))
-                            .truncate()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
                             .child(display_name),
-                    ),
-            )
+                    );
+
+                if let Some(cc) = cc_state {
+                    let cc_icon = if cc.status == "waiting_for_input" {
+                        Icon::MessageCircle
+                    } else {
+                        Icon::Loader
+                    };
+                    let cc_color = if cc.status == "waiting_for_input" {
+                        theme::warning()
+                    } else {
+                        theme::accent()
+                    };
+
+                    left = left.child(
+                        icon(cc_icon)
+                            .size(px(12.0))
+                            .flex_shrink_0()
+                            .text_color(cc_color),
+                    );
+
+                    if let Some(ref task) = cc.task_name {
+                        left = left.child(
+                            div()
+                                .text_color(theme::text_tertiary())
+                                .text_size(px(11.0))
+                                .truncate()
+                                .child(format!("— {task}")),
+                        );
+                    }
+                }
+
+                left
+            })
             .child(close_button)
     }
 }
@@ -865,7 +950,6 @@ impl Render for SidebarView {
                     .child(
                         div()
                             .id("new-session-local")
-                            .relative()
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded(px(4.0))
@@ -876,7 +960,6 @@ impl Render for SidebarView {
                             .text_color(theme::text_secondary())
                             .text_size(px(12.0))
                             .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                            .child(tracking_overlay("new-session-local"))
                             .child(icon(Icon::Plus).size(px(14.0)))
                             .child("New Session")
                             .on_click(cx.listener(

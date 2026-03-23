@@ -1389,32 +1389,35 @@ mod tests {
     /// Sets `GIT_CEILING_DIRECTORIES` to prevent git from discovering the parent
     /// worktree/repo, avoiding race conditions when tests run in parallel.
     fn init_isolated_git_repo(dir: &std::path::Path) {
-        let ceiling = dir.parent().unwrap_or(dir).to_str().unwrap();
-
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
-                .env("GIT_CEILING_DIRECTORIES", ceiling)
+                .current_dir(dir)
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
                 .output()
                 .expect("failed to run git command");
             assert!(
                 output.status.success(),
-                "git {} failed: {}",
+                "git {} failed (status={}):\nstderr: {}\nstdout: {}",
                 args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
+                output.status,
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
             );
         };
 
-        let path = dir.to_str().unwrap();
-        git(&["init", path]);
-        git(&["-C", path, "config", "user.email", "test@test.com"]);
-        git(&["-C", path, "config", "user.name", "Test"]);
+        git(&["init", "--initial-branch=main", "."]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
 
         std::fs::write(dir.join("test.txt"), "hello").unwrap();
-        git(&["-C", path, "add", "."]);
-        // --no-verify prevents the parent repo's pre-commit hook from running
-        // inside the temp test repo
-        git(&["-C", path, "commit", "--no-verify", "-m", "init"]);
+        git(&["add", "."]);
+        // --no-verify prevents hooks from running inside the temp test repo
+        git(&["commit", "--no-verify", "-m", "init"]);
     }
 
     async fn test_state() -> Arc<LocalAppState> {

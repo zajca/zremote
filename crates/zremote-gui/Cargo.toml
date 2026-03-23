@@ -6,13 +6,7 @@ edition.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-test-introspection = ["dep:axum", "dep:tower-http"]
-
 [dependencies]
-axum = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

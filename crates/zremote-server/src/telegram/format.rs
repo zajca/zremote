@@ -45,39 +45,11 @@ pub fn format_loop_status(hostname: &str, tool_name: &str, status: &str) -> Stri
 }
 
 /// Format a loop-ended notification.
-pub fn format_loop_ended(hostname: &str, reason: &str, summary: Option<&str>, cost: f64) -> String {
-    let summary_line = summary
-        .map(|s| format!("\nSummary: {}", escape_html(s)))
-        .unwrap_or_default();
+pub fn format_loop_ended(hostname: &str, reason: &str) -> String {
     truncate_message(&format!(
-        "<b>Loop completed</b>\nHost: <code>{}</code>\nReason: {}{}\nCost: ${:.4}",
+        "<b>Loop completed</b>\nHost: <code>{}</code>\nReason: {}",
         escape_html(hostname),
         escape_html(reason),
-        summary_line,
-        cost,
-    ))
-}
-
-/// Format a tool-call-pending notification.
-pub fn format_tool_call_pending(
-    hostname: &str,
-    tool_name: &str,
-    arguments_preview: &str,
-) -> String {
-    truncate_message(&format!(
-        "<b>Tool call pending</b>\nHost: <code>{}</code>\nTool: <code>{}</code>\n<pre>{}</pre>",
-        escape_html(hostname),
-        escape_html(tool_name),
-        escape_html(arguments_preview),
-    ))
-}
-
-/// Format batched tool calls notification.
-#[allow(dead_code)]
-pub fn format_batched_tool_calls(hostname: &str, count: usize) -> String {
-    truncate_message(&format!(
-        "<b>{count} tool calls pending</b>\nHost: <code>{}</code>",
-        escape_html(hostname),
     ))
 }
 
@@ -178,25 +150,16 @@ mod tests {
     }
 
     #[test]
-    fn format_loop_ended_with_summary() {
-        let msg = format_loop_ended("host", "completed", Some("did stuff"), 0.42);
+    fn format_loop_ended_with_reason() {
+        let msg = format_loop_ended("host", "completed");
         assert!(msg.contains("completed"));
-        assert!(msg.contains("did stuff"));
-        assert!(msg.contains("0.42"));
-    }
-
-    #[test]
-    fn format_loop_ended_without_summary() {
-        let msg = format_loop_ended("host", "error", None, 0.0);
-        assert!(msg.contains("error"));
-        assert!(!msg.contains("Summary"));
-    }
-
-    #[test]
-    fn format_tool_call_pending_message() {
-        let msg = format_tool_call_pending("host", "Bash", r#"{"cmd":"ls"}"#);
-        assert!(msg.contains("Bash"));
         assert!(msg.contains("host"));
+    }
+
+    #[test]
+    fn format_loop_ended_error_reason() {
+        let msg = format_loop_ended("host", "error");
+        assert!(msg.contains("error"));
     }
 
     #[test]
@@ -218,13 +181,6 @@ mod tests {
         assert!(msg.contains("<b>Loop status: working</b>"));
         assert!(msg.contains("my-host"));
         assert!(msg.contains("claude-code"));
-    }
-
-    #[test]
-    fn format_batched_tool_calls_message() {
-        let msg = format_batched_tool_calls("my-host", 5);
-        assert!(msg.contains("5 tool calls pending"));
-        assert!(msg.contains("my-host"));
     }
 
     #[test]
@@ -345,12 +301,5 @@ mod tests {
         let msg = format_host_disconnected("<script>alert(1)</script>");
         assert!(msg.contains("&lt;script&gt;"));
         assert!(!msg.contains("<script>"));
-    }
-
-    #[test]
-    fn format_tool_call_pending_escapes_arguments() {
-        let msg = format_tool_call_pending("host", "Bash", r#"<img onerror="alert(1)">"#);
-        assert!(msg.contains("&lt;img"));
-        assert!(!msg.contains("<img"));
     }
 }
