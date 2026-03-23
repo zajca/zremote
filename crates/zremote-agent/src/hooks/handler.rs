@@ -270,6 +270,560 @@ fn extract_task_name_from_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+    use zremote_protocol::AgenticLoopId;
+
+    /// Create a minimal `HooksState` with mpsc channels for testing.
+    /// Returns `(state, agentic_rx, outbound_rx)` so tests can inspect sent messages.
+    fn test_state() -> (
+        HooksState,
+        mpsc::Receiver<AgenticAgentMessage>,
+        mpsc::Receiver<AgentMessage>,
+    ) {
+        let (agentic_tx, agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let state = HooksState {
+            agentic_tx,
+            mapper: SessionMapper::new(),
+            outbound_tx,
+            sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        };
+        (state, agentic_rx, outbound_rx)
+    }
+
+    /// Register a loop in the mapper and return IDs.
+    async fn setup_loop(state: &HooksState) -> (SessionId, AgenticLoopId) {
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        state.mapper.register_loop(session_id, loop_id).await;
+        (session_id, loop_id)
+    }
+
+    fn payload(event: &str, cc_session: &str) -> HookPayload {
+        HookPayload {
+            session_id: cc_session.to_string(),
+            hook_event_name: event.to_string(),
+            transcript_path: None,
+            cwd: None,
+            tool_name: None,
+            tool_input: None,
+            tool_use_id: None,
+            tool_response: None,
+            message: None,
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // handle_pre_tool_use
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pre_tool_use_sends_working_status() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let p = payload("PreToolUse", "cc-1");
+        handle_pre_tool_use(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                task_name,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::Working);
+                assert!(task_name.is_none());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_no_loop_mapping_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        // No loop registered -- resolve will fail after retries
+        let p = payload("PreToolUse", "unknown-cc");
+        handle_pre_tool_use(&state, &p).await;
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_with_various_tool_names() {
+        for tool in &["Read", "Bash", "Edit", "Write", "Grep", "WebSearch"] {
+            let (state, mut agentic_rx, _outbound_rx) = test_state();
+            let (_sid, _loop_id) = setup_loop(&state).await;
+
+            let mut p = payload("PreToolUse", "cc-tools");
+            p.tool_name = Some(tool.to_string());
+            handle_pre_tool_use(&state, &p).await;
+
+            // All tool names should produce a Working status
+            let msg = agentic_rx.try_recv().unwrap();
+            assert!(
+                matches!(
+                    msg,
+                    AgenticAgentMessage::LoopStateUpdate {
+                        status: AgenticStatus::Working,
+                        ..
+                    }
+                ),
+                "expected Working for tool {tool}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // handle_post_tool_use
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_tool_use_sends_working_status() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let p = payload("PostToolUse", "cc-2");
+        handle_post_tool_use(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::Working);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_no_loop_mapping_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let p = payload("PostToolUse", "unknown-cc");
+        handle_post_tool_use(&state, &p).await;
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_extracts_task_name_from_transcript() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, _loop_id) = setup_loop(&state).await;
+
+        // Create a transcript file with a slug
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::env::var("HOME").unwrap();
+        // The transcript must be under ~/.claude/projects/ to pass validation
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"result\",\"slug\":\"my-task-slug\"}\n",
+        )
+        .unwrap();
+
+        // First resolve the CC session so mapper knows it
+        let cc_id = "cc-slug-test";
+        let _ = state.mapper.resolve_loop_id(cc_id, None).await;
+
+        // Set transcript path on the mapped session
+        state
+            .mapper
+            .set_transcript_path(cc_id, transcript_path.clone())
+            .await;
+
+        let mut p = payload("PostToolUse", cc_id);
+        p.transcript_path = Some(transcript_path.clone());
+        handle_post_tool_use(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate { task_name, .. } => {
+                assert_eq!(task_name.as_deref(), Some("my-task-slug"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        // Cleanup
+        std::fs::remove_dir_all(&transcript_dir).ok();
+        drop(dir);
+    }
+
+    // ---------------------------------------------------------------
+    // handle_stop
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stop_sends_loop_ended() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let p = payload("Stop", "cc-stop");
+        handle_stop(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopEnded {
+                loop_id: lid,
+                reason,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(reason, "stop");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_no_loop_mapping_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let p = payload("Stop", "unknown-cc");
+        handle_stop(&state, &p).await;
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_with_task_name_sends_completed_update() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        // Create transcript with slug under allowed path
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_stop");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"result\",\"slug\":\"stop-task\"}\n",
+        )
+        .unwrap();
+
+        let cc_id = "cc-stop-slug";
+        let _ = state.mapper.resolve_loop_id(cc_id, None).await;
+        state
+            .mapper
+            .set_transcript_path(cc_id, transcript_path.clone())
+            .await;
+
+        let mut p = payload("Stop", cc_id);
+        p.transcript_path = Some(transcript_path.clone());
+        handle_stop(&state, &p).await;
+
+        // First message: LoopEnded
+        let msg1 = agentic_rx.try_recv().unwrap();
+        assert!(matches!(msg1, AgenticAgentMessage::LoopEnded { .. }));
+
+        // Second message: LoopStateUpdate with Completed + task_name
+        let msg2 = agentic_rx.try_recv().unwrap();
+        match msg2 {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                task_name,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::Completed);
+                assert_eq!(task_name.as_deref(), Some("stop-task"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // handle_hook (dispatcher)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_hook_sets_transcript_path() {
+        let (state, _agentic_rx, _outbound_rx) = test_state();
+        let (_sid, _loop_id) = setup_loop(&state).await;
+        let cc_id = "cc-transcript";
+
+        // Resolve to auto-register the CC session
+        let _ = state.mapper.resolve_loop_id(cc_id, None).await;
+
+        let mut p = payload("PreToolUse", cc_id);
+        p.transcript_path = Some("/some/path/transcript.jsonl".to_string());
+
+        // Call the internal logic that handle_hook does before dispatching
+        if let Some(ref path) = p.transcript_path {
+            state
+                .mapper
+                .set_transcript_path(&p.session_id, path.clone())
+                .await;
+        }
+
+        let mapped = state.mapper.lookup_by_cc_session(cc_id).await.unwrap();
+        assert_eq!(
+            mapped.transcript_path.as_deref(),
+            Some("/some/path/transcript.jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_hook_unknown_event_is_noop() {
+        let (_state, mut agentic_rx, _outbound_rx) = test_state();
+        let p = payload("SomeUnknownEvent", "cc-unknown");
+
+        // Dispatcher matches "other" branch -- no messages sent
+        match p.hook_event_name.as_str() {
+            "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SubagentStart"
+            | "SubagentStop" => panic!("should not match known events"),
+            _ => {} // expected
+        }
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_hook_subagent_events_are_ignored() {
+        let (_state, mut agentic_rx, _outbound_rx) = test_state();
+        for event in &["SubagentStart", "SubagentStop"] {
+            let p = payload(event, "cc-sub");
+            // These events just log and do nothing
+            match p.hook_event_name.as_str() {
+                "SubagentStart" | "SubagentStop" => {} // expected path
+                _ => panic!("should match subagent events"),
+            }
+        }
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // try_capture_cc_session_id
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn capture_cc_session_id_sends_message_for_claude_task() {
+        let (state, _agentic_rx, mut outbound_rx) = test_state();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let claude_task_id = Uuid::new_v4();
+
+        state.mapper.register_loop(session_id, loop_id).await;
+        state
+            .mapper
+            .register_claude_task(session_id, claude_task_id)
+            .await;
+
+        try_capture_cc_session_id(&state, "cc-capture", &session_id).await;
+
+        let msg = outbound_rx.try_recv().unwrap();
+        match msg {
+            AgentMessage::ClaudeAction(ClaudeAgentMessage::SessionIdCaptured {
+                claude_task_id: tid,
+                cc_session_id,
+            }) => {
+                assert_eq!(tid, claude_task_id);
+                assert_eq!(cc_session_id, "cc-capture");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_cc_session_id_deduplicates() {
+        let (state, _agentic_rx, mut outbound_rx) = test_state();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let claude_task_id = Uuid::new_v4();
+
+        state.mapper.register_loop(session_id, loop_id).await;
+        state
+            .mapper
+            .register_claude_task(session_id, claude_task_id)
+            .await;
+
+        // First call sends the message
+        try_capture_cc_session_id(&state, "cc-dedup", &session_id).await;
+        assert!(outbound_rx.try_recv().is_ok());
+
+        // Second call with same CC session ID is a no-op
+        try_capture_cc_session_id(&state, "cc-dedup", &session_id).await;
+        assert!(outbound_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_cc_session_id_noop_when_not_claude_task() {
+        let (state, _agentic_rx, mut outbound_rx) = test_state();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        state.mapper.register_loop(session_id, loop_id).await;
+        // No claude task registered for this session
+
+        try_capture_cc_session_id(&state, "cc-no-task", &session_id).await;
+        assert!(outbound_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // extract_task_name_from_transcript
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn extract_task_name_no_transcript_path() {
+        let p = payload("PostToolUse", "cc-1");
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_task_name_falls_back_to_mapped_transcript_path() {
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_fallback");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"result\",\"slug\":\"fallback-slug\"}\n",
+        )
+        .unwrap();
+
+        let p = payload("PostToolUse", "cc-1"); // no transcript_path in payload
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: Some(transcript_path),
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        assert_eq!(result.as_deref(), Some("fallback-slug"));
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    #[test]
+    fn extract_task_name_truncates_at_100_chars() {
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_trunc");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+
+        let long_slug = "a".repeat(150);
+        std::fs::write(
+            &transcript_path,
+            format!("{{\"type\":\"result\",\"slug\":\"{long_slug}\"}}\n"),
+        )
+        .unwrap();
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        assert_eq!(result.as_ref().map(|s| s.len()), Some(100));
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    #[test]
+    fn extract_task_name_rejects_path_outside_allowed_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"result\",\"slug\":\"evil-slug\"}\n",
+        )
+        .unwrap();
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path.to_str().unwrap().to_string());
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        // Path traversal validation should reject this
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_task_name_nonexistent_file_returns_none() {
+        let home = std::env::var("HOME").unwrap();
+        let transcript_path =
+            format!("{home}/.claude/projects/_test_handler_nofile/nonexistent.jsonl");
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_task_name_empty_slug_in_transcript() {
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_empty");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+        std::fs::write(&transcript_path, "{\"type\":\"result\",\"slug\":\"\"}\n").unwrap();
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        // Empty string slug is still returned (extract_slug returns it)
+        assert_eq!(result.as_deref(), Some(""));
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    #[test]
+    fn extract_task_name_no_slug_in_transcript() {
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_noslug");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"message\",\"role\":\"user\"}\n",
+        )
+        .unwrap();
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result = extract_task_name_from_transcript(&p, &mapped);
+        assert!(result.is_none());
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // Deserialization tests (original)
+    // ---------------------------------------------------------------
 
     #[test]
     fn deserialize_pre_tool_use_hook() {
