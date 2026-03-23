@@ -96,6 +96,8 @@ enum PaletteCategory {
     Pinned,
     AllProjects,
     Actions,
+    DrillSessions,
+    DrillActions,
 }
 
 impl PaletteCategory {
@@ -106,7 +108,8 @@ impl PaletteCategory {
             Self::Suspended => "SUSPENDED",
             Self::Pinned => "PINNED",
             Self::AllProjects => "ALL PROJECTS",
-            Self::Actions => "ACTIONS",
+            Self::Actions | Self::DrillActions => "ACTIONS",
+            Self::DrillSessions => "SESSIONS",
         }
     }
 }
@@ -124,6 +127,18 @@ pub enum PaletteAction {
         currently_pinned: bool,
     },
     Reconnect,
+    NewSessionInProject {
+        host_id: String,
+        working_dir: String,
+        project_name: String,
+    },
+    CloseSession {
+        session_id: String,
+    },
+    SwitchToSession {
+        session_id: String,
+        host_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +166,7 @@ struct ResultItem {
     item: PaletteItem,
     title: String,
     subtitle: String,
+    selectable: bool,
 }
 
 struct CategoryGroup {
@@ -292,10 +308,17 @@ impl EventEmitter<CommandPaletteEvent> for CommandPalette {}
 // Main struct
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaletteSubView {
-    Main,
+#[derive(Debug, Clone)]
+enum DrillDownLevel {
+    Project { project_idx: usize },
+    Session { session_idx: usize },
     HostPicker,
+}
+
+struct SavedLevelState {
+    query: String,
+    selected_index: usize,
+    active_tab: PaletteTab,
 }
 
 pub struct CommandPalette {
@@ -304,12 +327,15 @@ pub struct CommandPalette {
     active_tab: PaletteTab,
     selected_index: usize,
     hovered_index: Option<usize>,
-    sub_view: PaletteSubView,
+    nav_stack: Vec<DrillDownLevel>,
+    nav_saved_state: Vec<SavedLevelState>,
     snapshot: PaletteSnapshot,
     /// Pre-built item lists, created once at palette open time.
     session_items: Vec<ResultItem>,
     project_items: Vec<ResultItem>,
     action_items: Vec<ResultItem>,
+    /// Items for the current drill-down level.
+    drill_items: Vec<ResultItem>,
     results: PaletteResults,
     /// Cached tab counts to avoid rebuilding item lists during render.
     tab_counts: [usize; 4],
@@ -337,11 +363,13 @@ impl CommandPalette {
             active_tab: initial_tab,
             selected_index: 0,
             hovered_index: None,
-            sub_view: PaletteSubView::Main,
+            nav_stack: Vec::new(),
+            nav_saved_state: Vec::new(),
             snapshot,
             session_items,
             project_items,
             action_items,
+            drill_items: Vec::new(),
             results: PaletteResults::Grouped(Vec::new()),
             tab_counts,
         };
@@ -387,6 +415,11 @@ impl CommandPalette {
 
     /// Look up the `ResultItem` for a given flat index in the current results.
     fn resolve_item(&self, index: usize) -> Option<&ResultItem> {
+        if self.is_drilled_down()
+            && !matches!(self.current_level(), Some(DrillDownLevel::HostPicker))
+        {
+            return self.resolve_drill_item(index);
+        }
         match &self.results {
             PaletteResults::Grouped(groups) => {
                 let mut offset = 0;
@@ -414,6 +447,26 @@ impl CommandPalette {
         }
     }
 
+    fn resolve_drill_item(&self, index: usize) -> Option<&ResultItem> {
+        match &self.results {
+            PaletteResults::Grouped(groups) => {
+                let mut offset = 0;
+                for group in groups {
+                    if index < offset + group.indices.len() {
+                        let item_idx = group.indices[index - offset];
+                        return self.drill_items.get(item_idx);
+                    }
+                    offset += group.indices.len();
+                }
+                None
+            }
+            PaletteResults::Scored(entries) => {
+                let entry = entries.get(index)?;
+                self.drill_items.get(entry.index)
+            }
+        }
+    }
+
     fn execute_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
         match item {
             PaletteItem::Session { session_idx } => {
@@ -431,7 +484,8 @@ impl CommandPalette {
                 });
             }
             PaletteItem::Action(action) => match action {
-                PaletteAction::CloseCurrentSession { session_id } => {
+                PaletteAction::CloseCurrentSession { session_id }
+                | PaletteAction::CloseSession { session_id } => {
                     cx.emit(CommandPaletteEvent::CloseSession {
                         session_id: session_id.clone(),
                     });
@@ -467,36 +521,147 @@ impl CommandPalette {
                 PaletteAction::Reconnect => {
                     cx.emit(CommandPaletteEvent::Reconnect);
                 }
+                PaletteAction::NewSessionInProject {
+                    host_id,
+                    working_dir,
+                    ..
+                } => {
+                    cx.emit(CommandPaletteEvent::CreateSessionInProject {
+                        host_id: host_id.clone(),
+                        working_dir: working_dir.clone(),
+                    });
+                }
+                PaletteAction::SwitchToSession {
+                    session_id,
+                    host_id,
+                } => {
+                    cx.emit(CommandPaletteEvent::SelectSession {
+                        session_id: session_id.clone(),
+                        host_id: host_id.clone(),
+                    });
+                }
             },
         }
         cx.emit(CommandPaletteEvent::Close);
     }
 
     fn enter_host_picker(&mut self) {
-        self.sub_view = PaletteSubView::HostPicker;
-        self.query.clear();
-        self.selected_index = 0;
-    }
-
-    fn exit_host_picker(&mut self) {
-        self.sub_view = PaletteSubView::Main;
-        self.query.clear();
-        self.selected_index = 0;
-        self.recompute_results();
+        self.push_drill_down(DrillDownLevel::HostPicker);
     }
 
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         cx.emit(CommandPaletteEvent::Close);
     }
 
+    fn push_drill_down(&mut self, level: DrillDownLevel) {
+        self.nav_saved_state.push(SavedLevelState {
+            query: self.query.clone(),
+            selected_index: self.selected_index,
+            active_tab: self.active_tab,
+        });
+        self.nav_stack.push(level);
+        self.query.clear();
+        self.selected_index = 0;
+        self.hovered_index = None;
+        self.recompute_results();
+    }
+
+    fn pop_drill_down(&mut self) -> bool {
+        if self.nav_stack.pop().is_some() {
+            if let Some(saved) = self.nav_saved_state.pop() {
+                self.query = saved.query;
+                self.selected_index = saved.selected_index;
+                self.active_tab = saved.active_tab;
+            }
+            self.hovered_index = None;
+            self.recompute_results();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_drilled_down(&self) -> bool {
+        !self.nav_stack.is_empty()
+    }
+
+    fn current_level(&self) -> Option<&DrillDownLevel> {
+        self.nav_stack.last()
+    }
+
+    fn drill_into_selected(&mut self) {
+        let item = self
+            .resolve_item(self.selected_index)
+            .map(|r| r.item.clone());
+        match item {
+            Some(PaletteItem::Project { project_idx }) => {
+                self.push_drill_down(DrillDownLevel::Project { project_idx });
+            }
+            Some(PaletteItem::Session { session_idx }) => {
+                self.push_drill_down(DrillDownLevel::Session { session_idx });
+            }
+            _ => {}
+        }
+    }
+
     // -- Computation --------------------------------------------------------
 
     fn recompute_results(&mut self) {
-        self.results = if self.query.is_empty() {
-            self.compute_grouped()
-        } else {
-            self.compute_scored()
-        };
+        match self.current_level() {
+            None => {
+                self.drill_items.clear();
+                self.results = if self.query.is_empty() {
+                    self.compute_grouped()
+                } else {
+                    self.compute_scored()
+                };
+            }
+            Some(DrillDownLevel::Project { project_idx }) => {
+                let project_idx = *project_idx;
+                let (items, results) = build_project_drill_items_from(
+                    project_idx,
+                    &self.snapshot,
+                    &self.session_items,
+                );
+                self.drill_items = items;
+                if self.query.is_empty() {
+                    self.results = results;
+                } else {
+                    self.results = self.compute_drill_scored();
+                }
+            }
+            Some(DrillDownLevel::Session { session_idx }) => {
+                let session_idx = *session_idx;
+                let (items, results) = build_session_drill_items_from(session_idx, &self.snapshot);
+                self.drill_items = items;
+                if self.query.is_empty() {
+                    self.results = results;
+                } else {
+                    self.results = self.compute_drill_scored();
+                }
+            }
+            Some(DrillDownLevel::HostPicker) => {
+                self.drill_items.clear();
+            }
+        }
+    }
+
+    fn compute_drill_scored(&self) -> PaletteResults {
+        let mut scored: Vec<ScoredEntry> = Vec::new();
+        for (i, item) in self.drill_items.iter().enumerate() {
+            if !item.selectable {
+                continue;
+            }
+            if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                scored.push(ScoredEntry {
+                    index: i,
+                    source: ItemSource::Action,
+                    fuzzy_match: fm,
+                });
+            }
+        }
+        scored.sort_by(|a, b| b.fuzzy_match.score.cmp(&a.fuzzy_match.score));
+        PaletteResults::Scored(scored)
     }
 
     fn compute_grouped(&self) -> PaletteResults {
@@ -685,9 +850,15 @@ impl CommandPalette {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
-        // Host picker sub-view has its own key handling
-        if self.sub_view == PaletteSubView::HostPicker {
+        // Host picker has its own key handling
+        if matches!(self.current_level(), Some(DrillDownLevel::HostPicker)) {
             self.handle_host_picker_key(event, cx);
+            return;
+        }
+
+        // Drill-down level key handling
+        if self.is_drilled_down() {
+            self.handle_drill_down_key(event, cx);
             return;
         }
 
@@ -720,6 +891,17 @@ impl CommandPalette {
 
         if key == "tab" && mods.shift {
             self.switch_tab(self.active_tab.prev(), cx);
+            return;
+        }
+
+        // Right arrow drills into selected item
+        if key == "right" && !mods.control && !mods.alt && !mods.platform {
+            if let Some(item) = self.resolve_item(self.selected_index)
+                && is_item_drillable(&item.item)
+            {
+                self.drill_into_selected();
+                cx.notify();
+            }
             return;
         }
 
@@ -797,19 +979,99 @@ impl CommandPalette {
         }
     }
 
-    fn handle_host_picker_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_drill_down_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
         if key == "escape" {
-            self.exit_host_picker();
+            self.dismiss(cx);
+            return;
+        }
+
+        if key == "left" && !mods.control && !mods.alt {
+            self.pop_drill_down();
             cx.notify();
             return;
         }
 
         if key == "backspace" {
             if self.query.is_empty() {
-                self.exit_host_picker();
+                self.pop_drill_down();
+                cx.notify();
+            } else {
+                self.query.pop();
+                self.selected_index = 0;
+                self.recompute_results();
+                cx.notify();
+            }
+            return;
+        }
+
+        if key == "enter" {
+            self.execute_selected(cx);
+            return;
+        }
+
+        if key == "up" || (key == "k" && mods.control) {
+            self.move_selection(-1);
+            cx.notify();
+            return;
+        }
+
+        if key == "down" || (key == "j" && mods.control) {
+            self.move_selection(1);
+            cx.notify();
+            return;
+        }
+
+        // Right arrow to drill deeper (e.g. session within project)
+        if key == "right" && !mods.control && !mods.alt && !mods.platform {
+            if let Some(item) = self.resolve_item(self.selected_index)
+                && is_item_drillable(&item.item)
+            {
+                self.drill_into_selected();
+                cx.notify();
+            }
+            return;
+        }
+
+        // Tab is no-op in drill-down
+        if key == "tab" {
+            return;
+        }
+
+        // Consume modifier combos
+        if mods.control || mods.alt || mods.platform {
+            return;
+        }
+
+        // Printable characters
+        if let Some(ch) = &event.keystroke.key_char {
+            self.query.push_str(ch);
+            self.selected_index = 0;
+            self.recompute_results();
+            cx.notify();
+        }
+    }
+
+    fn handle_host_picker_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+
+        if key == "escape" {
+            self.dismiss(cx);
+            return;
+        }
+
+        if key == "left" && !mods.control && !mods.alt {
+            self.pop_drill_down();
+            cx.notify();
+            return;
+        }
+
+        if key == "backspace" {
+            if self.query.is_empty() {
+                self.pop_drill_down();
                 cx.notify();
             } else {
                 self.query.pop();
@@ -960,8 +1222,20 @@ impl CommandPalette {
     }
 
     fn render_input_bar(&self) -> impl IntoElement {
-        let query_display = if self.query.is_empty() {
+        let placeholder = if self.is_drilled_down() {
+            match self.current_level() {
+                Some(DrillDownLevel::Project { project_idx }) => {
+                    format!("Search in {}...", self.snapshot.projects[*project_idx].name)
+                }
+                Some(DrillDownLevel::Session { .. }) => "Session actions...".to_string(),
+                _ => self.active_tab.placeholder().to_string(),
+            }
+        } else {
             self.active_tab.placeholder().to_string()
+        };
+
+        let query_display = if self.query.is_empty() {
+            placeholder
         } else {
             self.query.clone()
         };
@@ -1120,9 +1394,12 @@ impl CommandPalette {
             PaletteItem::Session { .. } => Icon::SquareTerminal,
             PaletteItem::Project { .. } => Icon::Folder,
             PaletteItem::Action(a) => match a {
-                PaletteAction::NewSession => Icon::Plus,
-                PaletteAction::CloseCurrentSession { .. } => Icon::X,
+                PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
+                PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
+                    Icon::X
+                }
                 PaletteAction::SearchInTerminal => Icon::Search,
+                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
                 PaletteAction::ToggleProjectPin {
                     currently_pinned, ..
                 } => {
@@ -1181,6 +1458,35 @@ impl CommandPalette {
             PaletteItem::Action(a) => {
                 row = row.child(self.render_action_accessory(a));
             }
+        }
+
+        // Chevron for drillable items (separate click target that drills instead of executing)
+        if is_item_drillable(&item.item) {
+            row = row.child(
+                div()
+                    .id(ElementId::NamedInteger("chevron".into(), index as u64))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.0))
+                    .rounded(px(4.0))
+                    .hover(|s: StyleRefinement| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::ChevronRight)
+                            .size(px(12.0))
+                            .text_color(if is_selected {
+                                theme::text_secondary()
+                            } else {
+                                theme::text_tertiary()
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.selected_index = index;
+                        this.drill_into_selected();
+                        cx.notify();
+                    })),
+            );
         }
 
         row
@@ -1262,18 +1568,38 @@ impl CommandPalette {
     }
 
     fn render_footer(&self) -> impl IntoElement {
-        div()
+        let mut footer = div()
             .flex()
             .items_center()
             .h(px(28.0))
             .px(px(12.0))
             .gap(px(12.0))
             .border_t_1()
-            .border_color(theme::border())
-            .child(render_footer_hint("Up/Down", "Navigate"))
-            .child(render_footer_hint("Enter", "Select"))
-            .child(render_footer_hint("Tab", "Next tab"))
-            .child(render_footer_hint("Esc", "Close"))
+            .border_color(theme::border());
+
+        if self.is_drilled_down() {
+            footer = footer
+                .child(render_footer_hint("Left", "Back"))
+                .child(render_footer_hint("Up/Down", "Navigate"))
+                .child(render_footer_hint("Enter", "Select"))
+                .child(render_footer_hint("Esc", "Close"));
+        } else {
+            footer = footer.child(render_footer_hint("Up/Down", "Navigate"));
+
+            // Add Right hint if selected item is drillable
+            if let Some(item) = self.resolve_item(self.selected_index)
+                && is_item_drillable(&item.item)
+            {
+                footer = footer.child(render_footer_hint("Right", "Open"));
+            }
+
+            footer = footer
+                .child(render_footer_hint("Enter", "Select"))
+                .child(render_footer_hint("Tab", "Next tab"))
+                .child(render_footer_hint("Esc", "Close"));
+        }
+
+        footer
     }
 
     fn render_empty_state(&self) -> impl IntoElement {
@@ -1491,12 +1817,447 @@ impl CommandPalette {
                 .gap(px(12.0))
                 .border_t_1()
                 .border_color(theme::border())
-                .child(render_footer_hint("Backspace", "Back"))
+                .child(render_footer_hint("Left", "Back"))
                 .child(render_footer_hint("Enter", "Select"))
-                .child(render_footer_hint("Esc", "Cancel")),
+                .child(render_footer_hint("Esc", "Close")),
         );
 
         container
+    }
+
+    fn render_breadcrumb_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (parent_label, item_name) = match self.current_level() {
+            Some(DrillDownLevel::Project { project_idx }) => (
+                "Projects".to_string(),
+                self.snapshot.projects[*project_idx].name.clone(),
+            ),
+            Some(DrillDownLevel::Session { session_idx }) => {
+                let session = &self.snapshot.sessions[*session_idx];
+                ("Sessions".to_string(), session_title(session))
+            }
+            Some(DrillDownLevel::HostPicker) => ("Actions".to_string(), "Select Host".to_string()),
+            None => return div().into_any_element(),
+        };
+
+        div()
+            .id("breadcrumb-header")
+            .flex()
+            .items_center()
+            .h(px(36.0))
+            .px(px(12.0))
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .id("breadcrumb-back")
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .hover(|s: StyleRefinement| s.bg(theme::bg_tertiary()).rounded(px(4.0)))
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .child(
+                        icon(Icon::ChevronLeft)
+                            .size(px(14.0))
+                            .text_color(theme::text_secondary()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::text_secondary())
+                            .child(parent_label),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.pop_drill_down();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme::text_tertiary())
+                    .child("/"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child(item_name),
+            )
+            .into_any_element()
+    }
+
+    fn render_drill_info_header(&self) -> impl IntoElement {
+        match self.current_level() {
+            Some(DrillDownLevel::Project { project_idx }) => {
+                let project = &self.snapshot.projects[*project_idx];
+                let mut row = div()
+                    .flex()
+                    .items_center()
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .mx(px(4.0))
+                    .mt(px(4.0))
+                    .gap(px(8.0))
+                    .bg(theme::bg_tertiary())
+                    .rounded(px(4.0));
+
+                if let Some(ref branch) = project.git_branch {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                icon(Icon::GitBranch)
+                                    .size(px(12.0))
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme::text_secondary())
+                                    .child(branch.clone()),
+                            ),
+                    );
+                    if project.git_is_dirty {
+                        row = row.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme::warning())
+                                .child("*dirty"),
+                        );
+                    }
+                }
+
+                row = row.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme::text_tertiary())
+                        .child(compact_path(&project.path)),
+                );
+
+                row.into_any_element()
+            }
+            Some(DrillDownLevel::Session { session_idx }) => {
+                let session = &self.snapshot.sessions[*session_idx];
+                let host_name = self.snapshot.host_name(&session.host_id);
+                let project_name = session
+                    .project_id
+                    .as_deref()
+                    .and_then(|pid| self.snapshot.project_name(pid));
+
+                let status_color = match session.status.as_str() {
+                    "active" => theme::success(),
+                    "suspended" => theme::warning(),
+                    _ => theme::text_tertiary(),
+                };
+
+                let mut info_parts = vec![session.status.clone()];
+
+                let duration = format_duration(session.created_at.as_deref());
+                if !duration.is_empty() {
+                    info_parts.push(duration);
+                }
+
+                if self.snapshot.mode != "local" {
+                    info_parts.push(host_name);
+                }
+
+                if let Some(proj) = project_name {
+                    info_parts.push(proj);
+                }
+
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .mx(px(4.0))
+                    .mt(px(4.0))
+                    .gap(px(8.0))
+                    .bg(theme::bg_tertiary())
+                    .rounded(px(4.0))
+                    .child(div().size(px(6.0)).rounded_full().bg(status_color))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme::text_secondary())
+                            .child(info_parts.join(" \u{00b7} ")),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
+
+    fn render_drill_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.results.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .py(px(32.0))
+                .child(
+                    icon(Icon::Search)
+                        .size(px(24.0))
+                        .text_color(theme::text_tertiary()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme::text_secondary())
+                        .child("No matching items"),
+                )
+                .into_any_element();
+        }
+
+        let mut container = div()
+            .id("drill-results")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll();
+        let mut flat_index: usize = 0;
+
+        match &self.results {
+            PaletteResults::Grouped(groups) => {
+                // Build a set of indices that are in groups for ordered rendering
+                let mut rendered_indices: HashSet<usize> = HashSet::new();
+                for group in groups {
+                    for &idx in &group.indices {
+                        rendered_indices.insert(idx);
+                    }
+                }
+
+                for (gi, group) in groups.iter().enumerate() {
+                    container = container
+                        .child(self.render_category_header(group.category.label(), gi == 0));
+
+                    for &idx in &group.indices {
+                        // Before each selectable item, render any non-selectable items
+                        // that precede it in drill_items (e.g. "Already Active" before "Close Session")
+                        if gi == 0 {
+                            for di in 0..idx {
+                                if !rendered_indices.contains(&di)
+                                    && let Some(item) = self.drill_items.get(di)
+                                    && !item.selectable
+                                {
+                                    container = container.child(self.render_disabled_row(item));
+                                    rendered_indices.insert(di);
+                                }
+                            }
+                        }
+
+                        if let Some(item) = self.drill_items.get(idx) {
+                            container = container
+                                .child(self.render_drill_item_row(item, flat_index, None, cx));
+                            flat_index += 1;
+                        }
+                    }
+                }
+            }
+            PaletteResults::Scored(entries) => {
+                for entry in entries {
+                    if let Some(item) = self.drill_items.get(entry.index) {
+                        container = container.child(self.render_drill_item_row(
+                            item,
+                            flat_index,
+                            Some(&entry.fuzzy_match),
+                            cx,
+                        ));
+                        flat_index += 1;
+                    }
+                }
+            }
+        }
+
+        container.into_any_element()
+    }
+
+    fn render_disabled_row(&self, item: &ResultItem) -> impl IntoElement {
+        let item_icon = match &item.item {
+            PaletteItem::Session { .. } => Icon::SquareTerminal,
+            PaletteItem::Project { .. } => Icon::Folder,
+            PaletteItem::Action(a) => match a {
+                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
+                PaletteAction::CloseSession { .. } | PaletteAction::CloseCurrentSession { .. } => {
+                    Icon::X
+                }
+                PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
+                PaletteAction::SearchInTerminal => Icon::Search,
+                PaletteAction::ToggleProjectPin {
+                    currently_pinned, ..
+                } => {
+                    if *currently_pinned {
+                        Icon::PinOff
+                    } else {
+                        Icon::Pin
+                    }
+                }
+                PaletteAction::Reconnect => Icon::Wifi,
+            },
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .h(px(32.0))
+            .px(px(12.0))
+            .gap(px(8.0))
+            .child(
+                icon(item_icon)
+                    .size(px(16.0))
+                    .text_color(theme::text_tertiary()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.0))
+                    .text_color(theme::text_tertiary())
+                    .child(item.title.clone()),
+            )
+    }
+
+    fn render_drill_item_row(
+        &self,
+        item: &ResultItem,
+        index: usize,
+        fuzzy_match: Option<&FuzzyMatch>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let drillable = is_item_drillable(&item.item);
+        let is_selected = index == self.selected_index;
+        let is_hovered = self.hovered_index == Some(index);
+        let title = item.title.clone();
+        let subtitle = item.subtitle.clone();
+        let fuzzy_match = fuzzy_match.cloned();
+
+        let mut row = div()
+            .id(ElementId::NamedInteger("drill-item".into(), index as u64))
+            .flex()
+            .items_center()
+            .h(px(32.0))
+            .px(px(12.0))
+            .gap(px(8.0))
+            .cursor_pointer()
+            .when(is_selected, |s: Stateful<Div>| {
+                s.bg(theme::bg_tertiary())
+                    .border_l_2()
+                    .border_color(theme::accent())
+            })
+            .when(is_hovered && !is_selected, |s: Stateful<Div>| {
+                s.bg(theme::bg_tertiary())
+            })
+            .on_mouse_move(
+                cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
+                    if this.hovered_index != Some(index) {
+                        this.hovered_index = Some(index);
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.selected_index = index;
+                this.execute_selected(cx);
+            }));
+
+        // Icon
+        let item_icon = match &item.item {
+            PaletteItem::Session { .. } => Icon::SquareTerminal,
+            PaletteItem::Project { .. } => Icon::Folder,
+            PaletteItem::Action(a) => match a {
+                PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
+                PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
+                    Icon::X
+                }
+                PaletteAction::SearchInTerminal => Icon::Search,
+                PaletteAction::SwitchToSession { .. } => Icon::SquareTerminal,
+                PaletteAction::ToggleProjectPin {
+                    currently_pinned, ..
+                } => {
+                    if *currently_pinned {
+                        Icon::PinOff
+                    } else {
+                        Icon::Pin
+                    }
+                }
+                PaletteAction::Reconnect => Icon::Wifi,
+            },
+        };
+
+        row = row.child(
+            icon(item_icon)
+                .size(px(16.0))
+                .text_color(theme::text_secondary()),
+        );
+
+        // Title + subtitle
+        row = row.child(
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .child(render_highlighted_text(
+                    &title,
+                    fuzzy_match.as_ref(),
+                    &self.query,
+                    theme::text_primary(),
+                ))
+                .when(!subtitle.is_empty(), |s: Div| {
+                    s.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme::text_tertiary())
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(subtitle),
+                    )
+                }),
+        );
+
+        // Chevron for drillable items (separate click target that drills instead of executing)
+        if drillable {
+            row = row.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        "drill-chevron".into(),
+                        index as u64,
+                    ))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.0))
+                    .rounded(px(4.0))
+                    .hover(|s: StyleRefinement| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::ChevronRight)
+                            .size(px(12.0))
+                            .text_color(if is_selected {
+                                theme::text_secondary()
+                            } else {
+                                theme::text_tertiary()
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.selected_index = index;
+                        this.drill_into_selected();
+                        cx.notify();
+                    })),
+            );
+        }
+
+        row
     }
 
     fn count_for_tab(&self, tab: PaletteTab) -> usize {
@@ -1525,10 +2286,32 @@ impl Render for CommandPalette {
             self.focus_handle.focus(window);
         }
 
-        if self.sub_view == PaletteSubView::HostPicker {
+        // Host picker has its own full layout
+        if matches!(self.current_level(), Some(DrillDownLevel::HostPicker)) {
             return self.render_host_picker(cx).into_any_element();
         }
 
+        // Drill-down view
+        if self.is_drilled_down() {
+            return div()
+                .id("command-palette-drill")
+                .track_focus(&self.focus_handle)
+                .flex()
+                .flex_col()
+                .size_full()
+                .overflow_hidden()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.handle_key_down(event, window, cx);
+                }))
+                .child(self.render_breadcrumb_header(cx))
+                .child(self.render_input_bar())
+                .child(self.render_drill_info_header())
+                .child(self.render_drill_results(cx))
+                .child(self.render_footer())
+                .into_any_element();
+        }
+
+        // Root view
         div()
             .id("command-palette")
             .track_focus(&self.focus_handle)
@@ -1571,6 +2354,7 @@ fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
                 item: PaletteItem::Session { session_idx: idx },
                 title,
                 subtitle,
+                selectable: true,
             }
         })
         .collect()
@@ -1590,6 +2374,7 @@ fn build_project_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
                 item: PaletteItem::Project { project_idx: idx },
                 title,
                 subtitle,
+                selectable: true,
             }
         })
         .collect()
@@ -1602,6 +2387,7 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
         item: PaletteItem::Action(PaletteAction::NewSession),
         title: "New Terminal Session".to_string(),
         subtitle: String::new(),
+        selectable: true,
     });
 
     if let Some(ref sid) = snapshot.active_session_id {
@@ -1611,6 +2397,7 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
             }),
             title: "Close Current Session".to_string(),
             subtitle: String::new(),
+            selectable: true,
         });
     }
 
@@ -1619,6 +2406,7 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
             item: PaletteItem::Action(PaletteAction::SearchInTerminal),
             title: "Search in Terminal".to_string(),
             subtitle: "Ctrl+F".to_string(),
+            selectable: true,
         });
     }
 
@@ -1636,6 +2424,7 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
             }),
             title: label,
             subtitle: String::new(),
+            selectable: true,
         });
     }
 
@@ -1644,10 +2433,157 @@ fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
             item: PaletteItem::Action(PaletteAction::Reconnect),
             title: "Reconnect to Server".to_string(),
             subtitle: String::new(),
+            selectable: true,
         });
     }
 
     items
+}
+
+// ---------------------------------------------------------------------------
+// Drill-down item builders
+// ---------------------------------------------------------------------------
+
+fn is_item_drillable(item: &PaletteItem) -> bool {
+    matches!(
+        item,
+        PaletteItem::Session { .. } | PaletteItem::Project { .. }
+    )
+}
+
+fn build_project_drill_items_from(
+    project_idx: usize,
+    snapshot: &PaletteSnapshot,
+    session_items: &[ResultItem],
+) -> (Vec<ResultItem>, PaletteResults) {
+    let project = &snapshot.projects[project_idx];
+    let mut items = Vec::new();
+    let mut groups = Vec::new();
+
+    // Find sessions belonging to this project
+    let mut session_indices = Vec::new();
+    for sess_item in session_items {
+        if let PaletteItem::Session { session_idx } = &sess_item.item {
+            let session = &snapshot.sessions[*session_idx];
+            if session.project_id.as_deref() == Some(&project.id) {
+                session_indices.push(items.len());
+                items.push(ResultItem {
+                    item: sess_item.item.clone(),
+                    title: sess_item.title.clone(),
+                    subtitle: sess_item.subtitle.clone(),
+                    selectable: true,
+                });
+            }
+        }
+    }
+
+    if !session_indices.is_empty() {
+        groups.push(CategoryGroup {
+            category: PaletteCategory::DrillSessions,
+            indices: session_indices,
+            source: ItemSource::Session,
+        });
+    }
+
+    // Actions
+    let mut action_indices = Vec::new();
+
+    // "New Session in {project}"
+    let action_start = items.len();
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::NewSessionInProject {
+            host_id: project.host_id.clone(),
+            working_dir: project.path.clone(),
+            project_name: project.name.clone(),
+        }),
+        title: format!("New Session in {}", project.name),
+        subtitle: String::new(),
+        selectable: true,
+    });
+    action_indices.push(action_start);
+
+    // "Pin/Unpin"
+    let pin_idx = items.len();
+    let pin_label = if project.pinned {
+        format!("Unpin {}", project.name)
+    } else {
+        format!("Pin {}", project.name)
+    };
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::ToggleProjectPin {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            currently_pinned: project.pinned,
+        }),
+        title: pin_label,
+        subtitle: String::new(),
+        selectable: true,
+    });
+    action_indices.push(pin_idx);
+
+    groups.push(CategoryGroup {
+        category: PaletteCategory::DrillActions,
+        indices: action_indices,
+        source: ItemSource::Action,
+    });
+
+    (items, PaletteResults::Grouped(groups))
+}
+
+fn build_session_drill_items_from(
+    session_idx: usize,
+    snapshot: &PaletteSnapshot,
+) -> (Vec<ResultItem>, PaletteResults) {
+    let session = &snapshot.sessions[session_idx];
+    let is_active = snapshot.active_session_id.as_deref() == Some(&session.id);
+    let mut items = Vec::new();
+    let mut action_indices = Vec::new();
+
+    // "Switch to Session" / "Already Active" action
+    let switch_idx = items.len();
+    if is_active {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::SwitchToSession {
+                session_id: session.id.clone(),
+                host_id: session.host_id.clone(),
+            }),
+            title: "Already Active".to_string(),
+            subtitle: String::new(),
+            selectable: false,
+        });
+        // Non-selectable: not added to action_indices
+    } else {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::SwitchToSession {
+                session_id: session.id.clone(),
+                host_id: session.host_id.clone(),
+            }),
+            title: "Switch to Session".to_string(),
+            subtitle: String::new(),
+            selectable: true,
+        });
+        action_indices.push(switch_idx);
+    }
+
+    // "Close Session" action
+    let close_idx = items.len();
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::CloseSession {
+            session_id: session.id.clone(),
+        }),
+        title: "Close Session".to_string(),
+        subtitle: String::new(),
+        selectable: true,
+    });
+    action_indices.push(close_idx);
+
+    let groups = vec![CategoryGroup {
+        category: PaletteCategory::DrillActions,
+        indices: action_indices,
+        source: ItemSource::Action,
+    }];
+
+    (items, PaletteResults::Grouped(groups))
 }
 
 // ---------------------------------------------------------------------------
@@ -1859,4 +2795,464 @@ fn render_footer_hint(key: &str, label: &str) -> impl IntoElement {
                 .text_color(theme::text_tertiary())
                 .child(label.to_string()),
         )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DrillDownLevel, PaletteAction, PaletteCategory, PaletteItem, PaletteResults,
+        PaletteSnapshot, PaletteTab, ResultItem, SavedLevelState, build_action_items,
+        build_project_drill_items_from, build_project_items, build_session_drill_items_from,
+        build_session_items, is_item_drillable,
+    };
+    use crate::types::{Host, Project, Session};
+    use std::rc::Rc;
+
+    fn test_snapshot() -> PaletteSnapshot {
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            hostname: "localhost".to_string(),
+            status: "online".to_string(),
+            agent_version: None,
+            os: None,
+            arch: None,
+        }]);
+
+        let sessions = Rc::new(vec![
+            Session {
+                id: "sess-1".to_string(),
+                host_id: "host-1".to_string(),
+                name: Some("dev".to_string()),
+                shell: Some("zsh".to_string()),
+                status: "active".to_string(),
+                pid: Some(1234),
+                created_at: None,
+                closed_at: None,
+                project_id: Some("proj-1".to_string()),
+                working_dir: Some("/home/user/project-a".to_string()),
+                tmux_name: None,
+            },
+            Session {
+                id: "sess-2".to_string(),
+                host_id: "host-1".to_string(),
+                name: Some("test".to_string()),
+                shell: Some("bash".to_string()),
+                status: "suspended".to_string(),
+                pid: None,
+                created_at: None,
+                closed_at: None,
+                project_id: Some("proj-1".to_string()),
+                working_dir: Some("/home/user/project-a".to_string()),
+                tmux_name: None,
+            },
+            Session {
+                id: "sess-3".to_string(),
+                host_id: "host-1".to_string(),
+                name: None,
+                shell: Some("zsh".to_string()),
+                status: "active".to_string(),
+                pid: Some(5678),
+                created_at: None,
+                closed_at: None,
+                project_id: Some("proj-2".to_string()),
+                working_dir: Some("/home/user/project-b".to_string()),
+                tmux_name: None,
+            },
+        ]);
+
+        let projects = Rc::new(vec![
+            Project {
+                id: "proj-1".to_string(),
+                host_id: "host-1".to_string(),
+                path: "/home/user/project-a".to_string(),
+                name: "project-a".to_string(),
+                project_type: "rust".to_string(),
+                parent_project_id: None,
+                pinned: true,
+                git_branch: Some("main".to_string()),
+                git_is_dirty: true,
+            },
+            Project {
+                id: "proj-2".to_string(),
+                host_id: "host-1".to_string(),
+                path: "/home/user/project-b".to_string(),
+                name: "project-b".to_string(),
+                project_type: "node".to_string(),
+                parent_project_id: None,
+                pinned: false,
+                git_branch: Some("feature/test".to_string()),
+                git_is_dirty: false,
+            },
+        ]);
+
+        PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "local".to_string(),
+            Some("sess-1".to_string()),
+            &[],
+        )
+    }
+
+    #[test]
+    fn test_is_item_drillable() {
+        assert!(is_item_drillable(&PaletteItem::Project { project_idx: 0 }));
+        assert!(is_item_drillable(&PaletteItem::Session { session_idx: 0 }));
+        assert!(!is_item_drillable(&PaletteItem::Action(
+            PaletteAction::NewSession
+        )));
+        assert!(!is_item_drillable(&PaletteItem::Action(
+            PaletteAction::SearchInTerminal
+        )));
+        assert!(!is_item_drillable(&PaletteItem::Action(
+            PaletteAction::Reconnect
+        )));
+    }
+
+    #[test]
+    fn test_saved_level_state_preserves_values() {
+        let saved = SavedLevelState {
+            query: "test query".to_string(),
+            selected_index: 5,
+            active_tab: PaletteTab::Projects,
+        };
+        assert_eq!(saved.query, "test query");
+        assert_eq!(saved.selected_index, 5);
+        assert_eq!(saved.active_tab, PaletteTab::Projects);
+    }
+
+    #[test]
+    fn test_drill_down_level_variants() {
+        let project_level = DrillDownLevel::Project { project_idx: 2 };
+        assert!(matches!(
+            project_level,
+            DrillDownLevel::Project { project_idx: 2 }
+        ));
+
+        let session_level = DrillDownLevel::Session { session_idx: 1 };
+        assert!(matches!(
+            session_level,
+            DrillDownLevel::Session { session_idx: 1 }
+        ));
+
+        let host_level = DrillDownLevel::HostPicker;
+        assert!(matches!(host_level, DrillDownLevel::HostPicker));
+    }
+
+    #[test]
+    fn test_project_drill_items_filter_sessions() {
+        let snapshot = test_snapshot();
+        let session_items = build_session_items(&snapshot);
+
+        // Project 0 (proj-1) has 2 sessions (sess-1, sess-2)
+        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let session_count = items
+            .iter()
+            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
+            .count();
+        assert_eq!(session_count, 2, "project-a should have 2 sessions");
+
+        // Check results have groups
+        assert!(matches!(results, PaletteResults::Grouped(_)));
+
+        // Project 1 (proj-2) has 1 session (sess-3)
+        let (items, _) = build_project_drill_items_from(1, &snapshot, &session_items);
+        let session_count = items
+            .iter()
+            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
+            .count();
+        assert_eq!(session_count, 1, "project-b should have 1 session");
+    }
+
+    #[test]
+    fn test_project_drill_items_have_actions() {
+        let snapshot = test_snapshot();
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let has_new_session = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::NewSessionInProject { .. })
+            )
+        });
+        assert!(
+            has_new_session,
+            "should have 'New Session in project' action"
+        );
+
+        let has_pin = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
+            )
+        });
+        assert!(has_pin, "should have pin/unpin action");
+    }
+
+    #[test]
+    fn test_project_drill_items_pin_label() {
+        let snapshot = test_snapshot();
+        let session_items = build_session_items(&snapshot);
+
+        // Project 0 is pinned -> should show "Unpin"
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+        let pin_item = items
+            .iter()
+            .find(|i| {
+                matches!(
+                    &i.item,
+                    PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
+                )
+            })
+            .unwrap();
+        assert!(
+            pin_item.title.starts_with("Unpin"),
+            "pinned project should show 'Unpin'"
+        );
+
+        // Project 1 is not pinned -> should show "Pin"
+        let (items, _) = build_project_drill_items_from(1, &snapshot, &session_items);
+        let pin_item = items
+            .iter()
+            .find(|i| {
+                matches!(
+                    &i.item,
+                    PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
+                )
+            })
+            .unwrap();
+        assert!(
+            pin_item.title.starts_with("Pin"),
+            "unpinned project should show 'Pin'"
+        );
+    }
+
+    #[test]
+    fn test_session_drill_items_have_actions() {
+        let snapshot = test_snapshot();
+        let (items, _) = build_session_drill_items_from(0, &snapshot);
+
+        let has_switch = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::SwitchToSession { .. })
+            )
+        });
+        assert!(has_switch, "should have 'Switch to Session' action");
+
+        let has_close = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::CloseSession { .. })
+            )
+        });
+        assert!(has_close, "should have 'Close Session' action");
+    }
+
+    #[test]
+    fn test_session_drill_items_use_correct_ids() {
+        let snapshot = test_snapshot();
+        let (items, _) = build_session_drill_items_from(1, &snapshot);
+
+        let switch = items
+            .iter()
+            .find(|i| {
+                matches!(
+                    &i.item,
+                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
+                )
+            })
+            .unwrap();
+        if let PaletteItem::Action(PaletteAction::SwitchToSession {
+            session_id,
+            host_id,
+        }) = &switch.item
+        {
+            assert_eq!(session_id, "sess-2");
+            assert_eq!(host_id, "host-1");
+        } else {
+            panic!("expected SwitchToSession");
+        }
+    }
+
+    #[test]
+    fn test_all_result_items_are_selectable() {
+        let snapshot = test_snapshot();
+        let session_items = build_session_items(&snapshot);
+        let project_items = build_project_items(&snapshot);
+        let action_items = build_action_items(&snapshot);
+
+        for item in &session_items {
+            assert!(item.selectable, "session items should be selectable");
+        }
+        for item in &project_items {
+            assert!(item.selectable, "project items should be selectable");
+        }
+        for item in &action_items {
+            assert!(item.selectable, "action items should be selectable");
+        }
+    }
+
+    #[test]
+    fn test_project_drill_no_sessions_still_has_actions() {
+        // Create a snapshot with a project that has no sessions
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            hostname: "localhost".to_string(),
+            status: "online".to_string(),
+            agent_version: None,
+            os: None,
+            arch: None,
+        }]);
+        let sessions = Rc::new(vec![]);
+        let projects = Rc::new(vec![Project {
+            id: "proj-1".to_string(),
+            host_id: "host-1".to_string(),
+            path: "/home/user/empty-project".to_string(),
+            name: "empty-project".to_string(),
+            project_type: "rust".to_string(),
+            parent_project_id: None,
+            pinned: false,
+            git_branch: None,
+            git_is_dirty: false,
+        }]);
+        let snapshot =
+            PaletteSnapshot::capture(hosts, sessions, projects, "local".to_string(), None, &[]);
+        let session_items = build_session_items(&snapshot);
+        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        // No sessions, but should still have actions
+        let session_count = items
+            .iter()
+            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
+            .count();
+        assert_eq!(session_count, 0);
+        assert!(
+            !items.is_empty(),
+            "should have action items even with no sessions"
+        );
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_nav_stack_operations() {
+        let mut stack: Vec<DrillDownLevel> = Vec::new();
+        let mut saved: Vec<SavedLevelState> = Vec::new();
+
+        // Push
+        saved.push(SavedLevelState {
+            query: "initial".to_string(),
+            selected_index: 3,
+            active_tab: PaletteTab::All,
+        });
+        stack.push(DrillDownLevel::Project { project_idx: 0 });
+        assert_eq!(stack.len(), 1);
+        assert!(matches!(
+            stack.last(),
+            Some(DrillDownLevel::Project { project_idx: 0 })
+        ));
+
+        // Push deeper
+        saved.push(SavedLevelState {
+            query: String::new(),
+            selected_index: 0,
+            active_tab: PaletteTab::All,
+        });
+        stack.push(DrillDownLevel::Session { session_idx: 1 });
+        assert_eq!(stack.len(), 2);
+
+        // Pop
+        stack.pop();
+        let restored = saved.pop().unwrap();
+        assert_eq!(restored.query, "");
+        assert_eq!(restored.selected_index, 0);
+        assert_eq!(stack.len(), 1);
+        assert!(matches!(stack.last(), Some(DrillDownLevel::Project { .. })));
+
+        // Pop to root
+        stack.pop();
+        let restored = saved.pop().unwrap();
+        assert_eq!(restored.query, "initial");
+        assert_eq!(restored.selected_index, 3);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn test_palette_category_drill_labels() {
+        assert_eq!(PaletteCategory::DrillSessions.label(), "SESSIONS");
+        assert_eq!(PaletteCategory::DrillActions.label(), "ACTIONS");
+    }
+
+    #[test]
+    fn test_session_drill_active_session_shows_already_active() {
+        let snapshot = test_snapshot(); // active_session_id = Some("sess-1")
+
+        // Drill into the active session (sess-1, index 0)
+        let (items, _) = build_session_drill_items_from(0, &snapshot);
+
+        let switch_item = items
+            .iter()
+            .find(|i| {
+                matches!(
+                    &i.item,
+                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
+                )
+            })
+            .expect("should have switch/already-active item");
+
+        assert_eq!(switch_item.title, "Already Active");
+        assert!(
+            !switch_item.selectable,
+            "already active should not be selectable"
+        );
+    }
+
+    #[test]
+    fn test_session_drill_inactive_session_shows_switch() {
+        let snapshot = test_snapshot(); // active_session_id = Some("sess-1")
+
+        // Drill into an inactive session (sess-2, index 1)
+        let (items, _) = build_session_drill_items_from(1, &snapshot);
+
+        let switch_item = items
+            .iter()
+            .find(|i| {
+                matches!(
+                    &i.item,
+                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
+                )
+            })
+            .expect("should have switch item");
+
+        assert_eq!(switch_item.title, "Switch to Session");
+        assert!(
+            switch_item.selectable,
+            "switch should be selectable for inactive session"
+        );
+    }
+
+    #[test]
+    fn test_session_drill_active_close_is_default_selection() {
+        let snapshot = test_snapshot();
+
+        // Active session drill-down: "Already Active" is non-selectable,
+        // so "Close Session" should be the only selectable action
+        let (items, results) = build_session_drill_items_from(0, &snapshot);
+
+        let selectable: Vec<&ResultItem> = items.iter().filter(|i| i.selectable).collect();
+        assert_eq!(
+            selectable.len(),
+            1,
+            "only 'Close Session' should be selectable"
+        );
+        assert_eq!(selectable[0].title, "Close Session");
+        assert_eq!(results.selectable_count(), 1);
+    }
 }
