@@ -28,7 +28,7 @@ pub struct MainView {
 }
 
 impl MainView {
-    pub fn new(app_state: Arc<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| SidebarView::new(app_state.clone(), cx));
 
         // Listen for sidebar session selection events
@@ -38,6 +38,8 @@ impl MainView {
         Self::start_event_polling(&app_state, cx);
 
         let focus_handle = cx.focus_handle();
+        // Auto-focus so keyboard shortcuts work immediately (important for headless E2E tests).
+        window.focus(&focus_handle);
 
         Self {
             app_state,
@@ -493,21 +495,41 @@ impl Render for MainView {
             );
         }
 
+        // Flush the introspection registry AFTER all child canvases have run.
+        // We append a canvas to the root div so it executes during prepaint,
+        // which happens after render() returns and layout is computed.
         #[cfg(feature = "test-introspection")]
         if cx.has_global::<crate::test_introspection::ElementRegistry>() {
-            let state = crate::test_introspection::AppStateSnapshot {
-                selected_session_id: self
-                    .terminal
-                    .as_ref()
-                    .map(|t| t.read(cx).session_id().to_string()),
-                palette_open: self.command_palette.is_some(),
-                switcher_open: self.session_switcher.is_some(),
-                mode: self.app_state.mode.clone(),
-                terminal_active: self.terminal.is_some(),
-            };
-            let registry = cx.global_mut::<crate::test_introspection::ElementRegistry>();
-            registry.set_app_state(state);
-            registry.flush();
+            let selected_session_id = self
+                .terminal
+                .as_ref()
+                .map(|t| t.read(cx).session_id().to_string());
+            let palette_open = self.command_palette.is_some();
+            let switcher_open = self.session_switcher.is_some();
+            let mode = self.app_state.mode.clone();
+            let terminal_active = self.terminal.is_some();
+
+            root = root.child(
+                gpui::canvas(
+                    move |_bounds, _window, cx| {
+                        if cx.has_global::<crate::test_introspection::ElementRegistry>() {
+                            let state = crate::test_introspection::AppStateSnapshot {
+                                selected_session_id,
+                                palette_open,
+                                switcher_open,
+                                mode,
+                                terminal_active,
+                            };
+                            let registry =
+                                cx.global_mut::<crate::test_introspection::ElementRegistry>();
+                            registry.set_app_state(state);
+                            registry.flush();
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .size_0(),
+            );
         }
 
         root

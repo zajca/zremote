@@ -9,7 +9,7 @@
 #   source scripts/e2e-test.sh          # Source to get helper functions
 #   ./scripts/e2e-test.sh               # Run directly to see usage info
 #
-# Requirements: cage, grim, ydotool, wtype, jq, curl
+# Requirements: cage, grim, wlrctl, wtype, jq, curl
 # All are available in the nix dev shell: nix develop
 
 set -euo pipefail
@@ -25,7 +25,7 @@ E2E_SERVER_URL="${E2E_SERVER_URL:-http://localhost:3000}"
 
 _e2e_check_deps() {
     local missing=()
-    for tool in cage grim ydotool wtype jq curl; do
+    for tool in cage grim wlrctl wtype jq curl; do
         if ! command -v "$tool" &>/dev/null; then
             missing+=("$tool")
         fi
@@ -42,7 +42,6 @@ _e2e_check_deps() {
 _e2e_xdg_dir=""
 _e2e_cage_pid=""
 _e2e_app_pid=""
-_e2e_ydotoold_pid=""
 
 _e2e_cleanup() {
     echo "[e2e] Cleaning up..."
@@ -57,12 +56,6 @@ _e2e_cleanup() {
     if [[ -n "${_e2e_cage_pid:-}" ]] && kill -0 "$_e2e_cage_pid" 2>/dev/null; then
         kill "$_e2e_cage_pid" 2>/dev/null || true
         wait "$_e2e_cage_pid" 2>/dev/null || true
-    fi
-
-    # Kill ydotoold if we started it
-    if [[ -n "${_e2e_ydotoold_pid:-}" ]] && kill -0 "$_e2e_ydotoold_pid" 2>/dev/null; then
-        kill "$_e2e_ydotoold_pid" 2>/dev/null || true
-        wait "$_e2e_ydotoold_pid" 2>/dev/null || true
     fi
 
     # Clean port file
@@ -89,7 +82,9 @@ e2e_element() {
     curl -s "http://localhost:${E2E_PORT}/elements/${id}" | jq .
 }
 
-# Click an element by ID (computes center coords, uses ydotool)
+# Click an element by ID (computes center coords, uses wlrctl via Wayland protocol).
+# wlrctl only supports relative pointer movement, so we first reset to (0,0) by
+# moving a large negative amount, then move to the target coordinates.
 e2e_click() {
     local id="$1"
     local bounds
@@ -101,15 +96,40 @@ e2e_click() {
         echo "ERROR: Element '$id' not found" >&2
         return 1
     fi
-    ydotool mousemove --absolute -x "$x" -y "$y"
+    # Reset pointer to origin (0,0) then move to target
+    WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wlrctl pointer move -10000 -10000
+    sleep 0.02
+    WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wlrctl pointer move "$x" "$y"
     sleep 0.05
-    ydotool click 0xC0  # left click
+    WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wlrctl pointer click left
 }
 
-# Send keyboard shortcut via wtype (Wayland-aware)
+# Send keyboard shortcut via wtype (Wayland-aware).
+# Accepts shortcuts like "ctrl+k", "ctrl+shift+p", "Return", "Tab".
+# For key combos, uses -M/-m (modifier hold/release) + -k (key tap).
 e2e_key() {
-    local key="$1"
-    WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wtype -k "$key"
+    local input="$1"
+    local -a parts
+    IFS='+' read -ra parts <<< "$input"
+
+    if [[ ${#parts[@]} -eq 1 ]]; then
+        # Single key, no modifiers
+        WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wtype -k "${parts[0]}"
+        return
+    fi
+
+    # Last part is the key, everything before is a modifier
+    local key="${parts[${#parts[@]}-1]}"
+    local -a wtype_args=()
+    for ((i=0; i<${#parts[@]}-1; i++)); do
+        wtype_args+=(-M "${parts[$i]}")
+    done
+    wtype_args+=(-k "$key")
+    for ((i=${#parts[@]}-2; i>=0; i--)); do
+        wtype_args+=(-m "${parts[$i]}")
+    done
+
+    WAYLAND_DISPLAY="$E2E_WAYLAND_DISPLAY" wtype "${wtype_args[@]}"
 }
 
 # Type text via wtype (Wayland-aware)
@@ -168,14 +188,6 @@ _e2e_start() {
     export XDG_RUNTIME_DIR="$_e2e_xdg_dir"
     export WLR_BACKENDS=headless
     export WLR_LIBINPUT_NO_DEVICES=1
-
-    # Start ydotoold (needed for ydotool mouse/keyboard simulation)
-    if ! pgrep -x ydotoold &>/dev/null; then
-        echo "[e2e] Starting ydotoold..."
-        ydotoold &
-        _e2e_ydotoold_pid=$!
-        sleep 0.5
-    fi
 
     # Start cage compositor with the app
     echo "[e2e] Starting headless Wayland compositor..."
