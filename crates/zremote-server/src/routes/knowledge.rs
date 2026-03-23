@@ -204,24 +204,14 @@ pub async fn extract_memories(
         .parse()
         .map_err(|_| AppError::BadRequest("invalid loop_id".to_string()))?;
 
-    let transcript_rows = q::get_transcript_for_loop(&state.db, &body.loop_id).await?;
+    // Transcript storage was removed; extraction is no longer supported from stored data.
+    let transcript = Vec::<zremote_protocol::knowledge::TranscriptFragment>::new();
 
-    if transcript_rows.is_empty() {
+    if transcript.is_empty() {
         return Err(AppError::NotFound(
             "no transcript entries for this loop".to_string(),
         ));
     }
-
-    let transcript: Vec<zremote_protocol::knowledge::TranscriptFragment> = transcript_rows
-        .into_iter()
-        .map(
-            |(role, content, timestamp)| zremote_protocol::knowledge::TranscriptFragment {
-                role,
-                content,
-                timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
-            },
-        )
-        .collect();
 
     let sender = state
         .connections

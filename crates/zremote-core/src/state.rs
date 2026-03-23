@@ -172,21 +172,8 @@ pub struct AgenticLoopState {
     pub loop_id: AgenticLoopId,
     pub session_id: SessionId,
     pub status: AgenticStatus,
-    pub pending_tool_calls: VecDeque<PendingToolCall>,
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub estimated_cost_usd: f64,
-    pub context_used: u64,
-    pub context_max: u64,
+    pub task_name: Option<String>,
     pub last_updated: Instant,
-}
-
-/// A pending tool call in the agentic loop queue.
-#[derive(Debug, Clone)]
-pub struct PendingToolCall {
-    pub tool_call_id: uuid::Uuid,
-    pub tool_name: String,
-    pub arguments_json: String,
 }
 
 /// Thread-safe store for active agentic loop state.
@@ -199,44 +186,11 @@ pub struct LoopInfo {
     pub session_id: String,
     pub project_path: Option<String>,
     pub tool_name: String,
-    pub model: Option<String>,
     pub status: String,
     pub started_at: String,
     pub ended_at: Option<String>,
-    pub total_tokens_in: i64,
-    pub total_tokens_out: i64,
-    pub estimated_cost_usd: f64,
     pub end_reason: Option<String>,
-    pub summary: Option<String>,
-    pub context_used: i64,
-    pub context_max: i64,
-    pub pending_tool_calls: i64,
     pub task_name: Option<String>,
-}
-
-/// Tool call information matching the frontend `ToolCall` interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallInfo {
-    pub id: String,
-    pub loop_id: String,
-    pub tool_name: String,
-    pub arguments_json: Option<String>,
-    pub status: String,
-    pub result_preview: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub created_at: String,
-    pub resolved_at: Option<String>,
-}
-
-/// Transcript entry information matching the frontend `TranscriptEntry` interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscriptEntryInfo {
-    pub id: i64,
-    pub loop_id: String,
-    pub role: String,
-    pub content: String,
-    pub tool_call_id: Option<String>,
-    pub timestamp: String,
 }
 
 /// Real-time events broadcast to browser WebSocket clients and Telegram bot.
@@ -282,28 +236,6 @@ pub enum ServerEvent {
         loop_info: LoopInfo,
         host_id: String,
         hostname: String,
-    },
-    #[serde(rename = "agentic_loop_tool_call")]
-    ToolCallPending {
-        loop_id: String,
-        tool_call: ToolCallInfo,
-        host_id: String,
-        hostname: String,
-    },
-    #[serde(rename = "agentic_loop_tool_result")]
-    ToolCallResult {
-        loop_id: String,
-        tool_call: ToolCallInfo,
-    },
-    #[serde(rename = "agentic_loop_transcript")]
-    LoopTranscript {
-        loop_id: String,
-        transcript_entry: TranscriptEntryInfo,
-    },
-    #[serde(rename = "agentic_loop_metrics")]
-    LoopMetrics {
-        #[serde(rename = "loop")]
-        loop_info: LoopInfo,
     },
     #[serde(rename = "projects_updated")]
     ProjectsUpdated { host_id: String },
@@ -351,7 +283,6 @@ pub enum ServerEvent {
         task_id: String,
         status: String,
         summary: Option<String>,
-        total_cost_usd: f64,
     },
 }
 
@@ -823,14 +754,12 @@ mod tests {
             task_id: "task-1".to_string(),
             status: "completed".to_string(),
             summary: Some("Fixed the bug".to_string()),
-            total_cost_usd: 0.42,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "claude_task_ended");
         assert_eq!(json["task_id"], "task-1");
         assert_eq!(json["status"], "completed");
         assert_eq!(json["summary"], "Fixed the bug");
-        assert_eq!(json["total_cost_usd"], 0.42);
     }
 
     // --- Binary frame encoding/decoding tests ---
@@ -901,12 +830,10 @@ mod tests {
             task_id: "task-1".to_string(),
             status: "error".to_string(),
             summary: Some("PTY spawn failed".to_string()),
-            total_cost_usd: 0.0,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "claude_task_ended");
         assert_eq!(json["status"], "error");
-        assert_eq!(json["total_cost_usd"], 0.0);
     }
 
     #[test]
@@ -956,18 +883,10 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    model: None,
                     status: "working".to_string(),
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: None,
-                    total_tokens_in: 0,
-                    total_tokens_out: 0,
-                    estimated_cost_usd: 0.0,
                     end_reason: None,
-                    summary: None,
-                    context_used: 0,
-                    context_max: 0,
-                    pending_tool_calls: 0,
                     task_name: None,
                 },
                 host_id: "h1".to_string(),
@@ -979,18 +898,10 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    model: None,
                     status: "working".to_string(),
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: None,
-                    total_tokens_in: 0,
-                    total_tokens_out: 0,
-                    estimated_cost_usd: 0.0,
                     end_reason: None,
-                    summary: None,
-                    context_used: 0,
-                    context_max: 0,
-                    pending_tool_calls: 0,
                     task_name: None,
                 },
                 host_id: "h1".to_string(),
@@ -1002,84 +913,14 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    model: None,
                     status: "completed".to_string(),
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: Some("2026-01-01T01:00:00Z".to_string()),
-                    total_tokens_in: 100,
-                    total_tokens_out: 200,
-                    estimated_cost_usd: 0.42,
                     end_reason: Some("completed".to_string()),
-                    summary: Some("done".to_string()),
-                    context_used: 0,
-                    context_max: 0,
-                    pending_tool_calls: 0,
                     task_name: None,
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
-            },
-            ServerEvent::ToolCallPending {
-                loop_id: "l1".to_string(),
-                tool_call: ToolCallInfo {
-                    id: "tc1".to_string(),
-                    loop_id: "l1".to_string(),
-                    tool_name: "Bash".to_string(),
-                    arguments_json: Some(r#"{"cmd":"ls"}"#.to_string()),
-                    status: "pending".to_string(),
-                    result_preview: None,
-                    duration_ms: None,
-                    created_at: "2026-01-01T00:00:00Z".to_string(),
-                    resolved_at: None,
-                },
-                host_id: "h1".to_string(),
-                hostname: "host".to_string(),
-            },
-            ServerEvent::ToolCallResult {
-                loop_id: "l1".to_string(),
-                tool_call: ToolCallInfo {
-                    id: "tc1".to_string(),
-                    loop_id: "l1".to_string(),
-                    tool_name: "Bash".to_string(),
-                    arguments_json: Some(r#"{"cmd":"ls"}"#.to_string()),
-                    status: "completed".to_string(),
-                    result_preview: Some("file.txt".to_string()),
-                    duration_ms: Some(100),
-                    created_at: "2026-01-01T00:00:00Z".to_string(),
-                    resolved_at: Some("2026-01-01T00:00:01Z".to_string()),
-                },
-            },
-            ServerEvent::LoopTranscript {
-                loop_id: "l1".to_string(),
-                transcript_entry: TranscriptEntryInfo {
-                    id: 1,
-                    loop_id: "l1".to_string(),
-                    role: "assistant".to_string(),
-                    content: "Hello".to_string(),
-                    tool_call_id: None,
-                    timestamp: "2026-01-01T00:00:00Z".to_string(),
-                },
-            },
-            ServerEvent::LoopMetrics {
-                loop_info: LoopInfo {
-                    id: "l1".to_string(),
-                    session_id: "s1".to_string(),
-                    project_path: None,
-                    tool_name: "claude-code".to_string(),
-                    model: Some("sonnet".to_string()),
-                    status: "working".to_string(),
-                    started_at: "2026-01-01T00:00:00Z".to_string(),
-                    ended_at: None,
-                    total_tokens_in: 500,
-                    total_tokens_out: 1000,
-                    estimated_cost_usd: 0.05,
-                    end_reason: None,
-                    summary: None,
-                    context_used: 5000,
-                    context_max: 200_000,
-                    pending_tool_calls: 0,
-                    task_name: None,
-                },
             },
             ServerEvent::ProjectsUpdated {
                 host_id: "h1".to_string(),
@@ -1121,7 +962,6 @@ mod tests {
                 task_id: "t1".to_string(),
                 status: "completed".to_string(),
                 summary: Some("done".to_string()),
-                total_cost_usd: 1.23,
             },
         ];
         for event in &events {

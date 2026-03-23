@@ -52,41 +52,6 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
         .route(
-            "/api/loops/{loop_id}/tools",
-            get(routes::agentic::get_loop_tools),
-        )
-        .route(
-            "/api/loops/{loop_id}/transcript",
-            get(routes::agentic::get_loop_transcript),
-        )
-        .route(
-            "/api/loops/{loop_id}/action",
-            post(routes::agentic::post_loop_action),
-        )
-        .route(
-            "/api/loops/{loop_id}/metrics",
-            get(routes::agentic::get_loop_metrics),
-        )
-        .route(
-            "/api/permissions",
-            get(routes::permissions::list_permissions).put(routes::permissions::upsert_permission),
-        )
-        .route(
-            "/api/permissions/{rule_id}",
-            delete(routes::permissions::delete_permission),
-        )
-        .route("/api/analytics/tokens", get(routes::analytics::get_tokens))
-        .route("/api/analytics/cost", get(routes::analytics::get_cost))
-        .route(
-            "/api/analytics/sessions",
-            get(routes::analytics::get_sessions),
-        )
-        .route("/api/analytics/loops", get(routes::analytics::get_loops))
-        .route(
-            "/api/search/transcripts",
-            get(routes::search::search_transcripts),
-        )
-        .route(
             "/api/hosts/{host_id}/projects",
             get(routes::projects::list_projects).post(routes::projects::add_project),
         )

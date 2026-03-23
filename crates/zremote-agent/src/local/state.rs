@@ -9,7 +9,6 @@ use zremote_core::state::{AgenticLoopStore, ServerEvent, SessionStore};
 
 use crate::agentic::manager::AgenticLoopManager;
 use crate::hooks::mapper::SessionMapper;
-use crate::hooks::permission::PermissionManager;
 use crate::session::{PtyOutput, SessionManager};
 
 /// Application state for local mode.
@@ -28,7 +27,6 @@ pub struct LocalAppState {
     pub pty_output_rx: Mutex<mpsc::Receiver<PtyOutput>>,
     pub agentic_manager: Mutex<AgenticLoopManager>,
     pub agentic_processor: Arc<AgenticProcessor>,
-    pub hooks_permission_manager: Arc<PermissionManager>,
     pub session_mapper: SessionMapper,
     /// Optional channel to send messages to the KnowledgeManager.
     /// `None` when the knowledge service is not configured.
@@ -52,7 +50,6 @@ impl LocalAppState {
         let session_manager = SessionManager::new(pty_output_tx, use_tmux);
 
         let agentic_manager = AgenticLoopManager::new();
-        let hooks_permission_manager = Arc::new(PermissionManager::new());
         let session_mapper = SessionMapper::new();
 
         let agentic_processor = Arc::new(AgenticProcessor {
@@ -75,7 +72,6 @@ impl LocalAppState {
             pty_output_rx: Mutex::new(pty_output_rx),
             agentic_manager: Mutex::new(agentic_manager),
             agentic_processor,
-            hooks_permission_manager,
             session_mapper,
             knowledge_tx: None,
         })
@@ -139,14 +135,5 @@ mod tests {
 
         // Agentic manager should be accessible
         let _mgr = state.agentic_manager.lock().await;
-
-        // Permission manager should be accessible
-        assert!(
-            state
-                .hooks_permission_manager
-                .check_permission("SomeTool", Uuid::new_v4(), "{}", &mpsc::channel(1).0,)
-                .await
-                == crate::hooks::permission::PermissionDecision::Ask
-        );
     }
 }
