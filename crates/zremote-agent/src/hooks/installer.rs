@@ -97,13 +97,7 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
 
     let hooks_obj = hooks.as_object_mut().ok_or(InstallError::InvalidSettings)?;
 
-    for event in &[
-        "PreToolUse",
-        "PostToolUse",
-        "Stop",
-        "PermissionRequest",
-        "Notification",
-    ] {
+    for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
         let event_hooks = hooks_obj.entry(*event).or_insert(serde_json::json!([]));
 
         if let Some(arr) = event_hooks.as_array_mut() {
@@ -249,13 +243,7 @@ mod tests {
 
         // Verify all hook events are configured
         let hooks = settings["hooks"].as_object().unwrap();
-        for event in &[
-            "PreToolUse",
-            "PostToolUse",
-            "Stop",
-            "PermissionRequest",
-            "Notification",
-        ] {
+        for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
             assert!(hooks.contains_key(*event), "missing hook event: {event}");
         }
     }
@@ -414,13 +402,7 @@ mod tests {
         // Verify hooks were removed
         let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
         let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        for event in &[
-            "PreToolUse",
-            "PostToolUse",
-            "Stop",
-            "PermissionRequest",
-            "Notification",
-        ] {
+        for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
             let arr = settings["hooks"][event].as_array().unwrap();
             assert!(
                 arr.is_empty(),

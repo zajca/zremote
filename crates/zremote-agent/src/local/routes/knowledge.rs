@@ -171,24 +171,14 @@ pub async fn extract_memories(
         .parse()
         .map_err(|_| AppError::BadRequest("invalid loop_id".to_string()))?;
 
-    let transcript_rows = q::get_transcript_for_loop(&state.db, &body.loop_id).await?;
+    // Transcript storage was removed; extraction is no longer supported from stored data.
+    let transcript = Vec::<zremote_protocol::knowledge::TranscriptFragment>::new();
 
-    if transcript_rows.is_empty() {
+    if transcript.is_empty() {
         return Err(AppError::NotFound(
             "no transcript entries for this loop".to_string(),
         ));
     }
-
-    let transcript: Vec<zremote_protocol::knowledge::TranscriptFragment> = transcript_rows
-        .into_iter()
-        .map(
-            |(role, content, timestamp)| zremote_protocol::knowledge::TranscriptFragment {
-                role,
-                content,
-                timestamp: timestamp.parse().unwrap_or_else(|_| chrono::Utc::now()),
-            },
-        )
-        .collect();
 
     send_knowledge_msg(
         &state,
@@ -1561,43 +1551,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_with_transcript_but_no_knowledge_tx() {
+    async fn extract_with_no_transcript_storage() {
+        // Transcript storage was removed; extract always returns 404.
         let state = test_state().await;
         let host_id = state.host_id.to_string();
         let project_id = Uuid::new_v4().to_string();
-        let session_id = Uuid::new_v4().to_string();
         let loop_id = Uuid::new_v4().to_string();
 
         pq::insert_project(&state.db, &project_id, &host_id, "/tmp/test", "test")
             .await
             .unwrap();
-
-        // Insert a session, agentic_loop, and transcript entry
-        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
-            .bind(&session_id)
-            .bind(&host_id)
-            .execute(&state.db)
-            .await
-            .unwrap();
-
-        sqlx::query(
-            "INSERT INTO agentic_loops (id, session_id, tool_name, status) VALUES (?, ?, 'claude', 'active')",
-        )
-        .bind(&loop_id)
-        .bind(&session_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-        let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES (?, 'user', 'hello', ?)",
-        )
-        .bind(&loop_id)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .unwrap();
 
         let app = build_test_router(state);
 
@@ -1618,8 +1581,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Has transcript but no knowledge_tx => conflict
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

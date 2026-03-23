@@ -135,19 +135,6 @@ pub async fn get_memory(
     Ok(memory)
 }
 
-pub async fn get_transcript_for_loop(
-    pool: &SqlitePool,
-    loop_id: &str,
-) -> Result<Vec<(String, String, String)>, AppError> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT role, content, timestamp FROM transcript_entries WHERE loop_id = ? ORDER BY id",
-    )
-    .bind(loop_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,77 +431,6 @@ mod tests {
         let result = get_memory(&pool, "m1", "proj-2").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
-    }
-
-    // --- get_transcript_for_loop tests ---
-
-    #[tokio::test]
-    async fn get_transcript_for_loop_empty() {
-        let pool = test_db().await;
-        let host_id = "host-1";
-        insert_host(&pool, host_id).await;
-        insert_session(&pool, "sess-1", host_id).await;
-        insert_loop(&pool, "loop-1", "sess-1").await;
-
-        let rows = get_transcript_for_loop(&pool, "loop-1").await.unwrap();
-        assert!(rows.is_empty());
-    }
-
-    #[tokio::test]
-    async fn get_transcript_for_loop_returns_ordered() {
-        let pool = test_db().await;
-        let host_id = "host-1";
-        insert_host(&pool, host_id).await;
-        insert_session(&pool, "sess-1", host_id).await;
-        insert_loop(&pool, "loop-1", "sess-1").await;
-
-        // Insert transcript entries
-        sqlx::query(
-            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES ('loop-1', 'user', 'Fix the bug', '2026-01-01T00:00:00Z')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES ('loop-1', 'assistant', 'I will fix it', '2026-01-01T00:00:01Z')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let rows = get_transcript_for_loop(&pool, "loop-1").await.unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "user");
-        assert_eq!(rows[0].1, "Fix the bug");
-        assert_eq!(rows[1].0, "assistant");
-        assert_eq!(rows[1].1, "I will fix it");
-    }
-
-    #[tokio::test]
-    async fn get_transcript_for_loop_does_not_return_other_loops() {
-        let pool = test_db().await;
-        let host_id = "host-1";
-        insert_host(&pool, host_id).await;
-        insert_session(&pool, "sess-1", host_id).await;
-        insert_loop(&pool, "loop-1", "sess-1").await;
-        insert_loop(&pool, "loop-2", "sess-1").await;
-
-        sqlx::query(
-            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES ('loop-1', 'user', 'msg1', '2026-01-01T00:00:00Z')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO transcript_entries (loop_id, role, content, timestamp) VALUES ('loop-2', 'user', 'msg2', '2026-01-01T00:00:00Z')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let rows = get_transcript_for_loop(&pool, "loop-1").await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, "msg1");
     }
 
     // --- list_memories ordering ---

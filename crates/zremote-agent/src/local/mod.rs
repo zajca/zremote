@@ -262,22 +262,6 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
         // Agentic loop endpoints
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
-        .route(
-            "/api/loops/{loop_id}/tools",
-            get(routes::agentic::get_loop_tools),
-        )
-        .route(
-            "/api/loops/{loop_id}/transcript",
-            get(routes::agentic::get_loop_transcript),
-        )
-        .route(
-            "/api/loops/{loop_id}/metrics",
-            get(routes::agentic::get_loop_metrics),
-        )
-        .route(
-            "/api/loops/{loop_id}/action",
-            post(routes::agentic::post_loop_action),
-        )
         // Projects
         .route(
             "/api/hosts/{host_id}/projects",
@@ -338,15 +322,6 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
             "/api/projects/{project_id}/configure",
             post(routes::projects::configure_with_claude),
         )
-        // Permissions
-        .route(
-            "/api/permissions",
-            get(routes::permissions::list_permissions).put(routes::permissions::upsert_permission),
-        )
-        .route(
-            "/api/permissions/{id}",
-            delete(routes::permissions::delete_permission),
-        )
         // Config
         .route(
             "/api/config/{key}",
@@ -355,19 +330,6 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
         .route(
             "/api/hosts/{host_id}/config/{key}",
             get(routes::config::get_host_config).put(routes::config::set_host_config),
-        )
-        // Analytics
-        .route("/api/analytics/tokens", get(routes::analytics::get_tokens))
-        .route("/api/analytics/cost", get(routes::analytics::get_cost))
-        .route(
-            "/api/analytics/sessions",
-            get(routes::analytics::get_sessions),
-        )
-        .route("/api/analytics/loops", get(routes::analytics::get_loops))
-        // Search
-        .route(
-            "/api/search/transcripts",
-            get(routes::search::search_transcripts),
         )
         // Knowledge
         .route(
@@ -490,12 +452,7 @@ async fn start_hooks_server(state: Arc<LocalAppState>, shutdown: CancellationTok
     // dummy channel that we drain and discard.
     let (outbound_tx, _outbound_rx) = mpsc::channel::<AgentMessage>(64);
 
-    let hooks_server = HooksServer::new(
-        agentic_tx,
-        state.session_mapper.clone(),
-        state.hooks_permission_manager.clone(),
-        outbound_tx,
-    );
+    let hooks_server = HooksServer::new(agentic_tx, state.session_mapper.clone(), outbound_tx);
 
     // Convert CancellationToken to a watch channel for the hooks server
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -543,17 +500,6 @@ fn spawn_hooks_message_consumer(
                 }
                 AgenticAgentMessage::LoopEnded { loop_id, .. } => {
                     state.session_mapper.remove_loop(loop_id).await;
-                }
-                _ => {}
-            }
-
-            // Signal hooks_active when we receive structured hook data
-            match &msg {
-                AgenticAgentMessage::LoopToolCall { loop_id, .. }
-                | AgenticAgentMessage::LoopMetrics { loop_id, .. }
-                | AgenticAgentMessage::LoopToolResult { loop_id, .. } => {
-                    let mut mgr = state.agentic_manager.lock().await;
-                    mgr.set_hooks_active_for_loop(loop_id);
                 }
                 _ => {}
             }
@@ -793,17 +739,7 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                         });
                 }
             } else {
-                // Main pane output -> feed to agentic manager + scrollback + browser senders
-                let agentic_msgs = {
-                    let mut mgr = state.agentic_manager.lock().await;
-                    mgr.process_output(&session_id, &data)
-                };
-                for msg in agentic_msgs {
-                    if let Err(e) = state.agentic_processor.handle_message(msg).await {
-                        tracing::warn!(error = %e, "failed to process agentic output message");
-                    }
-                }
-
+                // Main pane output -> scrollback + browser senders
                 let mut sessions = state.sessions.write().await;
                 if let Some(session_state) = sessions.get_mut(&session_id) {
                     session_state.append_scrollback(data.clone());

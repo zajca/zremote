@@ -4,7 +4,7 @@ pub mod knowledge;
 pub mod project;
 mod terminal;
 
-pub use agentic::*;
+pub use agentic::{AgenticAgentMessage, AgenticStatus};
 pub use claude::*;
 pub use knowledge::*;
 pub use project::*;

@@ -22,7 +22,6 @@ use gpui::*;
 
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
-use crate::test_introspection::tracking_overlay;
 use crate::theme;
 use crate::types::{Host, Project, Session};
 
@@ -203,13 +202,11 @@ impl Render for SessionSwitcher {
 
                         div()
                             .id(SharedString::from(format!("switcher-{idx}")))
-                            .relative()
                             .flex()
                             .items_center()
                             .gap(px(10.0))
                             .px(px(12.0))
                             .py(px(8.0))
-                            .child(tracking_overlay(format!("switcher-item-{idx}")))
                             .when(is_selected, |d: Stateful<Div>| {
                                 d.bg(theme::bg_tertiary())
                                     .border_l_3()
