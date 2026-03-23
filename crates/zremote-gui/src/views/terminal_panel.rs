@@ -73,9 +73,6 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 
-/// Lines to scroll per mouse wheel tick.
-const SCROLL_LINES_PER_TICK: i32 = 3;
-
 /// Debounce delay for WebSocket resize messages (ms).
 /// Local term.resize() is immediate; only the server message is debounced.
 const RESIZE_DEBOUNCE_MS: u64 = 150;
@@ -1092,14 +1089,11 @@ impl Render for TerminalPanel {
                         px(18.0)
                     };
 
-                    // Scroll multiplier: for discrete mouse wheels (Lines delta), each
-                    // tick reports 1 line, so multiply to get SCROLL_LINES_PER_TICK.
-                    // For trackpad (Pixels delta), the OS already provides proportional
-                    // pixel values, so use 1.0 to avoid double-scaling.
-                    let multiplier = match event.delta {
-                        ScrollDelta::Lines(_) => SCROLL_LINES_PER_TICK as f32,
-                        ScrollDelta::Pixels(_) => 1.0,
-                    };
+                    let is_precise = event.delta.precise();
+
+                    // Both Lines (mouse wheel, already scaled by GPUI) and Pixels
+                    // (touchpad, raw pixel values) need no extra scaling.
+                    let multiplier = 1.0_f32;
 
                     // Following Zed's approach: accumulate pixel deltas and convert to
                     // whole-line scroll deltas. No sub-pixel rendering offset -- alacritty's
@@ -1127,9 +1121,14 @@ impl Render for TerminalPanel {
                     };
 
                     if let Some(lines) = line_delta {
-                        // Negate: positive pixel_delta.y = scroll content down (show newer),
-                        // but Scroll::Delta(positive) = scroll up (show older/history).
-                        pending_scroll_delta.fetch_add(-lines, Ordering::Relaxed);
+                        // Lines (mouse wheel): positive y = physical "scroll up" = show
+                        // history, matches Scroll::Delta(positive). No negation needed.
+                        //
+                        // Pixels (touchpad): positive y = content moves down (natural
+                        // scrolling) = show newer, opposite of Scroll::Delta(positive).
+                        // Must negate.
+                        let scroll_lines = if is_precise { -lines } else { lines };
+                        pending_scroll_delta.fetch_add(scroll_lines, Ordering::Relaxed);
                         cx.notify(entity_id);
                     }
                 }
