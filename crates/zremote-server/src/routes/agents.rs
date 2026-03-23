@@ -14,10 +14,7 @@ use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use zremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 
 use crate::auth;
-use crate::state::{
-    AgenticLoopState, AppState, HostInfo, LoopInfo, PendingToolCall, ServerEvent, SessionInfo,
-    ToolCallInfo, TranscriptEntryInfo,
-};
+use crate::state::{AgenticLoopState, AppState, HostInfo, LoopInfo, ServerEvent, SessionInfo};
 
 /// Timeout for the first message (Register) after WebSocket upgrade.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -288,18 +285,12 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
     "DirectoryListing",
     "ProjectSettingsResult",
     "ProjectSettingsSaved",
+    "WorktreeHookResult",
+    "ActionInputsResolved",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
-const AGENTIC_MSG_TYPES: &[&str] = &[
-    "LoopDetected",
-    "LoopStateUpdate",
-    "LoopToolCall",
-    "LoopToolResult",
-    "LoopTranscript",
-    "LoopMetrics",
-    "LoopEnded",
-];
+const AGENTIC_MSG_TYPES: &[&str] = &["LoopDetected", "LoopStateUpdate", "LoopEnded"];
 
 /// Receive and deserialize an agent message from the WebSocket.
 /// Parses to `serde_json::Value` first, then dispatches based on the "type" tag.
@@ -516,7 +507,6 @@ async fn handle_agent_message(
                         task_id,
                         status: "error".to_string(),
                         summary: Some("session closed before Claude started".to_string()),
-                        total_cost_usd: 0.0,
                     });
                 }
                 // active -> completed (normal exit)
@@ -529,8 +519,8 @@ async fn handle_agent_message(
                 .execute(&state.db)
                 .await
                     && result.rows_affected() > 0
-                    && let Ok(Some((task_id, cost))) = sqlx::query_as::<_, (String, f64)>(
-                        "SELECT id, COALESCE(total_cost_usd, 0.0) FROM claude_sessions WHERE session_id = ?",
+                    && let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
+                        "SELECT id FROM claude_sessions WHERE session_id = ?",
                     )
                     .bind(&session_id_str)
                     .fetch_optional(&state.db)
@@ -540,7 +530,6 @@ async fn handle_agent_message(
                         task_id,
                         status: "completed".to_string(),
                         summary: None,
-                        total_cost_usd: cost,
                     });
                 }
             }
@@ -1118,27 +1107,18 @@ struct LoopRow {
     session_id: String,
     project_path: Option<String>,
     tool_name: String,
-    model: Option<String>,
     status: String,
     started_at: String,
     ended_at: Option<String>,
-    total_tokens_in: Option<i64>,
-    total_tokens_out: Option<i64>,
-    estimated_cost_usd: Option<f64>,
     end_reason: Option<String>,
-    summary: Option<String>,
-    context_used: Option<i64>,
-    context_max: Option<i64>,
     task_name: Option<String>,
 }
 
-/// Fetch a full `LoopInfo` from the DB, supplementing with in-memory state
-/// for fields not stored in the database (context_used, context_max, pending_tool_calls).
+/// Fetch a `LoopInfo` from the DB.
 async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, model, status, started_at, \
-         ended_at, total_tokens_in, total_tokens_out, estimated_cost_usd, end_reason, summary, \
-         context_used, context_max, task_name \
+        "SELECT id, session_id, project_path, tool_name, status, started_at, \
+         ended_at, end_reason, task_name \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -1146,41 +1126,15 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     .await
     .ok()??;
 
-    // Supplement with in-memory state for real-time fields
-    let loop_uuid: uuid::Uuid = row.id.parse().ok()?;
-    let (pending_tool_calls, context_used, context_max) =
-        state.agentic_loops.get(&loop_uuid).map_or(
-            (
-                0,
-                row.context_used.unwrap_or(0),
-                row.context_max.unwrap_or(0),
-            ),
-            |e| {
-                (
-                    i64::try_from(e.pending_tool_calls.len()).unwrap_or(0),
-                    i64::try_from(e.context_used).unwrap_or(0),
-                    i64::try_from(e.context_max).unwrap_or(0),
-                )
-            },
-        );
-
     Some(LoopInfo {
         id: row.id,
         session_id: row.session_id,
         project_path: row.project_path,
         tool_name: row.tool_name,
-        model: row.model,
         status: row.status,
         started_at: row.started_at,
         ended_at: row.ended_at,
-        total_tokens_in: row.total_tokens_in.unwrap_or(0),
-        total_tokens_out: row.total_tokens_out.unwrap_or(0),
-        estimated_cost_usd: row.estimated_cost_usd.unwrap_or(0.0),
         end_reason: row.end_reason,
-        summary: row.summary,
-        context_used,
-        context_max,
-        pending_tool_calls,
         task_name: row.task_name,
     })
 }
@@ -1198,20 +1152,18 @@ async fn handle_agentic_message(
             session_id,
             project_path,
             tool_name,
-            model,
         } => {
             let loop_id_str = loop_id.to_string();
             let session_id_str = session_id.to_string();
 
             if let Err(e) = sqlx::query(
-                "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model) \
-                 VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO agentic_loops (id, session_id, project_path, tool_name) \
+                 VALUES (?, ?, ?, ?)",
             )
             .bind(&loop_id_str)
             .bind(&session_id_str)
             .bind(&project_path)
             .bind(&tool_name)
-            .bind(&model)
             .execute(&state.db)
             .await
             {
@@ -1225,12 +1177,7 @@ async fn handle_agentic_message(
                     loop_id,
                     session_id,
                     status: AgenticStatus::Working,
-                    pending_tool_calls: std::collections::VecDeque::new(),
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    estimated_cost_usd: 0.0,
-                    context_used: 0,
-                    context_max: 0,
+                    task_name: None,
                     last_updated: Instant::now(),
                 },
             );
@@ -1259,7 +1206,7 @@ async fn handle_agentic_message(
                     row.map(|(id,)| id)
                 }
                 _ => {
-                    // No dialog-started task exists — auto-create one for this manually-started Claude session
+                    // No dialog-started task exists -- auto-create one for this manually-started Claude session
                     let auto_task_id = Uuid::new_v4().to_string();
                     let host_id_str = host_id.to_string();
 
@@ -1275,8 +1222,8 @@ async fn handle_agentic_message(
                     .flatten();
 
                     if let Err(e) = sqlx::query(
-                        "INSERT INTO claude_sessions (id, session_id, host_id, project_path, project_id, model, status, loop_id) \
-                         VALUES (?, ?, ?, ?, ?, ?, 'active', ?) \
+                        "INSERT INTO claude_sessions (id, session_id, host_id, project_path, project_id, status, loop_id) \
+                         VALUES (?, ?, ?, ?, ?, 'active', ?) \
                          ON CONFLICT(session_id) DO UPDATE SET loop_id = excluded.loop_id, status = 'active'",
                     )
                     .bind(&auto_task_id)
@@ -1284,7 +1231,6 @@ async fn handle_agentic_message(
                     .bind(&host_id_str)
                     .bind(&project_path)
                     .bind(&project_id)
-                    .bind(&model)
                     .bind(&loop_id_str)
                     .execute(&state.db)
                     .await
@@ -1328,11 +1274,16 @@ async fn handle_agentic_message(
             }
         }
         AgenticAgentMessage::LoopStateUpdate {
-            loop_id, status, ..
+            loop_id,
+            status,
+            task_name,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
                 entry.status = status;
+                if task_name.is_some() {
+                    entry.task_name = task_name.clone();
+                }
                 entry.last_updated = Instant::now();
             }
 
@@ -1343,13 +1294,27 @@ async fn handle_agentic_message(
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| format!("{status:?}").to_lowercase());
 
-            if let Err(e) = sqlx::query("UPDATE agentic_loops SET status = ? WHERE id = ?")
-                .bind(&status_str)
-                .bind(&loop_id_str)
-                .execute(&state.db)
-                .await
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET status = ?, task_name = COALESCE(?, task_name) WHERE id = ?",
+            )
+            .bind(&status_str)
+            .bind(task_name.as_deref())
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
             {
                 tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status in DB");
+            }
+
+            // Update task_name on linked claude_session if provided
+            if task_name.is_some() {
+                let _ = sqlx::query(
+                    "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
+                )
+                .bind(task_name.as_deref())
+                .bind(&loop_id_str)
+                .execute(&state.db)
+                .await;
             }
 
             // Broadcast event with full loop info
@@ -1366,241 +1331,16 @@ async fn handle_agentic_message(
                 });
             }
         }
-        AgenticAgentMessage::LoopToolCall {
-            loop_id,
-            tool_call_id,
-            tool_name,
-            arguments_json,
-            status,
-        } => {
-            // Validate arguments_json is valid JSON
-            let arguments_json = match serde_json::from_str::<serde_json::Value>(&arguments_json) {
-                Ok(_) => arguments_json,
-                Err(e) => {
-                    tracing::warn!(loop_id = %loop_id, tool_call_id = %tool_call_id, error = %e, "invalid arguments_json, replacing with empty object");
-                    "{}".to_string()
-                }
-            };
-
-            let tool_call_id_str = tool_call_id.to_string();
-            let loop_id_str = loop_id.to_string();
-            let status_str = serde_json::to_value(status)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| format!("{status:?}").to_lowercase());
-
-            if let Err(e) = sqlx::query(
-                "INSERT INTO tool_calls (id, loop_id, tool_name, arguments_json, status) \
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&tool_call_id_str)
-            .bind(&loop_id_str)
-            .bind(&tool_name)
-            .bind(&arguments_json)
-            .bind(&status_str)
-            .execute(&state.db)
-            .await
-            {
-                tracing::warn!(loop_id = %loop_id, error = %e, "failed to insert tool call");
-            }
-
-            // Add to in-memory pending queue if pending
-            if status == zremote_protocol::ToolCallStatus::Pending {
-                if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
-                    entry.pending_tool_calls.push_back(PendingToolCall {
-                        tool_call_id,
-                        tool_name: tool_name.clone(),
-                        arguments_json: arguments_json.clone(),
-                    });
-                    entry.last_updated = Instant::now();
-                }
-
-                let now = chrono::Utc::now().to_rfc3339();
-                let hostname = state
-                    .connections
-                    .get_hostname(&host_id)
-                    .await
-                    .unwrap_or_default();
-                let _ = state.events.send(ServerEvent::ToolCallPending {
-                    loop_id: loop_id_str,
-                    tool_call: ToolCallInfo {
-                        id: tool_call_id_str,
-                        loop_id: loop_id.to_string(),
-                        tool_name,
-                        arguments_json: Some(arguments_json),
-                        status: status_str,
-                        result_preview: None,
-                        duration_ms: None,
-                        created_at: now,
-                        resolved_at: None,
-                    },
-                    host_id: host_id.to_string(),
-                    hostname,
-                });
-            }
-        }
-        AgenticAgentMessage::LoopToolResult {
-            loop_id,
-            tool_call_id,
-            result_preview,
-            duration_ms,
-        } => {
-            let tool_call_id_str = tool_call_id.to_string();
-            let now = chrono::Utc::now().to_rfc3339();
-
-            if let Err(e) = sqlx::query(
-                "UPDATE tool_calls SET status = 'completed', result_preview = ?, \
-                 duration_ms = ?, resolved_at = ? WHERE id = ?",
-            )
-            .bind(&result_preview)
-            .bind(i64::try_from(duration_ms).unwrap_or(i64::MAX))
-            .bind(&now)
-            .bind(&tool_call_id_str)
-            .execute(&state.db)
-            .await
-            {
-                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update tool call result");
-            }
-
-            // Remove from pending queue
-            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
-                entry
-                    .pending_tool_calls
-                    .retain(|tc| tc.tool_call_id != tool_call_id);
-                entry.last_updated = Instant::now();
-            }
-
-            // Broadcast tool result event
-            let _ = state.events.send(ServerEvent::ToolCallResult {
-                loop_id: loop_id.to_string(),
-                tool_call: ToolCallInfo {
-                    id: tool_call_id_str,
-                    loop_id: loop_id.to_string(),
-                    tool_name: String::new(),
-                    arguments_json: None,
-                    status: "completed".to_string(),
-                    result_preview: Some(result_preview.clone()),
-                    duration_ms: Some(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
-                    created_at: String::new(),
-                    resolved_at: Some(now),
-                },
-            });
-        }
-        AgenticAgentMessage::LoopTranscript {
-            loop_id,
-            role,
-            content,
-            tool_call_id,
-            timestamp,
-        } => {
-            let loop_id_str = loop_id.to_string();
-            let role_str = serde_json::to_value(role)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| format!("{role:?}").to_lowercase());
-            let tool_call_id_str = tool_call_id.map(|id: uuid::Uuid| id.to_string());
-            let timestamp_str = timestamp.to_rfc3339();
-
-            if let Err(e) = sqlx::query(
-                "INSERT INTO transcript_entries (loop_id, role, content, tool_call_id, timestamp) \
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&loop_id_str)
-            .bind(&role_str)
-            .bind(&content)
-            .bind(&tool_call_id_str)
-            .bind(&timestamp_str)
-            .execute(&state.db)
-            .await
-            {
-                tracing::warn!(loop_id = %loop_id, error = %e, "failed to insert transcript entry");
-            }
-
-            // Broadcast transcript event
-            let _ = state.events.send(ServerEvent::LoopTranscript {
-                loop_id: loop_id_str,
-                transcript_entry: TranscriptEntryInfo {
-                    id: 0, // DB auto-increment, not critical for real-time
-                    loop_id: loop_id.to_string(),
-                    role: role_str,
-                    content,
-                    tool_call_id: tool_call_id_str,
-                    timestamp: timestamp_str,
-                },
-            });
-        }
-        AgenticAgentMessage::LoopMetrics {
-            loop_id,
-            tokens_in,
-            tokens_out,
-            estimated_cost_usd,
-            context_used,
-            context_max,
-            model,
-            task_name,
-        } => {
-            // Update in-memory state
-            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
-                entry.tokens_in = tokens_in;
-                entry.tokens_out = tokens_out;
-                entry.estimated_cost_usd = estimated_cost_usd;
-                entry.context_used = context_used;
-                entry.context_max = context_max;
-                entry.last_updated = Instant::now();
-            }
-
-            // Update DB
-            let loop_id_str = loop_id.to_string();
-            let model_opt: Option<&str> = if model.is_empty() { None } else { Some(&model) };
-            if let Err(e) = sqlx::query(
-                "UPDATE agentic_loops SET total_tokens_in = ?, total_tokens_out = ?, \
-                 estimated_cost_usd = ?, context_used = ?, context_max = ?, \
-                 model = COALESCE(?, model), task_name = COALESCE(?, task_name) WHERE id = ?",
-            )
-            .bind(i64::try_from(tokens_in).unwrap_or(i64::MAX))
-            .bind(i64::try_from(tokens_out).unwrap_or(i64::MAX))
-            .bind(estimated_cost_usd)
-            .bind(i64::try_from(context_used).unwrap_or(i64::MAX))
-            .bind(i64::try_from(context_max).unwrap_or(i64::MAX))
-            .bind(model_opt)
-            .bind(task_name.as_deref())
-            .bind(&loop_id_str)
-            .execute(&state.db)
-            .await
-            {
-                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
-            }
-
-            if task_name.is_some() {
-                let _ = sqlx::query(
-                    "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
-                )
-                .bind(task_name.as_deref())
-                .bind(&loop_id_str)
-                .execute(&state.db)
-                .await;
-            }
-
-            // Broadcast metrics event with full loop info
-            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
-                let _ = state.events.send(ServerEvent::LoopMetrics { loop_info });
-            }
-        }
-        AgenticAgentMessage::LoopEnded {
-            loop_id,
-            reason,
-            summary,
-        } => {
+        AgenticAgentMessage::LoopEnded { loop_id, reason } => {
             let loop_id_str = loop_id.to_string();
             let now = chrono::Utc::now().to_rfc3339();
 
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET status = 'completed', ended_at = ?, \
-                 end_reason = ?, summary = ? WHERE id = ?",
+                 end_reason = ? WHERE id = ?",
             )
             .bind(&now)
             .bind(&reason)
-            .bind(&summary)
             .bind(&loop_id_str)
             .execute(&state.db)
             .await
@@ -1617,36 +1357,18 @@ async fn handle_agentic_message(
             {
                 let now_str = chrono::Utc::now().to_rfc3339();
                 let _ = sqlx::query(
-                    "UPDATE claude_sessions SET status = 'completed', ended_at = ?, summary = ?, \
-                     total_cost_usd = (SELECT COALESCE(estimated_cost_usd, 0) FROM agentic_loops WHERE id = ?), \
-                     total_tokens_in = (SELECT COALESCE(total_tokens_in, 0) FROM agentic_loops WHERE id = ?), \
-                     total_tokens_out = (SELECT COALESCE(total_tokens_out, 0) FROM agentic_loops WHERE id = ?) \
-                     WHERE id = ?",
+                    "UPDATE claude_sessions SET status = 'completed', ended_at = ? WHERE id = ?",
                 )
                 .bind(&now_str)
-                .bind(&summary)
-                .bind(&loop_id_str)
-                .bind(&loop_id_str)
-                .bind(&loop_id_str)
                 .bind(&task_id)
                 .execute(&state.db)
                 .await;
 
-                // Fetch updated values for event
-                if let Ok(Some((cost,))) = sqlx::query_as::<_, (f64,)>(
-                    "SELECT COALESCE(total_cost_usd, 0.0) FROM claude_sessions WHERE id = ?",
-                )
-                .bind(&task_id)
-                .fetch_optional(&state.db)
-                .await
-                {
-                    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
-                        task_id,
-                        status: "completed".to_string(),
-                        summary: summary.clone(),
-                        total_cost_usd: cost,
-                    });
-                }
+                let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                    task_id,
+                    status: "completed".to_string(),
+                    summary: None,
+                });
             }
 
             // Fetch full loop info before removing from in-memory state
@@ -1669,68 +1391,6 @@ async fn handle_agentic_message(
             }
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
-
-            // Auto-extract memories if configured
-            {
-                let auto_extract: Option<(String,)> = sqlx::query_as(
-                    "SELECT value FROM config_global WHERE key = 'openviking.auto_extract'",
-                )
-                .fetch_optional(&state.db)
-                .await
-                .unwrap_or(None);
-
-                let should_extract = auto_extract.is_none_or(|(v,)| v != "false" && v != "0");
-
-                if should_extract {
-                    // Fetch project_path for this loop
-                    let project_path: Option<(Option<String>,)> =
-                        sqlx::query_as("SELECT project_path FROM agentic_loops WHERE id = ?")
-                            .bind(&loop_id_str)
-                            .fetch_optional(&state.db)
-                            .await
-                            .unwrap_or(None);
-
-                    if let Some((Some(ref path),)) = project_path
-                        && !path.is_empty()
-                    {
-                        // Fetch transcript
-                        let transcript_rows: Vec<(String, String, String)> = sqlx::query_as(
-                            "SELECT role, content, timestamp FROM transcript_entries WHERE loop_id = ? ORDER BY id"
-                        )
-                        .bind(&loop_id_str)
-                        .fetch_all(&state.db)
-                        .await
-                        .unwrap_or_default();
-
-                        if !transcript_rows.is_empty() {
-                            let transcript: Vec<zremote_protocol::knowledge::TranscriptFragment> =
-                                transcript_rows
-                                    .into_iter()
-                                    .map(|(role, content, timestamp)| {
-                                        zremote_protocol::knowledge::TranscriptFragment {
-                                            role,
-                                            content,
-                                            timestamp: timestamp
-                                                .parse()
-                                                .unwrap_or_else(|_| chrono::Utc::now()),
-                                        }
-                                    })
-                                    .collect();
-
-                            if let Some(sender) = state.connections.get_sender(&host_id).await {
-                                let _ = sender.send(zremote_protocol::ServerMessage::KnowledgeAction(
-                                    zremote_protocol::knowledge::KnowledgeServerMessage::ExtractMemory {
-                                        loop_id,
-                                        project_path: path.clone(),
-                                        transcript,
-                                    }
-                                )).await;
-                                tracing::info!(loop_id = %loop_id, project_path = %path, "triggered auto memory extraction");
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
     Ok(())
@@ -1777,7 +1437,6 @@ async fn handle_claude_message(
                 task_id: task_id_str,
                 status: "error".to_string(),
                 summary: Some(error),
-                total_cost_usd: 0.0,
             });
         }
         ClaudeAgentMessage::SessionsDiscovered {

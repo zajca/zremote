@@ -9,9 +9,6 @@ mod persistence;
 mod terminal_direct;
 mod terminal_handle;
 mod terminal_ws;
-mod test_introspection;
-#[cfg(feature = "test-introspection")]
-mod test_server;
 #[allow(dead_code)]
 mod theme;
 #[allow(dead_code)]
@@ -46,10 +43,6 @@ struct Cli {
     /// Auto-exit after N seconds (for headless screenshot capture).
     #[arg(long)]
     exit_after: Option<u64>,
-
-    /// Enable test introspection HTTP server for E2E GUI testing.
-    #[arg(long)]
-    test_introspect: bool,
 }
 
 /// Extract base HTTP URL from a server URL that may include a WS path.
@@ -123,29 +116,12 @@ fn main() {
     let restored_width = persistence.state().window_width;
     let restored_height = persistence.state().window_height;
 
-    // Set up test introspection if requested and feature-enabled.
-    #[cfg(feature = "test-introspection")]
-    let (test_snapshot, test_app_state) = if cli.test_introspect {
-        let snapshot = test_introspection::SharedSnapshot::default();
-        let app_state_snapshot = test_introspection::SharedAppState::default();
-        let server_snapshot = snapshot.clone();
-        let server_app_state = app_state_snapshot.clone();
-        tokio_handle.spawn(test_server::run(server_snapshot, server_app_state));
-        (Some(snapshot), Some(app_state_snapshot))
-    } else {
-        (None, None)
-    };
-
     let app_state = Arc::new(AppState {
         api,
         tokio_handle,
         event_rx,
         mode,
         persistence: Mutex::new(persistence),
-        #[cfg(feature = "test-introspection")]
-        test_snapshot,
-        #[cfg(feature = "test-introspection")]
-        test_app_state,
     });
 
     let exit_after = cli.exit_after;
@@ -154,15 +130,6 @@ fn main() {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            // Register introspection global if enabled.
-            #[cfg(feature = "test-introspection")]
-            if let Some(snapshot) = &app_state.test_snapshot {
-                let app_state_shared = app_state.test_app_state.clone().unwrap_or_default();
-                cx.set_global(test_introspection::ElementRegistry::new(
-                    snapshot.clone(),
-                    app_state_shared,
-                ));
-            }
             let app_state_for_quit = app_state.clone();
             let app_state_clone = app_state.clone();
             cx.open_window(

@@ -1,5 +1,4 @@
 pub mod agentic;
-pub mod analytics;
 pub mod claude_sessions;
 pub mod config;
 pub mod events;
@@ -7,8 +6,6 @@ pub mod health;
 pub mod hosts;
 pub mod knowledge;
 pub mod linear;
-pub mod permissions;
 pub mod projects;
-pub mod search;
 pub mod sessions;
 pub mod terminal;

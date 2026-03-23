@@ -131,12 +131,6 @@ pub async fn purge_session(pool: &SqlitePool, session_id: &str) -> Result<(), Ap
         .execute(pool)
         .await?;
 
-    // Delete session stats
-    sqlx::query("DELETE FROM session_stats WHERE session_id = ?")
-        .bind(session_id)
-        .execute(pool)
-        .await?;
-
     // Delete the session row
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(session_id)

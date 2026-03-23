@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::post;
 use tokio::sync::mpsc;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage};
 
 use super::handler::{self, HooksState};
 use super::mapper::SessionMapper;
-use super::permission::PermissionManager;
 
 /// The hooks HTTP sidecar server.
 ///
@@ -24,17 +24,12 @@ impl HooksServer {
     pub fn new(
         agentic_tx: mpsc::Sender<AgenticAgentMessage>,
         mapper: SessionMapper,
-        permission_manager: Arc<PermissionManager>,
         outbound_tx: mpsc::Sender<AgentMessage>,
     ) -> Self {
         Self {
             state: HooksState {
                 agentic_tx,
                 mapper,
-                permission_manager,
-                tool_call_starts: Arc::new(tokio::sync::RwLock::new(
-                    std::collections::HashMap::new(),
-                )),
                 outbound_tx,
                 sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(
                     std::collections::HashSet::new(),
@@ -52,6 +47,7 @@ impl HooksServer {
     ) -> Result<SocketAddr, std::io::Error> {
         let app = Router::new()
             .route("/hooks", post(handler::handle_hook))
+            .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(self.state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -125,7 +121,7 @@ mod tests {
         let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
         let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
-        let permission_manager = Arc::new(PermissionManager::new());
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         // Register a loop so the mapper can resolve
@@ -133,7 +129,7 @@ mod tests {
         let loop_id = Uuid::new_v4();
         mapper.register_loop(session_id, loop_id).await;
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         // Send a PreToolUse hook
@@ -153,18 +149,18 @@ mod tests {
 
         assert_eq!(resp.status(), 200);
 
-        // Verify the agentic message was emitted
+        // Verify the agentic message was emitted (now LoopStateUpdate)
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
-            AgenticAgentMessage::LoopToolCall {
+            AgenticAgentMessage::LoopStateUpdate {
                 loop_id: lid,
-                tool_name,
+                status,
                 ..
             } => {
                 assert_eq!(lid, loop_id);
-                assert_eq!(tool_name, "Read");
+                assert_eq!(status, zremote_protocol::AgenticStatus::Working);
             }
-            other => panic!("expected LoopToolCall, got {other:?}"),
+            other => panic!("expected LoopStateUpdate, got {other:?}"),
         }
 
         // Shutdown
@@ -176,10 +172,10 @@ mod tests {
         let (agentic_tx, _agentic_rx) = mpsc::channel(64);
         let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
-        let permission_manager = Arc::new(PermissionManager::new());
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -210,10 +206,9 @@ mod tests {
         let loop_id = Uuid::new_v4();
         mapper.register_loop(session_id, loop_id).await;
 
-        let permission_manager = Arc::new(PermissionManager::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -241,10 +236,9 @@ mod tests {
         let loop_id = Uuid::new_v4();
         mapper.register_loop(session_id, loop_id).await;
 
-        let permission_manager = Arc::new(PermissionManager::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -283,7 +277,7 @@ mod tests {
         let msg = agentic_rx.try_recv().unwrap();
         assert!(matches!(
             msg,
-            zremote_protocol::AgenticAgentMessage::LoopToolCall { .. }
+            zremote_protocol::AgenticAgentMessage::LoopStateUpdate { .. }
         ));
 
         shutdown_tx.send(true).unwrap();
@@ -294,10 +288,10 @@ mod tests {
         let (agentic_tx, _agentic_rx) = mpsc::channel(64);
         let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
-        let permission_manager = Arc::new(PermissionManager::new());
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -321,10 +315,10 @@ mod tests {
         let (agentic_tx, _agentic_rx) = mpsc::channel(64);
         let (outbound_tx, _outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
-        let permission_manager = Arc::new(PermissionManager::new());
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, permission_manager, outbound_tx);
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();

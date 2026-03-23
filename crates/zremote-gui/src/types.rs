@@ -110,8 +110,32 @@ pub enum ServerEvent {
     HostStatusChanged { host_id: String, status: String },
     #[serde(rename = "projects_updated")]
     ProjectsUpdated { host_id: String },
+    #[serde(rename = "agentic_loop_detected")]
+    LoopDetected {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfoLite,
+    },
+    #[serde(rename = "agentic_loop_state_update")]
+    LoopStateChanged {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfoLite,
+    },
+    #[serde(rename = "agentic_loop_ended")]
+    LoopEnded {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfoLite,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// Lightweight loop info for GUI sidebar display.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoopInfoLite {
+    pub id: String,
+    pub session_id: String,
+    pub status: String,
+    pub task_name: Option<String>,
 }
 
 /// Terminal WebSocket message from server.
