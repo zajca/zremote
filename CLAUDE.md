@@ -90,6 +90,17 @@ cargo clippy -p zremote-gui              # Lint
 
 **Headless testing**: `cargo run -p zremote-gui -- --exit-after 5` auto-exits after N seconds (for screenshot capture).
 
+### Git & Committing
+
+**Always commit inside `nix develop`**: The pre-commit hook runs `cargo fmt`, `cargo clippy`, and `cargo test` — all require the nix develop environment. Use:
+```bash
+nix develop --command bash -c 'git commit -m "message"'
+```
+
+**Never use `GIT_DIR`/`GIT_WORK_TREE` env vars** as a workaround for git issues. These env vars leak into subprocesses (cargo test → git init in tests) and cause cascading failures.
+
+**Worktree isolation (`isolation: "worktree"`) corrupts `.git/config`**: Agents spawned with `isolation: "worktree"` can overwrite `user.name`, `user.email`, set `core.worktree` to a temp path, and flip `bare = true` after cleanup. This breaks all git operations in the main repo. **Do not use `isolation: "worktree"`** unless the worktree cleanup is verified to restore `.git/config` to its original state. If git stops working with "fatal: this operation must be run in a work tree", check `.git/config` for corrupted `bare` or `core.worktree` values.
+
 ### Backend Development
 
 ```bash
