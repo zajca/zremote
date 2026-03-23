@@ -9,7 +9,7 @@ Interactive end-to-end testing for the GPUI desktop app. Runs the app in a headl
 
 ## Prerequisites
 
-- Must be in `nix develop` shell (provides cage, grim, wtype, ydotool)
+- Must be in `nix develop` shell (provides cage, grim, wtype, wlrctl)
 - Agent must be running: `cargo run -p zremote-agent -- local --port 3000 &` (or the test connects to any available server)
 
 ## Setup
@@ -38,8 +38,8 @@ E2E_BUILD=0 source scripts/e2e-test.sh
 |---------|-------------|
 | `e2e_elements` | List all tracked UI elements with bounds (JSON) |
 | `e2e_element <id>` | Get single element bounds by ID |
-| `e2e_click <id>` | Click element by ID (computes center, uses ydotool) |
-| `e2e_key <key>` | Send keyboard shortcut via wtype (e.g. "ctrl+k") |
+| `e2e_click <id>` | Click element by ID via wlrctl (see Known Limitations) |
+| `e2e_key <combo>` | Send keyboard shortcut via wtype (e.g. "ctrl+k", "Escape") |
 | `e2e_type <text>` | Type text via wtype |
 | `e2e_screenshot [path]` | Take screenshot, returns file path |
 | `e2e_wait_render [timeout]` | Wait for UI to re-render after action |
@@ -52,44 +52,44 @@ E2E_BUILD=0 source scripts/e2e-test.sh
 - `host-header-{host_id}` - Host header row
 - `new-session-{host_id}` - New session button per host
 - `new-session-local` - New session button (local mode)
+- `new-in-{project_id}` - New session in project button
 - `session-{session_id}` - Session row (clickable)
-- `close-{session_id}` - Close session button
 - `project-{project_id}` - Project row
 
 ### Terminal
 - `terminal-content` - Terminal rendering area
 
 ### Modals
-- `palette-container` - Command palette container
-- `palette-item-{index}` - Individual palette items
-- `switcher-container` - Session switcher container
-- `switcher-item-{index}` - Individual switcher items
+- `palette-item-{index}` - Individual palette items (visible when palette open)
+- `switcher-item-{index}` - Individual switcher items (visible when switcher open)
 
 ## Test Workflow
 
 The recommended pattern is: **action -> wait -> verify**
 
-1. Perform an action (click, keyboard shortcut)
+1. Perform an action (keyboard shortcut)
 2. Wait for render: `e2e_wait_render`
 3. Verify state: check elements, take screenshot, check state
 
 ### Verify initial load
 
 ```bash
-e2e_elements          # Should show sidebar elements
+e2e_elements          # Should show new-session-local element
 e2e_screenshot        # Visual check of initial state
 e2e_state             # Check mode, no session selected
 ```
 
-### Open command palette
+### Open command palette (verified working)
 
 ```bash
 e2e_key "ctrl+k"
 e2e_wait_render
-e2e_elements          # palette-container should appear
+e2e_state             # palette_open: true
+e2e_elements          # palette-item-0 should appear
 e2e_screenshot        # Visual check
 e2e_key "Escape"      # Close palette
 e2e_wait_render
+e2e_state             # palette_open: false
 ```
 
 ### Open session switcher
@@ -97,16 +97,8 @@ e2e_wait_render
 ```bash
 e2e_key "ctrl+Tab"
 e2e_wait_render
-e2e_elements          # switcher-container should appear
-```
-
-### Click sidebar element
-
-```bash
-e2e_click "new-session-local"
-e2e_wait_render
-e2e_state             # Check terminal_active is true
-e2e_elements          # terminal-content should appear
+e2e_state             # switcher_open: true
+e2e_elements          # switcher-item-* should appear
 ```
 
 ## Environment Variables
@@ -117,12 +109,17 @@ e2e_elements          # terminal-content should appear
 | `E2E_APP_BINARY` | `target/debug/zremote-gui` | Custom binary path |
 | `E2E_SERVER_URL` | `http://localhost:3000` | Server URL for the app |
 
+## Known Limitations
+
+- **Mouse clicks**: `e2e_click` uses wlrctl virtual pointer which may not work reliably in cage headless mode (pointer events are not forwarded to the GPUI app). Prefer keyboard-driven testing (`e2e_key`) for interactions.
+- **Element visibility**: Elements are only tracked if they were rendered in the most recent frame. Check `visible: true` in element bounds.
+- **Keyboard shortcuts require focus**: The app auto-focuses on startup, but after compositor-level events focus may shift.
+
 ## Troubleshooting
 
-- **ydotool permission denied**: ydotool needs write access to `/dev/uinput`. Run `sudo chmod 666 /dev/uinput` or add yourself to the input group.
 - **cage not starting**: Ensure you're in `nix develop`. Check `WLR_BACKENDS=headless` is set.
 - **No elements returned**: The app may not have rendered yet. Use `e2e_wait_render` or increase the startup wait time.
-- **wtype: No compositor**: Ensure `WAYLAND_DISPLAY` is set correctly (the harness handles this).
+- **wtype: Unknown key**: Use wtype key names. Modifiers: "ctrl", "shift", "alt". Keys: "k", "Tab", "Escape", "Return".
 - **App crashes on start**: Check that the server URL is reachable. For standalone testing, start a local agent first.
 
 ## Cleanup

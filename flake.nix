@@ -41,9 +41,11 @@
             pkgs.libxcb
             pkgs.alsa-lib
             pkgs.cmake
-            # Headless screenshot testing (cage compositor + grim capture)
+            # Headless E2E testing (cage compositor + grim capture + input simulation)
             pkgs.cage
             pkgs.grim
+            pkgs.wtype
+            pkgs.wlrctl
           ];
 
           shellHook = ''
