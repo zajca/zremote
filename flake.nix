@@ -27,8 +27,6 @@
             rustToolchain
             pkgs.cargo-audit
             pkgs.cargo-llvm-cov
-            pkgs.bun
-            pkgs.nodejs_22
             pkgs.python312
             pkgs.sqlite
             pkgs.pkg-config
@@ -52,7 +50,6 @@
             echo "ZRemote dev shell ready"
             echo "  Rust: $(rustc --version)"
             echo "  Cargo: $(cargo --version)"
-            echo "  Bun: $(bun --version)"
             # GPUI needs Vulkan, Wayland, and font libraries at runtime
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
               pkgs.vulkan-loader

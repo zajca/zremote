@@ -15,7 +15,7 @@ Additionally, users have no visibility into what teammates are doing in their sp
 ## 2. Goals
 
 1. **Pane-stable I/O** -- Input always reaches the original shell pane, output always comes from it, regardless of how many panes are split
-2. **Multi-pane visibility** -- All tmux panes in a session are visible in the browser UI as tabs
+2. **Multi-pane visibility** -- All tmux panes in a session are visible in the UI as tabs
 3. **Per-pane interaction** -- User can switch between pane tabs and send input to any pane
 4. **Zero configuration** -- Works automatically when panes are split by Claude Code or manually
 5. **Backward compatible** -- Existing single-pane sessions work exactly as before
@@ -53,13 +53,7 @@ New panes are detected via periodic `tmux list-panes` polling (every 3 seconds, 
 
 Each detected pane gets its own `pipe-pane` + FIFO + reader task, following the same pattern as the main pane. Output is tagged with `pane_id` and routed to per-pane scrollback buffers.
 
-### 4.5 Frontend: hidden-but-mounted terminals
-
-Each pane tab has its own xterm.js instance, always mounted but hidden via `display:none` when not active. This preserves terminal state (cursor, screen buffer, scroll position). Switching tabs is instant with no data reload.
-
-Tab bar appears only when >1 pane exists. Single-pane sessions look exactly as before.
-
-### 4.6 Output channel type change
+### 4.5 Output channel type change
 
 The output channel changes from `(SessionId, Vec<u8>)` to a `PtyOutput` struct:
 
@@ -233,89 +227,7 @@ In `process_pty_output`:
 
 In `check_sessions` (3s interval):
 - Call `tmux_session.sync_panes()` for each tmux-backed session
-- Broadcast `PaneAdded`/`PaneRemoved` to all browser senders for that session
-
-#### 5.2.6 Frontend types (`web/src/types/terminal.ts`)
-
-```typescript
-// NEW file
-export interface PaneInfo {
-  pane_id: string;
-  index: number;
-}
-
-// Extended WsMessage in Terminal.tsx
-interface WsMessage {
-  type: "output" | "session_closed" | "session_suspended" | "session_resumed"
-      | "error" | "scrollback_start" | "scrollback_end"
-      | "pane_added" | "pane_removed";  // NEW
-  pane_id?: string;   // NEW - on output, pane_added, pane_removed
-  index?: number;     // NEW - on pane_added
-  data?: string;
-  exit_code?: number | null;
-  message?: string;
-}
-```
-
-#### 5.2.7 Terminal component (`web/src/components/Terminal.tsx`)
-
-Props change:
-```typescript
-interface TerminalProps {
-  sessionId: string;
-  paneId?: string;        // NEW - undefined = main pane
-  onPaneEvent?: (event: PaneEvent) => void;  // NEW - bubble pane changes up
-}
-```
-
-Input/resize messages include `pane_id` when set:
-```typescript
-wsRef.current.send(JSON.stringify({ type: "input", pane_id: paneId, data }));
-```
-
-Handle `pane_added`/`pane_removed` by calling `onPaneEvent`.
-
-**Important**: Only the main-pane Terminal instance manages the WebSocket connection. Extra pane terminals receive output forwarded from the main terminal's WS handler (via shared state or callback). This avoids multiple WS connections per session.
-
-Alternative: each pane could have its own WS connection to `/ws/terminal/{sessionId}?pane={paneId}`. Simpler per-component but more server resources. Going with single WS + client-side routing.
-
-#### 5.2.8 PaneTabBar component (`web/src/components/PaneTabBar.tsx`)
-
-```typescript
-interface PaneTabBarProps {
-  panes: PaneInfo[];
-  activePaneId: string | undefined;  // undefined = main
-  onSelectPane: (paneId: string | undefined) => void;
-}
-```
-
-- Horizontal tab bar, only visible when `panes.length > 0` (extra panes exist)
-- Main pane tab always first, labeled "Main" or "Shell"
-- Extra panes labeled "Pane {index}" with pane_id as tooltip
-- Active tab: `bg-bg-tertiary text-text-primary`, inactive: `text-text-secondary hover:text-text-primary`
-- Consistent with existing tab patterns (`text-sm`, `px-3 py-1.5`, `rounded-md`, `transition-colors duration-150`)
-
-#### 5.2.9 SessionPage layout (`web/src/pages/SessionPage.tsx`)
-
-```
-SessionPage
-+-- Header (existing, unchanged)
-+-- Terminal area (flex-1, flex-col)
-    +-- AgenticOverlay (existing)
-    +-- PaneTabBar (NEW, hidden when single pane)
-    +-- Pane panels (flex-1, relative)
-        +-- Terminal sessionId paneId=undefined (main, always visible)
-        +-- Terminal sessionId paneId="%5" (hidden when not active)
-        +-- Terminal sessionId paneId="%6" (hidden when not active)
-```
-
-State:
-```typescript
-const [panes, setPanes] = useState<PaneInfo[]>([]);
-const [activePaneId, setActivePaneId] = useState<string | undefined>(undefined);
-```
-
-All terminals always mounted (CSS `display: none` for inactive). On `pane_removed` for active pane, switch to main.
+- Broadcast `PaneAdded`/`PaneRemoved` to all connected clients for that session
 
 ---
 
@@ -330,18 +242,12 @@ All terminals always mounted (CSS `display: none` for inactive). On `pane_remove
 | `crates/zremote-agent/src/local/routes/terminal.rs` | 2 | pane_id in messages, per-pane scrollback |
 | `crates/zremote-agent/src/connection.rs` | 2 | PtyOutput (mechanical) |
 | `crates/zremote-core/src/state.rs` | 2 | BrowserMessage pane_id, PaneAdded/Removed, per-pane scrollback |
-| `web/src/types/terminal.ts` | 2 | NEW - PaneInfo type |
-| `web/src/components/Terminal.tsx` | 2 | paneId prop, pane event handling |
-| `web/src/components/PaneTabBar.tsx` | 2 | NEW - tab bar component |
-| `web/src/pages/SessionPage.tsx` | 2 | pane state, tabs, multiple terminals |
 
 ## 7. Phasing
 
 **Phase 1** is the critical fix. Single file change (`tmux.rs`). Can be shipped immediately. Makes existing sessions work correctly when panes are split.
 
-**Phase 2** builds on Phase 1. Adds multi-pane visibility. Can be implemented incrementally:
-- 2a: Backend pane monitoring + PtyOutput type change + BrowserMessage changes
-- 2b: Frontend tabs
+**Phase 2** builds on Phase 1. Adds multi-pane visibility (backend pane monitoring + PtyOutput type change + BrowserMessage changes).
 
 ## 8. Testing
 
@@ -351,16 +257,15 @@ cargo build -p zremote-agent && cargo test -p zremote-agent && cargo clippy -p z
 
 # Phase 2
 cargo test --workspace && cargo clippy --workspace
-cd web && bun run typecheck && bun run test
 
 # Manual (both phases)
 # 1. cargo run -p zremote-agent -- local --port 3000
-# 2. Open browser, create session
+# 2. Connect GPUI client, create session
 # 3. In terminal: tmux split-window -h
 # Phase 1: input still goes to original pane (left)
-# Phase 2: new "Pane 1" tab appears, can switch and interact with both
+# Phase 2: pane changes detected, new pane output routed correctly
 # 4. Close the split pane (exit in it)
-# Phase 2: tab disappears, back to single terminal
+# Phase 2: pane removed, back to single pane
 ```
 
 New tests:
@@ -368,11 +273,10 @@ New tests:
 - `PtyOutput` serialization
 - `BrowserMessage::Output` with `pane_id` roundtrip
 - `BrowserMessage::PaneAdded`/`PaneRemoved` serialization
-- `PaneTabBar` render tests (0 panes hidden, 1+ panes visible, active state)
 
 ## 9. Risk Assessment
 
 - **Phase 1 -- Low risk**: Single file, no API changes, public interface unchanged. Backward compatible (pane_id captured at runtime).
-- **Phase 2 -- Medium risk**: Output channel type change touches 5 files (mechanical). BrowserMessage change is additive (new optional field + new variants). Frontend is isolated.
+- **Phase 2 -- Medium risk**: Output channel type change touches 5 files (mechanical). BrowserMessage change is additive (new optional field + new variants).
 - **Edge case -- tmux < 1.8**: `#{pane_id}` format variable introduced in tmux 1.8 (2013). Any version in active use supports it.
 - **Edge case -- pane closed between detection and I/O setup**: sync_panes catches this on next poll. Reader gets EOF, cleans up.

@@ -2,7 +2,7 @@
 
 ## Inspiration: IntelliJ Search Everywhere + Raycast
 
-This idea targets the **native GPUI client** (not the web UI). The user comes from IntelliJ and wants to feel at home -- tabbed search with dedicated shortcuts per category, fast fuzzy navigation, Raycast-like item rendering.
+This idea targets the **native GPUI client**. The user comes from IntelliJ and wants to feel at home -- tabbed search with dedicated shortcuts per category, fast fuzzy navigation, Raycast-like item rendering.
 
 ### IntelliJ Search Everywhere
 

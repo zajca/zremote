@@ -1,7 +1,7 @@
 # Research: Similar Projects to ZRemote
 
 ## Context
-ZRemote = central server with web UI for managing remote machines, terminals, agentic sessions, OAuth credentials and Telegram notifications. This document maps existing projects that cover parts of this vision.
+ZRemote = central server with native desktop app for managing remote machines, terminals, agentic sessions, OAuth credentials and Telegram notifications. This document maps existing projects that cover parts of this vision.
 
 ---
 
@@ -57,11 +57,11 @@ No existing project combines all aspects of ZRemote:
 | Feature | Claude RC | JessyTsui | CloudCLI | Moshi | Web terms | ZRemote |
 |---|---|---|---|---|---|---|
 | Central multi-machine hub | - | - | - | - | partial | **YES** |
-| Web UI for sessions | - | - | YES | - | YES | **YES** |
+| UI for sessions (web or native) | - | - | YES | - | YES | **YES** (native) |
 | Attach from local (tmux-style) | - | - | - | via SSH | - | **YES** |
 | Agentic loop controls | - | - | - | - | - | **YES** |
 | OAuth monitoring + notifications | - | - | - | - | - | **YES** |
 | Telegram bot integration | - | YES | - | - | - | **YES** |
 | Mobile access | YES | YES | YES | YES | - | **YES** |
 
-**Closest competitors**: CloudCLI (web UI) + JessyTsui (Telegram) + Anthropic Remote Control (mobile access). But each solves only a partial piece. ZRemote is unique in being a central hub for multiple machines with full integration of agentic controls, OAuth and Telegram.
+**Closest competitors**: CloudCLI (web UI) + JessyTsui (Telegram) + Anthropic Remote Control (mobile access). But each solves only a partial piece. ZRemote is unique in being a central hub for multiple machines with a native GPUI desktop client and full integration of agentic controls, OAuth and Telegram.

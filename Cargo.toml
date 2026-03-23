@@ -43,7 +43,6 @@ sysinfo = "0.34"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust-embed = { version = "8", features = ["compression"] }
-mime_guess = "2"
 
 # GUI
 gpui = "0.2"
