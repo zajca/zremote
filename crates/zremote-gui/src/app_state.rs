@@ -16,4 +16,10 @@ pub struct AppState {
     pub mode: String,
     /// Persistent GUI state (window size, selected session, etc.).
     pub persistence: Mutex<Persistence>,
+    /// Shared element snapshot for test introspection HTTP server.
+    #[cfg(feature = "test-introspection")]
+    pub test_snapshot: Option<crate::test_introspection::SharedSnapshot>,
+    /// Shared app state snapshot for test introspection HTTP server.
+    #[cfg(feature = "test-introspection")]
+    pub test_app_state: Option<crate::test_introspection::SharedAppState>,
 }
