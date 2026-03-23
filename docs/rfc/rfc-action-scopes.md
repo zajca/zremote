@@ -39,19 +39,7 @@ New field on `ProjectAction`:
 pub scopes: Vec<ActionScope>,
 ```
 
-### TypeScript (web)
-
-```typescript
-export type ActionScope = "project" | "worktree" | "sidebar" | "command_palette";
-
-export interface ProjectAction {
-  // ... existing fields ...
-  worktree_scoped: boolean;
-  scopes?: ActionScope[];
-}
-```
-
-### Helper functions (both Rust and TypeScript)
+### Helper functions (Rust)
 
 ```
 effective_scopes(action) -> Vec<ActionScope>

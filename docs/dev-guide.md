@@ -3,56 +3,26 @@
 ## Prerequisites
 
 - [Nix](https://nixos.org/) with flakes (recommended) -- `nix develop` gives you everything
-- Or install manually: Rust (stable), Bun, SQLite3
+- Or install manually: Rust (stable), SQLite3
 
 ## First-Time Setup
 
 ```bash
 git clone <repo-url> && cd myremote
 nix develop                    # enter dev shell
-./scripts/dev-setup.sh         # install deps, build web UI, compile workspace
+./scripts/dev-setup.sh         # install deps, compile workspace
 ```
 
 The setup script is idempotent -- safe to re-run anytime.
 
-## Development Modes
-
-### Full Hot-Reload (frontend + backend)
+## Development
 
 ```bash
-./scripts/dev.sh
-```
+# Run the GPUI desktop client (connects to localhost:3000 by default)
+cargo run -p zremote-gui
 
-Starts two processes:
-- **Agent** on `http://localhost:3000` -- serves API and WebSocket endpoints
-- **Vite** on `http://localhost:5173` -- proxies API/WS to agent, hot-reloads React code
-
-Open `http://localhost:5173` in your browser. Edit any `.tsx` file and changes appear instantly.
-
-To use a different agent port:
-
-```bash
-./scripts/dev.sh 3001
-```
-
-### Backend Only
-
-```bash
-./scripts/dev-backend.sh
-```
-
-Starts the agent with embedded UI (no Vite, no hot-reload). Open `http://localhost:3000`.
-
-Use this when you're only changing Rust code and don't need frontend hot-reload.
-
-### Manual Setup (if you need more control)
-
-```bash
-# Terminal 1: Agent with filesystem-served UI
-cargo run -p zremote-agent -- local --port 3000 --web-dir ./web/dist/
-
-# Terminal 2: Vite dev server
-cd web && bun run dev
+# Run the agent in local mode
+cargo run -p zremote-agent -- local --port 3000
 ```
 
 ## Running Tests
@@ -60,12 +30,6 @@ cd web && bun run dev
 ```bash
 # Rust tests
 cargo test --workspace
-
-# Frontend tests
-cd web && bun run test
-
-# Type checking
-cd web && bun run typecheck
 
 # Lint
 cargo clippy --workspace
@@ -108,25 +72,20 @@ When deploying changes to production:
 ```
 scripts/
   dev-setup.sh          # First-time setup
-  dev.sh                # Full hot-reload dev environment
   dev-backend.sh        # Backend-only dev
   check-coverage.sh     # Coverage gate check
 
 crates/
+  zremote-gui/          # Native GPUI desktop client
   zremote-protocol/     # Shared message types (agent <-> server)
   zremote-core/         # Shared DB, queries, processing
   zremote-server/       # Multi-host server (Axum)
   zremote-agent/        # Agent binary (local + server + MCP modes)
-
-web/                    # React frontend (Vite + TypeScript + Tailwind)
 ```
 
 ## Useful Commands
 
 ```bash
-# Rebuild web UI (after pulling changes or switching branches)
-cd web && bun run build
-
 # Check if tmux sessions survived agent restart
 tmux -L zremote ls
 

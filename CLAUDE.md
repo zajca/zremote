@@ -263,7 +263,6 @@ crates/
         mod.rs           run_local() - Axum server, PTY output loop, agentic detection,
                          hooks server, graceful shutdown
         state.rs         LocalAppState - DB, sessions, agentic, hooks, knowledge
-        static_files.rs  Static file serving (legacy, not used by GPUI client)
         routes/
           health.rs      /health, /api/mode (returns "local")
           hosts.rs       Synthetic single host

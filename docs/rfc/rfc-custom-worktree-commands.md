@@ -74,12 +74,6 @@ All fields `#[serde(default, skip_serializing_if = "Option::is_none")]` -- fully
 - Add `{{worktree_name}}` replacement
 - Update all callers (4 call sites: `run_worktree_hook` in local/routes/projects.rs, `run_worktree_hook_server` in connection.rs, and test calls)
 
-### 1c. TypeScript interface
-
-**File:** `web/src/lib/api.ts`
-
-Add `create_command?: string` and `delete_command?: string` to `WorktreeSettings` interface.
-
 ### Tests (~6)
 - `WorktreeSettings` serde backward compat (old JSON without new fields)
 - `WorktreeSettings` roundtrip with all 4 fields
@@ -202,26 +196,6 @@ Updates to `build_configure_prompt()`:
 - Prompt contains `{{worktree_name}}`
 - Prompt mentions worktree script detection
 
-## Phase 5: Frontend Adjustments
-
-**File:** `web/src/pages/ProjectPage.tsx`
-
-Modify `handleCreateWorktree`:
-- Check response shape: if response has `session_id` and `mode === "custom_command"` → navigate to terminal session
-- If response has project data (default git mode) → existing behavior
-
-Modify `handleDeleteWorktree`:
-- If response has `session_id` → navigate to terminal
-- If 204 (default) → existing behavior (worktree removed from UI)
-
-No other frontend changes needed -- `worktree_scoped` actions and `WorktreeCard` already work.
-
-### Tests (~4)
-- Create worktree with custom command response → navigates to session
-- Create worktree with normal response → shows toast
-- Delete worktree with custom command response → navigates to session
-- Delete worktree with normal response → removes from UI
-
 ## Key Files Summary
 
 | File | Change |
@@ -232,8 +206,6 @@ No other frontend changes needed -- `worktree_scoped` actions and `WorktreeCard`
 | `crates/zremote-agent/src/local/routes/projects.rs` | Custom command flow for create/delete, completion monitor, PTY helper |
 | `crates/zremote-agent/src/connection.rs` | Server mode custom command support |
 | `crates/zremote-core/src/configure.rs` | Prompt enhancement |
-| `web/src/lib/api.ts` | TypeScript interface update |
-| `web/src/pages/ProjectPage.tsx` | Handle dual response shapes |
 
 ## Verification
 
@@ -241,5 +213,4 @@ No other frontend changes needed -- `worktree_scoped` actions and `WorktreeCard`
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace
-cd web && bun run typecheck && bun run test
 ```

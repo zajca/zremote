@@ -31,16 +31,15 @@ Version-pinned technology choices for ZRemote (March 2026).
 | uuid | 1.x | IDs |
 | tracing | 0.1.x | Logging |
 
-## Web UI (Bun + React)
+## GUI (GPUI)
 
-| Technology | Version | Purpose |
+| Crate | Version | Purpose |
 |---|---|---|
-| Bun | 1.3.9 | Runtime, bundler, package manager |
-| React | 19.2.4 | UI framework |
-| TypeScript | 6.0 | Type-safe JavaScript |
-| xterm.js | 6.0.0 | Terminal emulator |
-| react-xtermjs | 1.0.9 | React wrapper for xterm.js |
-| Tailwind CSS | 4.x | Styling |
+| gpui | 0.2 | Native desktop UI framework |
+| alacritty_terminal | 0.25 | Terminal emulation (VTE processing) |
+| rust-embed | 8 | Embedded SVG assets |
+| flume | 0.11 | Tokio-GPUI channel communication |
+| clap | 4 | CLI argument parsing |
 
 ## Database
 

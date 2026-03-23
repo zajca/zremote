@@ -2,13 +2,13 @@
 
 ## Vision
 
-The core idea is a central server with a web UI that acts as a hub for remote machines. Machines connect to the server and register themselves, and from the UI you can see all connected machines, their status, and manage terminal sessions running on them.
+The core idea is a central server with a native desktop app that acts as a hub for remote machines. Machines connect to the server and register themselves, and from the UI you can see all connected machines, their status, and manage terminal sessions running on them.
 
 Terminal sessions are first-class citizens. You can spawn a new session on any connected machine, see its output in real time from the server UI, and interact with it. But the sessions aren't locked to the UI — you can also attach to them directly from the machine itself, whether you're sitting at it physically, SSHed in, or connecting through any other means. Think of it like tmux/screen, but orchestrated centrally and accessible from anywhere.
 
-The primary use case driving this is running terminal-based AI tools like Claude Code on remote machines. You want to kick off an agentic coding session on a powerful remote box, monitor it from the server UI, and step in when needed — all without worrying about SSH sessions dropping or losing context.
+The primary use case driving this is running terminal-based AI tools like Claude Code on remote machines. You want to kick off an agentic coding session on a powerful remote box, monitor it from the app, and step in when needed — all without worrying about SSH sessions dropping or losing context.
 
-But it goes beyond just being a fancy remote terminal. For agentic loops specifically, the server should understand what's happening inside them. It should expose controls to pause, resume, or stop an agentic run. It should surface specialized actions — approve a tool call, reject a suggestion, provide input when the agent asks for it. The UI becomes not just a terminal viewer but an agentic loop control panel.
+But it goes beyond just being a fancy remote terminal. For agentic loops specifically, the server should understand what's happening inside them. It should expose controls to pause, resume, or stop an agentic run. It should surface specialized actions — approve a tool call, reject a suggestion, provide input when the agent asks for it. The app becomes not just a terminal viewer but an agentic loop control panel.
 
 Everything in the UI is organized around a clear hierarchy: **Hosts → Projects → Sessions / Agentic Loops**. The sidebar gives you a bird's-eye view of all your machines, what's running where, and lets you drill down to any level with a click. The rest of this document walks through that structure and the actions available at every level.
 
@@ -72,7 +72,7 @@ Sessions are terminal instances running inside a project directory.
 
 - **Displays:** shell type (bash, zsh, fish, ...), status (idle / running / paused), start time, duration, PID
 - **Actions:**
-  - Open terminal (xterm.js live view)
+  - Open terminal
   - Attach / detach
   - Pause / resume
   - Kill session
@@ -85,7 +85,7 @@ Agentic loops are AI-driven coding sessions — Claude Code, Codex, or any other
 
 - **Displays:** tool name (Claude Code, Codex, ...), status (working / waiting / paused / error / completed), current step description, model in use, context window usage, running time
 - **Actions:**
-  - View live terminal (xterm.js)
+  - View live terminal
   - Pause / resume / stop the loop
   - Approve or reject pending tool executions
   - Provide input when the agent asks for it
@@ -123,7 +123,7 @@ Sessions and agentic loops are siblings under a project, not nested inside each 
 
 When you click on an agentic loop in the sidebar, the main panel becomes a dedicated control surface.
 
-- **Terminal view** — live xterm.js rendering of the agent's terminal output, scrollable, searchable
+- **Terminal view** — live rendering of the agent's terminal output, scrollable, searchable
 - **Action bar** — prominent buttons for the most common actions: Approve, Reject, Provide Input, Pause, Stop
 - **Tool execution queue** — a list of pending and recently executed tool calls, each with its name, arguments, status, and result preview. Pending calls have Approve / Reject buttons inline
 - **Context usage bar** — visual indicator showing how much of the model's context window is consumed
@@ -193,7 +193,7 @@ The UI provides:
 
 ## Telegram Integration
 
-Telegram serves as a mobile control plane so you can stay in the loop without being at the web UI.
+Telegram serves as a mobile control plane so you can stay in the loop without being at the desktop app.
 
 - **Notifications:**
   - Errors and failures in agentic loops

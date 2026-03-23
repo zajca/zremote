@@ -22,7 +22,7 @@ Same pattern used by Claude Code Remote Control, Tailscale DERP, ngrok. The host
 **Recommendation for ZRemote**: **WebSocket** as the primary host-to-server channel. Reasons:
 - Passes through NAT, firewalls, HTTP proxies without configuration
 - Bidirectional real-time (terminal I/O needs low latency)
-- Native in browser (server UI can use the same protocol)
+- Well-supported in Rust ecosystem (tokio-tungstenite)
 - Proven in practice (Wetty, CloudCLI, ttyd, Nexterm all use WS)
 
 ### Host Authentication
@@ -34,11 +34,8 @@ Same pattern used by Claude Code Remote Control, Tailscale DERP, ngrok. The host
 
 ## 2. Terminal Emulation and PTY
 
-### Frontend (browser)
-**xterm.js** — de facto standard. Used by: CloudCLI, Wetty, ttyd, GoTTY, Nexterm, Webmux, VS Code terminal.
-- Full terminal emulation in JS (ANSI escape codes, Unicode, custom keybindings)
-- React wrapper: `react-xtermjs`
-- Actively developed, massive community
+### Desktop Client
+**GPUI + alacritty_terminal** — native desktop rendering with VTE processing. GPUI (from Zed editor) provides GPU-accelerated UI, alacritty_terminal handles ANSI escape code parsing and terminal state.
 
 ### Backend (PTY on host)
 | Library | Language | Notes |
@@ -50,9 +47,9 @@ Same pattern used by Claude Code Remote Control, Tailscale DERP, ngrok. The host
 
 ### Architecture
 ```
-[Browser: xterm.js] <--WebSocket--> [Server] <--WebSocket--> [Host Agent: PTY]
+[GPUI Desktop Client: alacritty_terminal] <--WebSocket--> [Server] <--WebSocket--> [Host Agent: PTY]
 ```
-Host agent creates a PTY process, streams I/O over WebSocket to the server, server relays to the browser.
+Host agent creates a PTY process, streams I/O over WebSocket to the server, server relays to the desktop client.
 
 ---
 
@@ -61,7 +58,7 @@ Host agent creates a PTY process, streams I/O over WebSocket to the server, serv
 ### Server (central hub)
 - **Rust (Axum)** — high performance, async, Tower middleware ecosystem
 - Alternative: Go — simpler, but less memory control
-- WebSocket server for host agents + for browser clients
+- WebSocket server for host agents + for desktop clients
 - REST/GraphQL API for management operations
 
 ### Host Agent (runs on remote machines)
@@ -69,10 +66,10 @@ Host agent creates a PTY process, streams I/O over WebSocket to the server, serv
 - Alternative: Go — simpler distribution, but larger binary
 - Connects via WebSocket to server, manages local PTY sessions
 
-### Web UI
-- **TypeScript + React** — standard for modern web UI
-- xterm.js for terminal view
-- Tailwind CSS for styling
+### Desktop UI
+- **GPUI** (Rust) — native GPU-accelerated desktop UI framework (from Zed editor)
+- alacritty_terminal for VTE processing and terminal state
+- Custom element-based rendering with per-character glyph caching
 
 ### Communication Protocol
 - **WebSocket** (wss://) for real-time bidirectional communication (terminal I/O, events)
@@ -110,10 +107,10 @@ Host agent creates a PTY process, streams I/O over WebSocket to the server, serv
 
 ```
 ┌─────────────────┐     wss://     ┌──────────────────┐     wss://     ┌─────────────────┐
-│   Web Browser   │ <-----------> │   ZRemote       │ <-----------> │   Host Agent    │
-│   (React +      │               │   Server         │               │   (Rust binary) │
-│    xterm.js)    │               │   (Rust/Axum)    │               │                 │
-└─────────────────┘               │                  │               │   - PTY mgmt    │
+│  GPUI Desktop   │ <-----------> │   ZRemote       │ <-----------> │   Host Agent    │
+│  Client         │               │   Server         │               │   (Rust binary) │
+│  (alacritty_    │               │   (Rust/Axum)    │               │                 │
+│   terminal)     │               │                  │               │   - PTY mgmt    │
                                   │   - Session mgr  │               │   - WS client   │
 ┌─────────────────┐               │   - OAuth monitor│               │   - Local attach│
 │   Telegram Bot  │ <-----------> │   - Telegram bot │               └─────────────────┘
@@ -124,9 +121,9 @@ Host agent creates a PTY process, streams I/O over WebSocket to the server, serv
 
 ### Key Design Decisions
 
-1. **WebSocket everywhere** — unified protocol for host-server and server-browser communication
+1. **WebSocket everywhere** — unified protocol for host-server and server-client communication
 2. **Rust for backend** — performance, small binaries, memory safety, portable-pty ecosystem
-3. **xterm.js for terminal** — industry standard, no viable alternative
+3. **GPUI + alacritty_terminal for desktop client** — native performance, GPU-accelerated rendering, VTE processing from alacritty
 4. **SQLite to start** — simplicity, zero ops overhead, migrate later if needed
 5. **JSON messages initially** — easier debugging, switch to MessagePack for terminal data if perf needed
 6. **Outbound-only connections** — hosts never expose ports, always connect to server
@@ -203,7 +200,7 @@ Server behind VPN significantly reduces attack surface:
 
 ### Dropped (mitigated by VPN / single-user)
 - ~~RBAC/ACLs~~ — single user
-- ~~CORS policy~~ — VPN-only access
+- ~~CORS policy~~ — native desktop client, no browser origin concerns
 - ~~DoS protection~~ — VPN filters traffic
 - ~~MFA~~ — VPN is the second factor
 - ~~E2E encryption~~ — nice to have, not critical for single user behind VPN
@@ -229,7 +226,7 @@ Server behind VPN significantly reduces attack surface:
 | # | Issue | Recommendation |
 |---|-------|----------------|
 | 1 | **Protocol underspecified** — no message format, no multiplexing | Define message types: `{type, session_id, payload}`. Start with JSON, add binary framing later if needed |
-| 2 | **No reconnection strategy** — agent/browser disconnect = session lost | Agent: exponential backoff reconnect (1s–5min). Browser: auto-reconnect with terminal history replay. Server: keep PTY alive for N minutes after disconnect |
+| 2 | **No reconnection strategy** — agent/client disconnect = session lost | Agent: exponential backoff reconnect (1s–5min). Client: auto-reconnect with terminal history replay. Server: keep PTY alive for N minutes after disconnect |
 | 3 | **No deployment strategy** | Server: Docker or systemd. Agent: single binary + install script. Config: TOML file + env vars |
 | 4 | **No observability** | Structured logging (tracing + JSON), basic Prometheus metrics, `/health` endpoint, dead host detection via heartbeat |
 | 5 | **No graceful shutdown** | Drain connections, notify agents, give 30s for reconnect before killing sessions |
@@ -250,7 +247,7 @@ Server behind VPN significantly reduces attack surface:
 | portable-pty | Test early | Risk: v0.9.0. Fallback: nix crate |
 | teloxide | OK | Fallback: raw HTTP API |
 | SQLite | Fine for personal use | WAL mode, consider PostgreSQL only at scale |
-| React + xterm.js | Industry standard | No risk |
+| GPUI + alacritty_terminal | Native desktop, GPU-accelerated | Zed ecosystem, actively maintained |
 | WebSocket | Correct choice | Proven pattern |
 
 ---
@@ -272,7 +269,7 @@ Terminal history: keep in-memory ring buffer on server (last 1000 lines per sess
 2. **Agent auth flow** — token generation, storage, validation, rotation
 3. **Session lifecycle** — create/attach/detach/close/timeout states
 4. **DB schema** — hosts, sessions, auth tokens
-5. **Reconnection strategy** — agent and browser reconnect with state recovery
+5. **Reconnection strategy** — agent and client reconnect with state recovery
 6. **Telegram bot security** — user ID whitelist, command validation
 7. **Observability basics** — structured logging, health endpoint, heartbeat
 8. **Deployment** — Docker/systemd for server, install script for agent

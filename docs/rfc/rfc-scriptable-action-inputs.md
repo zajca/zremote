@@ -96,7 +96,6 @@ zremote-protocol  (new types: ActionInput, ActionInputOption, ResolvedActionInpu
        |
        +---> zremote-server  (updates: state.rs, routes/projects.rs, routes/agents.rs, main.rs)
 
-web/  (new: ActionInputDialog.tsx; updates: api.ts, ActionRow.tsx, CommandPalette.tsx, types.ts, project-actions.ts, worktree-actions.ts)
 ```
 
 ## Implementation Phases
@@ -234,52 +233,7 @@ Extend the `actions` schema section to include the new `inputs` field documentat
 
 Update test `test_prompt_contains_all_schema_fields`.
 
-### Phase 8: Frontend Types & API
-
-**Files:** `web/src/lib/api.ts`
-
-New interfaces: `ActionInput`, `ActionInputOption`, `ResolvedActionInput`.
-Update `ProjectAction` with optional `inputs`.
-Update `RunActionRequest` with optional `inputs`.
-Add `resolveActionInputs` to `api.projects`.
-
-### Phase 9: ActionInputDialog Component
-
-**New file:** `web/src/components/project/ActionInputDialog.tsx`
-
-Full modal dialog following `RunPromptDialog.tsx` pattern. Key behaviors:
-1. Detect worktree/branch needs from command template
-2. Resolve scripted inputs on mount
-3. Render form fields (text, multiline, select with static/scripted options)
-4. Empty script output handling with retry
-5. Per-input error display
-6. Required field validation
-7. Submit with collected values + worktree/branch
-8. Keyboard shortcuts (Escape, Cmd+Enter)
-9. Live command preview
-
-**Tests:** ~9 tests covering all behaviors.
-
-### Phase 10: ActionRow Integration
-
-**Files:** `web/src/components/project/ActionRow.tsx`
-
-Decision tree:
-- Action has `inputs[]` with entries -> ActionInputDialog
-- Action has NO inputs but needs worktree/branch -> ActionInputPopover (existing)
-- Action has NO inputs and no missing vars -> direct run
-
-**Tests:** ~3 tests covering decision tree.
-
-### Phase 11: Command Palette Integration
-
-**Files:** `web/src/components/command-palette/CommandPalette.tsx`, `types.ts`, `project-actions.ts`, `worktree-actions.ts`
-
-Add `openActionInput` to `ActionDeps`. Actions with inputs open ActionInputDialog from palette.
-
-**Tests:** ~2 tests.
-
-### Phase 12: Tests & Verification
+### Phase 8: Tests & Verification
 
 Full test suite run + manual verification with test action in `.zremote/settings.json`.
 
