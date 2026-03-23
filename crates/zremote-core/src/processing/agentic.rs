@@ -565,4 +565,614 @@ mod tests {
         assert_eq!(status, "completed");
         assert_eq!(end_reason.as_deref(), Some("completed"));
     }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_task_name_propagates_to_session_name() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop first
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Subscribe to events before sending the update
+        let mut rx = proc.events.subscribe();
+
+        // Update with task_name -- session has name IS NULL so it should be set
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some("refactor-auth".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Verify session name was updated in DB
+        let (name,): (Option<String>,) = sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some("refactor-auth"));
+
+        // Verify SessionUpdated event was emitted
+        let mut found_session_updated = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::SessionUpdated { ref session_id } if session_id == &session_id.to_string())
+            {
+                found_session_updated = true;
+            }
+        }
+        assert!(found_session_updated, "expected SessionUpdated event");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_none_task_name_does_not_change_session_name() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Update with None task_name
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: None,
+        })
+        .await
+        .unwrap();
+
+        // Session name should remain NULL
+        let (name,): (Option<String>,) = sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(
+            name.is_none(),
+            "session name should stay NULL when task_name is None"
+        );
+
+        // In-memory task_name should remain None
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert!(entry.task_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_empty_task_name_does_not_propagate() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Update with empty string task_name -- filtered by .filter(|s| !s.is_empty())
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some(String::new()),
+        })
+        .await
+        .unwrap();
+
+        // Session name should remain NULL since empty string is filtered out
+        let (name,): (Option<String>,) = sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(
+            name.is_none(),
+            "session name should stay NULL when task_name is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_does_not_overwrite_existing_session_name() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Insert session with an existing name
+        sqlx::query("INSERT INTO sessions (id, host_id, status, name) VALUES (?, ?, 'active', 'existing-name')")
+            .bind(session_id.to_string())
+            .bind(&host_id_str)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Update with task_name -- but session already has a name
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some("new-task-name".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Session name should NOT be overwritten (UPDATE ... WHERE name IS NULL)
+        let (name,): (Option<String>,) = sqlx::query_as("SELECT name FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            name.as_deref(),
+            Some("existing-name"),
+            "existing session name should not be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_with_error_reason() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "error: process crashed".to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert!(!proc.agentic_loops.contains_key(&loop_id));
+
+        let (status, end_reason, ended_at): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, end_reason, ended_at FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(end_reason.as_deref(), Some("error: process crashed"));
+        assert!(ended_at.is_some(), "ended_at should be set");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_with_linked_claude_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Detect loop (this auto-creates a claude_session linked to loop_id)
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Verify claude_session was created and linked
+        let (task_status,): (String,) =
+            sqlx::query_as("SELECT status FROM claude_sessions WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(task_status, "active");
+
+        // Subscribe to events
+        let mut rx = proc.events.subscribe();
+
+        // End the loop
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "user_stopped".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Verify claude_session was completed
+        let (task_status, ended_at): (String, Option<String>) =
+            sqlx::query_as("SELECT status, ended_at FROM claude_sessions WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(task_status, "completed");
+        assert!(ended_at.is_some(), "claude_session ended_at should be set");
+
+        // Verify ClaudeTaskEnded event was emitted
+        let mut found_task_ended = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::ClaudeTaskEnded { ref status, .. } if status == "completed")
+            {
+                found_task_ended = true;
+            }
+        }
+        assert!(found_task_ended, "expected ClaudeTaskEnded event");
+    }
+
+    #[tokio::test]
+    async fn fetch_loop_info_returns_none_for_nonexistent_loop() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+
+        let result = proc.fetch_loop_info(&Uuid::new_v4().to_string()).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_loop_info_returns_data_for_existing_loop() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/home/user/myproject".to_string(),
+            tool_name: "aider".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let info = proc.fetch_loop_info(&loop_id.to_string()).await;
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.id, loop_id.to_string());
+        assert_eq!(info.session_id, session_id.to_string());
+        assert_eq!(info.project_path.as_deref(), Some("/home/user/myproject"));
+        assert_eq!(info.tool_name, "aider");
+        assert_eq!(info.status, "working");
+        assert!(info.ended_at.is_none());
+        assert!(info.end_reason.is_none());
+        assert!(info.task_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_without_memory_entry() {
+        // Test that state update works even if loop is not in the in-memory store
+        // (e.g., after agent restart where DB has the loop but memory was cleared)
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Insert loop directly into DB without adding to in-memory store
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, project_path, tool_name) VALUES (?, ?, ?, ?)",
+        )
+        .bind(loop_id.to_string())
+        .bind(session_id.to_string())
+        .bind("/proj")
+        .bind("claude-code")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // State update should succeed even without memory entry
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Error,
+            task_name: Some("debug-issue".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // DB should be updated
+        let (status_str, task_name): (String, Option<String>) =
+            sqlx::query_as("SELECT status, task_name FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status_str, "error");
+        assert_eq!(task_name.as_deref(), Some("debug-issue"));
+
+        // Memory store should still be empty (no entry was created)
+        assert!(!proc.agentic_loops.contains_key(&loop_id));
+    }
+
+    #[tokio::test]
+    async fn handle_loop_ended_emits_loop_ended_event() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut rx = proc.events.subscribe();
+
+        proc.handle_message(AgenticAgentMessage::LoopEnded {
+            loop_id,
+            reason: "timeout".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut found_loop_ended = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::LoopEnded {
+                ref loop_info,
+                ref hostname,
+                ..
+            } = event
+            {
+                assert_eq!(loop_info.id, loop_id.to_string());
+                assert_eq!(loop_info.end_reason.as_deref(), Some("timeout"));
+                assert_eq!(loop_info.status, "completed");
+                assert_eq!(hostname, "test-host");
+                found_loop_ended = true;
+            }
+        }
+        assert!(found_loop_ended, "expected LoopEnded event");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_emits_status_changed_event() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let mut rx = proc.events.subscribe();
+
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::WaitingForInput,
+            task_name: None,
+        })
+        .await
+        .unwrap();
+
+        let mut found_status_changed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::LoopStatusChanged {
+                ref loop_info,
+                ref hostname,
+                ..
+            } = event
+            {
+                assert_eq!(loop_info.id, loop_id.to_string());
+                assert_eq!(loop_info.status, "waiting_for_input");
+                assert_eq!(hostname, "test-host");
+                found_status_changed = true;
+            }
+        }
+        assert!(found_status_changed, "expected LoopStatusChanged event");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_detected_links_starting_claude_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4().to_string();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        // Pre-create a claude_session in 'starting' status (simulates UI-initiated task)
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status) VALUES (?, ?, ?, '/proj', 'starting')",
+        )
+        .bind(&task_id)
+        .bind(session_id.to_string())
+        .bind(&host_id_str)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // Verify the pre-existing claude_session was linked to the loop
+        let (linked_loop_id, status): (Option<String>, String) =
+            sqlx::query_as("SELECT loop_id, status FROM claude_sessions WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(linked_loop_id.as_deref(), Some(&*loop_id.to_string()));
+        assert_eq!(status, "active");
+    }
+
+    #[tokio::test]
+    async fn handle_loop_state_update_task_name_propagates_to_claude_session() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some("implement-feature-x".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Verify task_name was set on the claude_session
+        let (task_name,): (Option<String>,) =
+            sqlx::query_as("SELECT task_name FROM claude_sessions WHERE loop_id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(task_name.as_deref(), Some("implement-feature-x"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handle_multiple_state_updates_preserves_first_task_name_in_memory() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        // First update with task_name
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some("first-task".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Second update without task_name -- should keep "first-task"
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::WaitingForInput,
+            task_name: None,
+        })
+        .await
+        .unwrap();
+
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.task_name.as_deref(), Some("first-task"));
+        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
+        drop(entry);
+
+        // Third update with new task_name -- should overwrite in memory
+        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
+            loop_id,
+            status: AgenticStatus::Working,
+            task_name: Some("second-task".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.task_name.as_deref(), Some("second-task"));
+    }
 }
