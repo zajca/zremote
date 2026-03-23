@@ -82,7 +82,9 @@ impl SidebarView {
             // Debounce: wait 100ms, then check if this is still the latest request.
             Timer::after(Duration::from_millis(100)).await;
             let should_proceed = this
-                .update(cx, |this: &mut Self, _cx| this.load_generation == generation)
+                .update(cx, |this: &mut Self, _cx| {
+                    this.load_generation == generation
+                })
                 .unwrap_or(false);
             if !should_proceed {
                 return;
@@ -117,11 +119,9 @@ impl SidebarView {
 
                 // If a session was restored/selected, keep it unless it's truly gone.
                 if let Some(ref restored_id) = this.selected_session_id {
-                    if let Some(session) = this
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == *restored_id && s.status != "closed" && s.status != "error")
-                    {
+                    if let Some(session) = this.sessions.iter().find(|s| {
+                        s.id == *restored_id && s.status != "closed" && s.status != "error"
+                    }) {
                         // Only emit SessionSelected if the session is active
                         // (not suspended -- avoid opening terminal for a suspended session).
                         if session.status == "active" {
@@ -215,17 +215,15 @@ impl SidebarView {
 
                         // Resolve project_id from in-memory projects (mirrors
                         // server's resolve_project_id SQL logic).
-                        let resolved_project_id =
-                            working_dir_clone.as_deref().and_then(|wd| {
-                                this.projects
-                                    .iter()
-                                    .find(|p| {
-                                        p.host_id == host_id
-                                            && (wd == p.path
-                                                || wd.starts_with(&format!("{}/", p.path)))
-                                    })
-                                    .map(|p| p.id.clone())
-                            });
+                        let resolved_project_id = working_dir_clone.as_deref().and_then(|wd| {
+                            this.projects
+                                .iter()
+                                .find(|p| {
+                                    p.host_id == host_id
+                                        && (wd == p.path || wd.starts_with(&format!("{}/", p.path)))
+                                })
+                                .map(|p| p.id.clone())
+                        });
 
                         let session = Session {
                             id: resp.id,

@@ -137,7 +137,10 @@ pub async fn run_local(
         mgr.discover_existing()
     };
 
-    let recovered_ids: Vec<String> = recovered.iter().map(|(id, _, _, _)| id.to_string()).collect();
+    let recovered_ids: Vec<String> = recovered
+        .iter()
+        .map(|(id, _, _, _)| id.to_string())
+        .collect();
 
     // Resume recovered sessions in DB and create in-memory state
     for (session_id, shell, pid, captured) in &recovered {
@@ -185,7 +188,6 @@ pub async fn run_local(
             count = recovered.len(),
             "recovered tmux sessions from previous run"
         );
-
     }
 
     // Spawn the PTY output routing loop (includes agentic output processing)
