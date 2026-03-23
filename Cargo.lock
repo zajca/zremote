@@ -8806,6 +8806,7 @@ name = "zremote-gui"
 version = "0.2.10"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "chrono",
  "clap",
  "dirs 6.0.0",

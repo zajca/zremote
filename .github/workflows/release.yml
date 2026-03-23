@@ -211,6 +211,18 @@ jobs:
             zremote-*.tar.gz
             SHA256SUMS
 
+  trigger-deploy:
+    name: Trigger VPS Deploy
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch deploy to machine-management
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_DISPATCH_PAT }}
+          repository: zajca/machine-management
+          event-type: zremote-release
+
   update-latest:
     name: Update Latest Release
     needs: release
