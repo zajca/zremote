@@ -545,15 +545,10 @@ fn connect_terminal(
     }
     let ws_url = app_state.api.terminal_ws_url(session_id);
     let handle = &app_state.tokio_handle;
-    match handle.block_on(zremote_client::TerminalSession::connect(ws_url, handle)) {
-        Ok(session) => Some(crate::terminal_handle::TerminalHandle::from_session(
-            session, handle,
-        )),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to connect terminal WebSocket");
-            None
-        }
-    }
+    let session = zremote_client::TerminalSession::connect_spawned(ws_url, handle);
+    Some(crate::terminal_handle::TerminalHandle::from_session(
+        session, handle,
+    ))
 }
 
 /// Events emitted by the sidebar for the main view to handle.
