@@ -660,6 +660,40 @@ pub async fn run_connection(
     result
 }
 
+/// Decode PNG bytes, set the image on the system clipboard, and send Ctrl+V to the PTY.
+fn set_clipboard_image_and_send_paste(
+    session_manager: &mut SessionManager,
+    session_id: uuid::Uuid,
+    png_bytes: &[u8],
+) -> Result<(), String> {
+    let decoder = png::Decoder::new(png_bytes);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png decode: {e}"))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png frame: {e}"))?;
+    buf.truncate(info.buffer_size());
+
+    let img_data = arboard::ImageData {
+        width: info.width as usize,
+        height: info.height as usize,
+        bytes: std::borrow::Cow::Owned(buf),
+    };
+
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
+    clipboard
+        .set_image(img_data)
+        .map_err(|e| format!("clipboard set: {e}"))?;
+
+    session_manager
+        .write_to(&session_id, &[0x16])
+        .map_err(|e| format!("PTY write: {e}"))?;
+
+    Ok(())
+}
+
 /// Handle a server message, dispatching session-related messages to the session manager.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn handle_server_message(
@@ -720,6 +754,13 @@ fn handle_server_message(
         ServerMessage::TerminalInput { session_id, data } => {
             if let Err(e) = session_manager.write_to(session_id, data) {
                 tracing::warn!(session_id = %session_id, error = %e, "failed to write to PTY");
+            }
+        }
+        ServerMessage::TerminalImagePaste { session_id, data } => {
+            let sid = *session_id;
+            let png_bytes = data.clone();
+            if let Err(e) = set_clipboard_image_and_send_paste(session_manager, sid, &png_bytes) {
+                tracing::warn!(session_id = %sid, error = %e, "image paste failed");
             }
         }
         ServerMessage::TerminalResize {

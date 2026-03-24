@@ -174,6 +174,8 @@ pub enum TerminalClientMessage {
     },
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
+    #[serde(rename = "image_paste")]
+    ImagePaste { data: String },
 }
 
 /// Decoded terminal event for the GUI.

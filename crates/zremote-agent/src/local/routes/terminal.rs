@@ -31,6 +31,8 @@ enum BrowserInput {
         cols: u16,
         rows: u16,
     },
+    #[serde(rename = "image_paste")]
+    ImagePaste { data: String },
 }
 
 /// WebSocket upgrade handler for browser terminal connections.
@@ -273,6 +275,15 @@ async fn handle_terminal_connection(
                                     }
                                 }
                             }
+                            Ok(BrowserInput::ImagePaste { data }) => {
+                                if let Err(e) = set_clipboard_image_and_paste(
+                                    &data,
+                                    &state,
+                                    &session_id,
+                                ).await {
+                                    tracing::warn!(error = %e, "image paste failed");
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!(error = %e, "invalid browser terminal message");
                             }
@@ -333,4 +344,54 @@ async fn handle_terminal_connection(
 
     // Cleanup: sender drops automatically when this function returns,
     // try_send in the output loop will detect it and remove it.
+}
+
+/// Decode a base64-encoded PNG, set it on the system clipboard, and send Ctrl+V
+/// to the PTY so Claude Code detects the paste and reads the clipboard image.
+async fn set_clipboard_image_and_paste(
+    b64_png: &str,
+    state: &LocalAppState,
+    session_id: &uuid::Uuid,
+) -> Result<(), String> {
+    use base64::Engine;
+
+    let png_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_png)
+        .map_err(|e| format!("base64 decode: {e}"))?;
+
+    // Decode PNG to RGBA for arboard
+    let decoder = png::Decoder::new(png_bytes.as_slice());
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png decode: {e}"))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png frame: {e}"))?;
+    buf.truncate(info.buffer_size());
+
+    let img_data = arboard::ImageData {
+        width: info.width as usize,
+        height: info.height as usize,
+        bytes: std::borrow::Cow::Owned(buf),
+    };
+
+    // Set clipboard in a blocking task (arboard may interact with display server)
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
+        clipboard
+            .set_image(img_data)
+            .map_err(|e| format!("clipboard set: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
+
+    // Send Ctrl+V (0x16) to PTY so Claude Code reads the clipboard
+    let mut mgr = state.session_manager.lock().await;
+    mgr.write_to(session_id, &[0x16])
+        .map_err(|e| format!("PTY write: {e}"))?;
+
+    Ok(())
 }

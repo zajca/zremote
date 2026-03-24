@@ -14,6 +14,8 @@ pub struct TerminalWsHandle {
     pub output_rx: flume::Receiver<TerminalEvent>,
     /// Send resize events (cols, rows).
     pub resize_tx: flume::Sender<(u16, u16)>,
+    /// Send base64-encoded image data for clipboard paste forwarding.
+    pub image_paste_tx: flume::Sender<String>,
 }
 
 /// Connect to a terminal WebSocket and return handles for I/O.
@@ -23,13 +25,21 @@ pub fn connect(url: String, tokio_handle: &tokio::runtime::Handle) -> TerminalWs
     let (input_tx, input_rx) = flume::bounded::<Vec<u8>>(256);
     let (output_tx, output_rx) = flume::bounded::<TerminalEvent>(256);
     let (resize_tx, resize_rx) = flume::bounded::<(u16, u16)>(16);
+    let (image_paste_tx, image_paste_rx) = flume::bounded::<String>(4);
 
-    tokio_handle.spawn(run_terminal_ws(url, input_rx, output_tx, resize_rx));
+    tokio_handle.spawn(run_terminal_ws(
+        url,
+        input_rx,
+        output_tx,
+        resize_rx,
+        image_paste_rx,
+    ));
 
     TerminalWsHandle {
         input_tx,
         output_rx,
         resize_tx,
+        image_paste_tx,
     }
 }
 
@@ -38,6 +48,7 @@ async fn run_terminal_ws(
     input_rx: flume::Receiver<Vec<u8>>,
     output_tx: flume::Sender<TerminalEvent>,
     resize_rx: flume::Receiver<(u16, u16)>,
+    image_paste_rx: flume::Receiver<String>,
 ) {
     info!(url = %url, "connecting to terminal WebSocket");
 
@@ -80,6 +91,19 @@ async fn run_terminal_ws(
                     match resize {
                         Ok((cols, rows)) => {
                             let msg = TerminalClientMessage::Resize { cols, rows };
+                            if let Ok(json) = serde_json::to_string(&msg)
+                                && write.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                image = image_paste_rx.recv_async() => {
+                    match image {
+                        Ok(data) => {
+                            let msg = TerminalClientMessage::ImagePaste { data };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && write.send(Message::Text(json.into())).await.is_err()
                             {

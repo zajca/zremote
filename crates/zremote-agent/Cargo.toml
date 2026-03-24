@@ -35,6 +35,8 @@ dashmap.workspace = true
 base64.workspace = true
 glob-match = "0.2"
 dirs = "6"
+arboard.workspace = true
+png.workspace = true
 clap = { version = "4", features = ["derive"] }
 tower-http = { workspace = true, optional = true }
 
