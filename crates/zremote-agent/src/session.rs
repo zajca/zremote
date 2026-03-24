@@ -545,4 +545,35 @@ mod tests {
         let orphans = mgr.find_orphaned_direct_attached();
         assert!(orphans.is_empty());
     }
+
+    #[test]
+    fn write_to_pane_nonexistent_session() {
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.write_to_pane(&session_id, "%0", b"test");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(&session_id.to_string()),
+            "error should contain session id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resize_pane_nonexistent_session() {
+        let mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr.resize_pane(&session_id, "%0", 120, 40);
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(&session_id.to_string()),
+            "error should contain session id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sync_all_panes_empty_manager() {
+        let mut mgr = make_manager();
+        let results = mgr.sync_all_panes();
+        assert!(results.is_empty());
+    }
 }

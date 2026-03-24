@@ -187,4 +187,21 @@ mod tests {
         let msg = app_err.to_string();
         assert!(msg.starts_with("database error:"), "got: {msg}");
     }
+
+    #[tokio::test]
+    async fn conflict_returns_409_with_message() {
+        let (status, json) =
+            extract_error_response(AppError::Conflict("resource already exists".to_string())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"]["code"], "CONFLICT");
+        assert_eq!(json["error"]["message"], "resource already exists");
+    }
+
+    #[test]
+    fn display_conflict_error() {
+        assert_eq!(
+            AppError::Conflict("dup".to_string()).to_string(),
+            "conflict: dup"
+        );
+    }
 }
