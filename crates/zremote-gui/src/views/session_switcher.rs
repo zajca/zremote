@@ -24,6 +24,7 @@ use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
 use crate::types::{Host, Project, Session};
+use crate::views::sidebar::CcState;
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -36,6 +37,8 @@ struct SwitcherEntry {
     title: String,
     subtitle: String,
     is_current: bool,
+    /// Agentic state: (status, task_name)
+    cc_state: Option<(String, Option<String>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +82,7 @@ impl SessionSwitcher {
         recent_sessions: &[RecentSession],
         current_session_id: Option<&str>,
         mode: &str,
+        cc_states: &HashMap<String, CcState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let entries = build_entries(
@@ -88,6 +92,7 @@ impl SessionSwitcher {
             recent_sessions,
             current_session_id,
             mode,
+            cc_states,
         );
         let focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
@@ -262,6 +267,35 @@ impl Render for SessionSwitcher {
                                         )
                                     }),
                             )
+                            // Agentic state indicator
+                            .when_some(
+                                entry.cc_state.as_ref(),
+                                |d: Stateful<Div>, (status, task_name)| {
+                                    let (cc_icon, cc_color) = if status == "waiting_for_input" {
+                                        (Icon::MessageCircle, theme::warning())
+                                    } else {
+                                        (Icon::Loader, theme::accent())
+                                    };
+                                    let mut indicator = div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .flex_shrink_0()
+                                        .child(icon(cc_icon).size(px(12.0)).text_color(cc_color));
+                                    if let Some(task) = task_name {
+                                        indicator = indicator.child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .text_color(theme::text_tertiary())
+                                                .max_w(px(80.0))
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .child(task.clone()),
+                                        );
+                                    }
+                                    d.child(indicator)
+                                },
+                            )
                             // "current" badge
                             .when(entry.is_current, |d: Stateful<Div>| {
                                 d.child(
@@ -288,6 +322,7 @@ fn build_entries(
     recent_sessions: &[RecentSession],
     current_session_id: Option<&str>,
     mode: &str,
+    cc_states: &HashMap<String, CcState>,
 ) -> Vec<SwitcherEntry> {
     let host_names: HashMap<&str, &str> = hosts
         .iter()
@@ -308,14 +343,18 @@ fn build_entries(
     // Filter to active sessions only
     let mut active: Vec<&Session> = sessions.iter().filter(|s| s.status == "active").collect();
 
-    // Sort by MRU (most recent first), fallback to created_at descending
+    // Sort: waiting_for_input first, then working, then MRU order
     active.sort_by(|a, b| {
-        let a_mru = mru_map.get(a.id.as_str()).copied().unwrap_or(0);
-        let b_mru = mru_map.get(b.id.as_str()).copied().unwrap_or(0);
-        b_mru.cmp(&a_mru).then_with(|| {
-            let a_created = a.created_at.as_deref().unwrap_or("");
-            let b_created = b.created_at.as_deref().unwrap_or("");
-            b_created.cmp(a_created)
+        let a_priority = cc_sort_priority(cc_states.get(a.id.as_str()));
+        let b_priority = cc_sort_priority(cc_states.get(b.id.as_str()));
+        a_priority.cmp(&b_priority).then_with(|| {
+            let a_mru = mru_map.get(a.id.as_str()).copied().unwrap_or(0);
+            let b_mru = mru_map.get(b.id.as_str()).copied().unwrap_or(0);
+            b_mru.cmp(&a_mru).then_with(|| {
+                let a_created = a.created_at.as_deref().unwrap_or("");
+                let b_created = b.created_at.as_deref().unwrap_or("");
+                b_created.cmp(a_created)
+            })
         })
     });
 
@@ -343,6 +382,10 @@ fn build_entries(
             let title = session_title(s);
             let subtitle = session_subtitle(host_name, project_name, mode);
 
+            let cc_state = cc_states
+                .get(&s.id)
+                .map(|cc| (cc.status.clone(), cc.task_name.clone()));
+
             SwitcherEntry {
                 session_id: s.id.clone(),
                 host_id: s.host_id.clone(),
@@ -350,9 +393,18 @@ fn build_entries(
                 title,
                 subtitle,
                 is_current: current_session_id == Some(s.id.as_str()),
+                cc_state,
             }
         })
         .collect()
+}
+
+fn cc_sort_priority(cc: Option<&CcState>) -> u8 {
+    match cc.map(|c| c.status.as_str()) {
+        Some("waiting_for_input") => 0,
+        Some("working") => 1,
+        _ => 2,
+    }
 }
 
 fn session_title(session: &Session) -> String {

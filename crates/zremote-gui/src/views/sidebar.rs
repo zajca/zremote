@@ -13,10 +13,11 @@ use crate::types::{CreateSessionRequest, Host, Project, ServerEvent, Session};
 use crate::views::main_view::SidebarEvent;
 
 /// Tracks the Claude Code agentic loop state for a session.
-struct CcState {
-    loop_id: String,
-    status: String,
-    task_name: Option<String>,
+#[derive(Clone)]
+pub struct CcState {
+    pub loop_id: String,
+    pub status: String,
+    pub task_name: Option<String>,
 }
 
 /// A project with its associated sessions.
@@ -59,6 +60,10 @@ impl SidebarView {
 
     pub fn selected_session_id(&self) -> Option<&str> {
         self.selected_session_id.as_deref()
+    }
+
+    pub fn cc_states(&self) -> &HashMap<String, CcState> {
+        &self.cc_states
     }
 
     pub fn new(app_state: Arc<AppState>, cx: &mut Context<Self>) -> Self {

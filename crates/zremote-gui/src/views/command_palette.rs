@@ -22,6 +22,7 @@ use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
 use crate::types::{Host, Project, Session};
+use crate::views::sidebar::CcState;
 
 use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
 
@@ -221,6 +222,7 @@ pub struct PaletteSnapshot {
     host_names: HashMap<String, String>,
     project_names: HashMap<String, String>,
     recent_set: HashSet<String>,
+    cc_states: HashMap<String, CcState>,
 }
 
 impl PaletteSnapshot {
@@ -231,6 +233,7 @@ impl PaletteSnapshot {
         mode: String,
         active_session_id: Option<String>,
         recent_sessions: &[RecentSession],
+        cc_states: HashMap<String, CcState>,
     ) -> Self {
         let host_names: HashMap<String, String> = hosts
             .iter()
@@ -253,6 +256,7 @@ impl PaletteSnapshot {
             host_names,
             project_names,
             recent_set,
+            cc_states,
         }
     }
 
@@ -1512,21 +1516,48 @@ impl CommandPalette {
         };
 
         let duration = format_duration(session.created_at.as_deref());
+        let cc_state = self.snapshot.cc_states.get(&session.id);
 
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .flex_shrink_0()
-            .child(div().size(px(6.0)).rounded_full().bg(dot_color))
-            .when(!duration.is_empty(), |s: Div| {
-                s.child(
+        let mut row = div().flex().items_center().gap(px(6.0)).flex_shrink_0();
+
+        // Agentic state indicator
+        if let Some(cc) = cc_state {
+            let (cc_icon, cc_color) = if cc.status == "waiting_for_input" {
+                (Icon::MessageCircle, theme::warning())
+            } else {
+                (Icon::Loader, theme::accent())
+            };
+            row = row.child(
+                icon(cc_icon)
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(cc_color),
+            );
+            if let Some(ref task) = cc.task_name {
+                row = row.child(
                     div()
                         .text_size(px(11.0))
                         .text_color(theme::text_tertiary())
-                        .child(duration),
-                )
-            })
+                        .max_w(px(100.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(task.clone()),
+                );
+            }
+        }
+
+        row = row.child(div().size(px(6.0)).rounded_full().bg(dot_color));
+
+        if !duration.is_empty() {
+            row = row.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme::text_tertiary())
+                    .child(duration),
+            );
+        }
+
+        row
     }
 
     fn render_project_accessory(&self, project: &Project) -> impl IntoElement {
@@ -2352,7 +2383,7 @@ impl Render for CommandPalette {
 // ---------------------------------------------------------------------------
 
 fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
-    snapshot
+    let mut items: Vec<ResultItem> = snapshot
         .sessions
         .iter()
         .enumerate()
@@ -2374,7 +2405,27 @@ fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
                 selectable: true,
             }
         })
-        .collect()
+        .collect();
+
+    // Sort: waiting_for_input first, then working, then rest
+    items.sort_by_key(|item| {
+        if let PaletteItem::Session { session_idx } = &item.item {
+            let session = &snapshot.sessions[*session_idx];
+            match snapshot
+                .cc_states
+                .get(&session.id)
+                .map(|c| c.status.as_str())
+            {
+                Some("waiting_for_input") => 0,
+                Some("working") => 1,
+                _ => 2,
+            }
+        } else {
+            2
+        }
+    });
+
+    items
 }
 
 fn build_project_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
@@ -2930,6 +2981,7 @@ mod tests {
             "local".to_string(),
             Some("sess-1".to_string()),
             &[],
+            std::collections::HashMap::new(),
         )
     }
 
@@ -3158,8 +3210,15 @@ mod tests {
             git_branch: None,
             git_is_dirty: false,
         }]);
-        let snapshot =
-            PaletteSnapshot::capture(hosts, sessions, projects, "local".to_string(), None, &[]);
+        let snapshot = PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "local".to_string(),
+            None,
+            &[],
+            std::collections::HashMap::new(),
+        );
         let session_items = build_session_items(&snapshot);
         let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
 
