@@ -1176,6 +1176,7 @@ async fn handle_agentic_message(
                 AgenticLoopState {
                     loop_id,
                     session_id,
+                    host_id,
                     status: AgenticStatus::Working,
                     task_name: None,
                     last_updated: Instant::now(),
