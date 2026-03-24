@@ -1,6 +1,6 @@
 use crate::types::{
-    CreateSessionRequest, CreateSessionResponse, Host, ModeResponse, Project, Session,
-    UpdateProjectRequest,
+    CreateSessionRequest, CreateSessionResponse, Host, LoopInfoLite, ModeResponse, Project,
+    Session, UpdateProjectRequest,
 };
 
 /// HTTP client for the `ZRemote` REST API.
@@ -105,6 +105,20 @@ impl ApiClient {
             .json()
             .await?;
         Ok(project)
+    }
+
+    /// Fetch currently active (working) agentic loops.
+    /// Returns an empty vec on any error (best-effort reconciliation).
+    pub async fn get_active_loops(&self) -> Result<Vec<LoopInfoLite>, ApiError> {
+        let loops: Vec<LoopInfoLite> = self
+            .client
+            .get(format!("{}/api/loops?status=working", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(loops)
     }
 
     /// Close (delete) a session.

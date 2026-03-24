@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -236,6 +236,41 @@ impl SidebarView {
             }
             ServerEvent::Unknown => {}
         }
+    }
+
+    /// Remove stale loop entries that the server no longer considers active.
+    /// Called periodically as a fallback for missed WebSocket events.
+    pub fn reconcile_loops(&mut self, cx: &mut Context<Self>) {
+        if self.cc_states.is_empty() {
+            return; // Nothing to reconcile
+        }
+
+        let api = self.app_state.api.clone();
+        let stale_session_ids: Vec<String> = self.cc_states.keys().cloned().collect();
+        let handle = self.app_state.tokio_handle.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let active_loops = handle
+                .spawn(async move { api.get_active_loops().await.unwrap_or_default() })
+                .await
+                .unwrap_or_default();
+
+            let active_session_ids: HashSet<String> =
+                active_loops.iter().map(|l| l.session_id.clone()).collect();
+
+            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                let mut changed = false;
+                for sid in &stale_session_ids {
+                    if !active_session_ids.contains(sid) && this.cc_states.remove(sid).is_some() {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn create_session(
