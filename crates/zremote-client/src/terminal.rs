@@ -13,6 +13,9 @@ use crate::types::{
 /// Maximum terminal message size (1MB).
 const MAX_TERMINAL_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// Maximum cumulative scrollback buffer size (100MB).
+const MAX_SCROLLBACK_BUFFER_SIZE: usize = 100 * 1024 * 1024;
+
 /// Handle for interacting with a terminal WebSocket connection.
 /// Dropping this handle cancels the background tasks.
 pub struct TerminalSession {
@@ -65,6 +68,54 @@ impl TerminalSession {
             image_paste_tx,
             cancel,
         })
+    }
+
+    /// Connect to a terminal WebSocket without blocking.
+    ///
+    /// Unlike [`connect`](Self::connect), this returns immediately by spawning
+    /// the connection attempt in the background. Connection failures surface as
+    /// a [`TerminalEvent::SessionClosed`] on `output_rx` rather than as a
+    /// `Result::Err`. This is useful when calling from a non-async context
+    /// (e.g. the GPUI main thread) where blocking is unacceptable.
+    pub fn connect_spawned(url: String, tokio_handle: &tokio::runtime::Handle) -> Self {
+        let (input_tx, input_rx) = flume::bounded::<TerminalInput>(TERMINAL_CHANNEL_CAPACITY);
+        let (output_tx, output_rx) = flume::bounded::<TerminalEvent>(TERMINAL_CHANNEL_CAPACITY);
+        let (resize_tx, resize_rx) = flume::bounded::<(u16, u16)>(RESIZE_CHANNEL_CAPACITY);
+        let (image_paste_tx, image_paste_rx) =
+            flume::bounded::<String>(IMAGE_PASTE_CHANNEL_CAPACITY);
+
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+
+        tokio_handle.spawn(async move {
+            info!(url = %url, "connecting to terminal WebSocket (background)");
+            match connect_async(&url).await {
+                Ok((ws_stream, _)) => {
+                    info!("terminal WebSocket connected");
+                    run_terminal_ws(
+                        ws_stream,
+                        input_rx,
+                        output_tx,
+                        resize_rx,
+                        image_paste_rx,
+                        cancel_bg,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    error!(error = %e, "failed to connect terminal WebSocket");
+                    let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
+                }
+            }
+        });
+
+        Self {
+            input_tx,
+            output_rx,
+            resize_tx,
+            image_paste_tx,
+            cancel,
+        }
     }
 }
 
@@ -178,7 +229,13 @@ async fn run_terminal_ws(
                                 // Main pane output
                                 let bytes = &data[1..];
                                 if in_scrollback {
-                                    scrollback_buf.extend_from_slice(bytes);
+                                    if scrollback_buf.len() + bytes.len() > MAX_SCROLLBACK_BUFFER_SIZE {
+                                        warn!("scrollback buffer exceeded 100MB cap, truncating");
+                                        in_scrollback = false;
+                                        scrollback_buf.clear();
+                                    } else {
+                                        scrollback_buf.extend_from_slice(bytes);
+                                    }
                                 } else if output_tx
                                     .send(TerminalEvent::Output(bytes.to_vec()))
                                     .is_err()
@@ -200,7 +257,7 @@ async fn run_terminal_ws(
                                     Err(_) => continue,
                                 };
                                 let bytes = &data[2 + pid_len..];
-                                if in_scrollback {
+                                if in_scrollback && scrollback_buf.len() + bytes.len() <= MAX_SCROLLBACK_BUFFER_SIZE {
                                     scrollback_buf.extend_from_slice(bytes);
                                 } else if output_tx
                                     .send(TerminalEvent::PaneOutput {
