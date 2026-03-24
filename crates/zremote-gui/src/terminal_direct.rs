@@ -6,7 +6,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::types::TerminalEvent;
+use zremote_client::TerminalEvent;
 
 const TMUX_SOCKET: &str = "zremote";
 

@@ -23,7 +23,7 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use crate::types::{Host, Project, Session};
+use zremote_client::{Host, Project, Session};
 use crate::views::sidebar::CcState;
 
 // ---------------------------------------------------------------------------
@@ -351,9 +351,7 @@ fn build_entries(
             let a_mru = mru_map.get(a.id.as_str()).copied().unwrap_or(0);
             let b_mru = mru_map.get(b.id.as_str()).copied().unwrap_or(0);
             b_mru.cmp(&a_mru).then_with(|| {
-                let a_created = a.created_at.as_deref().unwrap_or("");
-                let b_created = b.created_at.as_deref().unwrap_or("");
-                b_created.cmp(a_created)
+                b.created_at.cmp(&a.created_at)
             })
         })
     });

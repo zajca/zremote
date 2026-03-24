@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
-use crate::api::ApiClient;
+use zremote_client::{ApiClient, ServerEvent};
+
 use crate::persistence::Persistence;
-use crate::types::ServerEvent;
 
 /// Shared application state accessible from all GPUI views.
 pub struct AppState {
@@ -12,6 +12,8 @@ pub struct AppState {
     pub tokio_handle: tokio::runtime::Handle,
     /// Receiver for real-time server events (from /ws/events WebSocket).
     pub event_rx: flume::Receiver<ServerEvent>,
+    /// Keep the event stream alive (dropping it cancels the background task).
+    pub _event_stream: zremote_client::EventStream,
     /// Server mode: "server" or "local".
     pub mode: String,
     /// Persistent GUI state (window size, selected session, etc.).

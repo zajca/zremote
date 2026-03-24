@@ -6,6 +6,7 @@ members = [
     "crates/zremote-server",
     "crates/zremote-agent",
     "crates/zremote-gui",
+    "crates/zremote-client",
 ]
 
 [workspace.package]
@@ -54,6 +55,7 @@ flume = "0.11"
 # Internal
 zremote-protocol = { path = "crates/zremote-protocol" }
 zremote-core = { path = "crates/zremote-core" }
+zremote-client = { path = "crates/zremote-client" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

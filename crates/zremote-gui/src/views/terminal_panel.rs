@@ -60,11 +60,11 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::terminal_handle::TerminalHandle;
 use crate::theme;
-use crate::types::TerminalEvent;
 use crate::views::command_palette::PaletteTab;
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
 use crate::views::url_detector::UrlDetector;
+use zremote_client::TerminalEvent;
 
 /// Cursor blink interval (standard terminal blink rate).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -317,6 +317,15 @@ impl TerminalPanel {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
+                    }
+                    Ok(
+                        TerminalEvent::PaneOutput { .. }
+                        | TerminalEvent::PaneAdded { .. }
+                        | TerminalEvent::PaneRemoved { .. }
+                        | TerminalEvent::SessionSuspended
+                        | TerminalEvent::SessionResumed,
+                    ) => {
+                        // Pane and suspension events not yet handled in single-pane terminal
                     }
                     Err(_) => break,
                 }

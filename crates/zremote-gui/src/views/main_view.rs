@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use gpui::*;
 
+use zremote_client::ServerEvent;
+
 use crate::app_state::AppState;
 use crate::theme;
-use crate::types::ServerEvent;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
@@ -102,7 +103,9 @@ impl MainView {
             let _ = p.save_if_changed();
         }
 
-        let handle = connect_terminal(&self.app_state, session_id);
+        let Some(handle) = connect_terminal(&self.app_state, session_id) else {
+            return;
+        };
         let tokio_handle = self.app_state.tokio_handle.clone();
         let terminal =
             cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, tmux_name, cx));
@@ -522,7 +525,7 @@ impl Render for MainView {
 fn connect_terminal(
     app_state: &std::sync::Arc<AppState>,
     session_id: &str,
-) -> crate::terminal_handle::TerminalHandle {
+) -> Option<crate::terminal_handle::TerminalHandle> {
     if crate::terminal_direct::tmux_available()
         && let Some(pane_id) = crate::terminal_direct::probe_local_session(session_id)
     {
@@ -533,7 +536,7 @@ fn connect_terminal(
         ) {
             Ok(direct) => {
                 tracing::info!(session_id = %session_id, "using direct tmux connection");
-                return crate::terminal_handle::TerminalHandle::Direct(direct);
+                return Some(crate::terminal_handle::TerminalHandle::Direct(direct));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "direct tmux failed, falling back to WebSocket");
@@ -541,8 +544,16 @@ fn connect_terminal(
         }
     }
     let ws_url = app_state.api.terminal_ws_url(session_id);
-    let ws = crate::terminal_ws::connect(ws_url, &app_state.tokio_handle);
-    crate::terminal_handle::TerminalHandle::WebSocket(ws)
+    let handle = &app_state.tokio_handle;
+    match handle.block_on(zremote_client::TerminalSession::connect(ws_url, handle)) {
+        Ok(session) => Some(crate::terminal_handle::TerminalHandle::from_session(
+            session, handle,
+        )),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to connect terminal WebSocket");
+            None
+        }
+    }
 }
 
 /// Events emitted by the sidebar for the main view to handle.
