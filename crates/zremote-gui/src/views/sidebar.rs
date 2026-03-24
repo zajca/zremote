@@ -238,13 +238,10 @@ impl SidebarView {
         }
     }
 
-    /// Remove stale loop entries that the server no longer considers active.
-    /// Called periodically as a fallback for missed WebSocket events.
+    /// Sync loop state with the server: add missing, update changed, remove stale.
+    /// Called periodically to catch missed WebSocket events and keep late-joining
+    /// GUI clients in sync.
     pub fn reconcile_loops(&mut self, cx: &mut Context<Self>) {
-        if self.cc_states.is_empty() {
-            return; // Nothing to reconcile
-        }
-
         let api = self.app_state.api.clone();
         let stale_session_ids: Vec<String> = self.cc_states.keys().cloned().collect();
         let handle = self.app_state.tokio_handle.clone();
@@ -261,7 +258,7 @@ impl SidebarView {
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                 let mut changed = false;
 
-                // Update existing entries with server-side status
+                // Add or update entries from server
                 for loop_info in &active_loops {
                     if let Some(cc) = this.cc_states.get_mut(&loop_info.session_id) {
                         if cc.status != loop_info.status || cc.task_name != loop_info.task_name {
@@ -269,6 +266,17 @@ impl SidebarView {
                             cc.task_name.clone_from(&loop_info.task_name);
                             changed = true;
                         }
+                    } else {
+                        // New loop the GUI didn't know about (missed LoopDetected event)
+                        this.cc_states.insert(
+                            loop_info.session_id.clone(),
+                            CcState {
+                                loop_id: loop_info.id.clone(),
+                                status: loop_info.status.clone(),
+                                task_name: loop_info.task_name.clone(),
+                            },
+                        );
+                        changed = true;
                     }
                 }
 
