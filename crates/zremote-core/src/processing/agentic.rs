@@ -1281,11 +1281,11 @@ mod tests {
         // Verify LoopStatusChanged event was emitted
         let mut found_event = false;
         while let Ok(event) = rx.try_recv() {
-            if let ServerEvent::LoopStatusChanged { ref loop_info, .. } = event {
-                if loop_info.id == loop_id.to_string() {
-                    assert_eq!(loop_info.status, "waiting_for_input");
-                    found_event = true;
-                }
+            if let ServerEvent::LoopStatusChanged { ref loop_info, .. } = event
+                && loop_info.id == loop_id.to_string()
+            {
+                assert_eq!(loop_info.status, "waiting_for_input");
+                found_event = true;
             }
         }
         assert!(found_event, "expected LoopStatusChanged event");
