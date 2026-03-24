@@ -1,18 +1,12 @@
 #[allow(dead_code)]
-mod api;
-#[allow(dead_code)]
 mod app_state;
 mod assets;
-mod events_ws;
 mod icons;
 mod persistence;
 mod terminal_direct;
 mod terminal_handle;
-mod terminal_ws;
 #[allow(dead_code)]
 mod theme;
-#[allow(dead_code)]
-mod types;
 mod views;
 
 use std::sync::{Arc, Mutex};
@@ -20,12 +14,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use gpui::*;
+use zremote_client::ApiClient;
 
-use api::ApiClient;
 use app_state::AppState;
 use assets::Assets;
 use persistence::Persistence;
-use types::ServerEvent;
 use views::main_view::MainView;
 
 #[derive(Parser)]
@@ -91,11 +84,9 @@ fn main() {
     let tokio_handle = rt.handle().clone();
 
     // Detect server mode
+    let api = ApiClient::new(&server_url).expect("invalid server URL");
     let mode = rt
-        .block_on(async {
-            let api = ApiClient::new(&server_url);
-            api.get_mode().await
-        })
+        .block_on(async { api.get_mode().await })
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to detect server mode, assuming 'server'");
             "server".to_string()
@@ -108,10 +99,8 @@ fn main() {
     persistence.update(|s| s.server_url = Some(server_url.clone()));
 
     // Start events WebSocket on background tokio task
-    let (event_tx, event_rx) = flume::bounded::<ServerEvent>(256);
-    let api = ApiClient::new(&server_url);
     let events_url = api.events_ws_url();
-    rt.spawn(events_ws::run_events_ws(events_url, event_tx));
+    let event_stream = zremote_client::EventStream::connect(events_url, &tokio_handle);
 
     let restored_width = persistence.state().window_width;
     let restored_height = persistence.state().window_height;
@@ -119,7 +108,8 @@ fn main() {
     let app_state = Arc::new(AppState {
         api,
         tokio_handle,
-        event_rx,
+        event_rx: event_stream.rx.clone(),
+        _event_stream: event_stream,
         mode,
         persistence: Mutex::new(persistence),
     });

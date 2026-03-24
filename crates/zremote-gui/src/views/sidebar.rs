@@ -9,8 +9,10 @@ use crate::icons::{Icon, icon};
 use crate::theme;
 use std::time::Duration;
 
-use crate::types::{CreateSessionRequest, Host, Project, ServerEvent, Session};
 use crate::views::main_view::SidebarEvent;
+use zremote_client::{
+    CreateSessionRequest, Host, ListLoopsFilter, Project, ServerEvent, Session,
+};
 
 /// Tracks the Claude Code agentic loop state for a session.
 #[derive(Clone)]
@@ -208,29 +210,29 @@ impl SidebarView {
                 }
                 self.load_data(cx);
             }
-            ServerEvent::LoopDetected { loop_info } => {
+            ServerEvent::LoopDetected { loop_info, .. } => {
                 self.cc_states.insert(
                     loop_info.session_id.clone(),
                     CcState {
                         loop_id: loop_info.id.clone(),
-                        status: loop_info.status.clone(),
+                        status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
                     },
                 );
                 cx.notify();
             }
-            ServerEvent::LoopStateChanged { loop_info } => {
+            ServerEvent::LoopStateChanged { loop_info, .. } => {
                 self.cc_states.insert(
                     loop_info.session_id.clone(),
                     CcState {
                         loop_id: loop_info.id.clone(),
-                        status: loop_info.status.clone(),
+                        status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
                     },
                 );
                 cx.notify();
             }
-            ServerEvent::LoopEnded { loop_info } => {
+            ServerEvent::LoopEnded { loop_info, .. } => {
                 // Only remove if the loop_id matches (avoid stale removal).
                 if let Some(state) = self.cc_states.get(&loop_info.session_id)
                     && state.loop_id == loop_info.id
@@ -239,7 +241,7 @@ impl SidebarView {
                 }
                 cx.notify();
             }
-            ServerEvent::Unknown => {}
+            _ => {}
         }
     }
 
@@ -253,7 +255,13 @@ impl SidebarView {
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let active_loops = handle
-                .spawn(async move { api.get_active_loops().await.unwrap_or_default() })
+                .spawn(async move {
+                    let filter = ListLoopsFilter {
+                        status: Some("active".to_string()),
+                        ..ListLoopsFilter::default()
+                    };
+                    api.list_loops(&filter).await.unwrap_or_default()
+                })
                 .await
                 .unwrap_or_default();
 
@@ -267,7 +275,7 @@ impl SidebarView {
                 for loop_info in &active_loops {
                     if let Some(cc) = this.cc_states.get_mut(&loop_info.session_id) {
                         if cc.status != loop_info.status || cc.task_name != loop_info.task_name {
-                            cc.status.clone_from(&loop_info.status);
+                            cc.status = loop_info.status;
                             cc.task_name.clone_from(&loop_info.task_name);
                             changed = true;
                         }
@@ -277,7 +285,7 @@ impl SidebarView {
                             loop_info.session_id.clone(),
                             CcState {
                                 loop_id: loop_info.id.clone(),
-                                status: loop_info.status.clone(),
+                                status: loop_info.status,
                                 task_name: loop_info.task_name.clone(),
                             },
                         );
@@ -358,7 +366,8 @@ impl SidebarView {
                             shell: None,
                             status: "active".to_string(),
                             pid: None,
-                            created_at: None,
+                            exit_code: None,
+                            created_at: String::new(),
                             closed_at: None,
                             project_id: resolved_project_id,
                             working_dir: working_dir_clone,

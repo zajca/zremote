@@ -21,7 +21,7 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use crate::types::{Host, Project, Session};
+use zremote_client::{Host, Project, Session};
 use crate::views::sidebar::CcState;
 
 use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
@@ -1515,7 +1515,7 @@ impl CommandPalette {
             _ => theme::text_tertiary(),
         };
 
-        let duration = format_duration(session.created_at.as_deref());
+        let duration = format_duration(Some(&session.created_at));
         let cc_state = self.snapshot.cc_states.get(&session.id);
 
         let mut row = div().flex().items_center().gap(px(6.0)).flex_shrink_0();
@@ -2003,7 +2003,7 @@ impl CommandPalette {
 
                 let mut info_parts = vec![session.status.clone()];
 
-                let duration = format_duration(session.created_at.as_deref());
+                let duration = format_duration(Some(&session.created_at));
                 if !duration.is_empty() {
                     info_parts.push(duration);
                 }
@@ -2894,17 +2894,21 @@ mod tests {
         build_project_drill_items_from, build_project_items, build_session_drill_items_from,
         build_session_items, is_item_drillable,
     };
-    use crate::types::{Host, Project, Session};
     use std::rc::Rc;
+    use zremote_client::{Host, Project, Session};
 
     fn test_snapshot() -> PaletteSnapshot {
         let hosts = Rc::new(vec![Host {
             id: "host-1".to_string(),
+            name: "localhost".to_string(),
             hostname: "localhost".to_string(),
             status: "online".to_string(),
+            last_seen_at: None,
             agent_version: None,
             os: None,
             arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
         }]);
 
         let sessions = Rc::new(vec![
@@ -2915,7 +2919,8 @@ mod tests {
                 shell: Some("zsh".to_string()),
                 status: "active".to_string(),
                 pid: Some(1234),
-                created_at: None,
+                exit_code: None,
+                created_at: String::new(),
                 closed_at: None,
                 project_id: Some("proj-1".to_string()),
                 working_dir: Some("/home/user/project-a".to_string()),
@@ -2928,7 +2933,8 @@ mod tests {
                 shell: Some("bash".to_string()),
                 status: "suspended".to_string(),
                 pid: None,
-                created_at: None,
+                exit_code: None,
+                created_at: String::new(),
                 closed_at: None,
                 project_id: Some("proj-1".to_string()),
                 working_dir: Some("/home/user/project-a".to_string()),
@@ -2941,7 +2947,8 @@ mod tests {
                 shell: Some("zsh".to_string()),
                 status: "active".to_string(),
                 pid: Some(5678),
-                created_at: None,
+                exit_code: None,
+                created_at: String::new(),
                 closed_at: None,
                 project_id: Some("proj-2".to_string()),
                 working_dir: Some("/home/user/project-b".to_string()),
@@ -2955,22 +2962,40 @@ mod tests {
                 host_id: "host-1".to_string(),
                 path: "/home/user/project-a".to_string(),
                 name: "project-a".to_string(),
+                has_claude_config: false,
+                has_zremote_config: false,
                 project_type: "rust".to_string(),
+                created_at: String::new(),
                 parent_project_id: None,
-                pinned: true,
                 git_branch: Some("main".to_string()),
+                git_commit_hash: None,
+                git_commit_message: None,
                 git_is_dirty: true,
+                git_ahead: 0,
+                git_behind: 0,
+                git_remotes: None,
+                git_updated_at: None,
+                pinned: true,
             },
             Project {
                 id: "proj-2".to_string(),
                 host_id: "host-1".to_string(),
                 path: "/home/user/project-b".to_string(),
                 name: "project-b".to_string(),
+                has_claude_config: false,
+                has_zremote_config: false,
                 project_type: "node".to_string(),
+                created_at: String::new(),
                 parent_project_id: None,
-                pinned: false,
                 git_branch: Some("feature/test".to_string()),
+                git_commit_hash: None,
+                git_commit_message: None,
                 git_is_dirty: false,
+                git_ahead: 0,
+                git_behind: 0,
+                git_remotes: None,
+                git_updated_at: None,
+                pinned: false,
             },
         ]);
 
@@ -3192,11 +3217,15 @@ mod tests {
         // Create a snapshot with a project that has no sessions
         let hosts = Rc::new(vec![Host {
             id: "host-1".to_string(),
+            name: "host-1".to_string(),
             hostname: "localhost".to_string(),
             status: "online".to_string(),
+            last_seen_at: None,
             agent_version: None,
             os: None,
             arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
         }]);
         let sessions = Rc::new(vec![]);
         let projects = Rc::new(vec![Project {
@@ -3204,11 +3233,20 @@ mod tests {
             host_id: "host-1".to_string(),
             path: "/home/user/empty-project".to_string(),
             name: "empty-project".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
             project_type: "rust".to_string(),
+            created_at: String::new(),
             parent_project_id: None,
-            pinned: false,
             git_branch: None,
+            git_commit_hash: None,
+            git_commit_message: None,
             git_is_dirty: false,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
         }]);
         let snapshot = PaletteSnapshot::capture(
             hosts,
