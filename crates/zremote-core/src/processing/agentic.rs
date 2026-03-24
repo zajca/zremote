@@ -79,10 +79,19 @@ pub async fn check_idle_loops(
         }
 
         let loop_id_str = loop_id.to_string();
-        let _ = sqlx::query("UPDATE agentic_loops SET status = 'waiting_for_input' WHERE id = ?")
-            .bind(&loop_id_str)
-            .execute(db)
-            .await;
+        // Conditional update: only transition if still 'working' in DB.
+        // Prevents overwriting 'completed' set by a concurrent LoopEnded handler.
+        let result = sqlx::query(
+            "UPDATE agentic_loops SET status = 'waiting_for_input' WHERE id = ? AND status = 'working'",
+        )
+        .bind(&loop_id_str)
+        .execute(db)
+        .await;
+
+        // If the DB row was already updated (e.g., to 'completed'), skip the event.
+        if result.map_or(true, |r| r.rows_affected() == 0) {
+            continue;
+        }
 
         if let Some(loop_info) = fetch_loop_info_by_id(db, &loop_id_str).await {
             let _ = events.send(ServerEvent::LoopStatusChanged {
