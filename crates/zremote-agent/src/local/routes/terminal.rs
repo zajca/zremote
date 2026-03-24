@@ -227,10 +227,11 @@ async fn handle_terminal_connection(
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<BrowserInput>(&text) {
-                            Ok(BrowserInput::Input { pane_id: target_pane, data }) => {
-                                if data.len() > 4096 {
-                                    tracing::warn!("browser terminal input exceeds 4096 bytes, closing connection");
-                                    break;
+                            Ok(BrowserInput::Input { pane_id: target_pane, mut data }) => {
+                                const MAX_INPUT_BYTES: usize = 1_048_576;
+                                if data.len() > MAX_INPUT_BYTES {
+                                    tracing::warn!(len = data.len(), "browser terminal input exceeds 1 MB, truncating");
+                                    data.truncate(MAX_INPUT_BYTES);
                                 }
                                 // Flush any buffered output before forwarding input
                                 if !output_buf.is_empty() {

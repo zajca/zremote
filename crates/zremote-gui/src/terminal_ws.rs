@@ -60,14 +60,17 @@ async fn run_terminal_ws(
                 input = input_rx.recv_async() => {
                     match input {
                         Ok(data) => {
-                            let msg = TerminalClientMessage::Input {
-                                data: String::from_utf8_lossy(&data).to_string(),
-                                pane_id: None,
-                            };
-                            if let Ok(json) = serde_json::to_string(&msg)
-                                && write.send(Message::Text(json.into())).await.is_err()
-                            {
-                                break;
+                            const MAX_CHUNK: usize = 65_536;
+                            for chunk in data.chunks(MAX_CHUNK) {
+                                let msg = TerminalClientMessage::Input {
+                                    data: String::from_utf8_lossy(chunk).to_string(),
+                                    pane_id: None,
+                                };
+                                if let Ok(json) = serde_json::to_string(&msg)
+                                    && write.send(Message::Text(json.into())).await.is_err()
+                                {
+                                    break;
+                                }
                             }
                         }
                         Err(_) => break,
