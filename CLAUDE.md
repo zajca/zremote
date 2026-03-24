@@ -512,6 +512,20 @@ cargo build -p zremote-agent
 cargo build -p zremote-agent --no-default-features
 ```
 
+## Releasing
+
+```bash
+./scripts/release.sh next              # Show current version and next possible versions
+./scripts/release.sh release patch     # Release patch bump (X.Y.Z+1)
+./scripts/release.sh release minor     # Release minor bump (X.Y+1.0)
+./scripts/release.sh release 0.4.0    # Release specific version
+./scripts/release.sh retry             # Re-tag latest if CI failed
+./scripts/release.sh retry 0.2.5      # Re-tag specific version
+./scripts/release.sh status            # Show current version and tag state
+```
+
+The script validates semver, checks clean tree and main branch, bumps all crate versions in sync, updates Cargo.lock, commits, creates annotated tag, and pushes.
+
 ## Implementation Workflow
 
 Multi-phase features use a **team-based workflow** (TeamCreate). This is mandatory for any feature that spans 3+ files or requires architectural changes. You (the main agent) act as **team lead** -- you plan, delegate, review, and merge. Teammates do the implementation.
