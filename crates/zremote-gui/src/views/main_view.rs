@@ -174,6 +174,7 @@ impl MainView {
             .ok()
             .map(|p| p.state().recent_sessions.clone())
             .unwrap_or_default();
+        let cc_states = snapshot.cc_states().clone();
         let palette_snapshot = PaletteSnapshot::capture(
             Rc::clone(snapshot.hosts_rc()),
             Rc::clone(snapshot.sessions_rc()),
@@ -181,6 +182,7 @@ impl MainView {
             self.app_state.mode.clone(),
             snapshot.selected_session_id().map(String::from),
             &recent_sessions,
+            cc_states,
         );
         let palette = cx.new(|cx| CommandPalette::new(palette_snapshot, tab, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();
@@ -288,6 +290,7 @@ impl MainView {
         let hosts = Rc::clone(snapshot.hosts_rc());
         let sessions = Rc::clone(snapshot.sessions_rc());
         let projects = Rc::clone(snapshot.projects_rc());
+        let cc_states = snapshot.cc_states().clone();
         let mode = self.app_state.mode.clone();
 
         let switcher = cx.new(|cx| {
@@ -298,6 +301,7 @@ impl MainView {
                 &recent_sessions,
                 current_session_id.as_deref(),
                 &mode,
+                &cc_states,
                 cx,
             )
         });
