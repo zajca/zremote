@@ -1,0 +1,28 @@
+[package]
+name = "zremote-client"
+version = "0.3.9"
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zremote-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+url.workspace = true
+flume.workspace = true
+tracing.workspace = true
+tokio-util.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tower.workspace = true
+tokio = { workspace = true, features = ["full"] }
