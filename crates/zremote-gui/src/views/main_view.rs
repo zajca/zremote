@@ -37,6 +37,9 @@ impl MainView {
         // Start polling server events
         Self::start_event_polling(&app_state, cx);
 
+        // Start periodic loop reconciliation (fallback for missed WS events)
+        Self::start_loop_reconciliation(&sidebar, cx);
+
         let focus_handle = cx.focus_handle();
 
         Self {
@@ -115,6 +118,23 @@ impl MainView {
                 let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                     this.handle_server_event(&event, cx);
                 });
+            }
+        })
+        .detach();
+    }
+
+    fn start_loop_reconciliation(sidebar: &Entity<SidebarView>, cx: &mut Context<Self>) {
+        let sidebar = sidebar.clone();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                // Wait 5 seconds between reconciliation checks.
+                Timer::after(std::time::Duration::from_secs(5)).await;
+                let should_continue = sidebar.update(cx, |sidebar, cx| {
+                    sidebar.reconcile_loops(cx);
+                });
+                if should_continue.is_err() {
+                    break; // Entity dropped
+                }
             }
         })
         .detach();

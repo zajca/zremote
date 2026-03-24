@@ -285,6 +285,7 @@ impl AgenticProcessor {
         loop_id: AgenticLoopId,
         reason: String,
     ) -> Result<(), AppError> {
+        tracing::info!(loop_id = %loop_id, reason = %reason, "processing loop ended");
         let loop_id_str = loop_id.to_string();
         let now = chrono::Utc::now().to_rfc3339();
 

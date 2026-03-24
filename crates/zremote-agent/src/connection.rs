@@ -106,7 +106,7 @@ type WsStream =
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Establish a WebSocket connection to the server.
 async fn connect(config: &AgentConfig) -> Result<WsStream, ConnectionError> {

@@ -19,7 +19,7 @@ use crate::hooks::server::HooksServer;
 use state::LocalAppState;
 
 /// Interval for periodic agentic tool detection (same as connection.rs).
-const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Expand `~` at the start of a path to the user's home directory.
 fn expand_tilde(path: &str) -> PathBuf {
@@ -499,6 +499,7 @@ fn spawn_hooks_message_consumer(
                         .await;
                 }
                 AgenticAgentMessage::LoopEnded { loop_id, .. } => {
+                    tracing::info!(loop_id = %loop_id, "agentic loop ended (hook)");
                     state.session_mapper.remove_loop(loop_id).await;
                 }
                 _ => {}
@@ -513,7 +514,7 @@ fn spawn_hooks_message_consumer(
 
 /// Spawn a periodic task that scans process trees for agentic tools.
 ///
-/// Every 3 seconds, checks all active PTY sessions for known agentic tool
+/// Every 1 second, checks all active PTY sessions for known agentic tool
 /// processes (Claude Code, Codex, etc.) and emits detection/ended events.
 fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
     tokio::spawn(async move {
@@ -613,6 +614,7 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
                                 state.session_mapper.register_loop(*session_id, *loop_id).await;
                             }
                             AgenticAgentMessage::LoopEnded { loop_id, .. } => {
+                                tracing::info!(loop_id = %loop_id, "agentic loop ended (process exited)");
                                 state.session_mapper.remove_loop(loop_id).await;
                             }
                             _ => {}

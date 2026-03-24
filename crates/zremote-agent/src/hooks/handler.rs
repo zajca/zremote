@@ -195,8 +195,11 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
         .await
     else {
+        tracing::warn!(cc_session = %payload.session_id, "Stop hook: no loop mapping, falling back to process polling");
         return;
     };
+
+    tracing::info!(loop_id = %mapped.loop_id, cc_session = %payload.session_id, "Stop hook: sending LoopEnded");
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
