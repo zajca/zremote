@@ -13,6 +13,98 @@ ZRemote currently has a native GPUI desktop client and a web-accessible server. 
 
 The existing codebase is written entirely in Rust. The key question is: **how much code can be reused for mobile, and what's the best architecture?**
 
+## Prerequisite: `zremote-client` SDK Crate
+
+Before building any mobile app, extract a shared **`zremote-client`** SDK crate that all GUI clients (desktop GPUI, mobile, future CLI tools) depend on. This eliminates code duplication and ensures consistent API behavior across all frontends.
+
+### What to Extract from `zremote-gui`
+
+The desktop GUI currently contains platform-independent networking code that belongs in a shared crate:
+
+| Source file | What to extract | Notes |
+|---|---|---|
+| `zremote-gui/src/api.rs` | `ApiClient` (REST client) | 178 lines. reqwest-based. Zero GPUI dependencies. Move as-is. |
+| `zremote-gui/src/types.rs` | All API types (`Host`, `Session`, `Project`, `ServerEvent`, `TerminalServerMessage`, etc.) | 195 lines. Pure serde structs. Move as-is. |
+| `zremote-gui/src/events_ws.rs` | `run_events_ws()` (event stream with auto-reconnect) | 59 lines. Uses tokio-tungstenite + flume. Move as-is. |
+| `zremote-gui/src/terminal_ws.rs` | `TerminalWsHandle`, `connect()`, terminal WS protocol | 206 lines. Binary frame parsing, scrollback buffering. Move as-is. |
+
+### SDK Crate Structure
+
+```
+crates/zremote-client/
+  Cargo.toml          # deps: reqwest, tokio, tokio-tungstenite, serde, serde_json,
+                      #       futures-util, flume, tracing, uuid, chrono
+                      # depends on: zremote-protocol
+  src/
+    lib.rs            # Re-exports
+    api.rs            # ApiClient - REST endpoints
+    types.rs          # Host, Session, Project, ServerEvent, Terminal messages
+    events.rs         # run_events_ws() - event stream with reconnect
+    terminal.rs       # TerminalWsHandle, connect() - terminal WS I/O
+    error.rs          # ApiError (currently in api.rs)
+```
+
+### Dependency Graph After Extraction
+
+```
+zremote-protocol          (types only, no runtime)
+       │
+       ▼
+zremote-client            (SDK: REST + WS client, platform-independent)
+       │
+  ┌────┼────────┐
+  ▼    ▼        ▼
+ GUI  Mobile   CLI tools
+(GPUI) (UniFFI/  (future)
+       Dioxus/
+       etc.)
+```
+
+### Migration Plan
+
+1. Create `crates/zremote-client/` with dependencies from above
+2. Move `api.rs`, `types.rs`, `events_ws.rs`, `terminal_ws.rs` from GUI to SDK
+3. GUI becomes a thin presentation layer: `zremote-gui` depends on `zremote-client`
+4. All `use crate::types::*` in GUI views change to `use zremote_client::*`
+5. No behavior change — purely structural refactor
+
+### Channel Abstraction
+
+Currently the code uses `flume` channels for tokio-to-GUI communication. The SDK should keep `flume` as the default (it works on all platforms including mobile), but the channel types are part of the public API:
+
+```rust
+// zremote-client/src/terminal.rs
+pub struct TerminalWsHandle {
+    pub input_tx: flume::Sender<Vec<u8>>,
+    pub output_rx: flume::Receiver<TerminalEvent>,
+    pub resize_tx: flume::Sender<(u16, u16)>,
+    pub image_paste_tx: flume::Sender<String>,
+}
+```
+
+This works for both GPUI (current) and mobile frameworks (Dioxus reads from flume, UniFFI can wrap in callback). If a future client needs `tokio::sync::mpsc` instead, a feature flag or generic channel trait can be added later.
+
+### What Stays in GUI
+
+| Module | Why it stays |
+|---|---|
+| `main.rs` | GPUI Application launch, CLI parsing |
+| `app_state.rs` | GPUI-specific state (Entity, tokio handle) |
+| `theme.rs` | GPUI color palette |
+| `icons.rs` | GPUI SVG icon system |
+| `assets.rs` | rust-embed AssetSource for GPUI |
+| `views/` | All GPUI views (sidebar, terminal panel, terminal element) |
+
+### Benefits
+
+- **Single source of truth** for API interactions — bug fixes propagate to all clients
+- **Mobile app starts with a working SDK** — no need to rewrite networking
+- **Testable independently** — SDK can have integration tests against a real server
+- **UniFFI-ready** — SDK types are simple serde structs, trivial to annotate with `#[uniffi::export]`
+- **Future-proof** — CLI tools, TUI clients, or web frontends can all use the same SDK
+
+---
+
 ## Existing Code Reuse Analysis
 
 ### Directly Reusable (platform-independent)
@@ -520,12 +612,31 @@ Regardless of approach, the mobile MVP should include:
 
 ## Recommendation
 
-For ZRemote, **Option 1 (UniFFI + Native UI)** is the recommended path:
+### Step 1: Extract `zremote-client` SDK (regardless of mobile approach)
+
+This is a prerequisite for any mobile option and improves the codebase independently:
+- Clean separation of concerns in the desktop GUI
+- SDK is testable, reusable, and UniFFI-ready
+- Effort: ~1-2 days (pure structural refactor, no behavior change)
+
+### Step 2: Choose mobile framework
+
+**Option 1 (UniFFI + Native UI)** is the recommended production path:
 
 1. **Lowest risk**: UniFFI is battle-tested (Firefox ships with it on all platforms)
 2. **Best UX**: Native Jetpack Compose / SwiftUI gives platform-appropriate experience
-3. **Clean extraction**: The `zremote-client` crate benefits the entire project (CLI tools, tests, etc.)
-4. **Terminal rendering**: Native Android Canvas / iOS CoreText can handle terminal grid efficiently
-5. **Notification support**: Direct access to FCM (Android) / APNs (iOS)
+3. **Terminal rendering**: Native Android Canvas / iOS CoreText can handle terminal grid efficiently
+4. **Notification support**: Direct access to FCM (Android) / APNs (iOS)
+5. **SDK types map 1:1**: `Host`, `Session`, `ServerEvent` become Kotlin/Swift data classes automatically
 
-If the goal is **Android-only prototype**, Dioxus (Option 3) is a viable faster path with the understanding that it may need to be rewritten for production quality.
+**Alternative: Dioxus (Option 3)** for Android-only prototype — faster to ship, but may need rewrite for production quality.
+
+### Implementation Order
+
+```
+Phase 0: Extract zremote-client SDK from zremote-gui
+Phase 1: Add UniFFI annotations to SDK types + build Android .aar
+Phase 2: Android MVP (Jetpack Compose) — host list, session list, loop monitoring
+Phase 3: Terminal viewer (read-only) + push notifications
+Phase 4: (Optional) iOS app using same SDK
+```
