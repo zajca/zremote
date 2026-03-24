@@ -70,6 +70,10 @@ pub fn connect_standalone(
     // Shared stdin channel: writer, resize, and cleanup tasks all send commands here.
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(256);
 
+    // Query pane size BEFORE attaching the control mode client. This prevents
+    // the window from resizing when the new client attaches with default 80x24.
+    let (pre_cols, pre_rows) = query_tmux_pane_size(&pane_id);
+
     // Enter tokio runtime context for spawning the async child process.
     let guard = tokio_handle.enter();
     let mut child = TokioCommand::new("tmux")
@@ -89,6 +93,12 @@ pub fn connect_standalone(
 
     let child_stdin = child.stdin.take().expect("stdin was piped");
     let child_stdout = child.stdout.take().expect("stdout was piped");
+
+    // Set the control mode client's reported size to the current pane size,
+    // preventing tmux from resizing the window to the default 80x24.
+    if pre_cols > 0 && pre_rows > 0 {
+        let _ = stdin_tx.try_send(format!("refresh-client -C {pre_cols}x{pre_rows}\n"));
+    }
 
     // Queue initial capture-pane command (gets current screen content).
     let _ = stdin_tx.try_send(format!("capture-pane -t {pane_id} -p -e\n"));
@@ -139,7 +149,9 @@ pub fn connect_standalone(
                             capture_done = true;
                             // Frame capture-pane output with ScrollbackStart/End so
                             // the terminal panel recreates Term at correct window size.
-                            let (pane_cols, pane_rows) = query_tmux_pane_size(&reader_pane_id);
+                            // Use pre-queried size (before control mode client attached)
+                            // to avoid race with GUI's resize-window command.
+                            let (pane_cols, pane_rows) = (pre_cols, pre_rows);
                             if reader_output_tx
                                 .send(TerminalEvent::ScrollbackStart {
                                     cols: pane_cols,
@@ -149,8 +161,13 @@ pub fn connect_standalone(
                             {
                                 break;
                             }
-                            let mut content = block_lines.join("\n");
-                            content.push('\n');
+                            // Join with \r\n (not just \n) because alacritty's VTE
+                            // treats \n as LF only (move down, no column reset).
+                            // Without \r, each line would start at the column where
+                            // the previous line ended, causing cascading right-shift.
+                            // No trailing \r\n — the last row must not scroll the
+                            // first row off the top of the terminal.
+                            let content = block_lines.join("\r\n");
                             if reader_output_tx
                                 .send(TerminalEvent::Output(content.into_bytes()))
                                 .is_err()
