@@ -803,9 +803,31 @@ pub fn cleanup_stale() {
                 continue;
             };
 
+            // Extra-pane FIFOs have format "{uuid}-{pane_id}.fifo" -- strip
+            // the pane suffix to recover the session UUID.
+            let session_uuid = stem
+                .rsplit_once('-')
+                .and_then(|(prefix, suffix)| {
+                    // Only strip if the suffix looks like a pane id (digits or %digits)
+                    let s = suffix.strip_prefix('%').unwrap_or(suffix);
+                    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+                        // Verify the prefix is a valid UUID length (36 chars)
+                        (prefix.len() == 36).then_some(prefix)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(stem);
+
             // Check if the FIFO's session still has a living tmux session
-            let expected_name = format!("{SESSION_PREFIX}{stem}");
+            let expected_name = format!("{SESSION_PREFIX}{session_uuid}");
             if !active_sessions.contains(&expected_name) {
+                // Kill orphaned cat processes still writing to this FIFO
+                let fifo_str = path.to_string_lossy();
+                let _ = std::process::Command::new("pkill")
+                    .args(["-f", &format!("cat.*{fifo_str}")])
+                    .output();
+
                 tracing::info!(path = %path.display(), "removing orphaned FIFO");
                 let _ = fs::remove_file(&path);
             }
