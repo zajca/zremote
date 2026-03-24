@@ -154,6 +154,10 @@ pub enum ServerMessage {
         session_id: SessionId,
         data: Vec<u8>,
     },
+    TerminalImagePaste {
+        session_id: SessionId,
+        data: Vec<u8>,
+    },
     TerminalResize {
         session_id: SessionId,
         cols: u16,
@@ -307,6 +311,14 @@ mod tests {
         roundtrip_server(&ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x68, 0x65, 0x6c, 0x6c, 0x6f],
+        });
+    }
+
+    #[test]
+    fn terminal_image_paste_roundtrip() {
+        roundtrip_server(&ServerMessage::TerminalImagePaste {
+            session_id: Uuid::new_v4(),
+            data: vec![0x89, 0x50, 0x4e, 0x47], // PNG magic bytes
         });
     }
 

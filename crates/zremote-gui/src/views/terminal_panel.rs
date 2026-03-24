@@ -77,6 +77,28 @@ const DEFAULT_ROWS: u16 = 40;
 /// Local term.resize() is immediate; only the server message is debounced.
 const RESIZE_DEBOUNCE_MS: u64 = 150;
 
+/// Read image data from the system clipboard (bypassing GPUI's text-only API)
+/// and return it as a base64-encoded PNG string.
+fn read_clipboard_image_base64() -> Option<String> {
+    use base64::Engine;
+
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let img = clipboard.get_image().ok()?;
+    if img.width == 0 || img.height == 0 {
+        return None;
+    }
+
+    let mut png_buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_buf, img.width as u32, img.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&img.bytes).ok()?;
+    }
+    Some(base64::engine::general_purpose::STANDARD.encode(&png_buf))
+}
+
 /// Shared layout info set by the element during paint, read by mouse event handlers.
 #[derive(Clone, Copy, Default)]
 pub struct TerminalLayoutInfo {
@@ -761,6 +783,7 @@ impl Render for TerminalPanel {
             .overflow_hidden()
             .on_key_down({
                 let input_tx = self.handle.input_tx().clone();
+                let image_paste_tx = self.handle.image_paste_tx().cloned();
                 let term = self.term.clone();
                 let search_open = self.search_open;
                 let entity = cx.entity().downgrade();
@@ -891,8 +914,20 @@ impl Render for TerminalPanel {
                                 bytes.extend_from_slice(b"\x1b[201~");
                             }
                             let _ = input_tx.send(bytes);
+                            return;
                         }
-                        return;
+                        // No text in clipboard — try forwarding clipboard image
+                        // over WebSocket so the agent can set it on the remote
+                        // clipboard before sending Ctrl+V to the PTY.
+                        if let Some(ref tx) = image_paste_tx
+                            && let Some(b64) = read_clipboard_image_base64()
+                        {
+                            let _ = tx.send(b64);
+                            return;
+                        }
+                        // Direct mode or no image: fall through to encode_keystroke
+                        // which sends Ctrl+V (0x16) to the PTY, letting Claude Code
+                        // read the system clipboard itself.
                     }
 
                     if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke) {

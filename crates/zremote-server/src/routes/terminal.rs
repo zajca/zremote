@@ -22,6 +22,8 @@ enum BrowserInput {
     Input { data: String },
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
+    #[serde(rename = "image_paste")]
+    ImagePaste { data: String },
 }
 
 /// WebSocket upgrade handler for browser terminal connections.
@@ -237,6 +239,18 @@ async fn handle_terminal_connection(
                                         session_id,
                                         cols,
                                         rows,
+                                    };
+                                    let _ = sender.send(msg).await;
+                                }
+                            }
+                            Ok(BrowserInput::ImagePaste { data }) => {
+                                use base64::Engine;
+                                if let Ok(png_bytes) = base64::engine::general_purpose::STANDARD.decode(&data)
+                                    && let Some(sender) = state.connections.get_sender(&host_id).await
+                                {
+                                    let msg = ServerMessage::TerminalImagePaste {
+                                        session_id,
+                                        data: png_bytes,
                                     };
                                     let _ = sender.send(msg).await;
                                 }

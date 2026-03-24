@@ -30,6 +30,15 @@ impl TerminalHandle {
         }
     }
 
+    /// Image paste channel (WebSocket only). Direct mode returns `None` because
+    /// Claude Code can read the system clipboard itself on the same machine.
+    pub fn image_paste_tx(&self) -> Option<&flume::Sender<String>> {
+        match self {
+            Self::WebSocket(h) => Some(&h.image_paste_tx),
+            Self::Direct(_) => None,
+        }
+    }
+
     pub fn is_direct(&self) -> bool {
         matches!(self, Self::Direct(_))
     }
