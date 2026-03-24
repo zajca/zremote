@@ -107,18 +107,21 @@ impl ApiClient {
         Ok(project)
     }
 
-    /// Fetch currently active (working) agentic loops.
+    /// Fetch currently active (working or waiting_for_input) agentic loops.
     /// Returns an empty vec on any error (best-effort reconciliation).
     pub async fn get_active_loops(&self) -> Result<Vec<LoopInfoLite>, ApiError> {
         let loops: Vec<LoopInfoLite> = self
             .client
-            .get(format!("{}/api/loops?status=working", self.base_url))
+            .get(format!("{}/api/loops", self.base_url))
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
-        Ok(loops)
+        Ok(loops
+            .into_iter()
+            .filter(|l| l.status == "working" || l.status == "waiting_for_input")
+            .collect())
     }
 
     /// Close (delete) a session.

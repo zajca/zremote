@@ -299,6 +299,9 @@ async fn main() {
     // Start Telegram bot (optional -- skipped if TELEGRAM_BOT_TOKEN not set)
     telegram::try_start(Arc::clone(&state), shutdown.clone());
 
+    // Spawn idle loop checker for agentic loops
+    spawn_idle_loop_checker(Arc::clone(&state), shutdown.clone());
+
     let port: u16 = match std::env::var("ZREMOTE_PORT") {
         Ok(val) => val.parse().unwrap_or_else(|_| {
             tracing::warn!(value = %val, "ZREMOTE_PORT is not a valid port number, falling back to 3000");
@@ -323,6 +326,25 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("server error");
+}
+
+fn spawn_idle_loop_checker(state: Arc<AppState>, shutdown: CancellationToken) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    zremote_core::processing::agentic::check_idle_loops(
+                        &state.agentic_loops,
+                        &state.db,
+                        &state.events,
+                    ).await;
+                }
+                () = shutdown.cancelled() => break,
+            }
+        }
+    });
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

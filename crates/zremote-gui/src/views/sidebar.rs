@@ -260,6 +260,18 @@ impl SidebarView {
 
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                 let mut changed = false;
+
+                // Update existing entries with server-side status
+                for loop_info in &active_loops {
+                    if let Some(cc) = this.cc_states.get_mut(&loop_info.session_id) {
+                        if cc.status != loop_info.status || cc.task_name != loop_info.task_name {
+                            cc.status.clone_from(&loop_info.status);
+                            cc.task_name.clone_from(&loop_info.task_name);
+                            changed = true;
+                        }
+                    }
+                }
+
                 for sid in &stale_session_ids {
                     if !active_session_ids.contains(sid) && this.cc_states.remove(sid).is_some() {
                         changed = true;

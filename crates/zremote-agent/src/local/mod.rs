@@ -624,6 +624,9 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
                             tracing::warn!(error = %e, "failed to process agentic detection message");
                         }
                     }
+
+                    // Check for idle loops and transition to WaitingForInput
+                    state.agentic_processor.check_idle_loops().await;
                 }
                 () = state.shutdown.cancelled() => {
                     tracing::debug!("agentic detection loop shutting down");

@@ -181,6 +181,7 @@ pub type SessionStore = Arc<RwLock<HashMap<SessionId, SessionState>>>;
 pub struct AgenticLoopState {
     pub loop_id: AgenticLoopId,
     pub session_id: SessionId,
+    pub host_id: HostId,
     pub status: AgenticStatus,
     pub task_name: Option<String>,
     pub last_updated: Instant,
