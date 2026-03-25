@@ -374,18 +374,23 @@ impl TmuxSession {
             return Ok(());
         }
 
-        let mut cmd = tmux_cmd();
-        cmd.args(["send-keys", "-t", &self.pane_id, "-H"]);
-        for byte in data {
-            cmd.arg(format!("{byte:02x}"));
-        }
+        // Chunk to avoid exceeding ARG_MAX when pasting large text.
+        // Each byte becomes a hex arg ("XX"), so 4096 bytes ≈ 16 KB of args.
+        const CHUNK_SIZE: usize = 4096;
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let mut cmd = tmux_cmd();
+            cmd.args(["send-keys", "-t", &self.pane_id, "-H"]);
+            for byte in chunk {
+                cmd.arg(format!("{byte:02x}"));
+            }
 
-        let output = cmd.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(std::io::Error::other(format!(
-                "tmux send-keys failed: {stderr}"
-            )));
+            let output = cmd.output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(std::io::Error::other(format!(
+                    "tmux send-keys failed: {stderr}"
+                )));
+            }
         }
         Ok(())
     }
@@ -550,18 +555,21 @@ impl TmuxSession {
             return Ok(());
         }
 
-        let mut cmd = tmux_cmd();
-        cmd.args(["send-keys", "-t", pane_id, "-H"]);
-        for byte in data {
-            cmd.arg(format!("{byte:02x}"));
-        }
+        const CHUNK_SIZE: usize = 4096;
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let mut cmd = tmux_cmd();
+            cmd.args(["send-keys", "-t", pane_id, "-H"]);
+            for byte in chunk {
+                cmd.arg(format!("{byte:02x}"));
+            }
 
-        let output = cmd.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(std::io::Error::other(format!(
-                "tmux send-keys to pane {pane_id} failed: {stderr}"
-            )));
+            let output = cmd.output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(std::io::Error::other(format!(
+                    "tmux send-keys to pane {pane_id} failed: {stderr}"
+                )));
+            }
         }
         Ok(())
     }
