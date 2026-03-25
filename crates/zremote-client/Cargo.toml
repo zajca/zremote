@@ -20,6 +20,7 @@ url.workspace = true
 flume.workspace = true
 tracing.workspace = true
 tokio-util.workspace = true
+percent-encoding = "2"
 rand.workspace = true
 
 [dev-dependencies]
