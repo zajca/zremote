@@ -8860,7 +8860,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "tower",
  "tracing",
  "url",
  "uuid",

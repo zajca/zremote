@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
-    CreateSessionRequest, Host, ListLoopsFilter, Project, ServerEvent, Session,
+    AgenticStatus, CreateSessionRequest, Host, ListLoopsFilter, Project, ServerEvent, Session,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
 #[derive(Clone)]
 pub struct CcState {
     pub loop_id: String,
-    pub status: String,
+    pub status: AgenticStatus,
     pub task_name: Option<String>,
 }
 
@@ -221,7 +221,7 @@ impl SidebarView {
                 );
                 cx.notify();
             }
-            ServerEvent::LoopStateChanged { loop_info, .. } => {
+            ServerEvent::LoopStatusChanged { loop_info, .. } => {
                 self.cc_states.insert(
                     loop_info.session_id.clone(),
                     CcState {
@@ -886,12 +886,12 @@ impl SidebarView {
                     );
 
                 if let Some(cc) = cc_state {
-                    let cc_icon = if cc.status == "waiting_for_input" {
+                    let cc_icon = if cc.status == AgenticStatus::WaitingForInput {
                         Icon::MessageCircle
                     } else {
                         Icon::Loader
                     };
-                    let cc_color = if cc.status == "waiting_for_input" {
+                    let cc_color = if cc.status == AgenticStatus::WaitingForInput {
                         theme::warning()
                     } else {
                         theme::accent()
