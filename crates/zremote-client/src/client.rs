@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 use crate::error::ApiError;
 use crate::terminal::TerminalSession;
 use crate::types::{
@@ -11,6 +13,16 @@ use crate::types::{
     SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
     UpdateSessionRequest, WorktreeInfo,
 };
+
+/// Percent-encode a single URL path segment (RFC 3986 unreserved characters preserved).
+fn encode_path(segment: &str) -> String {
+    const PATH_SEGMENT: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
 
 /// Default request timeout (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -409,8 +421,9 @@ impl ApiClient {
         let resp = self
             .client
             .delete(format!(
-                "{}/api/projects/{project_id}/worktrees/{worktree_id}",
-                self.base_url
+                "{}/api/projects/{project_id}/worktrees/{}",
+                self.base_url,
+                encode_path(worktree_id)
             ))
             .send()
             .await?;
@@ -474,8 +487,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/actions/{action_name}/run",
-                self.base_url
+                "{}/api/projects/{project_id}/actions/{}/run",
+                self.base_url,
+                encode_path(action_name)
             ))
             .send()
             .await?;
@@ -493,8 +507,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/actions/{action_name}/resolve-inputs",
-                self.base_url
+                "{}/api/projects/{project_id}/actions/{}/resolve-inputs",
+                self.base_url,
+                encode_path(action_name)
             ))
             .json(body)
             .send()
@@ -513,8 +528,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/prompts/{prompt_name}/resolve",
-                self.base_url
+                "{}/api/projects/{project_id}/prompts/{}/resolve",
+                self.base_url,
+                encode_path(prompt_name)
             ))
             .json(body)
             .send()
@@ -588,7 +604,7 @@ impl ApiClient {
     pub async fn get_global_config(&self, key: &str) -> Result<ConfigValue, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/config/{key}", self.base_url))
+            .get(format!("{}/api/config/{}", self.base_url, encode_path(key)))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -602,7 +618,7 @@ impl ApiClient {
         };
         let resp = self
             .client
-            .put(format!("{}/api/config/{key}", self.base_url))
+            .put(format!("{}/api/config/{}", self.base_url, encode_path(key)))
             .json(&req)
             .send()
             .await?;
@@ -615,8 +631,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/hosts/{host_id}/config/{key}",
-                self.base_url
+                "{}/api/hosts/{host_id}/config/{}",
+                self.base_url,
+                encode_path(key)
             ))
             .send()
             .await?;
@@ -637,8 +654,9 @@ impl ApiClient {
         let resp = self
             .client
             .put(format!(
-                "{}/api/hosts/{host_id}/config/{key}",
-                self.base_url
+                "{}/api/hosts/{host_id}/config/{}",
+                self.base_url,
+                encode_path(key)
             ))
             .json(&req)
             .send()
