@@ -854,6 +854,7 @@ async fn spawn_command_session(
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(session_id, shell, 80, 24, Some(working_dir), None)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
@@ -1074,6 +1075,7 @@ pub async fn run_action(
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(session_id, shell, cols, rows, Some(&working_dir), env_ref)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
@@ -1237,6 +1239,7 @@ pub async fn configure_with_claude(
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(session_id, shell, 120, 40, Some(&project_path), None)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
@@ -1427,7 +1430,13 @@ mod tests {
         upsert_local_host(&pool, &host_id, "test-host")
             .await
             .unwrap();
-        LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false)
+        LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        )
     }
 
     fn build_test_router(state: Arc<LocalAppState>) -> Router {

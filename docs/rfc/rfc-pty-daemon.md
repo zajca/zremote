@@ -266,7 +266,7 @@ Path: `/tmp/zremote-pty-{uid}/{session_id}.json`
 
 | Operation | Solution |
 |-----------|----------|
-| PID liveness check | `nix::sys::signal::kill(Pid, None)` + verify `started_at` (PID reuse) |
+| PID liveness check | Linux: `kill(pid, 0)` + `/proc/{pid}/stat` starttime verification (precise). macOS: `kill(pid, 0)` + wall-clock `started_at` check + `GetState` verification on reconnect |
 | Shell name from PID | Stored in state file (not from `/proc`) |
 | UID | `nix::unistd::getuid()` |
 | Socket path | Always `/tmp/...` (not `$TMPDIR`), assert < 104 bytes |
@@ -274,7 +274,7 @@ Path: `/tmp/zremote-pty-{uid}/{session_id}.json`
 | `setsid()` | via `nix` - same API on both platforms |
 | `portable-pty` | Cross-platform (abstracted by crate) |
 
-**Rule**: Never use `/proc/` anywhere. Use `nix` crate for everything.
+**Rule**: Use `/proc/` only behind `#[cfg(target_os = "linux")]` with fallback for other platforms.
 
 ## Risks
 
@@ -284,7 +284,7 @@ Path: `/tmp/zremote-pty-{uid}/{session_id}.json`
 | systemd KillUserProcesses | `systemd-run --scope --user` with fallback to direct spawn |
 | Memory per daemon (~2-4MB) | OK for 1-20 sessions, monitor |
 | Daemon startup race | State file written AFTER socket bind; agent retry 100ms, max 3s |
-| PID reuse during discovery | `started_at` timestamp in state file, verify on reconnect |
+| PID reuse during discovery | Linux: `/proc/{pid}/stat` starttime verification (precise, pre-connect). All platforms: `started_at` timestamp in state file, verified on reconnect via `GetState` |
 | Socket write backpressure | Write with timeout, never block PTY read loop |
 | macOS socket path length | Assert < 104 bytes, always `/tmp/` not `$TMPDIR` |
 

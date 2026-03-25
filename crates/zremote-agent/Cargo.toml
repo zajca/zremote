@@ -38,6 +38,7 @@ dirs = "6"
 arboard.workspace = true
 png.workspace = true
 clap = { version = "4", features = ["derive"] }
+nix = { version = "0.29", features = ["signal", "process", "user"] }
 tower-http = { workspace = true, optional = true }
 
 [dev-dependencies]

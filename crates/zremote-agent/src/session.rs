@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use zremote_protocol::SessionId;
 
+use crate::config::PersistenceBackend;
+use crate::daemon::session::DaemonSession;
 use crate::pty::PtySession;
 use crate::tmux::TmuxSession;
 
@@ -21,6 +23,7 @@ pub struct PtyOutput {
 pub enum SessionBackend {
     Pty(PtySession),
     Tmux(TmuxSession),
+    Daemon(DaemonSession),
 }
 
 /// Connection info returned to the GUI for direct tmux attachment.
@@ -32,22 +35,25 @@ pub struct DirectAttachInfo {
 pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
     output_tx: mpsc::Sender<PtyOutput>,
-    use_tmux: bool,
+    backend: PersistenceBackend,
     direct_attached: HashSet<SessionId>,
 }
 
 impl SessionManager {
-    pub fn new(output_tx: mpsc::Sender<PtyOutput>, use_tmux: bool) -> Self {
+    pub fn new(output_tx: mpsc::Sender<PtyOutput>, backend: PersistenceBackend) -> Self {
         Self {
             sessions: HashMap::new(),
             output_tx,
-            use_tmux,
+            backend,
             direct_attached: HashSet::new(),
         }
     }
 
-    /// Spawn a new session (PTY or tmux). Returns the child PID.
-    pub fn create(
+    /// Spawn a new session (PTY, tmux, or daemon). Returns the child PID.
+    ///
+    /// Daemon sessions are async (need to spawn a process and wait for socket),
+    /// so this method is now async.
+    pub async fn create(
         &mut self,
         session_id: SessionId,
         shell: &str,
@@ -56,32 +62,50 @@ impl SessionManager {
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
-        if self.use_tmux {
-            let (session, pid) = TmuxSession::spawn(
-                session_id,
-                shell,
-                cols,
-                rows,
-                working_dir,
-                env,
-                self.output_tx.clone(),
-            )?;
-            self.sessions
-                .insert(session_id, SessionBackend::Tmux(session));
-            Ok(pid)
-        } else {
-            let (session, pid) = PtySession::spawn(
-                session_id,
-                shell,
-                cols,
-                rows,
-                working_dir,
-                env,
-                self.output_tx.clone(),
-            )?;
-            self.sessions
-                .insert(session_id, SessionBackend::Pty(session));
-            Ok(pid)
+        match self.backend {
+            PersistenceBackend::Tmux => {
+                let (session, pid) = TmuxSession::spawn(
+                    session_id,
+                    shell,
+                    cols,
+                    rows,
+                    working_dir,
+                    env,
+                    self.output_tx.clone(),
+                )?;
+                self.sessions
+                    .insert(session_id, SessionBackend::Tmux(session));
+                Ok(pid)
+            }
+            PersistenceBackend::Daemon => {
+                let (session, pid) = DaemonSession::spawn(
+                    session_id,
+                    shell,
+                    cols,
+                    rows,
+                    working_dir,
+                    env,
+                    self.output_tx.clone(),
+                )
+                .await?;
+                self.sessions
+                    .insert(session_id, SessionBackend::Daemon(session));
+                Ok(pid)
+            }
+            PersistenceBackend::None => {
+                let (session, pid) = PtySession::spawn(
+                    session_id,
+                    shell,
+                    cols,
+                    rows,
+                    working_dir,
+                    env,
+                    self.output_tx.clone(),
+                )?;
+                self.sessions
+                    .insert(session_id, SessionBackend::Pty(session));
+                Ok(pid)
+            }
         }
     }
 
@@ -98,6 +122,7 @@ impl SessionManager {
         match backend {
             SessionBackend::Pty(session) => session.write(data)?,
             SessionBackend::Tmux(session) => session.write(data)?,
+            SessionBackend::Daemon(session) => session.write(data)?,
         }
         Ok(())
     }
@@ -116,20 +141,26 @@ impl SessionManager {
         match backend {
             SessionBackend::Pty(session) => session.resize(cols, rows),
             SessionBackend::Tmux(session) => session.resize(cols, rows),
+            SessionBackend::Daemon(session) => session.resize(cols, rows),
         }
     }
 
     /// Close a session, killing the child process. Returns the exit code if available.
     pub fn close(&mut self, session_id: &SessionId) -> Option<i32> {
-        let mut backend = self.sessions.remove(session_id)?;
-        match &mut backend {
-            SessionBackend::Pty(session) => {
+        let backend = self.sessions.remove(session_id)?;
+        match backend {
+            SessionBackend::Pty(mut session) => {
                 session.kill();
                 session.try_wait()
             }
-            SessionBackend::Tmux(session) => {
+            SessionBackend::Tmux(mut session) => {
                 session.kill();
                 session.try_wait()
+            }
+            SessionBackend::Daemon(session) => {
+                let exit = session.try_wait();
+                session.kill();
+                exit
             }
         }
     }
@@ -142,8 +173,8 @@ impl SessionManager {
         }
     }
 
-    /// Detach tmux sessions (they survive) and kill PTY sessions.
-    /// Used during graceful agent shutdown when tmux is enabled.
+    /// Detach persistent sessions (they survive) and kill plain PTY sessions.
+    /// Used during graceful agent shutdown.
     pub fn detach_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
@@ -151,39 +182,64 @@ impl SessionManager {
                 match backend {
                     SessionBackend::Tmux(mut session) => session.detach(),
                     SessionBackend::Pty(mut session) => session.kill(),
+                    SessionBackend::Daemon(session) => session.detach(),
                 }
             }
         }
     }
 
-    /// Discover existing tmux sessions from a previous agent lifecycle.
+    /// Discover existing sessions from a previous agent lifecycle.
+    ///
+    /// For Tmux backend: discovers tmux sessions.
+    /// For Daemon backend: discovers running daemon processes via state files.
+    /// For None (plain PTY): no persistence, returns empty.
+    ///
     /// Returns a list of `(session_id, shell_name, pid, captured_content)` for
-    /// recovered sessions. The captured content is the visible pane state at
+    /// recovered sessions. The captured content is scrollback data at
     /// reattach time; the caller should put it into the scrollback synchronously.
-    pub fn discover_existing(&mut self) -> Vec<(SessionId, String, u32, Option<Vec<u8>>)> {
-        if !self.use_tmux {
-            return Vec::new();
+    pub async fn discover_existing(&mut self) -> Vec<(SessionId, String, u32, Option<Vec<u8>>)> {
+        match self.backend {
+            PersistenceBackend::None => Vec::new(),
+            PersistenceBackend::Tmux => {
+                // Clean up stale sessions first
+                crate::tmux::cleanup_stale();
+
+                let recovered = crate::tmux::discover_sessions(self.output_tx.clone());
+                let mut result = Vec::new();
+
+                for (session, captured) in recovered {
+                    let session_id = session.session_id();
+                    let pid = session.pid();
+                    // Get shell name from sysinfo or default to "shell"
+                    let shell = get_process_name(pid);
+                    result.push((session_id, shell, pid, captured));
+                    self.sessions
+                        .insert(session_id, SessionBackend::Tmux(session));
+                }
+
+                result
+            }
+            PersistenceBackend::Daemon => {
+                // Clean up stale daemon files first
+                crate::daemon::discovery::cleanup_stale_daemons();
+
+                let recovered =
+                    crate::daemon::discovery::discover_daemon_sessions(self.output_tx.clone())
+                        .await;
+                let mut result = Vec::new();
+
+                for (session, scrollback) in recovered {
+                    let session_id = session.session_id();
+                    let pid = session.pid();
+                    let shell = get_process_name(pid);
+                    result.push((session_id, shell, pid, scrollback));
+                    self.sessions
+                        .insert(session_id, SessionBackend::Daemon(session));
+                }
+
+                result
+            }
         }
-
-        // Clean up stale sessions first
-        crate::tmux::cleanup_stale();
-
-        let recovered = crate::tmux::discover_sessions(self.output_tx.clone());
-        let mut result = Vec::new();
-
-        for (session, captured) in recovered {
-            let session_id = session.session_id();
-            let pid = session.pid();
-            // Get shell from /proc/{pid}/comm or default to "shell"
-            let shell = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "shell".to_string());
-            result.push((session_id, shell, pid, captured));
-            self.sessions
-                .insert(session_id, SessionBackend::Tmux(session));
-        }
-
-        result
     }
 
     /// Return an iterator of `(session_id, shell_pid)` for all active sessions.
@@ -192,6 +248,7 @@ impl SessionManager {
             let pid = match backend {
                 SessionBackend::Pty(s) => s.pid(),
                 SessionBackend::Tmux(s) => s.pid(),
+                SessionBackend::Daemon(s) => s.pid(),
             };
             (*id, pid)
         })
@@ -213,7 +270,9 @@ impl SessionManager {
                 session.write_to_pane(pane_id, data)?;
                 Ok(())
             }
-            SessionBackend::Pty(_) => Err("PTY sessions do not support pane targeting".into()),
+            SessionBackend::Pty(_) | SessionBackend::Daemon(_) => {
+                Err("pane targeting not supported for this session type".into())
+            }
         }
     }
 
@@ -231,7 +290,9 @@ impl SessionManager {
             .ok_or_else(|| format!("session {session_id} not found"))?;
         match backend {
             SessionBackend::Tmux(session) => session.resize_pane(pane_id, cols, rows),
-            SessionBackend::Pty(_) => Err("PTY sessions do not support pane targeting".into()),
+            SessionBackend::Pty(_) | SessionBackend::Daemon(_) => {
+                Err("pane targeting not supported for this session type".into())
+            }
         }
     }
 
@@ -251,7 +312,17 @@ impl SessionManager {
 
     /// Whether tmux-backed sessions are enabled.
     pub fn use_tmux(&self) -> bool {
-        self.use_tmux
+        self.backend == PersistenceBackend::Tmux
+    }
+
+    /// Whether any persistent backend (tmux or daemon) is active.
+    pub fn supports_persistence(&self) -> bool {
+        self.backend != PersistenceBackend::None
+    }
+
+    /// Return the active persistence backend.
+    pub fn backend(&self) -> PersistenceBackend {
+        self.backend
     }
 
     /// Detach agent's FIFO reader, allowing GUI to connect directly to tmux.
@@ -267,7 +338,7 @@ impl SessionManager {
 
         let tmux_session = match backend {
             SessionBackend::Tmux(session) => session,
-            SessionBackend::Pty(_) => {
+            SessionBackend::Pty(_) | SessionBackend::Daemon(_) => {
                 return Err("direct attach only supported for tmux sessions".into());
             }
         };
@@ -307,7 +378,7 @@ impl SessionManager {
 
         let tmux_session = match backend {
             SessionBackend::Tmux(session) => session,
-            SessionBackend::Pty(_) => {
+            SessionBackend::Pty(_) | SessionBackend::Daemon(_) => {
                 return Err("direct detach only supported for tmux sessions".into());
             }
         };
@@ -348,6 +419,20 @@ impl SessionManager {
     }
 }
 
+/// Get the process name for a given PID using sysinfo.
+/// Falls back to "shell" if the process cannot be found.
+fn get_process_name(pid: u32) -> String {
+    use sysinfo::{Pid, System};
+    let mut sys = System::new();
+    sys.refresh_processes(
+        sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+    );
+    sys.process(Pid::from_u32(pid))
+        .map(|p| p.name().to_string_lossy().to_string())
+        .unwrap_or_else(|| "shell".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,7 +440,7 @@ mod tests {
 
     fn make_manager() -> SessionManager {
         let (tx, _rx) = mpsc::channel(64);
-        SessionManager::new(tx, false)
+        SessionManager::new(tx, PersistenceBackend::None)
     }
 
     #[test]
@@ -408,17 +493,21 @@ mod tests {
     #[test]
     fn use_tmux_returns_configured_value() {
         let (tx, _rx) = mpsc::channel(64);
-        let mgr_false = SessionManager::new(tx.clone(), false);
-        assert!(!mgr_false.use_tmux());
+        let mgr_none = SessionManager::new(tx.clone(), PersistenceBackend::None);
+        assert!(!mgr_none.use_tmux());
 
-        let mgr_true = SessionManager::new(tx, true);
-        assert!(mgr_true.use_tmux());
+        let mgr_tmux = SessionManager::new(tx.clone(), PersistenceBackend::Tmux);
+        assert!(mgr_tmux.use_tmux());
+
+        let mgr_daemon = SessionManager::new(tx, PersistenceBackend::Daemon);
+        assert!(!mgr_daemon.use_tmux());
+        assert!(mgr_daemon.supports_persistence());
     }
 
-    #[test]
-    fn discover_existing_returns_empty_when_tmux_disabled() {
+    #[tokio::test]
+    async fn discover_existing_returns_empty_when_no_persistence() {
         let mut mgr = make_manager();
-        let result = mgr.discover_existing();
+        let result = mgr.discover_existing().await;
         assert!(result.is_empty());
     }
 
@@ -474,21 +563,31 @@ mod tests {
         assert_eq!(mgr.count(), 0);
     }
 
-    #[test]
-    fn discover_existing_with_tmux_false_always_empty() {
+    #[tokio::test]
+    async fn discover_existing_with_no_persistence_always_empty() {
         let mut mgr = make_manager();
         assert!(!mgr.use_tmux());
-        let result1 = mgr.discover_existing();
+        let result1 = mgr.discover_existing().await;
         assert!(result1.is_empty());
-        let result2 = mgr.discover_existing();
+        let result2 = mgr.discover_existing().await;
         assert!(result2.is_empty());
     }
 
     #[test]
-    fn new_manager_with_tmux_true() {
+    fn new_manager_with_tmux_backend() {
         let (tx, _rx) = mpsc::channel(64);
-        let mgr = SessionManager::new(tx, true);
+        let mgr = SessionManager::new(tx, PersistenceBackend::Tmux);
         assert!(mgr.use_tmux());
+        assert_eq!(mgr.count(), 0);
+    }
+
+    #[test]
+    fn new_manager_with_daemon_backend() {
+        let (tx, _rx) = mpsc::channel(64);
+        let mgr = SessionManager::new(tx, PersistenceBackend::Daemon);
+        assert!(!mgr.use_tmux());
+        assert!(mgr.supports_persistence());
+        assert_eq!(mgr.backend(), PersistenceBackend::Daemon);
         assert_eq!(mgr.count(), 0);
     }
 

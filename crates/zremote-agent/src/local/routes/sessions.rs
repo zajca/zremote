@@ -126,7 +126,7 @@ pub async fn create_session(
         sessions.insert(session_id, SessionState::new(session_id, parsed_host_id));
     }
 
-    // Spawn PTY/tmux session directly
+    // Spawn PTY/tmux/daemon session directly
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(
@@ -137,6 +137,7 @@ pub async fn create_session(
             effective_working_dir,
             env_vars,
         )
+        .await
         .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
@@ -432,7 +433,13 @@ mod tests {
         upsert_local_host(&pool, &host_id, "test-host")
             .await
             .unwrap();
-        LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false)
+        LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        )
     }
 
     fn build_test_router(state: Arc<LocalAppState>) -> Router {

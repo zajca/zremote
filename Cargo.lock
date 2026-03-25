@@ -8822,6 +8822,7 @@ dependencies = [
  "futures-util",
  "glob-match",
  "hostname",
+ "nix 0.29.0",
  "png 0.17.16",
  "portable-pty",
  "rand 0.9.2",
