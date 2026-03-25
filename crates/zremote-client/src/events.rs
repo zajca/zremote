@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -52,7 +53,9 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
 
         info!(url = %url, "connecting to events WebSocket");
 
-        match connect_async(&url).await {
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_message_size = Some(MAX_EVENT_MESSAGE_SIZE);
+        match connect_async_with_config(&url, Some(ws_config), false).await {
             Ok((ws_stream, _)) => {
                 info!("events WebSocket connected");
                 backoff = std::time::Duration::from_secs(1);
@@ -76,9 +79,15 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
                                     }
                                     match serde_json::from_str::<ServerEvent>(&text) {
                                         Ok(event) => {
-                                            if tx.send(event).is_err() {
-                                                info!("events channel closed, stopping");
-                                                return;
+                                            match tx.try_send(event) {
+                                                Ok(()) => {}
+                                                Err(flume::TrySendError::Full(_)) => {
+                                                    warn!("event channel full, dropping event");
+                                                }
+                                                Err(flume::TrySendError::Disconnected(_)) => {
+                                                    info!("events channel closed, stopping");
+                                                    return;
+                                                }
                                             }
                                         }
                                         Err(e) => {

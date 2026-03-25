@@ -1,5 +1,7 @@
 use std::fmt;
 
+use futures_util::StreamExt;
+
 /// Maximum body size stored in `ServerError` (4KB).
 const MAX_ERROR_BODY_SIZE: usize = 4096;
 
@@ -50,14 +52,29 @@ impl std::error::Error for ApiError {
 }
 
 impl ApiError {
-    /// Create a `ServerError` from a response, truncating the body to 4KB.
+    /// Create a `ServerError` from a response, reading at most 4KB of the body.
     pub(crate) async fn from_response(response: reqwest::Response) -> Self {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        let message = if body.len() > MAX_ERROR_BODY_SIZE {
-            format!("{}... (truncated)", &body[..MAX_ERROR_BODY_SIZE])
+        let mut body = Vec::with_capacity(MAX_ERROR_BODY_SIZE + 1);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    body.extend_from_slice(&bytes);
+                    if body.len() > MAX_ERROR_BODY_SIZE {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let truncated = body.len() > MAX_ERROR_BODY_SIZE;
+        body.truncate(MAX_ERROR_BODY_SIZE);
+        let text = String::from_utf8_lossy(&body);
+        let message = if truncated {
+            format!("{text}... (truncated)")
         } else {
-            body
+            text.into_owned()
         };
         Self::ServerError { status, message }
     }

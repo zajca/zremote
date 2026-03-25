@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -40,7 +41,9 @@ impl TerminalSession {
     ) -> Result<Self, ApiError> {
         info!(url = %url, "connecting to terminal WebSocket");
 
-        let (ws_stream, _) = connect_async(&url).await?;
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_message_size = Some(MAX_TERMINAL_MESSAGE_SIZE);
+        let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false).await?;
 
         info!("terminal WebSocket connected");
 
@@ -89,7 +92,9 @@ impl TerminalSession {
 
         tokio_handle.spawn(async move {
             info!(url = %url, "connecting to terminal WebSocket (background)");
-            match connect_async(&url).await {
+            let mut ws_config = WebSocketConfig::default();
+            ws_config.max_message_size = Some(MAX_TERMINAL_MESSAGE_SIZE);
+            match connect_async_with_config(&url, Some(ws_config), false).await {
                 Ok((ws_stream, _)) => {
                     info!("terminal WebSocket connected");
                     run_terminal_ws(
@@ -157,7 +162,7 @@ async fn run_terminal_ws(
                             };
                             #[allow(clippy::items_after_statements)]
                             const MAX_CHUNK: usize = 65_536;
-                            for chunk in data.chunks(MAX_CHUNK) {
+                            for chunk in utf8_safe_chunks(&data, MAX_CHUNK) {
                                 let msg = TerminalClientMessage::Input {
                                     data: String::from_utf8_lossy(chunk).to_string(),
                                     pane_id: pane_id.clone(),
@@ -341,4 +346,29 @@ async fn run_terminal_ws(
     }
 
     writer.abort();
+}
+
+/// Split `data` into chunks of at most `max_chunk` bytes without breaking
+/// multi-byte UTF-8 sequences. If a chunk boundary falls inside a character,
+/// the boundary is moved back to the start of that character.
+fn utf8_safe_chunks(data: &[u8], max_chunk: usize) -> Vec<&[u8]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < data.len() {
+        let mut end = (start + max_chunk).min(data.len());
+        // If we're not at the end, walk back past any UTF-8 continuation bytes (10xxxxxx)
+        if end < data.len() {
+            while end > start && (data[end] & 0xC0) == 0x80 {
+                end -= 1;
+            }
+            // If we walked all the way back (entire chunk is continuation bytes — shouldn't
+            // happen with valid UTF-8), just take the original boundary to avoid infinite loop.
+            if end == start {
+                end = (start + max_chunk).min(data.len());
+            }
+        }
+        chunks.push(&data[start..end]);
+        start = end;
+    }
+    chunks
 }
