@@ -402,6 +402,17 @@ pub enum TerminalEvent {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ModeResponse {
     pub mode: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Server mode and version information.
+#[derive(Debug, Clone)]
+pub struct ModeInfo {
+    /// Server mode: "server" or "local".
+    pub mode: String,
+    /// Server/agent version (if reported).
+    pub version: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

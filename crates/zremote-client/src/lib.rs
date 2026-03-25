@@ -51,6 +51,7 @@ pub use types::{
     LoopInfoLite,
     Memory,
     MemoryCategory,
+    ModeInfo,
     Project,
     ProjectAction,
     ProjectInfo,

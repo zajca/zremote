@@ -143,6 +143,11 @@ impl ApiClient {
 
     /// Detect server mode ("server" or "local").
     pub async fn get_mode(&self) -> Result<String, ApiError> {
+        Ok(self.get_mode_info().await?.mode)
+    }
+
+    /// Detect server mode and version.
+    pub async fn get_mode_info(&self) -> Result<crate::types::ModeInfo, ApiError> {
         let resp = self
             .client
             .get(format!("{}/api/mode", self.base_url))
@@ -150,7 +155,10 @@ impl ApiClient {
             .await?;
         let resp = self.check_response(resp).await?;
         let mode: ModeResponse = resp.json().await?;
-        Ok(mode.mode)
+        Ok(crate::types::ModeInfo {
+            mode: mode.mode,
+            version: mode.version,
+        })
     }
 
     /// Check server health.

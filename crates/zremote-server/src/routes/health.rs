@@ -20,9 +20,12 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     })
 }
 
-/// Returns `{"mode": "server"}` so clients can detect server mode.
+/// Returns `{"mode": "server", "version": "..."}` so clients can detect server mode.
 pub async fn api_mode() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "mode": "server" }))
+    Json(serde_json::json!({
+        "mode": "server",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
 }
 
 #[cfg(test)]
@@ -72,6 +75,8 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "server");
+        assert!(json["version"].is_string());
+        assert!(!json["version"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]

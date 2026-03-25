@@ -550,9 +550,11 @@ impl TerminalPanel {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 pub enum TerminalPanelEvent {
     OpenCommandPalette { tab: PaletteTab },
     OpenSessionSwitcher,
+    OpenHelp,
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
@@ -858,6 +860,14 @@ impl Render for TerminalPanel {
                             cx.emit(TerminalPanelEvent::OpenCommandPalette {
                                 tab: PaletteTab::Projects,
                             });
+                        });
+                        return;
+                    }
+
+                    // F1: open help modal
+                    if !mods.control && !mods.shift && !mods.alt && key == "f1" {
+                        let _ = entity.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                            cx.emit(TerminalPanelEvent::OpenHelp);
                         });
                         return;
                     }

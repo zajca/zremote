@@ -110,14 +110,19 @@ fn main() {
 
     let tokio_handle = rt.handle().clone();
 
-    // Detect server mode
+    // Detect server mode and version
     let api = ApiClient::new(&server_url).expect("invalid server URL");
-    let mode = rt
-        .block_on(async { api.get_mode().await })
+    let mode_info = rt
+        .block_on(async { api.get_mode_info().await })
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to detect server mode, assuming 'server'");
-            "server".to_string()
+            zremote_client::ModeInfo {
+                mode: "server".to_string(),
+                version: None,
+            }
         });
+    let mode = mode_info.mode;
+    let server_version = mode_info.version;
 
     tracing::info!(mode = %mode, "connected to server");
 
@@ -138,6 +143,7 @@ fn main() {
         event_rx: event_stream.rx.clone(),
         _event_stream: event_stream,
         mode,
+        server_version,
         persistence: Mutex::new(persistence),
     });
 

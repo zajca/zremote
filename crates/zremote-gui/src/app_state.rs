@@ -16,6 +16,8 @@ pub struct AppState {
     pub _event_stream: zremote_client::EventStream,
     /// Server mode: "server" or "local".
     pub mode: String,
+    /// Server/agent version (from /api/mode response).
+    pub server_version: Option<String>,
     /// Persistent GUI state (window size, selected session, etc.).
     pub persistence: Mutex<Persistence>,
 }

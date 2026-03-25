@@ -13,6 +13,7 @@ use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
 use crate::views::double_shift::DoubleShiftDetector;
+use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
@@ -25,6 +26,7 @@ pub struct MainView {
     focus_handle: FocusHandle,
     command_palette: Option<Entity<CommandPalette>>,
     session_switcher: Option<Entity<SessionSwitcher>>,
+    help_modal: Option<Entity<HelpModal>>,
     double_shift: DoubleShiftDetector,
 }
 
@@ -50,6 +52,7 @@ impl MainView {
             focus_handle,
             command_palette: None,
             session_switcher: None,
+            help_modal: None,
             double_shift: DoubleShiftDetector::new(),
         }
     }
@@ -84,6 +87,9 @@ impl MainView {
                         cx.notify();
                     }
                 }
+            }
+            SidebarEvent::OpenHelp => {
+                self.open_help_modal(cx);
             }
         }
     }
@@ -211,6 +217,9 @@ impl MainView {
             TerminalPanelEvent::OpenSessionSwitcher => {
                 self.open_session_switcher(cx);
             }
+            TerminalPanelEvent::OpenHelp => {
+                self.open_help_modal(cx);
+            }
         }
     }
 
@@ -325,6 +334,42 @@ impl MainView {
         cx.notify();
     }
 
+    fn open_help_modal(&mut self, cx: &mut Context<Self>) {
+        // Close other overlays
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+        if self.session_switcher.is_some() {
+            self.close_session_switcher(cx);
+        }
+        // Toggle if already open
+        if self.help_modal.is_some() {
+            self.close_help_modal(cx);
+            return;
+        }
+        let server_version = self.app_state.server_version.clone();
+        let mode = self.app_state.mode.clone();
+        let hosts: Vec<(String, Option<String>)> = self
+            .sidebar
+            .read(cx)
+            .hosts_rc()
+            .iter()
+            .map(|h| (h.hostname.clone(), h.agent_version.clone()))
+            .collect();
+        let modal = cx.new(|cx| HelpModal::new(mode, server_version, &hosts, cx));
+        cx.subscribe(&modal, |this, _, event: &HelpModalEvent, cx| match event {
+            HelpModalEvent::Close => this.close_help_modal(cx),
+        })
+        .detach();
+        self.help_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_help_modal(&mut self, cx: &mut Context<Self>) {
+        self.help_modal = None;
+        cx.notify();
+    }
+
     fn on_switcher_event(
         &mut self,
         _: Entity<SessionSwitcher>,
@@ -412,6 +457,8 @@ impl Render for MainView {
                             this.open_command_palette(PaletteTab::Projects, cx);
                         } else if mods.control && mods.shift && key == "a" {
                             this.open_command_palette(PaletteTab::Actions, cx);
+                        } else if !mods.control && !mods.shift && !mods.alt && key == "f1" {
+                            this.open_help_modal(cx);
                         }
                     }))
                     .on_modifiers_changed(cx.listener(
@@ -514,6 +561,45 @@ impl Render for MainView {
             );
         }
 
+        // Help modal overlay (same backdrop+sibling pattern)
+        if let Some(help) = &self.help_modal {
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        div()
+                            .id("help-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba(0x1111_1366))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.close_help_modal(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .justify_center()
+                            .pt(px(80.0))
+                            .child(
+                                div()
+                                    .id("help-container")
+                                    .w(px(440.0))
+                                    .max_h(px(440.0))
+                                    .rounded(px(8.0))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .bg(theme::bg_secondary())
+                                    .overflow_hidden()
+                                    .child(help.clone()),
+                            ),
+                    ),
+            );
+        }
+
         root
     }
 }
@@ -561,6 +647,7 @@ pub enum SidebarEvent {
     SessionClosed {
         session_id: String,
     },
+    OpenHelp,
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}

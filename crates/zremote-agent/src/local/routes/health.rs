@@ -5,9 +5,12 @@ use axum::extract::State;
 
 use super::super::state::LocalAppState;
 
-/// Returns `{"mode": "local"}` so clients can detect local mode.
+/// Returns `{"mode": "local", "version": "..."}` so clients can detect local mode.
 pub async fn api_mode() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "mode": "local" }))
+    Json(serde_json::json!({
+        "mode": "local",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
 }
 
 /// Health check endpoint for the local server.
@@ -58,6 +61,8 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "local");
+        assert!(json["version"].is_string());
+        assert!(!json["version"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]

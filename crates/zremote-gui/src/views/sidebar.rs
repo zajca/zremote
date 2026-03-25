@@ -1011,17 +1011,39 @@ impl Render for SidebarView {
                             .font_weight(FontWeight::BOLD)
                             .child("ZRemote"),
                     )
-                    .child(if self.loading {
-                        icon(Icon::Loader)
-                            .size(px(14.0))
-                            .text_color(theme::text_tertiary())
-                            .into_any_element()
-                    } else {
-                        icon(Icon::Wifi)
-                            .size(px(14.0))
-                            .text_color(theme::success())
-                            .into_any_element()
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("help-button")
+                                    .cursor_pointer()
+                                    .child(
+                                        icon(Icon::CircleHelp)
+                                            .size(px(14.0))
+                                            .text_color(theme::text_secondary()),
+                                    )
+                                    .hover(|s| s.text_color(theme::text_primary()))
+                                    .on_click(cx.listener(
+                                        |_this, _event: &ClickEvent, _window, cx| {
+                                            cx.emit(SidebarEvent::OpenHelp);
+                                        },
+                                    )),
+                            )
+                            .child(if self.loading {
+                                icon(Icon::Loader)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_tertiary())
+                                    .into_any_element()
+                            } else {
+                                icon(Icon::Wifi)
+                                    .size(px(14.0))
+                                    .text_color(theme::success())
+                                    .into_any_element()
+                            }),
+                    ),
             )
             .child(
                 div()
