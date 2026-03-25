@@ -791,7 +791,7 @@ impl Render for TerminalPanel {
             .p(px(4.0))
             .overflow_hidden()
             .on_key_down({
-                let input_tx = self.handle.input_tx().clone();
+                let input_tx = self.handle.input_sender();
                 let image_paste_tx = self.handle.image_paste_tx().cloned();
                 let term = self.term.clone();
                 let search_open = self.search_open;

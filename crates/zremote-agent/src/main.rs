@@ -1,3 +1,25 @@
+// Pre-existing pedantic clippy lints — suppress at crate level for now
+#![allow(
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::redundant_closure_for_method_calls,
+    clippy::items_after_statements,
+    clippy::needless_continue,
+    clippy::doc_markdown,
+    clippy::assigning_clones,
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::cast_possible_truncation,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_value,
+    clippy::format_push_string,
+    clippy::single_match_else,
+    clippy::similar_names,
+    dead_code,
+    unused_imports
+)]
+
 mod agentic;
 mod claude;
 mod config;

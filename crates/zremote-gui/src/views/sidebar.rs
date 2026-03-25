@@ -256,11 +256,38 @@ impl SidebarView {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let active_loops = handle
                 .spawn(async move {
-                    let filter = ListLoopsFilter {
-                        status: Some("active".to_string()),
+                    let working_filter = ListLoopsFilter {
+                        status: Some("working".into()),
                         ..ListLoopsFilter::default()
                     };
-                    api.list_loops(&filter).await.unwrap_or_default()
+                    let waiting_filter = ListLoopsFilter {
+                        status: Some("waiting_for_input".into()),
+                        ..ListLoopsFilter::default()
+                    };
+                    let (working, waiting) = tokio::join!(
+                        api.list_loops(&working_filter),
+                        api.list_loops(&waiting_filter),
+                    );
+                    let mut loops = working
+                        .inspect_err(
+                            |e| tracing::warn!(error = %e, "failed to fetch working loops"),
+                        )
+                        .unwrap_or_default();
+                    loops.extend(
+                        waiting
+                            .inspect_err(
+                                |e| tracing::warn!(error = %e, "failed to fetch waiting loops"),
+                            )
+                            .unwrap_or_default(),
+                    );
+                    // Client-side safety net in case server returns unexpected statuses
+                    loops.retain(|l| {
+                        matches!(
+                            l.status,
+                            AgenticStatus::Working | AgenticStatus::WaitingForInput
+                        )
+                    });
+                    loops
                 })
                 .await
                 .unwrap_or_default();

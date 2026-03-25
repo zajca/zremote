@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use crate::error::AppError;
 
 /// Project representation for API responses.
+#[allow(clippy::struct_excessive_bools)] // DB row maps booleans directly from SQLite columns
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProjectRow {
     pub id: String,

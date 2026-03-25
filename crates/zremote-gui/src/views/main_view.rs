@@ -547,7 +547,7 @@ fn connect_terminal(
     let handle = &app_state.tokio_handle;
     let session = zremote_client::TerminalSession::connect_spawned(ws_url, handle);
     Some(crate::terminal_handle::TerminalHandle::from_session(
-        session, handle,
+        session,
     ))
 }
 

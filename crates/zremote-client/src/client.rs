@@ -54,6 +54,12 @@ impl ApiClient {
     }
 
     /// Create with a custom `reqwest::Client` (for custom TLS, proxy, etc.).
+    ///
+    /// # Security
+    ///
+    /// The caller is responsible for ensuring TLS certificate validation is enabled
+    /// on the provided client. Do not use `danger_accept_invalid_certs(true)` in
+    /// production builds.
     pub fn with_client(base_url: &str, client: reqwest::Client) -> Result<Self, ApiError> {
         let base_url = base_url.trim_end_matches('/');
         let _ = url::Url::parse(base_url)?;
@@ -93,7 +99,11 @@ impl ApiClient {
 
     /// Get the WebSocket URL for a terminal session.
     pub fn terminal_ws_url(&self, session_id: &str) -> String {
-        format!("{}/ws/terminal/{session_id}", self.ws_base_url())
+        format!(
+            "{}/ws/terminal/{}",
+            self.ws_base_url(),
+            encode_path(session_id)
+        )
     }
 
     /// Convenience: create a session and open a terminal WebSocket in one call.
@@ -108,8 +118,13 @@ impl ApiClient {
         let session = self.create_session(host_id, req).await?;
         let url = self.terminal_ws_url(&session.id);
         let handle = tokio::runtime::Handle::current();
-        let terminal = TerminalSession::connect(url, &handle).await?;
-        Ok((session, terminal))
+        match TerminalSession::connect(url, &handle).await {
+            Ok(terminal) => Ok((session, terminal)),
+            Err(e) => {
+                let _ = self.close_session(&session.id).await;
+                Err(e)
+            }
+        }
     }
 
     /// Check response status and parse errors.
@@ -166,7 +181,11 @@ impl ApiClient {
     pub async fn get_host(&self, host_id: &str) -> Result<Host, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/hosts/{host_id}", self.base_url))
+            .get(format!(
+                "{}/api/hosts/{}",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -181,7 +200,11 @@ impl ApiClient {
     ) -> Result<Host, ApiError> {
         let resp = self
             .client
-            .patch(format!("{}/api/hosts/{host_id}", self.base_url))
+            .patch(format!(
+                "{}/api/hosts/{}",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .json(req)
             .send()
             .await?;
@@ -193,7 +216,11 @@ impl ApiClient {
     pub async fn delete_host(&self, host_id: &str) -> Result<(), ApiError> {
         let resp = self
             .client
-            .delete(format!("{}/api/hosts/{host_id}", self.base_url))
+            .delete(format!(
+                "{}/api/hosts/{}",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .send()
             .await?;
         self.check_response(resp).await?;
@@ -206,7 +233,11 @@ impl ApiClient {
     pub async fn list_sessions(&self, host_id: &str) -> Result<Vec<Session>, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/hosts/{host_id}/sessions", self.base_url))
+            .get(format!(
+                "{}/api/hosts/{}/sessions",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -222,7 +253,11 @@ impl ApiClient {
     ) -> Result<Session, ApiError> {
         let resp = self
             .client
-            .post(format!("{}/api/hosts/{host_id}/sessions", self.base_url))
+            .post(format!(
+                "{}/api/hosts/{}/sessions",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .json(req)
             .send()
             .await?;
@@ -234,7 +269,11 @@ impl ApiClient {
     pub async fn get_session(&self, session_id: &str) -> Result<Session, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/sessions/{session_id}", self.base_url))
+            .get(format!(
+                "{}/api/sessions/{}",
+                self.base_url,
+                encode_path(session_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -250,7 +289,11 @@ impl ApiClient {
     ) -> Result<Session, ApiError> {
         let resp = self
             .client
-            .patch(format!("{}/api/sessions/{session_id}", self.base_url))
+            .patch(format!(
+                "{}/api/sessions/{}",
+                self.base_url,
+                encode_path(session_id)
+            ))
             .json(req)
             .send()
             .await?;
@@ -262,7 +305,11 @@ impl ApiClient {
     pub async fn close_session(&self, session_id: &str) -> Result<(), ApiError> {
         let resp = self
             .client
-            .delete(format!("{}/api/sessions/{session_id}", self.base_url))
+            .delete(format!(
+                "{}/api/sessions/{}",
+                self.base_url,
+                encode_path(session_id)
+            ))
             .send()
             .await?;
         self.check_response(resp).await?;
@@ -273,7 +320,11 @@ impl ApiClient {
     pub async fn purge_session(&self, session_id: &str) -> Result<(), ApiError> {
         let resp = self
             .client
-            .delete(format!("{}/api/sessions/{session_id}/purge", self.base_url))
+            .delete(format!(
+                "{}/api/sessions/{}/purge",
+                self.base_url,
+                encode_path(session_id)
+            ))
             .send()
             .await?;
         self.check_response(resp).await?;
@@ -286,7 +337,11 @@ impl ApiClient {
     pub async fn list_projects(&self, host_id: &str) -> Result<Vec<Project>, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/hosts/{host_id}/projects", self.base_url))
+            .get(format!(
+                "{}/api/hosts/{}/projects",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -297,7 +352,11 @@ impl ApiClient {
     pub async fn get_project(&self, project_id: &str) -> Result<Project, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/projects/{project_id}", self.base_url))
+            .get(format!(
+                "{}/api/projects/{}",
+                self.base_url,
+                encode_path(project_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -313,7 +372,11 @@ impl ApiClient {
     ) -> Result<Project, ApiError> {
         let resp = self
             .client
-            .patch(format!("{}/api/projects/{project_id}", self.base_url))
+            .patch(format!(
+                "{}/api/projects/{}",
+                self.base_url,
+                encode_path(project_id)
+            ))
             .json(req)
             .send()
             .await?;
@@ -325,7 +388,11 @@ impl ApiClient {
     pub async fn delete_project(&self, project_id: &str) -> Result<(), ApiError> {
         let resp = self
             .client
-            .delete(format!("{}/api/projects/{project_id}", self.base_url))
+            .delete(format!(
+                "{}/api/projects/{}",
+                self.base_url,
+                encode_path(project_id)
+            ))
             .send()
             .await?;
         self.check_response(resp).await?;
@@ -340,7 +407,11 @@ impl ApiClient {
     ) -> Result<(), ApiError> {
         let resp = self
             .client
-            .post(format!("{}/api/hosts/{host_id}/projects", self.base_url))
+            .post(format!(
+                "{}/api/hosts/{}/projects",
+                self.base_url,
+                encode_path(host_id)
+            ))
             .json(req)
             .send()
             .await?;
@@ -353,8 +424,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/hosts/{host_id}/projects/scan",
-                self.base_url
+                "{}/api/hosts/{}/projects/scan",
+                self.base_url,
+                encode_path(host_id)
             ))
             .send()
             .await?;
@@ -367,8 +439,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/git/refresh",
-                self.base_url
+                "{}/api/projects/{}/git/refresh",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -381,8 +454,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/projects/{project_id}/sessions",
-                self.base_url
+                "{}/api/projects/{}/sessions",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -395,8 +469,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/projects/{project_id}/worktrees",
-                self.base_url
+                "{}/api/projects/{}/worktrees",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -414,8 +489,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/worktrees",
-                self.base_url
+                "{}/api/projects/{}/worktrees",
+                self.base_url,
+                encode_path(project_id)
             ))
             .json(req)
             .send()
@@ -433,8 +509,9 @@ impl ApiClient {
         let resp = self
             .client
             .delete(format!(
-                "{}/api/projects/{project_id}/worktrees/{}",
+                "{}/api/projects/{}/worktrees/{}",
                 self.base_url,
+                encode_path(project_id),
                 encode_path(worktree_id)
             ))
             .send()
@@ -448,8 +525,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/projects/{project_id}/settings",
-                self.base_url
+                "{}/api/projects/{}/settings",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -466,8 +544,9 @@ impl ApiClient {
         let resp = self
             .client
             .put(format!(
-                "{}/api/projects/{project_id}/settings",
-                self.base_url
+                "{}/api/projects/{}/settings",
+                self.base_url,
+                encode_path(project_id)
             ))
             .json(settings)
             .send()
@@ -481,8 +560,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/projects/{project_id}/actions",
-                self.base_url
+                "{}/api/projects/{}/actions",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -499,8 +579,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/actions/{}/run",
+                "{}/api/projects/{}/actions/{}/run",
                 self.base_url,
+                encode_path(project_id),
                 encode_path(action_name)
             ))
             .send()
@@ -519,8 +600,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/actions/{}/resolve-inputs",
+                "{}/api/projects/{}/actions/{}/resolve-inputs",
                 self.base_url,
+                encode_path(project_id),
                 encode_path(action_name)
             ))
             .json(body)
@@ -540,8 +622,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/prompts/{}/resolve",
+                "{}/api/projects/{}/prompts/{}/resolve",
                 self.base_url,
+                encode_path(project_id),
                 encode_path(prompt_name)
             ))
             .json(body)
@@ -559,8 +642,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/configure",
-                self.base_url
+                "{}/api/projects/{}/configure",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -574,9 +658,11 @@ impl ApiClient {
         host_id: &str,
         path: Option<&str>,
     ) -> Result<Vec<DirectoryEntry>, ApiError> {
-        let mut req = self
-            .client
-            .get(format!("{}/api/hosts/{host_id}/browse", self.base_url));
+        let mut req = self.client.get(format!(
+            "{}/api/hosts/{}/browse",
+            self.base_url,
+            encode_path(host_id)
+        ));
         if let Some(p) = path {
             req = req.query(&[("path", p)]);
         }
@@ -603,7 +689,11 @@ impl ApiClient {
     pub async fn get_loop(&self, loop_id: &str) -> Result<AgenticLoop, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/loops/{loop_id}", self.base_url))
+            .get(format!(
+                "{}/api/loops/{}",
+                self.base_url,
+                encode_path(loop_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -643,8 +733,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/hosts/{host_id}/config/{}",
+                "{}/api/hosts/{}/config/{}",
                 self.base_url,
+                encode_path(host_id),
                 encode_path(key)
             ))
             .send()
@@ -666,8 +757,9 @@ impl ApiClient {
         let resp = self
             .client
             .put(format!(
-                "{}/api/hosts/{host_id}/config/{}",
+                "{}/api/hosts/{}/config/{}",
                 self.base_url,
+                encode_path(host_id),
                 encode_path(key)
             ))
             .json(&req)
@@ -687,8 +779,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/projects/{project_id}/knowledge/status",
-                self.base_url
+                "{}/api/projects/{}/knowledge/status",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -705,8 +798,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/index",
-                self.base_url
+                "{}/api/projects/{}/knowledge/index",
+                self.base_url,
+                encode_path(project_id)
             ))
             .json(req)
             .send()
@@ -724,8 +818,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/search",
-                self.base_url
+                "{}/api/projects/{}/knowledge/search",
+                self.base_url,
+                encode_path(project_id)
             ))
             .json(req)
             .send()
@@ -741,8 +836,9 @@ impl ApiClient {
         category: Option<&str>,
     ) -> Result<Vec<Memory>, ApiError> {
         let mut req = self.client.get(format!(
-            "{}/api/projects/{project_id}/knowledge/memories",
-            self.base_url
+            "{}/api/projects/{}/knowledge/memories",
+            self.base_url,
+            encode_path(project_id)
         ));
         if let Some(cat) = category {
             req = req.query(&[("category", cat)]);
@@ -763,8 +859,10 @@ impl ApiClient {
         let resp = self
             .client
             .put(format!(
-                "{}/api/projects/{project_id}/knowledge/memories/{memory_id}",
-                self.base_url
+                "{}/api/projects/{}/knowledge/memories/{}",
+                self.base_url,
+                encode_path(project_id),
+                encode_path(memory_id)
             ))
             .json(req)
             .send()
@@ -778,8 +876,10 @@ impl ApiClient {
         let resp = self
             .client
             .delete(format!(
-                "{}/api/projects/{project_id}/knowledge/memories/{memory_id}",
-                self.base_url
+                "{}/api/projects/{}/knowledge/memories/{}",
+                self.base_url,
+                encode_path(project_id),
+                encode_path(memory_id)
             ))
             .send()
             .await?;
@@ -796,8 +896,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/extract",
-                self.base_url
+                "{}/api/projects/{}/knowledge/extract",
+                self.base_url,
+                encode_path(project_id)
             ))
             .json(req)
             .send()
@@ -814,8 +915,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/generate-instructions",
-                self.base_url
+                "{}/api/projects/{}/knowledge/generate-instructions",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -828,8 +930,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/write-claude-md",
-                self.base_url
+                "{}/api/projects/{}/knowledge/write-claude-md",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -842,8 +945,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/projects/{project_id}/knowledge/bootstrap",
-                self.base_url
+                "{}/api/projects/{}/knowledge/bootstrap",
+                self.base_url,
+                encode_path(project_id)
             ))
             .send()
             .await?;
@@ -860,8 +964,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/hosts/{host_id}/knowledge/service",
-                self.base_url
+                "{}/api/hosts/{}/knowledge/service",
+                self.base_url,
+                encode_path(host_id)
             ))
             .json(req)
             .send()
@@ -907,7 +1012,11 @@ impl ApiClient {
     pub async fn get_claude_task(&self, task_id: &str) -> Result<ClaudeTask, ApiError> {
         let resp = self
             .client
-            .get(format!("{}/api/claude-tasks/{task_id}", self.base_url))
+            .get(format!(
+                "{}/api/claude-tasks/{}",
+                self.base_url,
+                encode_path(task_id)
+            ))
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
@@ -924,8 +1033,9 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/claude-tasks/{task_id}/resume",
-                self.base_url
+                "{}/api/claude-tasks/{}/resume",
+                self.base_url,
+                encode_path(task_id)
             ))
             .json(req)
             .send()
@@ -943,8 +1053,9 @@ impl ApiClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/hosts/{host_id}/claude-tasks/discover",
-                self.base_url
+                "{}/api/hosts/{}/claude-tasks/discover",
+                self.base_url,
+                encode_path(host_id)
             ))
             .query(&[("project_path", project_path)])
             .send()
