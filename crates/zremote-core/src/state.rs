@@ -21,7 +21,7 @@ pub struct SessionState {
     /// Last known terminal dimensions (updated on resize, sent with scrollback).
     pub last_cols: u16,
     pub last_rows: u16,
-    /// Per-pane scrollback buffers for extra tmux panes (pane_id -> (chunks, total_size)).
+    /// Per-pane scrollback buffers for extra tmux panes (`pane_id` -> (chunks, `total_size`)).
     pub pane_scrollbacks: HashMap<String, (VecDeque<Vec<u8>>, usize)>,
 }
 

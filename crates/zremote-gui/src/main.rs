@@ -1,3 +1,30 @@
+// Pre-existing pedantic clippy lints — suppress at crate level for now
+#![allow(
+    clippy::unreadable_literal,       // hex color codes in theme.rs
+    clippy::cast_possible_truncation, // terminal rendering casts (f32/usize/u16)
+    clippy::cast_sign_loss,           // terminal rendering casts
+    clippy::cast_precision_loss,      // terminal rendering casts
+    clippy::cast_possible_wrap,       // terminal rendering casts
+    clippy::too_many_lines,           // complex view/element functions
+    clippy::wildcard_imports,         // gpui::* pattern
+    clippy::similar_names,            // view field names
+    clippy::match_same_arms,          // exhaustive match patterns
+    clippy::match_wildcard_for_single_variants,
+    clippy::redundant_closure_for_method_calls,
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::doc_markdown,
+    clippy::assigning_clones,
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::map_unwrap_or,
+    dead_code,
+)]
+
 #[allow(dead_code)]
 mod app_state;
 mod assets;

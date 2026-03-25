@@ -1,6 +1,7 @@
 use std::fmt::Write;
 
 /// Build a prompt that instructs Claude to analyze a project and generate .zremote/settings.json.
+#[allow(clippy::too_many_lines)] // single prompt-building function, splitting would reduce readability
 pub fn build_configure_prompt(
     project_path: &str,
     project_type: &str,

@@ -3,7 +3,7 @@ use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::ApiError;
 use crate::types::{
@@ -39,13 +39,13 @@ impl TerminalSession {
         url: String,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Result<Self, ApiError> {
-        info!(url = %url, "connecting to terminal WebSocket");
+        debug!(url = %url, "connecting to terminal WebSocket");
 
         let mut ws_config = WebSocketConfig::default();
         ws_config.max_message_size = Some(MAX_TERMINAL_MESSAGE_SIZE);
         let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false).await?;
 
-        info!("terminal WebSocket connected");
+        debug!("terminal WebSocket connected");
 
         let (input_tx, input_rx) = flume::bounded::<TerminalInput>(TERMINAL_CHANNEL_CAPACITY);
         let (output_tx, output_rx) = flume::bounded::<TerminalEvent>(TERMINAL_CHANNEL_CAPACITY);
@@ -91,7 +91,7 @@ impl TerminalSession {
         let cancel_bg = cancel.clone();
 
         tokio_handle.spawn(async move {
-            info!(url = %url, "connecting to terminal WebSocket (background)");
+            debug!(url = %url, "connecting to terminal WebSocket (background)");
             let mut ws_config = WebSocketConfig::default();
             ws_config.max_message_size = Some(MAX_TERMINAL_MESSAGE_SIZE);
             match connect_async_with_config(&url, Some(ws_config), false).await {
@@ -263,8 +263,16 @@ async fn run_terminal_ws(
                                     Err(_) => continue,
                                 };
                                 let bytes = &data[2 + pid_len..];
-                                if in_scrollback && scrollback_buf.len() + bytes.len() <= MAX_SCROLLBACK_BUFFER_SIZE {
-                                    scrollback_buf.extend_from_slice(bytes);
+                                if in_scrollback {
+                                    if scrollback_buf.len() + bytes.len() > MAX_SCROLLBACK_BUFFER_SIZE {
+                                        if !scrollback_truncated {
+                                            warn!("scrollback buffer exceeded 100MB cap, truncating");
+                                            scrollback_truncated = true;
+                                        }
+                                        scrollback_buf.clear();
+                                    } else {
+                                        scrollback_buf.extend_from_slice(bytes);
+                                    }
                                 } else if output_tx
                                     .send(TerminalEvent::PaneOutput {
                                         pane_id,

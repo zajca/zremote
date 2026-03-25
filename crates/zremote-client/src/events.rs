@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::types::{EVENT_CHANNEL_CAPACITY, ServerEvent};
 
@@ -51,7 +51,7 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
             return;
         }
 
-        info!(url = %url, "connecting to events WebSocket");
+        debug!(url = %url, "connecting to events WebSocket");
 
         let mut ws_config = WebSocketConfig::default();
         ws_config.max_message_size = Some(MAX_EVENT_MESSAGE_SIZE);
