@@ -472,4 +472,308 @@ mod tests {
         assert_eq!(result.session_id, "abc");
         assert_eq!(result.shell_pid, 100);
     }
+
+    #[tokio::test]
+    async fn wait_for_state_file_delayed_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("delayed.json");
+        let path_clone = path.clone();
+
+        // Spawn a task that writes the state file after 500ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let state = DaemonStateFile {
+                version: 1,
+                session_id: "delayed".to_string(),
+                shell: "/bin/sh".to_string(),
+                shell_pid: 200,
+                daemon_pid: 201,
+                cols: 100,
+                rows: 30,
+                started_at: "2026-03-25T12:00:00Z".to_string(),
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            std::fs::write(&path_clone, json).unwrap();
+        });
+
+        let result = wait_for_state_file(&path).await.unwrap();
+        assert_eq!(result.session_id, "delayed");
+        assert_eq!(result.shell_pid, 200);
+        assert_eq!(result.cols, 100);
+        assert_eq!(result.rows, 30);
+    }
+
+    #[tokio::test]
+    async fn wait_for_state_file_invalid_json_then_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("evolving.json");
+
+        // Write invalid JSON first
+        std::fs::write(&path, "not valid json yet").unwrap();
+
+        let path_clone = path.clone();
+        // After 500ms, overwrite with valid JSON
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let state = DaemonStateFile {
+                version: 1,
+                session_id: "evolved".to_string(),
+                shell: "/bin/sh".to_string(),
+                shell_pid: 300,
+                daemon_pid: 301,
+                cols: 80,
+                rows: 24,
+                started_at: "2026-03-25T13:00:00Z".to_string(),
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            std::fs::write(&path_clone, json).unwrap();
+        });
+
+        let result = wait_for_state_file(&path).await.unwrap();
+        assert_eq!(result.session_id, "evolved");
+    }
+
+    #[tokio::test]
+    async fn start_io_tasks_forwards_output() {
+        use tokio::net::UnixStream;
+
+        let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+
+        let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
+
+        let (reader_handle, writer_handle, writer_tx) =
+            start_io_tasks(session_id, client_stream, output_tx);
+
+        // Simulate daemon sending an Output response on daemon_stream
+        let (mut daemon_read, mut daemon_write) = tokio::io::split(daemon_stream);
+        let resp = super::super::protocol::DaemonResponse::Output {
+            data: b"hello from daemon".to_vec(),
+        };
+        super::super::protocol::send_response(&mut daemon_write, &resp)
+            .await
+            .unwrap();
+
+        // Read from output_rx
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("should receive output within timeout")
+            .expect("channel should not be closed");
+        assert_eq!(output.data, b"hello from daemon");
+        assert_eq!(output.session_id, session_id);
+
+        // Test writer: send a request through writer_tx and read from daemon side
+        writer_tx.send(DaemonRequest::Ping).await.unwrap();
+
+        let req = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::super::protocol::read_request(&mut daemon_read),
+        )
+        .await
+        .expect("should receive request within timeout")
+        .unwrap();
+        assert_eq!(req, DaemonRequest::Ping);
+
+        // Clean up
+        reader_handle.abort();
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_io_tasks_handles_exited() {
+        use tokio::net::UnixStream;
+
+        let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+
+        let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
+
+        let (reader_handle, writer_handle, _writer_tx) =
+            start_io_tasks(session_id, client_stream, output_tx);
+
+        // Daemon sends Exited
+        let (_daemon_read, mut daemon_write) = tokio::io::split(daemon_stream);
+        let resp = super::super::protocol::DaemonResponse::Exited { code: Some(0) };
+        super::super::protocol::send_response(&mut daemon_write, &resp)
+            .await
+            .unwrap();
+
+        // Should receive empty data (EOF signal)
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel should not be closed");
+        assert!(
+            output.data.is_empty(),
+            "Exited should produce empty data (EOF)"
+        );
+
+        reader_handle.abort();
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_io_tasks_handles_disconnect() {
+        use tokio::net::UnixStream;
+
+        let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+
+        let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
+
+        let (reader_handle, _writer_handle, _writer_tx) =
+            start_io_tasks(session_id, client_stream, output_tx);
+
+        // Drop daemon side to simulate disconnect
+        drop(daemon_stream);
+
+        // Should receive EOF signal (empty data)
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel should not be closed");
+        assert!(
+            output.data.is_empty(),
+            "disconnect should produce empty data (EOF)"
+        );
+
+        reader_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_io_tasks_ignores_state_and_pong() {
+        use tokio::net::UnixStream;
+
+        let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+
+        let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
+
+        let (reader_handle, writer_handle, _writer_tx) =
+            start_io_tasks(session_id, client_stream, output_tx);
+
+        let (_daemon_read, mut daemon_write) = tokio::io::split(daemon_stream);
+
+        // Send State response (should be ignored by reader)
+        let state_resp = super::super::protocol::DaemonResponse::State {
+            session_id: session_id.to_string(),
+            shell_pid: 100,
+            daemon_pid: 101,
+            cols: 80,
+            rows: 24,
+            scrollback: vec![],
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        super::super::protocol::send_response(&mut daemon_write, &state_resp)
+            .await
+            .unwrap();
+
+        // Send Pong (should be ignored)
+        super::super::protocol::send_response(
+            &mut daemon_write,
+            &super::super::protocol::DaemonResponse::Pong,
+        )
+        .await
+        .unwrap();
+
+        // Send real Output after the ignored messages
+        let output_resp = super::super::protocol::DaemonResponse::Output {
+            data: b"real data".to_vec(),
+        };
+        super::super::protocol::send_response(&mut daemon_write, &output_resp)
+            .await
+            .unwrap();
+
+        // Should only receive the real output, State and Pong are silently ignored
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("should receive within timeout")
+            .expect("channel should not be closed");
+        assert_eq!(output.data, b"real data");
+
+        reader_handle.abort();
+        writer_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn start_io_tasks_writer_sends_multiple_requests() {
+        use tokio::net::UnixStream;
+
+        let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+
+        let (output_tx, _output_rx) = mpsc::channel::<PtyOutput>(64);
+
+        let (reader_handle, writer_handle, writer_tx) =
+            start_io_tasks(session_id, client_stream, output_tx);
+
+        let (mut daemon_read, _daemon_write) = tokio::io::split(daemon_stream);
+
+        // Send several requests
+        writer_tx
+            .send(DaemonRequest::Input {
+                data: b"ls\n".to_vec(),
+            })
+            .await
+            .unwrap();
+        writer_tx
+            .send(DaemonRequest::Resize {
+                cols: 120,
+                rows: 40,
+            })
+            .await
+            .unwrap();
+        writer_tx.send(DaemonRequest::GetState).await.unwrap();
+
+        // Read them all from daemon side
+        let req1 = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::super::protocol::read_request(&mut daemon_read),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            req1,
+            DaemonRequest::Input {
+                data: b"ls\n".to_vec()
+            }
+        );
+
+        let req2 = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::super::protocol::read_request(&mut daemon_read),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            req2,
+            DaemonRequest::Resize {
+                cols: 120,
+                rows: 40
+            }
+        );
+
+        let req3 = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::super::protocol::read_request(&mut daemon_read),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(req3, DaemonRequest::GetState);
+
+        reader_handle.abort();
+        writer_handle.abort();
+    }
+
+    #[test]
+    fn try_wait_for_dead_process() {
+        // We can't easily construct a DaemonSession without a real daemon,
+        // but we can test the kill-check logic via nix directly
+        let pid = nix::unistd::Pid::from_raw(99_999_999);
+        let result = nix::sys::signal::kill(pid, None);
+        assert!(result.is_err(), "nonexistent PID should fail signal check");
+    }
 }

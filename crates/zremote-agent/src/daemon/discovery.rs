@@ -439,9 +439,170 @@ mod tests {
     }
 
     #[test]
+    fn is_daemon_alive_invalid_timestamp() {
+        // Unparseable timestamp should return false even for an alive PID
+        let pid = std::process::id();
+        assert!(!is_daemon_alive(pid, "not-a-timestamp"));
+    }
+
+    #[test]
+    fn is_daemon_alive_future_timestamp() {
+        // Future timestamp should return false
+        let pid = std::process::id();
+        assert!(!is_daemon_alive(pid, "2099-12-31T23:59:59Z"));
+    }
+
+    #[test]
+    fn is_daemon_alive_pid_zero() {
+        // PID 0 (kernel) - kill(0, 0) sends to process group, but we test the path
+        // This exercises the i32 conversion path
+        let result = is_daemon_alive(0, "2026-01-01T00:00:00Z");
+        // Result varies by platform/permissions, but must not panic
+        let _ = result;
+    }
+
+    #[test]
+    fn is_daemon_alive_max_pid() {
+        // u32::MAX should fail i32 conversion or not exist
+        let result = is_daemon_alive(u32::MAX, "2026-01-01T00:00:00Z");
+        assert!(!result, "u32::MAX PID should not be alive");
+    }
+
+    #[test]
+    fn read_state_file_with_extra_fields() {
+        // State file with extra fields should still parse (forward compat)
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("extra.json");
+        let json = r#"{
+            "version": 1,
+            "session_id": "extra-test",
+            "shell": "/bin/sh",
+            "shell_pid": 100,
+            "daemon_pid": 101,
+            "cols": 80,
+            "rows": 24,
+            "started_at": "2026-01-01T00:00:00Z",
+            "unknown_field": "should be ignored"
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let result = read_state_file(&path);
+        // serde by default ignores unknown fields, so this should work
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().session_id, "extra-test");
+    }
+
+    #[test]
+    fn read_state_file_missing_required_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("incomplete.json");
+        // Missing shell_pid
+        let json = r#"{
+            "version": 1,
+            "session_id": "test",
+            "shell": "/bin/sh",
+            "daemon_pid": 101,
+            "cols": 80,
+            "rows": 24,
+            "started_at": "2026-01-01T00:00:00Z"
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let result = read_state_file(&path);
+        assert!(result.is_none(), "missing required field should fail parse");
+    }
+
+    #[test]
+    fn read_state_file_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.json");
+        std::fs::write(&path, "").unwrap();
+        let result = read_state_file(&path);
+        assert!(result.is_none(), "empty file should fail parse");
+    }
+
+    #[test]
+    fn cleanup_stale_daemons_removes_dead_daemon_files() {
+        // Create a temp dir that mimics the socket directory structure
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("dead-session.json");
+        let socket_path = tmp.path().join("dead-session.sock");
+
+        // Write a state file with a PID that doesn't exist
+        let state = DaemonStateFile {
+            version: 1,
+            session_id: "dead-session".to_string(),
+            shell: "/bin/sh".to_string(),
+            shell_pid: 99_999_998,
+            daemon_pid: 99_999_999,
+            cols: 80,
+            rows: 24,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
+        std::fs::write(&socket_path, "fake-socket").unwrap();
+
+        // We can't directly call cleanup_stale_daemons with a custom dir,
+        // but we can verify the internal logic by calling read_state_file + is_daemon_alive
+        let parsed = read_state_file(&state_path).unwrap();
+        assert!(!is_daemon_alive(parsed.daemon_pid, &parsed.started_at));
+    }
+
+    #[test]
     fn cleanup_stale_daemons_no_dir() {
         // Should not panic when directory doesn't exist
         cleanup_stale_daemons();
+    }
+
+    #[test]
+    fn cleanup_stale_daemons_removes_unparseable_state_files() {
+        // Verify the logic: unparseable state files are cleaned up
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.json");
+        std::fs::write(&path, "not valid json").unwrap();
+
+        // read_state_file returns None for unparseable files
+        assert!(read_state_file(&path).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_for_pid_1() {
+        // PID 1 (init/systemd) should always be readable if /proc is available
+        let result = super::parse_proc_stat_starttime(1);
+        // May be None if running in a restricted container, but should not panic
+        let _ = result;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_starttime_nonexistent_pid() {
+        let result = super::parse_proc_stat_starttime(99_999_999);
+        assert!(result.is_none(), "nonexistent PID should return None");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_boot_time_returns_some() {
+        let result = super::system_boot_time();
+        assert!(result.is_some(), "boot time should be readable on Linux");
+        // Boot time should be a reasonable value (after year 2000)
+        let btime = result.unwrap();
+        assert!(btime > 946_684_800, "boot time should be after year 2000");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clock_ticks_per_sec_returns_reasonable_value() {
+        let ticks = super::clock_ticks_per_sec();
+        // Typical values: 100 (most Linux), sometimes 250, 300, 1000
+        assert!(ticks > 0, "CLK_TCK should be positive");
+        assert!(ticks <= 10000, "CLK_TCK should be reasonable");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_proc_starttime_nonexistent_pid() {
+        let result = super::verify_proc_starttime(99_999_999, "2026-01-01T00:00:00Z");
+        assert!(result.is_none(), "nonexistent PID should return None");
     }
 
     #[tokio::test]

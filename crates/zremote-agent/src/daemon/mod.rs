@@ -389,7 +389,7 @@ pub async fn run_pty_daemon(
 }
 
 /// Write state file atomically (write .tmp then rename).
-fn write_state_file_atomic(path: &Path, state: &DaemonStateFile) -> std::io::Result<()> {
+pub(crate) fn write_state_file_atomic(path: &Path, state: &DaemonStateFile) -> std::io::Result<()> {
     let tmp_path = path.with_extension("json.tmp");
     let data = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     std::fs::write(&tmp_path, &data)?;
@@ -403,7 +403,7 @@ fn write_state_file_atomic(path: &Path, state: &DaemonStateFile) -> std::io::Res
 }
 
 /// Remove socket and state files on exit.
-fn cleanup(socket_path: &Path, state_file_path: &Path) {
+pub(crate) fn cleanup(socket_path: &Path, state_file_path: &Path) {
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_file(state_file_path);
     tracing::info!(
@@ -414,3 +414,153 @@ fn cleanup(socket_path: &Path, state_file_path: &Path) {
 }
 
 use std::io::Write;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_state() -> DaemonStateFile {
+        DaemonStateFile {
+            version: 1,
+            session_id: "test-session-001".to_string(),
+            shell: "/bin/sh".to_string(),
+            shell_pid: 12345,
+            daemon_pid: 12346,
+            cols: 80,
+            rows: 24,
+            started_at: "2026-03-25T10:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn write_state_file_atomic_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let state = sample_state();
+        write_state_file_atomic(&path, &state).unwrap();
+
+        assert!(path.exists(), "state file should exist after write");
+        // Tmp file should not remain
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "tmp file should be cleaned up"
+        );
+
+        // Read back and verify
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let decoded: DaemonStateFile = serde_json::from_str(&contents).unwrap();
+        assert_eq!(decoded.session_id, "test-session-001");
+        assert_eq!(decoded.shell, "/bin/sh");
+        assert_eq!(decoded.shell_pid, 12345);
+        assert_eq!(decoded.daemon_pid, 12346);
+        assert_eq!(decoded.cols, 80);
+        assert_eq!(decoded.rows, 24);
+    }
+
+    #[test]
+    fn write_state_file_atomic_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let mut state = sample_state();
+        write_state_file_atomic(&path, &state).unwrap();
+
+        // Overwrite with different data
+        state.session_id = "updated-session".to_string();
+        state.cols = 120;
+        state.rows = 40;
+        write_state_file_atomic(&path, &state).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let decoded: DaemonStateFile = serde_json::from_str(&contents).unwrap();
+        assert_eq!(decoded.session_id, "updated-session");
+        assert_eq!(decoded.cols, 120);
+        assert_eq!(decoded.rows, 40);
+    }
+
+    #[test]
+    fn write_state_file_atomic_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+        let state = sample_state();
+        write_state_file_atomic(&path, &state).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state file should have 0600 permissions");
+    }
+
+    #[test]
+    fn write_state_file_atomic_fails_on_bad_path() {
+        let state = sample_state();
+        let result = write_state_file_atomic(Path::new("/nonexistent/dir/state.json"), &state);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cleanup_removes_both_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("test.sock");
+        let state_path = tmp.path().join("test.json");
+
+        // Create both files
+        std::fs::write(&socket_path, "socket").unwrap();
+        std::fs::write(&state_path, "state").unwrap();
+        assert!(socket_path.exists());
+        assert!(state_path.exists());
+
+        cleanup(&socket_path, &state_path);
+
+        assert!(!socket_path.exists(), "socket should be removed");
+        assert!(!state_path.exists(), "state file should be removed");
+    }
+
+    #[test]
+    fn cleanup_handles_missing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("missing.sock");
+        let state_path = tmp.path().join("missing.json");
+
+        // Should not panic even if files don't exist
+        cleanup(&socket_path, &state_path);
+    }
+
+    #[test]
+    fn cleanup_handles_partial_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("test.sock");
+        let state_path = tmp.path().join("test.json");
+
+        // Only socket exists
+        std::fs::write(&socket_path, "socket").unwrap();
+        cleanup(&socket_path, &state_path);
+        assert!(!socket_path.exists());
+
+        // Only state exists
+        std::fs::write(&state_path, "state").unwrap();
+        cleanup(&socket_path, &state_path);
+        assert!(!state_path.exists());
+    }
+
+    #[test]
+    fn socket_dir_format() {
+        let uid = nix::unistd::getuid();
+        let dir = socket_dir();
+        assert_eq!(dir, PathBuf::from(format!("/tmp/zremote-pty-{uid}")));
+    }
+
+    #[test]
+    fn daemon_state_file_pretty_json() {
+        let state = sample_state();
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        assert!(json.contains("test-session-001"));
+        assert!(json.contains("version"));
+        assert!(json.contains("shell_pid"));
+        // Verify it round-trips through pretty format
+        let decoded: DaemonStateFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.version, 1);
+    }
+}
