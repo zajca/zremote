@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use zremote_client::ServerEvent;
+use zremote_client::{ClientEvent, ServerEvent};
 
 use crate::app_state::AppState;
+use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
@@ -28,6 +29,11 @@ pub struct MainView {
     session_switcher: Option<Entity<SessionSwitcher>>,
     help_modal: Option<Entity<HelpModal>>,
     double_shift: DoubleShiftDetector,
+    /// Whether the event WebSocket is currently connected.
+    server_connected: bool,
+    /// Whether the event WebSocket has ever successfully connected.
+    /// Used to suppress the disconnect banner before the first connection.
+    ever_connected: bool,
 }
 
 impl MainView {
@@ -54,6 +60,8 @@ impl MainView {
             session_switcher: None,
             help_modal: None,
             double_shift: DoubleShiftDetector::new(),
+            server_connected: true, // Assume connected until first Disconnected event
+            ever_connected: false,
         }
     }
 
@@ -123,10 +131,29 @@ impl MainView {
     fn start_event_polling(app_state: &Arc<AppState>, cx: &mut Context<Self>) {
         let event_rx = app_state.event_rx.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            while let Ok(event) = event_rx.recv_async().await {
-                let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                    this.handle_server_event(&event, cx);
-                });
+            while let Ok(client_event) = event_rx.recv_async().await {
+                let _ =
+                    this.update(
+                        cx,
+                        |this: &mut Self, cx: &mut Context<Self>| match &client_event {
+                            ClientEvent::Server(event) => {
+                                this.handle_server_event(event, cx);
+                            }
+                            ClientEvent::Connected => {
+                                this.ever_connected = true;
+                                if !this.server_connected {
+                                    this.server_connected = true;
+                                    cx.notify();
+                                }
+                            }
+                            ClientEvent::Disconnected => {
+                                if this.server_connected {
+                                    this.server_connected = false;
+                                    cx.notify();
+                                }
+                            }
+                        },
+                    );
             }
         })
         .detach();
@@ -153,6 +180,22 @@ impl MainView {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.handle_server_event(event, cx);
         });
+
+        // When a session is resumed, reconnect the terminal if it's the current one.
+        if let ServerEvent::SessionResumed { session_id } = event {
+            if let Some(terminal) = &self.terminal {
+                let is_current = terminal.read(cx).session_id() == session_id;
+                if is_current && terminal.read(cx).is_disconnected() {
+                    // Re-establish the terminal connection (new WS, scrollback replay).
+                    let session_id = session_id.clone();
+                    if let Some(handle) = connect_terminal(&self.app_state, &session_id) {
+                        terminal.update(cx, |panel, cx| {
+                            panel.reconnect(handle, &self.app_state.tokio_handle, cx);
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // -- Command palette ---------------------------------------------------------
@@ -429,14 +472,12 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut root = div()
-            .flex()
-            .size_full()
-            .bg(theme::bg_primary())
-            .child(self.sidebar.clone())
-            .child(if let Some(terminal) = &self.terminal {
-                div().flex_1().child(terminal.clone()).into_any_element()
-            } else {
+        // Build the content area (terminal or empty state) as a vertical column
+        // so we can prepend the connection banner when disconnected.
+        let content_area = if let Some(terminal) = &self.terminal {
+            div().flex_1().flex().flex_col().child(terminal.clone())
+        } else {
+            div().flex_1().flex().flex_col().child(
                 div()
                     .flex_1()
                     .track_focus(&self.focus_handle)
@@ -444,7 +485,6 @@ impl Render for MainView {
                         let key = event.keystroke.key.as_str();
                         let mods = &event.keystroke.modifiers;
 
-                        // Track key presses during shift hold for double-shift detection.
                         this.double_shift.on_key_down_during_shift();
 
                         if mods.control && !mods.shift && key == "tab" {
@@ -474,8 +514,47 @@ impl Render for MainView {
                             }
                         },
                     ))
-                    .child(Self::render_empty_state(cx))
+                    .child(Self::render_empty_state(cx)),
+            )
+        };
+
+        let mut root = div()
+            .flex()
+            .size_full()
+            .bg(theme::bg_primary())
+            .child(self.sidebar.clone())
+            .child(if !self.server_connected && self.ever_connected {
+                // Wrap content area in a column with a connection-lost banner on top.
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(12.0))
+                            .py(px(5.0))
+                            .bg(theme::warning_bg())
+                            .border_b_1()
+                            .border_color(theme::warning_border())
+                            .child(
+                                icon(Icon::WifiOff)
+                                    .size(px(14.0))
+                                    .text_color(theme::warning()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme::warning())
+                                    .child("Connection lost, reconnecting..."),
+                            ),
+                    )
+                    .child(content_area)
                     .into_any_element()
+            } else {
+                content_area.into_any_element()
             });
 
         // Command palette overlay: backdrop and palette are SIBLINGS so clicks

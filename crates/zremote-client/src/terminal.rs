@@ -213,6 +213,7 @@ async fn run_terminal_ws(
     let mut scrollback_buf: Vec<u8> = Vec::new();
     let mut in_scrollback = false;
     let mut scrollback_truncated = false;
+    let mut session_closed = false;
 
     loop {
         tokio::select! {
@@ -296,6 +297,7 @@ async fn run_terminal_ws(
                                 // Output arrives as binary frames; text output is not expected
                             }
                             Ok(TerminalServerMessage::SessionClosed { exit_code }) => {
+                                session_closed = true;
                                 let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code });
                                 break;
                             }
@@ -354,6 +356,12 @@ async fn run_terminal_ws(
                 }
             }
         }
+    }
+
+    // If the connection was lost (not a clean session close or intentional cancel),
+    // notify consumers so the UI can show a disconnect overlay.
+    if !session_closed && !cancel.is_cancelled() {
+        let _ = output_tx.send(TerminalEvent::Disconnected);
     }
 
     cancel.cancel();

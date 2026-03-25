@@ -13,7 +13,7 @@ pub mod types;
 
 pub use client::ApiClient;
 pub use error::ApiError;
-pub use events::EventStream;
+pub use events::{ClientEvent, EventStream};
 pub use terminal::TerminalSession;
 
 /// Re-export flume for channel consumers.
