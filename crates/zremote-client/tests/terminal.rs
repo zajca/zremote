@@ -37,15 +37,14 @@ async fn echo_ws(mut socket: WebSocket) {
         match msg {
             Message::Text(text) => {
                 // Parse client message, echo input data back as binary main-pane output
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if parsed.get("type").and_then(|t| t.as_str()) == Some("input") {
-                        if let Some(data) = parsed.get("data").and_then(|d| d.as_str()) {
-                            // Binary frame: 0x01 tag + data bytes
-                            let mut frame = vec![0x01];
-                            frame.extend_from_slice(data.as_bytes());
-                            let _ = socket.send(Message::Binary(frame.into())).await;
-                        }
-                    }
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text)
+                    && parsed.get("type").and_then(|t| t.as_str()) == Some("input")
+                    && let Some(data) = parsed.get("data").and_then(|d| d.as_str())
+                {
+                    // Binary frame: 0x01 tag + data bytes
+                    let mut frame = vec![0x01];
+                    frame.extend_from_slice(data.as_bytes());
+                    let _ = socket.send(Message::Binary(frame.into())).await;
                 }
             }
             Message::Close(_) => break,
@@ -286,18 +285,17 @@ async fn resize_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 async fn resize_ws(mut socket: WebSocket) {
     // Wait for a resize message and echo its dimensions as binary output
     while let Some(Ok(msg)) = socket.recv().await {
-        if let Message::Text(text) = msg {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                if parsed.get("type").and_then(|t| t.as_str()) == Some("resize") {
-                    let cols = parsed.get("cols").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let rows = parsed.get("rows").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let response = format!("{cols}x{rows}");
-                    let mut frame = vec![0x01];
-                    frame.extend_from_slice(response.as_bytes());
-                    let _ = socket.send(Message::Binary(frame.into())).await;
-                    break;
-                }
-            }
+        if let Message::Text(text) = msg
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text)
+            && parsed.get("type").and_then(|t| t.as_str()) == Some("resize")
+        {
+            let cols = parsed.get("cols").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rows = parsed.get("rows").and_then(|v| v.as_u64()).unwrap_or(0);
+            let response = format!("{cols}x{rows}");
+            let mut frame = vec![0x01];
+            frame.extend_from_slice(response.as_bytes());
+            let _ = socket.send(Message::Binary(frame.into())).await;
+            break;
         }
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
