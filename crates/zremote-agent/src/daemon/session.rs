@@ -538,7 +538,7 @@ mod tests {
         use tokio::net::UnixStream;
 
         let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
 
         let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
 
@@ -584,7 +584,7 @@ mod tests {
         use tokio::net::UnixStream;
 
         let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
 
         let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
 
@@ -617,7 +617,7 @@ mod tests {
         use tokio::net::UnixStream;
 
         let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
 
         let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
 
@@ -645,7 +645,7 @@ mod tests {
         use tokio::net::UnixStream;
 
         let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
 
         let (output_tx, mut output_rx) = mpsc::channel::<PtyOutput>(64);
 
@@ -700,7 +700,7 @@ mod tests {
         use tokio::net::UnixStream;
 
         let (client_stream, daemon_stream) = UnixStream::pair().unwrap();
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
 
         let (output_tx, _output_rx) = mpsc::channel::<PtyOutput>(64);
 
