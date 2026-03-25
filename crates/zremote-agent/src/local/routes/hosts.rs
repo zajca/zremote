@@ -52,7 +52,13 @@ mod tests {
         upsert_local_host(&pool, &host_id, "test-host")
             .await
             .unwrap();
-        LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false)
+        LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        )
     }
 
     #[tokio::test]

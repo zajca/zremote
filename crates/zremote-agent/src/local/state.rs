@@ -40,14 +40,14 @@ impl LocalAppState {
         hostname: String,
         host_id: Uuid,
         shutdown: CancellationToken,
-        use_tmux: bool,
+        backend: crate::config::PersistenceBackend,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
         let agentic_loops = AgenticLoopStore::default();
 
         let (pty_output_tx, pty_output_rx) = mpsc::channel(256);
-        let session_manager = SessionManager::new(pty_output_tx, use_tmux);
+        let session_manager = SessionManager::new(pty_output_tx, backend);
 
         let agentic_manager = AgenticLoopManager::new();
         let session_mapper = SessionMapper::new();
@@ -87,7 +87,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
-        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         assert_eq!(state.hostname, "test-host");
         assert_eq!(state.host_id, host_id);
@@ -98,7 +104,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         // Session store should be empty
         let sessions = state.sessions.read().await;
@@ -113,7 +125,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let mut rx = state.events.subscribe();
         let event = ServerEvent::HostStatusChanged {
@@ -131,7 +149,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         // Agentic manager should be accessible
         let _mgr = state.agentic_manager.lock().await;

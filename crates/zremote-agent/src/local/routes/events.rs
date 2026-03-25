@@ -68,7 +68,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let mut rx = state.events.subscribe();
 

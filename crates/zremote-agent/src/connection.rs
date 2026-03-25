@@ -128,7 +128,7 @@ async fn send_message(ws: &mut WsStream, msg: &AgentMessage) -> Result<(), Conne
 async fn register(
     ws: &mut WsStream,
     config: &AgentConfig,
-    use_tmux: bool,
+    supports_persistence: bool,
 ) -> Result<HostId, ConnectionError> {
     let hostname = hostname::get()
         .map_err(ConnectionError::Hostname)?
@@ -141,7 +141,7 @@ async fn register(
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         token: config.token.clone(),
-        supports_persistent_sessions: use_tmux,
+        supports_persistent_sessions: supports_persistence,
     };
 
     send_message(ws, &register_msg).await?;
@@ -257,7 +257,7 @@ async fn read_worktree_settings_server(
 
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
 #[allow(clippy::too_many_arguments)]
-fn handle_session_create(
+async fn handle_session_create(
     session_manager: &mut SessionManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
     session_id: SessionId,
@@ -269,7 +269,10 @@ fn handle_session_create(
     initial_command: Option<&str>,
 ) {
     let shell = shell.unwrap_or(default_shell());
-    match session_manager.create(session_id, shell, cols, rows, working_dir, env) {
+    match session_manager
+        .create(session_id, shell, cols, rows, working_dir, env)
+        .await
+    {
         Ok(pid) => {
             let tmux_name = if session_manager.use_tmux() {
                 Some(format!("zremote-{session_id}"))
@@ -320,14 +323,15 @@ fn handle_session_create(
 pub async fn run_connection(
     config: &AgentConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
-    use_tmux: bool,
+    backend: crate::config::PersistenceBackend,
 ) -> Result<(), ConnectionError> {
+    let supports_persistence = backend != crate::config::PersistenceBackend::None;
     tracing::info!(server_url = %config.server_url, "connecting to server");
 
     let mut ws = connect(config).await?;
     tracing::info!("WebSocket connection established");
 
-    let host_id = register(&mut ws, config, use_tmux).await?;
+    let host_id = register(&mut ws, config, supports_persistence).await?;
 
     // Split the WebSocket for concurrent read/write
     let (mut ws_sink, mut ws_stream) = ws.split();
@@ -339,11 +343,11 @@ pub async fn run_connection(
     let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<crate::session::PtyOutput>(256);
 
     // Session manager
-    let mut session_manager = SessionManager::new(pty_output_tx.clone(), use_tmux);
+    let mut session_manager = SessionManager::new(pty_output_tx.clone(), backend);
 
-    // Discover and report recovered tmux sessions
+    // Discover and report recovered sessions
     {
-        let recovered = session_manager.discover_existing();
+        let recovered = session_manager.discover_existing().await;
         if !recovered.is_empty() {
             let sessions: Vec<zremote_protocol::RecoveredSession> = recovered
                 .iter()
@@ -527,7 +531,7 @@ pub async fn run_connection(
                                     &agentic_tx,
                                     knowledge_sender.as_ref(),
                                     &session_mapper,
-                                );
+                                ).await;
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "failed to parse server message, ignoring");
@@ -639,8 +643,8 @@ pub async fn run_connection(
         }
     };
 
-    // Clean up sessions: detach tmux (they survive), kill PTY
-    if session_manager.use_tmux() {
+    // Clean up sessions: detach persistent ones (they survive), kill plain PTY
+    if session_manager.supports_persistence() {
         session_manager.detach_all();
     } else {
         session_manager.close_all();
@@ -696,7 +700,7 @@ fn set_clipboard_image_and_send_paste(
 
 /// Handle a server message, dispatching session-related messages to the session manager.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn handle_server_message(
+async fn handle_server_message(
     msg: &ServerMessage,
     host_id: &HostId,
     session_manager: &mut SessionManager,
@@ -730,7 +734,8 @@ fn handle_server_message(
                 working_dir.as_deref(),
                 env.as_ref(),
                 initial_command.as_deref(),
-            );
+            )
+            .await;
         }
         ServerMessage::SessionClose { session_id } => {
             // Clean up agentic loop if any
@@ -1282,7 +1287,8 @@ fn handle_server_message(
             });
         }
         ServerMessage::ClaudeAction(claude_msg) => {
-            handle_claude_server_message(claude_msg, session_manager, outbound_tx, session_mapper);
+            handle_claude_server_message(claude_msg, session_manager, outbound_tx, session_mapper)
+                .await;
         }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {
@@ -1391,7 +1397,7 @@ fn handle_server_message(
 
 /// Handle a Claude server message: start sessions, discover sessions, etc.
 #[allow(clippy::too_many_lines)]
-fn handle_claude_server_message(
+async fn handle_claude_server_message(
     msg: &ClaudeServerMessage,
     session_manager: &mut SessionManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
@@ -1466,7 +1472,10 @@ fn handle_claude_server_message(
 
             // Spawn PTY session using default shell
             let shell = default_shell();
-            match session_manager.create(*session_id, shell, 120, 40, Some(working_dir), None) {
+            match session_manager
+                .create(*session_id, shell, 120, 40, Some(working_dir), None)
+                .await
+            {
                 Ok(pid) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -1603,7 +1612,7 @@ mod tests {
         SessionMapper,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let session_manager = SessionManager::new(pty_tx, false);
+        let session_manager = SessionManager::new(pty_tx, crate::config::PersistenceBackend::None);
         let agentic_manager = AgenticLoopManager::new();
         let project_scanner = ProjectScanner::new();
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
@@ -1679,7 +1688,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1699,7 +1709,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1719,7 +1730,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1738,7 +1750,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
 
         // Should send SessionClosed with exit_code = None
         let sent = orx.try_recv().unwrap();
@@ -1772,7 +1785,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1794,7 +1808,8 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]

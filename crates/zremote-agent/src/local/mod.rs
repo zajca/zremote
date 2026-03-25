@@ -86,12 +86,18 @@ pub async fn run_local(
         shutdown_for_signal.cancel();
     });
 
-    // Detect tmux for persistent sessions
-    let use_tmux = crate::config::detect_tmux();
-    if use_tmux {
-        tracing::info!("tmux detected, persistent sessions enabled");
-    } else {
-        tracing::info!("tmux not found, using standard PTY sessions");
+    // Detect persistence backend for sessions
+    let backend = crate::config::detect_persistence_backend();
+    match backend {
+        crate::config::PersistenceBackend::Daemon => {
+            tracing::info!("using PTY daemon backend for persistent sessions");
+        }
+        crate::config::PersistenceBackend::Tmux => {
+            tracing::info!("using tmux backend for persistent sessions");
+        }
+        crate::config::PersistenceBackend::None => {
+            tracing::info!("no persistence backend, using standard PTY sessions");
+        }
     }
 
     // Create application state
@@ -100,15 +106,16 @@ pub async fn run_local(
         hostname.clone(),
         host_id,
         shutdown.clone(),
-        use_tmux,
+        backend,
     );
 
     // === Session recovery ===
-    // Discover surviving tmux sessions from a previous agent lifecycle
+    // Discover surviving sessions from a previous agent lifecycle
     // and reconcile DB state before starting the PTY output loop.
     let recovery_now = chrono::Utc::now().to_rfc3339();
 
-    if use_tmux {
+    let supports_persistence = backend != crate::config::PersistenceBackend::None;
+    if supports_persistence {
         // Mark stale active/creating sessions as suspended first
         // (they were active when the previous agent died)
         sqlx::query(
@@ -131,10 +138,10 @@ pub async fn run_local(
         .await?;
     }
 
-    // Discover existing tmux sessions and reattach
+    // Discover existing sessions and reattach
     let recovered = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.discover_existing()
+        mgr.discover_existing().await
     };
 
     let recovered_ids: Vec<String> = recovered
@@ -186,7 +193,7 @@ pub async fn run_local(
     if !recovered.is_empty() {
         tracing::info!(
             count = recovered.len(),
-            "recovered tmux sessions from previous run"
+            "recovered sessions from previous run"
         );
     }
 
@@ -874,7 +881,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "test".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let router = build_router(state).unwrap();
 
@@ -897,7 +910,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "test".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let router = build_router(state).unwrap();
 
@@ -924,7 +943,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let router = build_router(state).unwrap();
 
@@ -953,7 +978,13 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(pool, "test-host".to_string(), host_id, shutdown, false);
+        let state = LocalAppState::new(
+            pool,
+            "test-host".to_string(),
+            host_id,
+            shutdown,
+            crate::config::PersistenceBackend::None,
+        );
 
         let router = build_router(state).unwrap();
 

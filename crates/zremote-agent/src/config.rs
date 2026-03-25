@@ -119,12 +119,56 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Session persistence backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceBackend {
+    /// Per-session PTY daemon processes (preferred, no external deps).
+    Daemon,
+    /// tmux-backed sessions (legacy).
+    Tmux,
+    /// No persistence - plain PTY sessions die with the agent.
+    None,
+}
+
 /// Check if tmux is available on the system.
 pub fn detect_tmux() -> bool {
     std::process::Command::new("tmux")
         .arg("-V")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// Detect the best available persistence backend.
+///
+/// Priority: Daemon (always available) > Tmux (if installed) > None.
+/// Currently defaults to Daemon, with Tmux as fallback controlled by
+/// `ZREMOTE_SESSION_BACKEND` env var.
+pub fn detect_persistence_backend() -> PersistenceBackend {
+    // Allow explicit override via env var
+    if let Ok(val) = std::env::var("ZREMOTE_SESSION_BACKEND") {
+        match val.to_lowercase().as_str() {
+            "daemon" => return PersistenceBackend::Daemon,
+            "tmux" => {
+                if detect_tmux() {
+                    return PersistenceBackend::Tmux;
+                }
+                tracing::warn!(
+                    "ZREMOTE_SESSION_BACKEND=tmux but tmux not found, falling back to daemon"
+                );
+                return PersistenceBackend::Daemon;
+            }
+            "none" | "pty" => return PersistenceBackend::None,
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "unknown ZREMOTE_SESSION_BACKEND value, using daemon"
+                );
+            }
+        }
+    }
+
+    // Default: daemon (always available, no external deps)
+    PersistenceBackend::Daemon
 }
 
 #[cfg(test)]
@@ -220,6 +264,29 @@ mod tests {
         // On CI or systems without tmux, this will be false; on dev machines, true.
         // We can't assert either way, but we verify it runs without error.
         let _ = result;
+    }
+
+    #[test]
+    fn detect_persistence_backend_returns_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { remove_env("ZREMOTE_SESSION_BACKEND") };
+
+        let backend = super::detect_persistence_backend();
+        // Default should be Daemon
+        assert_eq!(backend, super::PersistenceBackend::Daemon);
+    }
+
+    #[test]
+    fn persistence_backend_none_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { set_env("ZREMOTE_SESSION_BACKEND", "none") };
+
+        let backend = super::detect_persistence_backend();
+        assert_eq!(backend, super::PersistenceBackend::None);
+
+        unsafe { remove_env("ZREMOTE_SESSION_BACKEND") };
     }
 
     #[test]

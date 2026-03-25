@@ -24,6 +24,7 @@ mod agentic;
 mod claude;
 mod config;
 mod connection;
+mod daemon;
 mod hooks;
 mod knowledge;
 mod linear;
@@ -93,17 +94,111 @@ enum Commands {
         #[arg(long)]
         skip_permissions: bool,
     },
+    /// Internal: run as a PTY daemon process (not for direct use)
+    #[command(hide = true)]
+    PtyDaemon {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        state_file: PathBuf,
+        #[arg(long)]
+        shell: String,
+        #[arg(long)]
+        cols: u16,
+        #[arg(long)]
+        rows: u16,
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        /// Extra environment variables as KEY=VALUE pairs
+        #[arg(long = "env")]
+        env_vars: Vec<String>,
+    },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Parse CLI first (before tokio) so PtyDaemon can call setsid() before runtime
+    let cli = Cli::try_parse().unwrap_or_default();
+
+    // PtyDaemon: setsid() FIRST, then single-thread tokio runtime
+    if let Some(Commands::PtyDaemon {
+        session_id,
+        socket,
+        state_file,
+        shell,
+        cols,
+        rows,
+        working_dir,
+        env_vars,
+    }) = cli.command
+    {
+        // Validate session_id as UUID to prevent path traversal (e.g. "../")
+        if uuid::Uuid::parse_str(&session_id).is_err() {
+            eprintln!("invalid session_id: must be a valid UUID");
+            std::process::exit(1);
+        }
+
+        // setsid() must be called before tokio runtime starts
+        if let Err(e) = nix::unistd::setsid() {
+            eprintln!("setsid failed: {e}");
+            std::process::exit(1);
+        }
+
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .json()
+            .init();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        // Parse --env KEY=VALUE pairs into a HashMap
+        let extra_env: std::collections::HashMap<String, String> = env_vars
+            .into_iter()
+            .filter_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                // Validate env key: must be non-empty, start with letter/underscore,
+                // contain only alphanumeric/underscore
+                if k.is_empty()
+                    || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || k.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    tracing::warn!(key = k, "ignoring invalid environment variable key");
+                    return None;
+                }
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect();
+
+        rt.block_on(daemon::run_pty_daemon(
+            session_id,
+            socket,
+            state_file,
+            shell,
+            cols,
+            rows,
+            working_dir,
+            extra_env,
+        ));
+        return;
+    }
+
+    // All other commands use the multi-thread runtime
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(async_main(cli));
+}
+
+async fn async_main(cli: Cli) {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .json()
         .init();
-
-    // Parse CLI args; default to Run if no subcommand given
-    let cli = Cli::try_parse().unwrap_or_default();
 
     match cli.command.unwrap_or_default() {
         Commands::Run => run_agent().await,
@@ -124,6 +219,7 @@ async fn main() {
         } => {
             run_configure(&project, &model, skip_permissions);
         }
+        Commands::PtyDaemon { .. } => unreachable!("handled above"),
     }
 }
 
@@ -183,11 +279,17 @@ async fn run_agent() {
         }
     };
 
-    let use_tmux = config::detect_tmux();
-    if use_tmux {
-        tracing::info!("tmux detected, persistent sessions enabled");
-    } else {
-        tracing::info!("tmux not found, using standard PTY sessions");
+    let backend = config::detect_persistence_backend();
+    match backend {
+        config::PersistenceBackend::Daemon => {
+            tracing::info!("using PTY daemon backend for persistent sessions");
+        }
+        config::PersistenceBackend::Tmux => {
+            tracing::info!("using tmux backend for persistent sessions");
+        }
+        config::PersistenceBackend::None => {
+            tracing::info!("no persistence backend, using standard PTY sessions");
+        }
     }
 
     // Shutdown signal channel: sender sets to `true` on SIGINT/SIGTERM
@@ -214,7 +316,7 @@ async fn run_agent() {
 
         attempt_num += 1;
 
-        match connection::run_connection(&config, shutdown_rx.clone(), use_tmux).await {
+        match connection::run_connection(&config, shutdown_rx.clone(), backend).await {
             Ok(()) => {
                 // Clean disconnect (e.g. server closed, or we received shutdown)
                 tracing::info!("connection closed cleanly");
