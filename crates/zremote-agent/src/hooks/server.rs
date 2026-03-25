@@ -47,6 +47,14 @@ impl HooksServer {
     ) -> Result<SocketAddr, std::io::Error> {
         let app = Router::new()
             .route("/hooks", post(handler::handle_hook))
+            .route(
+                "/hooks/notification/idle",
+                post(handler::handle_notification_idle),
+            )
+            .route(
+                "/hooks/notification/permission",
+                post(handler::handle_notification_permission),
+            )
             .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(self.state);
 
@@ -307,6 +315,89 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), 200);
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_handles_notification_idle_route() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        mapper.register_loop(session_id, loop_id).await;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks/notification/idle"))
+            .json(&serde_json::json!({
+                "session_id": "cc-idle",
+                "hook_event_name": "Notification",
+                "message": "Claude is waiting for input"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            zremote_protocol::AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, zremote_protocol::AgenticStatus::WaitingForInput);
+            }
+            other => panic!("expected WaitingForInput, got {other:?}"),
+        }
+
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_handles_notification_permission_route() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        mapper.register_loop(session_id, loop_id).await;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks/notification/permission"))
+            .json(&serde_json::json!({
+                "session_id": "cc-perm",
+                "hook_event_name": "Notification",
+                "message": "Permission required"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            zremote_protocol::AgenticAgentMessage::LoopStateUpdate { status, .. } => {
+                assert_eq!(status, zremote_protocol::AgenticStatus::WaitingForInput);
+            }
+            other => panic!("expected WaitingForInput, got {other:?}"),
+        }
+
         shutdown_tx.send(true).unwrap();
     }
 

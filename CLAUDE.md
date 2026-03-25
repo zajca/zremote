@@ -555,9 +555,17 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 - Teammates mark tasks completed and go idle -- team lead picks up
 
 ### Review (after each phase)
-- **Code review**: Spawn `developer:code-reviewer` teammate on the worktree changes
-  - Checks: dead code, missing wiring, type duplication, incomplete extraction, security issues
-  - If review finds issues: send message to implementation teammate (resume) to fix. No merge until clean.
+
+Reviews use the project's **custom agents** (`.claude/agents/`). Always run reviews automatically after implementation -- do not wait for user to ask.
+
+- **Rust code review**: Spawn `rust-reviewer` agent on the changes
+  - Checks: ownership/lifetimes, error handling, async patterns, GPUI conventions, protocol compatibility, security
+  - Confidence filter: only reports issues with >80% confidence
+  - Auto-runs: cargo check, cargo clippy, cargo fmt, cargo test
+  - If review finds issues: fix before merge. No merge until clean.
+- **Code review**: Spawn `code-reviewer` agent for broader review
+  - Checks: architecture, correctness, dead code, missing wiring, type duplication, code quality
+  - Use alongside `rust-reviewer` for major changes, or standalone for smaller changes
 - **UX review** (for phases that touch UI):
   - Spawn a teammate to analyze the user-facing changes from the perspective of the end user
   - Checks:
@@ -567,7 +575,8 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
     - Degradation: What happens when the backend is unavailable, data is empty, or an operation fails? Does the UI communicate this clearly?
   - The UX reviewer reads the modified view/element files plus the RFC, and reports issues with specific file:line references
   - UX issues block merge the same way code review issues do
-- **Security review**: Spawn `developer:code-security` teammate on the worktree changes
+- **Security review**: Spawn `security-reviewer` agent on the changes
+  - Specialized for ZRemote threat model: WebSocket auth, terminal I/O injection, PTY escape sequences, SQLite safety, secret handling, local mode network binding, tmux isolation
   - Checks:
     - Injection: SQL (parameterized queries only), command injection (no shell interpolation of user input).
     - Auth/authz: New endpoints must enforce the same auth as existing ones. Local mode endpoints must not leak to network (bind 127.0.0.1).
@@ -577,6 +586,33 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
     - WebSocket: Validate origin, enforce message size limits, handle malformed frames gracefully.
   - Reports issues with CWE identifiers, severity rating, and exact file:line references
   - Security issues block merge -- no exceptions
+
+### Available Custom Agents (`.claude/agents/`)
+
+| Agent | Model | Purpose | When to use |
+|-------|-------|---------|-------------|
+| `rust-reviewer` | Sonnet | Rust code review (ownership, async, GPUI, protocol) | All Rust code changes |
+| `code-reviewer` | Sonnet | Comprehensive review (architecture, security, quality) | Major changes, pre-merge |
+| `security-reviewer` | Sonnet | ZRemote-specific security vulnerabilities | New endpoints, auth, data handling |
+| `planner` | Opus | Phased implementation plans | Feature planning, refactoring |
+| `rust-build-resolver` | Sonnet | Fix cargo build/compilation errors | When `cargo check` or `cargo test` fails |
+| `refactor-cleaner` | Sonnet | Dead code cleanup, consolidation | Periodic cleanup, post-refactor |
+
+### Key Skills (`.claude/skills/`)
+
+| Skill | When to use |
+|-------|-------------|
+| `/visual-test` | After changes to terminal rendering, theme, or font |
+| `/rust-gpui-development` | Building GPUI views, managing state, terminal rendering |
+| `/axum-0-8-expert` | Axum routes, middleware, path parameters |
+| `/owasp-security` | Security reviews, auth implementation |
+| `/claude-wizard` | TDD methodology, phased implementation with quality gates |
+| `/rustdoc` | Writing doc comments on public Rust items |
+| `/rust-style` | Enforcing Rust coding style conventions |
+| `/rust-review` | Invoke Rust code review as a skill |
+| `/security-review` | Full security review of pending changes |
+| `/refactor-clean` | Dead code cleanup as a skill |
+| `/verify` | End-to-end verification |
 
 ### Merge (after all reviews pass)
 - Team lead commits in worktree with descriptive message (what changed, why, key design decisions)
@@ -594,7 +630,7 @@ Multi-phase features use a **team-based workflow** (TeamCreate). This is mandato
 - **No mocks**: Real implementations only. If blocked, teammate must ask team lead rather than stub.
 - **No reconstruction**: SQL migration files, config files, and other content-addressed artifacts must use original files, never reconstruct from schema.
 - **Verify after merge**: Always run the full test suite on main after merging. Migration checksum mismatches, missing files, and broken imports surface here.
-- **Team lead reviews everything**: No merge without team lead reviewing the diff or delegating to code-reviewer teammate.
+- **Team lead reviews everything**: No merge without team lead reviewing the diff or delegating to `rust-reviewer` / `code-reviewer` agent.
 
 ### Team Lead Discipline
 

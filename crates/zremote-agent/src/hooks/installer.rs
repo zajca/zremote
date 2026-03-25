@@ -1,5 +1,12 @@
 use std::path::Path;
 
+struct HookConfig {
+    event: &'static str,
+    matcher: &'static str,
+    command_arg: &'static str,
+    async_hook: bool,
+}
+
 /// Install the zremote hook scripts and update Claude Code settings.
 ///
 /// Creates:
@@ -48,7 +55,12 @@ fn generate_hook_script() -> String {
 # Managed by zremote-agent. Do not edit manually.
 PORT=$(cat ~/.zremote/hooks-port 2>/dev/null) || exit 0
 INPUT=$(cat -)
-RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/hooks" \
+# Whitelist valid endpoints to prevent command injection via $1
+case "${1:-hooks}" in
+  hooks|hooks/notification/idle|hooks/notification/permission) ENDPOINT="${1:-hooks}" ;;
+  *) exit 1 ;;
+esac
+RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
   -H "Content-Type: application/json" \
   -d "$INPUT" 2>/dev/null)
 if [ -n "$RESPONSE" ]; then
@@ -79,14 +91,59 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
 
     let script = script_path.to_string_lossy().to_string();
 
-    // Build hook configuration
-    let hook_entry = serde_json::json!({
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": script
-        }]
-    });
+    // Per-event hook configuration.
+    // NOTE: No catch-all Notification entry -- CC fires ALL matching hooks,
+    // so a catch-all would duplicate typed notification handlers.
+    let hook_configs = [
+        HookConfig {
+            event: "PreToolUse",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "PostToolUse",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "Stop",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: false,
+        },
+        HookConfig {
+            event: "Notification",
+            matcher: "idle_prompt",
+            command_arg: "hooks/notification/idle",
+            async_hook: false,
+        },
+        HookConfig {
+            event: "Notification",
+            matcher: "permission_prompt",
+            command_arg: "hooks/notification/permission",
+            async_hook: false,
+        },
+        HookConfig {
+            event: "Elicitation",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: false,
+        },
+        HookConfig {
+            event: "UserPromptSubmit",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "SessionStart",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+    ];
 
     // Merge into existing hooks (preserve user's own hooks)
     let hooks = settings
@@ -97,26 +154,53 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
 
     let hooks_obj = hooks.as_object_mut().ok_or(InstallError::InvalidSettings)?;
 
-    for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
-        let event_hooks = hooks_obj.entry(*event).or_insert(serde_json::json!([]));
+    for config in &hook_configs {
+        let event_hooks = hooks_obj
+            .entry(config.event)
+            .or_insert(serde_json::json!([]));
 
         if let Some(arr) = event_hooks.as_array_mut() {
-            // Check if zremote hook is already present
+            // Check if this specific zremote hook entry is already present
+            // (match by both command containing "zremote-hook" and same matcher)
             let already_installed = arr.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|h| {
-                            h.get("command")
-                                .and_then(|c| c.as_str())
-                                .is_some_and(|c| c.contains("zremote-hook"))
-                        })
-                    })
+                let matcher_matches = entry
+                    .get("matcher")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m == config.matcher);
+                let command_matches =
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.contains("zremote-hook"))
+                            })
+                        });
+                matcher_matches && command_matches
             });
 
             if !already_installed {
-                arr.push(hook_entry.clone());
+                let command = if config.command_arg == "hooks" {
+                    script.clone()
+                } else {
+                    format!("{script} {}", config.command_arg)
+                };
+
+                let mut hook_entry = serde_json::json!({
+                    "matcher": config.matcher,
+                    "hooks": [{
+                        "type": "command",
+                        "command": command
+                    }]
+                });
+
+                if config.async_hook {
+                    hook_entry["hooks"][0]["async"] = serde_json::json!(true);
+                }
+
+                arr.push(hook_entry);
             }
         }
     }
@@ -217,8 +301,11 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh"));
         assert!(script.contains("hooks-port"));
         assert!(script.contains("curl"));
-        assert!(script.contains("/hooks"));
+        assert!(script.contains("ENDPOINT"));
         assert!(script.contains("exit 0"));
+        // Verify whitelist validation against command injection
+        assert!(script.contains("case"));
+        assert!(script.contains("exit 1"));
     }
 
     #[tokio::test]
@@ -243,9 +330,48 @@ mod tests {
 
         // Verify all hook events are configured
         let hooks = settings["hooks"].as_object().unwrap();
-        for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
+        for event in &[
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "Notification",
+            "Elicitation",
+            "UserPromptSubmit",
+            "SessionStart",
+        ] {
             assert!(hooks.contains_key(*event), "missing hook event: {event}");
         }
+
+        // Verify async flag on PreToolUse
+        let pre_tool = hooks["PreToolUse"].as_array().unwrap();
+        let pre_tool_hook = &pre_tool[0]["hooks"][0];
+        assert_eq!(pre_tool_hook["async"], true, "PreToolUse should be async");
+
+        // Verify Stop is NOT async
+        let stop = hooks["Stop"].as_array().unwrap();
+        let stop_hook = &stop[0]["hooks"][0];
+        assert!(stop_hook.get("async").is_none(), "Stop should not be async");
+
+        // Verify Notification has separate entries for idle_prompt and permission_prompt
+        // (no catch-all -- CC fires ALL matching hooks, catch-all would duplicate)
+        let notifications = hooks["Notification"].as_array().unwrap();
+        assert_eq!(
+            notifications.len(),
+            2,
+            "Notification should have exactly idle_prompt and permission_prompt entries"
+        );
+        let matchers: Vec<&str> = notifications
+            .iter()
+            .filter_map(|e| e.get("matcher").and_then(|m| m.as_str()))
+            .collect();
+        assert!(
+            matchers.contains(&"idle_prompt"),
+            "missing idle_prompt matcher"
+        );
+        assert!(
+            matchers.contains(&"permission_prompt"),
+            "missing permission_prompt matcher"
+        );
     }
 
     #[tokio::test]
@@ -402,7 +528,15 @@ mod tests {
         // Verify hooks were removed
         let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
         let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
-        for event in &["PreToolUse", "PostToolUse", "Stop", "Notification"] {
+        for event in &[
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "Notification",
+            "Elicitation",
+            "UserPromptSubmit",
+            "SessionStart",
+        ] {
             let arr = settings["hooks"][event].as_array().unwrap();
             assert!(
                 arr.is_empty(),
@@ -491,6 +625,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh"));
         assert!(script.contains("PORT="));
         assert!(script.contains("INPUT="));
+        assert!(script.contains("ENDPOINT="));
         assert!(script.contains("RESPONSE="));
         assert!(script.contains("exit 0"));
         // Verify it reads from hooks-port file
@@ -498,6 +633,9 @@ mod tests {
         // Verify it POSTs to the sidecar
         assert!(script.contains("POST"));
         assert!(script.contains("127.0.0.1"));
+        // Verify it uses ENDPOINT variable with default fallback
+        assert!(script.contains("${1:-hooks}"));
+        assert!(script.contains("$ENDPOINT"));
     }
 
     #[tokio::test]

@@ -46,6 +46,26 @@ pub struct HookPayload {
     // Notification field
     #[serde(default)]
     pub message: Option<String>,
+    // Stop field -- true when a previous Stop hook blocked CC from stopping.
+    // Currently unused: ZRemote never blocks Stop (always returns empty response).
+    // Kept for forward compatibility and protocol completeness.
+    #[serde(default)]
+    pub stop_hook_active: Option<bool>,
+    // UserPromptSubmit field
+    #[serde(default)]
+    pub prompt: Option<String>,
+    // SessionStart field
+    #[serde(default)]
+    pub source: Option<String>,
+    // Elicitation fields
+    #[serde(default)]
+    pub mcp_server_name: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub elicitation_id: Option<String>,
+    #[serde(default)]
+    pub requested_schema: Option<serde_json::Value>,
 }
 
 /// Response to hook scripts. Empty for most hooks.
@@ -87,6 +107,15 @@ pub async fn handle_hook(
             if let Some(ref msg) = payload.message {
                 tracing::info!(cc_session = %payload.session_id, message = %msg, "CC notification");
             }
+        }
+        "Elicitation" => handle_elicitation(&state, &payload).await,
+        "UserPromptSubmit" => handle_user_prompt_submit(&state, &payload).await,
+        "SessionStart" => {
+            tracing::info!(
+                cc_session = %payload.session_id,
+                source = ?payload.source,
+                "CC session started"
+            );
         }
         "SubagentStart" | "SubagentStop" => {
             tracing::debug!(
@@ -225,6 +254,111 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     }
 }
 
+/// Send `WaitingForInput` status for a resolved loop. Shared by notification
+/// and elicitation handlers to avoid duplicated resolve+send logic.
+async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event: &str) {
+    let Some(mapped) = state
+        .mapper
+        .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
+        .await
+    else {
+        tracing::debug!(
+            cc_session = %payload.session_id,
+            event = %event,
+            "no loop mapping, ignoring"
+        );
+        return;
+    };
+
+    let msg = AgenticAgentMessage::LoopStateUpdate {
+        loop_id: mapped.loop_id,
+        status: AgenticStatus::WaitingForInput,
+        task_name: None,
+    };
+    if state.agentic_tx.try_send(msg).is_err() {
+        tracing::warn!("agentic channel full, WaitingForInput update dropped");
+    }
+}
+
+/// Handle typed notification events (idle_prompt, permission_prompt).
+///
+/// Called from dedicated routes `/hooks/notification/idle` and
+/// `/hooks/notification/permission` which are registered with specific
+/// matchers in settings.json. Sets `WaitingForInput` immediately.
+async fn handle_notification_typed(
+    state: &HooksState,
+    payload: &HookPayload,
+    notification_type: &str,
+) {
+    tracing::info!(
+        cc_session = %payload.session_id,
+        notification_type = %notification_type,
+        message = ?payload.message,
+        "CC notification (typed)"
+    );
+
+    // Update transcript path if provided
+    if let Some(ref path) = payload.transcript_path {
+        state
+            .mapper
+            .set_transcript_path(&payload.session_id, path.clone())
+            .await;
+    }
+
+    send_waiting_for_input(state, payload, notification_type).await;
+}
+
+/// Route handler for idle_prompt notifications.
+pub async fn handle_notification_idle(
+    State(state): State<HooksState>,
+    Json(payload): Json<HookPayload>,
+) -> impl IntoResponse {
+    handle_notification_typed(&state, &payload, "idle_prompt").await;
+    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
+}
+
+/// Route handler for permission_prompt notifications.
+pub async fn handle_notification_permission(
+    State(state): State<HooksState>,
+    Json(payload): Json<HookPayload>,
+) -> impl IntoResponse {
+    handle_notification_typed(&state, &payload, "permission_prompt").await;
+    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
+}
+
+async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
+    tracing::info!(
+        cc_session = %payload.session_id,
+        mcp_server = ?payload.mcp_server_name,
+        mode = ?payload.mode,
+        "CC elicitation event"
+    );
+
+    send_waiting_for_input(state, payload, "Elicitation").await;
+}
+
+async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
+    let Some(mapped) = state
+        .mapper
+        .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
+        .await
+    else {
+        tracing::debug!(cc_session = %payload.session_id, "no loop mapping for UserPromptSubmit, ignoring");
+        return;
+    };
+
+    try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+
+    let msg = AgenticAgentMessage::LoopStateUpdate {
+        loop_id: mapped.loop_id,
+        status: AgenticStatus::Working,
+        task_name: None,
+    };
+    if state.agentic_tx.try_send(msg).is_err() {
+        tracing::warn!("agentic channel full, LoopStateUpdate dropped");
+    }
+}
+
 /// Extract `task_name` from the transcript file slug, with path traversal validation.
 fn extract_task_name_from_transcript(
     payload: &HookPayload,
@@ -236,15 +370,17 @@ fn extract_task_name_from_transcript(
         .or(mapped.transcript_path.as_ref())?;
 
     // CWE-22: Validate transcript_path is within ~/.claude/projects/
-    if let Ok(home) = std::env::var("HOME") {
-        let allowed_prefix = format!("{home}/.claude/projects/");
-        if !transcript_path.starts_with(&allowed_prefix) {
-            tracing::warn!(
-                path = %transcript_path,
-                "transcript_path outside allowed directory, ignoring"
-            );
-            return None;
-        }
+    let Ok(home) = std::env::var("HOME") else {
+        tracing::warn!("HOME not set, cannot validate transcript_path, skipping");
+        return None;
+    };
+    let allowed_prefix = format!("{home}/.claude/projects/");
+    if !transcript_path.starts_with(&allowed_prefix) {
+        tracing::warn!(
+            path = %transcript_path,
+            "transcript_path outside allowed directory, ignoring"
+        );
+        return None;
     }
 
     let offset = mapped.transcript_offset;
@@ -313,6 +449,13 @@ mod tests {
             tool_use_id: None,
             tool_response: None,
             message: None,
+            stop_hook_active: None,
+            prompt: None,
+            source: None,
+            mcp_server_name: None,
+            mode: None,
+            elicitation_id: None,
+            requested_schema: None,
         }
     }
 
@@ -536,6 +679,76 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&transcript_dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // handle_elicitation
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn elicitation_sends_waiting_for_input() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let p = payload("Elicitation", "cc-elicit");
+        handle_elicitation(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                task_name,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::WaitingForInput);
+                assert!(task_name.is_none());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn elicitation_no_loop_mapping_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let p = payload("Elicitation", "unknown-cc");
+        handle_elicitation(&state, &p).await;
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // handle_user_prompt_submit
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn user_prompt_submit_sends_working() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let mut p = payload("UserPromptSubmit", "cc-prompt");
+        p.prompt = Some("fix the bug".to_string());
+        handle_user_prompt_submit(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::Working);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_no_loop_mapping_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let p = payload("UserPromptSubmit", "unknown-cc");
+        handle_user_prompt_submit(&state, &p).await;
+        assert!(agentic_rx.try_recv().is_err());
     }
 
     // ---------------------------------------------------------------
@@ -908,5 +1121,75 @@ mod tests {
         assert!(payload.message.is_none());
         assert!(payload.transcript_path.is_none());
         assert!(payload.cwd.is_none());
+        assert!(payload.stop_hook_active.is_none());
+        assert!(payload.prompt.is_none());
+        assert!(payload.source.is_none());
+        assert!(payload.mcp_server_name.is_none());
+        assert!(payload.mode.is_none());
+        assert!(payload.elicitation_id.is_none());
+        assert!(payload.requested_schema.is_none());
+    }
+
+    #[test]
+    fn deserialize_elicitation_hook() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "Elicitation",
+            "mcp_server_name": "my-mcp",
+            "message": "Please choose",
+            "mode": "form",
+            "elicitation_id": "elicit-1",
+            "requested_schema": {
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "enum": ["option1", "option2"]
+                    }
+                }
+            }
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.hook_event_name, "Elicitation");
+        assert_eq!(payload.mcp_server_name.as_deref(), Some("my-mcp"));
+        assert_eq!(payload.mode.as_deref(), Some("form"));
+        assert_eq!(payload.elicitation_id.as_deref(), Some("elicit-1"));
+        assert!(payload.requested_schema.is_some());
+    }
+
+    #[test]
+    fn deserialize_user_prompt_submit_hook() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "fix the bug in main.rs"
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.hook_event_name, "UserPromptSubmit");
+        assert_eq!(payload.prompt.as_deref(), Some("fix the bug in main.rs"));
+    }
+
+    #[test]
+    fn deserialize_session_start_hook() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.hook_event_name, "SessionStart");
+        assert_eq!(payload.source.as_deref(), Some("startup"));
+    }
+
+    #[test]
+    fn deserialize_stop_with_stop_hook_active() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "Stop",
+            "stop_hook_active": true
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.hook_event_name, "Stop");
+        assert_eq!(payload.stop_hook_active, Some(true));
     }
 }
