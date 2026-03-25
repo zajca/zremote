@@ -174,7 +174,10 @@ pub fn connect_standalone(
                             {
                                 break;
                             }
-                            if reader_output_tx.send(TerminalEvent::ScrollbackEnd).is_err() {
+                            if reader_output_tx
+                                .send(TerminalEvent::ScrollbackEnd { truncated: false })
+                                .is_err()
+                            {
                                 break;
                             }
                         }

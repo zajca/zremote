@@ -191,6 +191,11 @@ pub struct AgenticLoopState {
 pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
 
 /// Loop information matching the frontend `AgenticLoop` interface.
+///
+/// SYNC: This struct must stay in sync with `LoopInfo` in `zremote-client/src/types.rs`.
+/// They are defined separately because core uses `String` for status (raw DB value),
+/// while the SDK uses `AgenticStatus` enum (with `#[serde(other)]` for forward compatibility).
+/// Both serialize to the same JSON shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopInfo {
     pub id: String,

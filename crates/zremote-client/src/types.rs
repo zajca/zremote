@@ -182,6 +182,11 @@ pub struct LoopInfoLite {
 }
 
 /// Full loop info in server events.
+///
+/// SYNC: This struct must stay in sync with `LoopInfo` in `zremote-core/src/state.rs`.
+/// They are defined separately because the SDK uses `AgenticStatus` enum (with `#[serde(other)]`
+/// for forward compatibility with unknown statuses), while core uses `String` (raw DB value).
+/// Both serialize to the same JSON shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopInfo {
     pub id: String,
@@ -251,7 +256,7 @@ pub enum ServerEvent {
         hostname: String,
     },
     #[serde(rename = "agentic_loop_state_update")]
-    LoopStateChanged {
+    LoopStatusChanged {
         #[serde(rename = "loop")]
         loop_info: LoopInfo,
         host_id: String,
@@ -384,8 +389,9 @@ pub enum TerminalEvent {
     SessionClosed { exit_code: Option<i32> },
     /// Scrollback replay starting.
     ScrollbackStart { cols: u16, rows: u16 },
-    /// Scrollback replay finished.
-    ScrollbackEnd,
+    /// Scrollback replay finished. `truncated` is true when the scrollback
+    /// buffer exceeded the size cap and was discarded.
+    ScrollbackEnd { truncated: bool },
     /// Session was suspended (agent disconnected).
     SessionSuspended,
     /// Session was resumed (agent reconnected).

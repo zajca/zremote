@@ -23,8 +23,8 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use zremote_client::{Host, Project, Session};
 use crate::views::sidebar::CcState;
+use zremote_client::{AgenticStatus, Host, Project, Session};
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -38,7 +38,7 @@ struct SwitcherEntry {
     subtitle: String,
     is_current: bool,
     /// Agentic state: (status, task_name)
-    cc_state: Option<(String, Option<String>)>,
+    cc_state: Option<(AgenticStatus, Option<String>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,7 @@ impl Focusable for SessionSwitcher {
 }
 
 impl SessionSwitcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sessions: &Rc<Vec<Session>>,
         hosts: &Rc<Vec<Host>>,
@@ -271,11 +272,12 @@ impl Render for SessionSwitcher {
                             .when_some(
                                 entry.cc_state.as_ref(),
                                 |d: Stateful<Div>, (status, task_name)| {
-                                    let (cc_icon, cc_color) = if status == "waiting_for_input" {
-                                        (Icon::MessageCircle, theme::warning())
-                                    } else {
-                                        (Icon::Loader, theme::accent())
-                                    };
+                                    let (cc_icon, cc_color) =
+                                        if *status == AgenticStatus::WaitingForInput {
+                                            (Icon::MessageCircle, theme::warning())
+                                        } else {
+                                            (Icon::Loader, theme::accent())
+                                        };
                                     let mut indicator = div()
                                         .flex()
                                         .items_center()
@@ -350,9 +352,9 @@ fn build_entries(
         a_priority.cmp(&b_priority).then_with(|| {
             let a_mru = mru_map.get(a.id.as_str()).copied().unwrap_or(0);
             let b_mru = mru_map.get(b.id.as_str()).copied().unwrap_or(0);
-            b_mru.cmp(&a_mru).then_with(|| {
-                b.created_at.cmp(&a.created_at)
-            })
+            b_mru
+                .cmp(&a_mru)
+                .then_with(|| b.created_at.cmp(&a.created_at))
         })
     });
 
@@ -382,7 +384,7 @@ fn build_entries(
 
             let cc_state = cc_states
                 .get(&s.id)
-                .map(|cc| (cc.status.clone(), cc.task_name.clone()));
+                .map(|cc| (cc.status, cc.task_name.clone()));
 
             SwitcherEntry {
                 session_id: s.id.clone(),
@@ -398,9 +400,9 @@ fn build_entries(
 }
 
 fn cc_sort_priority(cc: Option<&CcState>) -> u8 {
-    match cc.map(|c| c.status.as_str()) {
-        Some("waiting_for_input") => 0,
-        Some("working") => 1,
+    match cc.map(|c| c.status) {
+        Some(AgenticStatus::WaitingForInput) => 0,
+        Some(AgenticStatus::Working) => 1,
         _ => 2,
     }
 }
