@@ -8846,6 +8846,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zremote-ccline"
+version = "0.4.3"
+dependencies = [
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "zremote-client"
 version = "0.3.10"
 dependencies = [

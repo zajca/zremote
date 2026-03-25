@@ -314,6 +314,20 @@ pub enum ServerEvent {
         status: String,
         summary: Option<String>,
     },
+    #[serde(rename = "claude_session_metrics")]
+    ClaudeSessionMetrics {
+        session_id: String,
+        model: Option<String>,
+        context_used_pct: Option<f64>,
+        context_window_size: Option<u64>,
+        cost_usd: Option<f64>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        lines_added: Option<i64>,
+        lines_removed: Option<i64>,
+        rate_limit_5h_pct: Option<u64>,
+        rate_limit_7d_pct: Option<u64>,
+    },
 }
 
 // ---------------------------------------------------------------------------

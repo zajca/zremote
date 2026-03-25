@@ -21,6 +21,8 @@
 )]
 
 mod agentic;
+#[cfg(feature = "local")]
+mod ccline;
 mod claude;
 mod config;
 mod connection;

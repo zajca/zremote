@@ -182,17 +182,17 @@ impl MainView {
         });
 
         // When a session is resumed, reconnect the terminal if it's the current one.
-        if let ServerEvent::SessionResumed { session_id } = event {
-            if let Some(terminal) = &self.terminal {
-                let is_current = terminal.read(cx).session_id() == session_id;
-                if is_current && terminal.read(cx).is_disconnected() {
-                    // Re-establish the terminal connection (new WS, scrollback replay).
-                    let session_id = session_id.clone();
-                    if let Some(handle) = connect_terminal(&self.app_state, &session_id) {
-                        terminal.update(cx, |panel, cx| {
-                            panel.reconnect(handle, &self.app_state.tokio_handle, cx);
-                        });
-                    }
+        if let ServerEvent::SessionResumed { session_id } = event
+            && let Some(terminal) = &self.terminal
+        {
+            let is_current = terminal.read(cx).session_id() == session_id;
+            if is_current && terminal.read(cx).is_disconnected() {
+                // Re-establish the terminal connection (new WS, scrollback replay).
+                let session_id = session_id.clone();
+                if let Some(handle) = connect_terminal(&self.app_state, &session_id) {
+                    terminal.update(cx, |panel, cx| {
+                        panel.reconnect(handle, &self.app_state.tokio_handle, cx);
+                    });
                 }
             }
         }

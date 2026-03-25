@@ -1,0 +1,18 @@
+[package]
+name = "zremote-ccline"
+version = "0.4.3"
+edition.workspace = true
+license.workspace = true
+description = "Claude Code status line binary for ZRemote"
+
+[[bin]]
+name = "zremote-ccline"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = "6"
