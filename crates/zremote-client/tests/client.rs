@@ -1,53 +1,15 @@
-use axum::body::Body;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use std::task::{Context, Poll};
 use tokio::net::TcpListener;
-use tower::Service;
 use zremote_client::{ApiClient, ApiError};
 
-/// Service wrapper that merges double slashes in request paths.
-/// Required because `ApiClient` stores `url::Url` which always has a trailing
-/// slash, producing paths like `//api/hosts` when formatted.
-#[derive(Clone)]
-struct MergeSlashes<S>(S);
-
-impl<S> Service<axum::http::Request<Body>> for MergeSlashes<S>
-where
-    S: Service<axum::http::Request<Body>>,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = S::Future;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_ready(cx)
-    }
-
-    fn call(&mut self, mut req: axum::http::Request<Body>) -> Self::Future {
-        let path = req.uri().path().replace("//", "/");
-        let new_pq = if let Some(q) = req.uri().query() {
-            format!("{path}?{q}")
-        } else {
-            path
-        };
-        if let Ok(uri) = axum::http::Uri::builder().path_and_query(new_pq).build() {
-            *req.uri_mut() = uri;
-        }
-        self.0.call(req)
-    }
-}
-
-/// Spin up an axum test server with path normalization.
+/// Spin up an axum test server.
 async fn setup_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
-    let app = MergeSlashes(router);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        axum::serve(listener, tower::make::Shared::new(app))
-            .await
-            .unwrap();
+        axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{addr}"), handle)
 }
@@ -63,15 +25,10 @@ fn new_valid_url() {
 }
 
 #[test]
-fn new_valid_url_trailing_slash_preserved_by_url_spec() {
-    // url::Url always normalizes scheme-authority URLs to have a trailing slash
+fn new_valid_url_trailing_slash_stripped() {
+    // Trailing slash is stripped to avoid double-slash in URL construction
     let client = ApiClient::new("http://localhost:3000/").unwrap();
-    assert!(
-        client
-            .base_url()
-            .as_str()
-            .starts_with("http://localhost:3000")
-    );
+    assert_eq!(client.base_url(), "http://localhost:3000");
 }
 
 #[test]

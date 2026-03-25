@@ -212,6 +212,7 @@ async fn run_terminal_ws(
     // During scrollback replay, chunks are buffered and delivered as one Output event.
     let mut scrollback_buf: Vec<u8> = Vec::new();
     let mut in_scrollback = false;
+    let mut scrollback_truncated = false;
 
     loop {
         tokio::select! {
@@ -236,7 +237,7 @@ async fn run_terminal_ws(
                                 if in_scrollback {
                                     if scrollback_buf.len() + bytes.len() > MAX_SCROLLBACK_BUFFER_SIZE {
                                         warn!("scrollback buffer exceeded 100MB cap, truncating");
-                                        in_scrollback = false;
+                                        scrollback_truncated = true;
                                         scrollback_buf.clear();
                                     } else {
                                         scrollback_buf.extend_from_slice(bytes);
@@ -309,7 +310,9 @@ async fn run_terminal_ws(
                                     }
                                     in_scrollback = false;
                                 }
-                                let _ = output_tx.send(TerminalEvent::ScrollbackEnd);
+                                let truncated = scrollback_truncated;
+                                scrollback_truncated = false;
+                                let _ = output_tx.send(TerminalEvent::ScrollbackEnd { truncated });
                             }
                             Ok(TerminalServerMessage::SessionSuspended) => {
                                 let _ = output_tx.send(TerminalEvent::SessionSuspended);
@@ -345,7 +348,8 @@ async fn run_terminal_ws(
         }
     }
 
-    writer.abort();
+    cancel.cancel();
+    let _ = writer.await;
 }
 
 /// Split `data` into chunks of at most `max_chunk` bytes without breaking

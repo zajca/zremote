@@ -313,7 +313,7 @@ impl TerminalPanel {
                         // Invalidate cell run cache - term was recreated
                         content_generation.fetch_add(1, Ordering::Relaxed);
                     }
-                    Ok(TerminalEvent::ScrollbackEnd) => {
+                    Ok(TerminalEvent::ScrollbackEnd { truncated: _ }) => {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });

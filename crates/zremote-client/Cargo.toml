@@ -25,5 +25,4 @@ rand.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-tower.workspace = true
 tokio = { workspace = true, features = ["full"] }

@@ -32,7 +32,7 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// HTTP client for the `ZRemote` REST API.
 #[derive(Clone)]
 pub struct ApiClient {
-    base_url: url::Url,
+    base_url: String,
     client: reqwest::Client,
 }
 
@@ -40,14 +40,15 @@ impl ApiClient {
     /// Create a new API client. Returns error if URL is invalid.
     pub fn new(base_url: &str) -> Result<Self, ApiError> {
         let base_url = base_url.trim_end_matches('/');
-        let parsed = url::Url::parse(base_url)?;
+        // Validate with url::Url, but store as String to avoid trailing-slash issues.
+        let _ = url::Url::parse(base_url)?;
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             .build()
             .map_err(ApiError::Http)?;
         Ok(Self {
-            base_url: parsed,
+            base_url: base_url.to_string(),
             client,
         })
     }
@@ -55,48 +56,59 @@ impl ApiClient {
     /// Create with a custom `reqwest::Client` (for custom TLS, proxy, etc.).
     pub fn with_client(base_url: &str, client: reqwest::Client) -> Result<Self, ApiError> {
         let base_url = base_url.trim_end_matches('/');
-        let parsed = url::Url::parse(base_url)?;
+        let _ = url::Url::parse(base_url)?;
         Ok(Self {
-            base_url: parsed,
+            base_url: base_url.to_string(),
             client,
         })
     }
 
     /// Get the base URL.
-    pub fn base_url(&self) -> &url::Url {
+    pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Convert `base_url` to a WebSocket base (http->ws, https->wss) using
+    /// proper URL parsing so that scheme-like substrings in host/path are safe.
+    fn ws_base_url(&self) -> String {
+        if let Ok(mut parsed) = url::Url::parse(&self.base_url) {
+            let ws_scheme = match parsed.scheme() {
+                "https" => "wss",
+                _ => "ws",
+            };
+            parsed.set_scheme(ws_scheme).ok();
+            // url::Url normalizes to trailing slash; strip it for consistent formatting.
+            let s = parsed.to_string();
+            s.trim_end_matches('/').to_string()
+        } else {
+            // Fallback: should not happen since constructor validated the URL.
+            self.base_url.clone()
+        }
     }
 
     /// Get the WebSocket URL for event stream.
     pub fn events_ws_url(&self) -> String {
-        let ws_base = self
-            .base_url
-            .as_str()
-            .replace("http://", "ws://")
-            .replace("https://", "wss://");
-        format!("{ws_base}/ws/events")
+        format!("{}/ws/events", self.ws_base_url())
     }
 
     /// Get the WebSocket URL for a terminal session.
     pub fn terminal_ws_url(&self, session_id: &str) -> String {
-        let ws_base = self
-            .base_url
-            .as_str()
-            .replace("http://", "ws://")
-            .replace("https://", "wss://");
-        format!("{ws_base}/ws/terminal/{session_id}")
+        format!("{}/ws/terminal/{session_id}", self.ws_base_url())
     }
 
     /// Convenience: create a session and open a terminal WebSocket in one call.
+    ///
+    /// This is an async method, so the caller is already in a tokio context.
+    /// Background tasks are spawned via `tokio::spawn` directly.
     pub async fn open_terminal(
         &self,
         host_id: &str,
         req: &CreateSessionRequest,
-        tokio_handle: &tokio::runtime::Handle,
     ) -> Result<(Session, TerminalSession), ApiError> {
         let session = self.create_session(host_id, req).await?;
         let url = self.terminal_ws_url(&session.id);
-        let terminal = TerminalSession::connect(url, tokio_handle).await?;
+        let handle = tokio::runtime::Handle::current();
+        let terminal = TerminalSession::connect(url, &handle).await?;
         Ok((session, terminal))
     }
 

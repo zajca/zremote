@@ -21,8 +21,8 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use zremote_client::{Host, Project, Session};
 use crate::views::sidebar::CcState;
+use zremote_client::{AgenticStatus, Host, Project, Session};
 
 use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
 
@@ -1522,7 +1522,7 @@ impl CommandPalette {
 
         // Agentic state indicator
         if let Some(cc) = cc_state {
-            let (cc_icon, cc_color) = if cc.status == "waiting_for_input" {
+            let (cc_icon, cc_color) = if cc.status == AgenticStatus::WaitingForInput {
                 (Icon::MessageCircle, theme::warning())
             } else {
                 (Icon::Loader, theme::accent())
@@ -2411,13 +2411,9 @@ fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
     items.sort_by_key(|item| {
         if let PaletteItem::Session { session_idx } = &item.item {
             let session = &snapshot.sessions[*session_idx];
-            match snapshot
-                .cc_states
-                .get(&session.id)
-                .map(|c| c.status.as_str())
-            {
-                Some("waiting_for_input") => 0,
-                Some("working") => 1,
+            match snapshot.cc_states.get(&session.id).map(|c| c.status) {
+                Some(AgenticStatus::WaitingForInput) => 0,
+                Some(AgenticStatus::Working) => 1,
                 _ => 2,
             }
         } else {

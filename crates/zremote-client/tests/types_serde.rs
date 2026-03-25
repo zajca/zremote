@@ -484,13 +484,13 @@ fn server_event_loop_state_changed() {
     }"#;
     let event: ServerEvent = serde_json::from_str(json).unwrap();
     match event {
-        ServerEvent::LoopStateChanged {
+        ServerEvent::LoopStatusChanged {
             loop_info, host_id, ..
         } => {
             assert_eq!(loop_info.status, AgenticStatus::WaitingForInput);
             assert_eq!(host_id, "h-1234");
         }
-        other => panic!("expected LoopStateChanged, got {other:?}"),
+        other => panic!("expected LoopStatusChanged, got {other:?}"),
     }
 }
 
@@ -745,7 +745,7 @@ fn terminal_event_variants_constructible() {
         },
         TerminalEvent::SessionClosed { exit_code: Some(0) },
         TerminalEvent::ScrollbackStart { cols: 80, rows: 24 },
-        TerminalEvent::ScrollbackEnd,
+        TerminalEvent::ScrollbackEnd { truncated: false },
         TerminalEvent::SessionSuspended,
         TerminalEvent::SessionResumed,
     ];
