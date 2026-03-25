@@ -396,6 +396,8 @@ pub enum TerminalEvent {
     SessionSuspended,
     /// Session was resumed (agent reconnected).
     SessionResumed,
+    /// WebSocket connection lost (session may still be alive on the server).
+    Disconnected,
 }
 
 /// Mode response from /api/mode.

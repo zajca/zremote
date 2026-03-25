@@ -6,14 +6,25 @@ use tracing::{debug, error, info, warn};
 
 use crate::types::{EVENT_CHANNEL_CAPACITY, ServerEvent};
 
+/// Wrapper around server events that also surfaces connection status changes.
+#[derive(Debug, Clone)]
+pub enum ClientEvent {
+    /// A parsed event from the server (boxed to avoid large enum variant).
+    Server(Box<ServerEvent>),
+    /// The event WebSocket has connected (or reconnected).
+    Connected,
+    /// The event WebSocket has disconnected (will retry with backoff).
+    Disconnected,
+}
+
 /// Maximum event message size (4MB).
 const MAX_EVENT_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Handle to a running event stream connection.
 /// Dropping this handle cancels the background task.
 pub struct EventStream {
-    /// Receive parsed server events.
-    pub rx: flume::Receiver<ServerEvent>,
+    /// Receive parsed server events and connection status changes.
+    pub rx: flume::Receiver<ClientEvent>,
     cancel: CancellationToken,
 }
 
@@ -42,9 +53,10 @@ fn with_jitter(duration: std::time::Duration) -> std::time::Duration {
 }
 
 /// Internal: run the event WebSocket loop with auto-reconnect.
-async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: CancellationToken) {
+async fn run_events_ws(url: String, tx: flume::Sender<ClientEvent>, cancel: CancellationToken) {
     let mut backoff = std::time::Duration::from_secs(1);
     let max_backoff = std::time::Duration::from_secs(30);
+    let mut ever_connected = false;
 
     loop {
         if cancel.is_cancelled() {
@@ -59,6 +71,10 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
             Ok((ws_stream, _)) => {
                 info!("events WebSocket connected");
                 backoff = std::time::Duration::from_secs(1);
+                ever_connected = true;
+
+                // Notify consumers that the connection is (re)established.
+                let _ = tx.send_async(ClientEvent::Connected).await;
 
                 let (mut write, mut read) = ws_stream.split();
 
@@ -79,7 +95,7 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
                                     }
                                     match serde_json::from_str::<ServerEvent>(&text) {
                                         Ok(event) => {
-                                            match tx.try_send(event) {
+                                            match tx.try_send(ClientEvent::Server(Box::new(event))) {
                                                 Ok(()) => {}
                                                 Err(flume::TrySendError::Full(_)) => {
                                                     warn!("event channel full, dropping event");
@@ -116,6 +132,11 @@ async fn run_events_ws(url: String, tx: flume::Sender<ServerEvent>, cancel: Canc
             Err(e) => {
                 error!(error = %e, "failed to connect to events WebSocket");
             }
+        }
+
+        // Notify consumers that the connection was lost (only after first successful connect).
+        if ever_connected {
+            let _ = tx.send_async(ClientEvent::Disconnected).await;
         }
 
         let delay = with_jitter(backoff);

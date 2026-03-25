@@ -153,6 +153,9 @@ pub struct TerminalPanel {
     _keystroke_subscription: Subscription,
     /// Tmux session name (for click-to-copy attach command on Direct badge).
     tmux_name: Option<String>,
+    /// Whether the terminal WebSocket connection has been lost
+    /// (session may still be alive on server, waiting for reconnect).
+    disconnected: bool,
 }
 
 impl TerminalPanel {
@@ -245,11 +248,82 @@ impl TerminalPanel {
             double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
             tmux_name,
+            disconnected: false,
         }
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Whether the terminal WebSocket connection has been lost.
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnected
+    }
+
+    /// Reconnect with a new terminal handle after session resume.
+    /// Resets disconnect state, replaces the handle, restarts the reader,
+    /// and sets up a new resize debounce pipeline.
+    pub fn reconnect(
+        &mut self,
+        handle: TerminalHandle,
+        tokio_handle: &tokio::runtime::Handle,
+        cx: &mut Context<Self>,
+    ) {
+        self.disconnected = false;
+        self.closed = false;
+        self.reader_started = false; // Allow start_output_reader to run again
+        self.handle = handle;
+
+        // Set up new resize debounce pipeline for the new handle.
+        let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
+        let real_resize_tx = self.handle.resize_tx().clone();
+        tokio_handle.spawn(async move {
+            let mut first_resize = true;
+            loop {
+                let Ok(mut dims) = resize_debounce_rx.recv_async().await else {
+                    break;
+                };
+                // Send very first resize immediately (skip debounce) so PTY knows
+                // the correct size before any output arrives.
+                if first_resize {
+                    first_resize = false;
+                    let _ = real_resize_tx.send(dims);
+                    continue;
+                }
+                // Debounce: keep replacing dims while new events arrive within the timeout.
+                loop {
+                    match tokio::time::timeout(
+                        Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                        resize_debounce_rx.recv_async(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(new_dims)) => dims = new_dims,
+                        Ok(Err(_)) => {
+                            let _ = real_resize_tx.send(dims);
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = real_resize_tx.send(dims);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.resize_debounce_tx = resize_debounce_tx;
+
+        // Trigger immediate resize to sync the new connection with current terminal size.
+        if let Ok(term) = self.term.lock() {
+            let cols = term.columns();
+            let rows = term.screen_lines();
+            if cols > 0 && rows > 0 {
+                let _ = self.resize_debounce_tx.send((cols as u16, rows as u16));
+            }
+        }
+
+        cx.notify();
     }
 
     fn start_output_reader(&mut self, cx: &mut Context<Self>) {
@@ -317,6 +391,13 @@ impl TerminalPanel {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
+                    }
+                    Ok(TerminalEvent::Disconnected) => {
+                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            this.disconnected = true;
+                            cx.notify();
+                        });
+                        break;
                     }
                     Ok(
                         TerminalEvent::PaneOutput { .. }
@@ -1226,6 +1307,14 @@ impl Render for TerminalPanel {
                     .text_size(px(12.0))
                     .child("[Session closed]"),
             );
+        } else if self.disconnected {
+            content = content.child(
+                div()
+                    .pt(px(8.0))
+                    .text_color(theme::warning())
+                    .text_size(px(12.0))
+                    .child("[Disconnected - reconnecting...]"),
+            );
         }
 
         // Connection type indicator (bottom-right pill badge).
@@ -1267,6 +1356,14 @@ impl Render for TerminalPanel {
                     .text_size(px(10.0))
                     .text_color(theme::text_tertiary())
                     .child(if is_direct { "Direct" } else { "WS" }),
+            )
+            .child(
+                // Connection status dot: green = connected, red = disconnected.
+                div().size(px(6.0)).rounded_full().bg(if self.disconnected {
+                    theme::error()
+                } else {
+                    theme::success()
+                }),
             )
             .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into());
         if clickable {

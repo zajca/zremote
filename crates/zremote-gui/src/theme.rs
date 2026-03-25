@@ -45,6 +45,26 @@ pub fn warning() -> Rgba {
     rgb(0xfbbf24)
 }
 
+/// Warning background: warning color at ~20% opacity over dark background.
+pub fn warning_bg() -> Rgba {
+    Rgba {
+        r: 0.984,
+        g: 0.749,
+        b: 0.141,
+        a: 0.08,
+    }
+}
+
+/// Warning border: warning color at ~27% opacity.
+pub fn warning_border() -> Rgba {
+    Rgba {
+        r: 0.984,
+        g: 0.749,
+        b: 0.141,
+        a: 0.27,
+    }
+}
+
 pub fn terminal_bg() -> Rgba {
     rgb(0x0a0a0b)
 }
