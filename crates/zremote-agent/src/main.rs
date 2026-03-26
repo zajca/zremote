@@ -328,6 +328,30 @@ async fn run_agent() {
         std::collections::HashSet::<String>::new(),
     ));
 
+    // Start ccline Unix socket listener for Claude Code status line data.
+    // In server mode, metrics are forwarded as AgentMessages through this channel.
+    let (ccline_tx, mut ccline_rx) =
+        tokio::sync::mpsc::channel::<zremote_protocol::AgentMessage>(256);
+    {
+        let ccline_shutdown = tokio_util::sync::CancellationToken::new();
+        let ccline_shutdown_clone = ccline_shutdown.clone();
+        let shutdown_rx_clone = shutdown_rx.clone();
+        // Bridge watch::Receiver shutdown to CancellationToken for the listener
+        tokio::spawn(async move {
+            let mut rx = shutdown_rx_clone;
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() {
+                    ccline_shutdown_clone.cancel();
+                    return;
+                }
+            }
+        });
+        let sink = ccline::listener::CclineSink::Remote {
+            outbound: ccline_tx,
+        };
+        tokio::spawn(ccline::listener::run(sink, ccline_shutdown));
+    }
+
     // Reconnection loop with exponential backoff
     let mut backoff = MIN_BACKOFF;
     let mut attempt_num: u64 = 0;
@@ -348,6 +372,7 @@ async fn run_agent() {
             &mut agentic_manager,
             &session_mapper,
             &sent_cc_session_ids,
+            &mut ccline_rx,
         )
         .await
         {

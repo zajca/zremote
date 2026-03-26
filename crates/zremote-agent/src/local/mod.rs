@@ -208,10 +208,12 @@ pub async fn run_local(
 
     // Start ccline Unix socket listener for Claude Code status line data
     {
-        let db = state.db.clone();
-        let events = state.events.clone();
+        let sink = crate::ccline::listener::CclineSink::Local {
+            db: state.db.clone(),
+            events: state.events.clone(),
+        };
         let shutdown = shutdown.clone();
-        tokio::spawn(crate::ccline::listener::run(db, events, shutdown));
+        tokio::spawn(crate::ccline::listener::run(sink, shutdown));
     }
 
     // Upsert synthetic host row so queries against hosts table work

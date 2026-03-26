@@ -1,9 +1,7 @@
 pub mod format;
 pub mod input;
-#[cfg(feature = "local")]
 pub mod listener;
 pub mod socket;
-#[cfg(feature = "local")]
 pub mod types;
 
 use std::io::Read;

@@ -48,7 +48,7 @@ pub enum ClaudeServerMessage {
 }
 
 /// Claude messages sent from agent to server.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum ClaudeAgentMessage {
     SessionStarted {
@@ -67,6 +67,32 @@ pub enum ClaudeAgentMessage {
     SessionIdCaptured {
         claude_task_id: Uuid,
         cc_session_id: String,
+    },
+    /// Claude Code status line metrics forwarded from agent in server mode.
+    MetricsUpdate {
+        cc_session_id: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        cost_usd: Option<f64>,
+        #[serde(default)]
+        tokens_in: Option<u64>,
+        #[serde(default)]
+        tokens_out: Option<u64>,
+        #[serde(default)]
+        context_used_pct: Option<u64>,
+        #[serde(default)]
+        context_window_size: Option<u64>,
+        #[serde(default)]
+        rate_limit_5h_pct: Option<u64>,
+        #[serde(default)]
+        rate_limit_7d_pct: Option<u64>,
+        #[serde(default)]
+        lines_added: Option<i64>,
+        #[serde(default)]
+        lines_removed: Option<i64>,
+        #[serde(default)]
+        cc_version: Option<String>,
     },
 }
 
@@ -321,5 +347,47 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "SessionStarted");
         assert!(value["payload"].is_object());
+    }
+
+    #[test]
+    fn metrics_update_roundtrip() {
+        let msg = ClaudeAgentMessage::MetricsUpdate {
+            cc_session_id: "cc-abc-123".to_string(),
+            model: Some("opus".to_string()),
+            cost_usd: Some(2.93),
+            tokens_in: Some(30000),
+            tokens_out: Some(15000),
+            context_used_pct: Some(45),
+            context_window_size: Some(1_000_000),
+            rate_limit_5h_pct: Some(11),
+            rate_limit_7d_pct: Some(85),
+            lines_added: Some(168),
+            lines_removed: Some(2),
+            cc_version: Some("2.1.83".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: ClaudeAgentMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn metrics_update_minimal_roundtrip() {
+        let msg = ClaudeAgentMessage::MetricsUpdate {
+            cc_session_id: "cc-minimal".to_string(),
+            model: None,
+            cost_usd: None,
+            tokens_in: None,
+            tokens_out: None,
+            context_used_pct: None,
+            context_window_size: None,
+            rate_limit_5h_pct: None,
+            rate_limit_7d_pct: None,
+            lines_added: None,
+            lines_removed: None,
+            cc_version: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: ClaudeAgentMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(msg, parsed);
     }
 }

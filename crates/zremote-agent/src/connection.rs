@@ -319,7 +319,7 @@ async fn handle_session_create(
 ///
 /// Returns `Ok(())` on clean disconnect, `Err` on failure.
 /// The caller is responsible for reconnection logic.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_connection(
     config: &AgentConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -328,6 +328,7 @@ pub async fn run_connection(
     agentic_manager: &mut AgenticLoopManager,
     session_mapper: &SessionMapper,
     sent_cc_session_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    ccline_rx: &mut mpsc::Receiver<AgentMessage>,
 ) -> Result<(), ConnectionError> {
     let supports_persistence = session_manager.supports_persistence();
     tracing::info!(server_url = %config.server_url, "connecting to server");
@@ -697,6 +698,11 @@ pub async fn run_connection(
                     if agentic_tx.try_send(msg).is_err() {
                         tracing::warn!("agentic channel full, message dropped");
                     }
+                }
+            }
+            Some(ccline_msg) = ccline_rx.recv() => {
+                if outbound_tx.try_send(ccline_msg).is_err() {
+                    tracing::debug!("outbound channel full, ccline metrics dropped");
                 }
             }
             () = wait_for_shutdown(shutdown.clone()) => {

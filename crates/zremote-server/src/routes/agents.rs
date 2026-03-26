@@ -1483,6 +1483,75 @@ async fn handle_claude_message(
                 );
             }
         }
+        ClaudeAgentMessage::MetricsUpdate {
+            cc_session_id,
+            model,
+            cost_usd,
+            tokens_in,
+            tokens_out,
+            context_used_pct,
+            context_window_size,
+            rate_limit_5h_pct,
+            rate_limit_7d_pct,
+            lines_added,
+            lines_removed,
+            cc_version,
+        } => {
+            tracing::debug!(
+                host_id = %host_id,
+                cc_session_id = %cc_session_id,
+                "claude session metrics update from agent"
+            );
+
+            #[allow(clippy::cast_possible_wrap, clippy::cast_precision_loss)]
+            match zremote_core::queries::claude_sessions::update_session_metrics(
+                &state.db,
+                &cc_session_id,
+                model.as_deref(),
+                cost_usd,
+                tokens_in.map(|v| v as i64),
+                tokens_out.map(|v| v as i64),
+                context_used_pct.map(|v| v as f64),
+                context_window_size.map(|v| v as i64),
+                rate_limit_5h_pct.map(|v| v as i64),
+                rate_limit_7d_pct.map(|v| v as i64),
+                lines_added,
+                lines_removed,
+                cc_version.as_deref(),
+            )
+            .await
+            {
+                Ok(true) => {
+                    tracing::debug!(cc_session_id, "updated claude session metrics via agent");
+                    let _ = state.events.send(ServerEvent::ClaudeSessionMetrics {
+                        session_id: cc_session_id,
+                        model,
+                        context_used_pct: context_used_pct.map(|v| v as f64),
+                        context_window_size,
+                        cost_usd,
+                        tokens_in,
+                        tokens_out,
+                        lines_added,
+                        lines_removed,
+                        rate_limit_5h_pct,
+                        rate_limit_7d_pct,
+                    });
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        cc_session_id,
+                        "no matching claude_session for metrics update"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        cc_session_id,
+                        error = %e,
+                        "failed to update session metrics"
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
