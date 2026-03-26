@@ -244,9 +244,12 @@ impl SessionManager {
                 // Clean up stale daemon files first
                 crate::daemon::discovery::cleanup_stale_daemons();
 
-                let recovered =
-                    crate::daemon::discovery::discover_daemon_sessions(self.output_tx.clone())
-                        .await;
+                let tracked_ids: HashSet<SessionId> = self.sessions.keys().copied().collect();
+                let recovered = crate::daemon::discovery::discover_daemon_sessions(
+                    self.output_tx.clone(),
+                    &tracked_ids,
+                )
+                .await;
                 let mut result = Vec::new();
 
                 for (session, scrollback) in recovered {
@@ -255,6 +258,7 @@ impl SessionManager {
                     // duplicate reader tasks
                     if self.sessions.contains_key(&session_id) {
                         tracing::debug!(session_id = %session_id, "skipping already-tracked daemon session");
+                        session.detach();
                         continue;
                     }
                     let pid = session.pid();

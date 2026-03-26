@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
@@ -18,6 +19,7 @@ use super::socket_dir;
 /// Returns a list of `(DaemonSession, scrollback)` for successfully reconnected daemons.
 pub async fn discover_daemon_sessions(
     output_tx: mpsc::Sender<PtyOutput>,
+    already_tracked: &HashSet<SessionId>,
 ) -> Vec<(DaemonSession, Option<Vec<u8>>)> {
     let dir = socket_dir();
     if !dir.exists() {
@@ -56,6 +58,17 @@ pub async fn discover_daemon_sessions(
                 continue;
             }
         };
+
+        // Skip sessions already tracked by the session manager to avoid
+        // disrupting active socket connections (reconnect replaces the daemon's
+        // client, breaking the existing DaemonSession's reader).
+        if already_tracked.contains(&session_id) {
+            tracing::debug!(
+                session_id = %session_id,
+                "skipping already-tracked daemon in discovery"
+            );
+            continue;
+        }
 
         // Check if daemon process is alive
         if !is_daemon_alive(state.daemon_pid, &state.started_at) {
@@ -621,7 +634,7 @@ mod tests {
         // The actual discover_daemon_sessions uses a fixed socket_dir(),
         // so we just verify it doesn't panic with whatever state exists.
         let (tx, _rx) = mpsc::channel(64);
-        let result = discover_daemon_sessions(tx).await;
+        let result = discover_daemon_sessions(tx, &HashSet::new()).await;
         // Result depends on environment, but must not panic
         drop(result);
     }
