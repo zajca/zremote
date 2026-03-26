@@ -25,11 +25,21 @@ pub struct ClaudeTaskRow {
     pub summary: Option<String>,
     pub task_name: Option<String>,
     pub created_at: String,
+    // Status line metrics (from migration 017)
+    pub context_used_pct: Option<f64>,
+    pub context_window_size: Option<i64>,
+    pub rate_limit_5h_pct: Option<i64>,
+    pub rate_limit_7d_pct: Option<i64>,
+    pub lines_added: Option<i64>,
+    pub lines_removed: Option<i64>,
+    pub cc_version: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, session_id, host_id, project_path, project_id, model, initial_prompt, \
      claude_session_id, resume_from, status, options_json, loop_id, started_at, ended_at, \
-     total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at";
+     total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at, \
+     context_used_pct, context_window_size, rate_limit_5h_pct, rate_limit_7d_pct, \
+     lines_added, lines_removed, cc_version";
 
 pub struct ListClaudeTasksFilter {
     pub host_id: Option<String>,

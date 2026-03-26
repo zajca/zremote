@@ -238,6 +238,20 @@ fn install_status_line(settings: &mut serde_json::Value) {
     let command = format!("{agent_path} ccline");
 
     if let Some(obj) = settings.as_object_mut() {
+        // Log if overwriting a non-zremote statusLine
+        if let Some(existing) = obj.get("statusLine") {
+            let existing_cmd = existing
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            if !existing_cmd.contains("zremote-agent") {
+                tracing::warn!(
+                    existing = existing_cmd,
+                    "overwriting existing statusLine config"
+                );
+            }
+        }
+
         obj.insert(
             "statusLine".to_string(),
             serde_json::json!({
@@ -286,6 +300,18 @@ async fn uninstall_hooks_at(home: &Path) -> Result<(), InstallError> {
                         })
                 });
             }
+        }
+    }
+
+    // Remove statusLine if it points to zremote-agent
+    if let Some(obj) = settings.as_object_mut() {
+        let is_zremote = obj
+            .get("statusLine")
+            .and_then(|s| s.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.contains("zremote-agent"));
+        if is_zremote {
+            obj.remove("statusLine");
         }
     }
 
