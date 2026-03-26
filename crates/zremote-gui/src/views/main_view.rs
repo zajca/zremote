@@ -759,12 +759,15 @@ impl Render for MainView {
 
 /// Establish a terminal connection for the given session.
 ///
-/// Probes for a local tmux session first (control mode attach, zero latency).
-/// Falls back to WebSocket relay if tmux is unavailable or the session isn't local.
+/// Connection priority:
+/// 1. Direct tmux (control mode attach, zero latency, local only)
+/// 2. Direct bridge (bypasses server relay, same-machine agent)
+/// 3. WebSocket relay through server (default, works for remote hosts)
 fn connect_terminal(
     app_state: &std::sync::Arc<AppState>,
     session_id: &str,
 ) -> Option<crate::terminal_handle::TerminalHandle> {
+    // 1. Try direct tmux
     if crate::terminal_direct::tmux_available()
         && let Some(pane_id) = crate::terminal_direct::probe_local_session(session_id)
     {
@@ -778,16 +781,42 @@ fn connect_terminal(
                 return Some(crate::terminal_handle::TerminalHandle::Direct(direct));
             }
             Err(e) => {
-                tracing::warn!(error = %e, "direct tmux failed, falling back to WebSocket");
+                tracing::warn!(error = %e, "direct tmux failed, trying bridge");
             }
         }
     }
+
+    // 2. Try direct bridge (same-machine agent)
+    if let Some(port) = read_bridge_port() {
+        let bridge_url = format!("ws://127.0.0.1:{port}/ws/bridge/{session_id}");
+        tracing::info!(port = port, session_id = %session_id, "attempting direct bridge connection");
+        let session =
+            zremote_client::TerminalSession::connect_spawned(bridge_url, &app_state.tokio_handle);
+        return Some(crate::terminal_handle::TerminalHandle::Bridge(session));
+    }
+
+    // 3. Fall back to WebSocket relay through server
     let ws_url = app_state.api.terminal_ws_url(session_id);
     let handle = &app_state.tokio_handle;
     let session = zremote_client::TerminalSession::connect_spawned(ws_url, handle);
     Some(crate::terminal_handle::TerminalHandle::from_session(
         session,
     ))
+}
+
+/// Read the bridge port from `~/.zremote/bridge-port`.
+///
+/// Returns `None` if the file doesn't exist or contains invalid data.
+/// No TCP probe is done here to avoid blocking the GPUI main thread.
+/// If the agent is dead but the port file lingers, `connect_spawned` will
+/// fail asynchronously and emit `SessionClosed` so the GUI handles it gracefully.
+fn read_bridge_port() -> Option<u16> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home)
+        .join(".zremote")
+        .join("bridge-port");
+    let content = std::fs::read_to_string(&path).ok()?;
+    content.trim().parse().ok()
 }
 
 /// Events emitted by the sidebar for the main view to handle.

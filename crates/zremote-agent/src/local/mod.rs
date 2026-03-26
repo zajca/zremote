@@ -47,6 +47,12 @@ pub async fn run_local(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_file = expand_tilde(db_path);
 
+    // Clean up stale bridge port file from server-mode runs.
+    // In local mode the GUI connects directly to this server, not via a bridge.
+    if let Err(e) = crate::bridge::remove_port_file().await {
+        tracing::debug!(error = %e, "no stale bridge port file to clean up");
+    }
+
     // Ensure parent directory exists
     if let Some(parent) = db_file.parent() {
         tokio::fs::create_dir_all(parent).await?;

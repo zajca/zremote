@@ -21,6 +21,7 @@
 )]
 
 mod agentic;
+mod bridge;
 mod ccline;
 mod claude;
 mod config;
@@ -352,6 +353,27 @@ async fn run_agent() {
         tokio::spawn(ccline::listener::run(sink, ccline_shutdown));
     }
 
+    // Start direct bridge server for same-machine GUI connections.
+    // Lives outside the reconnect loop so bridge connections survive server reconnects.
+    let bridge_senders: bridge::BridgeSenders =
+        std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let (bridge_cmd_tx, mut bridge_cmd_rx) =
+        tokio::sync::mpsc::channel::<bridge::BridgeCommand>(256);
+    {
+        let bridge_state = bridge::BridgeState {
+            senders: bridge_senders.clone(),
+            command_tx: bridge_cmd_tx,
+        };
+        match bridge::start(bridge_state, shutdown_rx.clone()).await {
+            Ok(addr) => {
+                tracing::info!(port = addr.port(), "direct bridge server started");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to start bridge server (non-fatal)");
+            }
+        }
+    }
+
     // Reconnection loop with exponential backoff
     let mut backoff = MIN_BACKOFF;
     let mut attempt_num: u64 = 0;
@@ -373,6 +395,8 @@ async fn run_agent() {
             &session_mapper,
             &sent_cc_session_ids,
             &mut ccline_rx,
+            &bridge_senders,
+            &mut bridge_cmd_rx,
         )
         .await
         {
@@ -431,9 +455,12 @@ async fn run_agent() {
         session_manager.close_all();
     }
 
-    // Remove hooks port file so stale file doesn't mislead CC after agent exit
+    // Remove port files so stale files don't mislead clients after agent exit
     if let Err(e) = hooks::server::remove_port_file().await {
         tracing::debug!(error = %e, "failed to remove hooks port file on exit");
+    }
+    if let Err(e) = bridge::remove_port_file().await {
+        tracing::debug!(error = %e, "failed to remove bridge port file on exit");
     }
 
     tracing::info!("zremote-agent stopped");

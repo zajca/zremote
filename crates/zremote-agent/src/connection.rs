@@ -11,6 +11,8 @@ use zremote_protocol::knowledge::KnowledgeServerMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, HostId, ServerMessage, SessionId};
 
 use crate::agentic::manager::AgenticLoopManager;
+use crate::bridge::BridgeCommand;
+use crate::bridge::{self, BridgeSenders};
 use crate::config::AgentConfig;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
@@ -329,6 +331,8 @@ pub async fn run_connection(
     session_mapper: &SessionMapper,
     sent_cc_session_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     ccline_rx: &mut mpsc::Receiver<AgentMessage>,
+    bridge_senders: &BridgeSenders,
+    bridge_cmd_rx: &mut mpsc::Receiver<BridgeCommand>,
 ) -> Result<(), ConnectionError> {
     let supports_persistence = session_manager.supports_persistence();
     tracing::info!(server_url = %config.server_url, "connecting to server");
@@ -572,6 +576,7 @@ pub async fn run_connection(
                                     &agentic_tx,
                                     knowledge_sender.as_ref(),
                                     session_mapper,
+                                    bridge_senders,
                                 ).await;
                             }
                             Err(e) => {
@@ -613,6 +618,11 @@ pub async fn run_connection(
                     }
                     let exit_code = session_manager.close(&session_id);
                     tracing::info!(session_id = %session_id, exit_code = ?exit_code, "PTY session ended");
+                    bridge::fan_out(
+                        bridge_senders,
+                        session_id,
+                        zremote_core::state::BrowserMessage::SessionClosed { exit_code },
+                    ).await;
                     if outbound_tx.try_send(AgentMessage::SessionClosed {
                         session_id,
                         exit_code,
@@ -621,6 +631,15 @@ pub async fn run_connection(
                     }
                 } else if pty_output.pane_id.is_none() {
                     // Main pane output -- forward to server
+                    // Also fan out to direct bridge GUI connections
+                    bridge::fan_out(
+                        bridge_senders,
+                        session_id,
+                        zremote_core::state::BrowserMessage::Output {
+                            pane_id: None,
+                            data: data.clone(),
+                        },
+                    ).await;
                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
@@ -628,7 +647,16 @@ pub async fn run_connection(
                         tracing::warn!("outbound channel full, message dropped");
                     }
                 } else {
-                    // Extra pane output -- forward without agentic processing
+                    // Extra pane output -- forward to server + bridge
+                    let pane_id_str = pty_output.pane_id;
+                    bridge::fan_out(
+                        bridge_senders,
+                        session_id,
+                        zremote_core::state::BrowserMessage::Output {
+                            pane_id: pane_id_str.clone(),
+                            data: data.clone(),
+                        },
+                    ).await;
                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
@@ -666,6 +694,11 @@ pub async fn run_connection(
                     }
                     let exit_code = session_manager.close(&session_id);
                     tracing::info!(session_id = %session_id, exit_code = ?exit_code, "GC: cleaned up dead session");
+                    bridge::fan_out(
+                        bridge_senders,
+                        session_id,
+                        zremote_core::state::BrowserMessage::SessionClosed { exit_code },
+                    ).await;
                     if outbound_tx.try_send(AgentMessage::SessionClosed {
                         session_id,
                         exit_code,
@@ -703,6 +736,30 @@ pub async fn run_connection(
             Some(ccline_msg) = ccline_rx.recv() => {
                 if outbound_tx.try_send(ccline_msg).is_err() {
                     tracing::debug!("outbound channel full, ccline metrics dropped");
+                }
+            }
+            Some(bridge_cmd) = bridge_cmd_rx.recv() => {
+                match bridge_cmd {
+                    BridgeCommand::Write { session_id, pane_id, data } => {
+                        let result = if let Some(ref pid) = pane_id {
+                            session_manager.write_to_pane(&session_id, pid, &data)
+                        } else {
+                            session_manager.write_to(&session_id, &data)
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!(session_id = %session_id, error = %e, "bridge: failed to write to PTY");
+                        }
+                    }
+                    BridgeCommand::Resize { session_id, pane_id, cols, rows } => {
+                        let result = if let Some(ref pid) = pane_id {
+                            session_manager.resize_pane(&session_id, pid, cols, rows)
+                        } else {
+                            session_manager.resize(&session_id, cols, rows)
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!(session_id = %session_id, error = %e, "bridge: failed to resize PTY");
+                        }
+                    }
                 }
             }
             () = wait_for_shutdown(shutdown.clone()) => {
@@ -778,6 +835,7 @@ async fn handle_server_message(
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
     knowledge_tx: Option<&mpsc::Sender<KnowledgeServerMessage>>,
     session_mapper: &SessionMapper,
+    bridge_senders: &BridgeSenders,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -814,6 +872,12 @@ async fn handle_server_message(
             }
             let exit_code = session_manager.close(session_id);
             tracing::info!(session_id = %session_id, exit_code = ?exit_code, "session closed by server");
+            bridge::fan_out(
+                bridge_senders,
+                *session_id,
+                zremote_core::state::BrowserMessage::SessionClosed { exit_code },
+            )
+            .await;
             if outbound_tx
                 .try_send(AgentMessage::SessionClosed {
                     session_id: *session_id,
@@ -1678,6 +1742,7 @@ mod tests {
         mpsc::Receiver<AgenticAgentMessage>,
         Option<mpsc::Sender<KnowledgeServerMessage>>,
         SessionMapper,
+        BridgeSenders,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx, crate::config::PersistenceBackend::None);
@@ -1686,6 +1751,8 @@ mod tests {
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
         let (agentic_tx, agentic_rx) = mpsc::channel(16);
         let session_mapper = SessionMapper::new();
+        let bridge_senders: BridgeSenders =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         (
             session_manager,
             agentic_manager,
@@ -1696,6 +1763,7 @@ mod tests {
             agentic_rx,
             None,
             session_mapper,
+            bridge_senders,
         )
     }
 
@@ -1742,7 +1810,7 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
@@ -1756,6 +1824,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
     }
@@ -1763,7 +1832,7 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
@@ -1777,6 +1846,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
     }
@@ -1784,7 +1854,7 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
@@ -1798,6 +1868,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
     }
@@ -1805,7 +1876,8 @@ mod tests {
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs) =
+            make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
         handle_server_message(
@@ -1818,6 +1890,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
 
@@ -1838,7 +1911,7 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
@@ -1853,6 +1926,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
     }
@@ -1860,7 +1934,7 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
         let msg = ServerMessage::TerminalResize {
             session_id: Uuid::new_v4(),
             cols: 120,
@@ -1876,6 +1950,7 @@ mod tests {
             &atx,
             ktx.as_ref(),
             &mapper,
+            &bs,
         )
         .await;
     }

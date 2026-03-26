@@ -8,6 +8,8 @@ use crate::terminal_direct::DirectTmuxHandle;
 pub enum TerminalHandle {
     WebSocket(TerminalSession),
     Direct(DirectTmuxHandle),
+    /// Direct bridge to agent on the same machine (bypasses server relay).
+    Bridge(TerminalSession),
 }
 
 /// Clonable sender for raw terminal input bytes.
@@ -65,35 +67,41 @@ impl TerminalHandle {
     /// Get a clonable input sender (for use in closures).
     pub fn input_sender(&self) -> InputSender {
         match self {
-            Self::WebSocket(session) => InputSender::WebSocket(session.input_tx.clone()),
+            Self::WebSocket(session) | Self::Bridge(session) => {
+                InputSender::WebSocket(session.input_tx.clone())
+            }
             Self::Direct(h) => InputSender::Direct(h.input_tx.clone()),
         }
     }
 
     pub fn output_rx(&self) -> &flume::Receiver<TerminalEvent> {
         match self {
-            Self::WebSocket(session) => &session.output_rx,
+            Self::WebSocket(session) | Self::Bridge(session) => &session.output_rx,
             Self::Direct(h) => &h.output_rx,
         }
     }
 
     pub fn resize_tx(&self) -> &flume::Sender<(u16, u16)> {
         match self {
-            Self::WebSocket(session) => &session.resize_tx,
+            Self::WebSocket(session) | Self::Bridge(session) => &session.resize_tx,
             Self::Direct(h) => &h.resize_tx,
         }
     }
 
-    /// Image paste channel (WebSocket only). Direct mode returns `None` because
-    /// Claude Code can read the system clipboard itself on the same machine.
+    /// Image paste channel (WebSocket only). Direct/bridge mode returns `None`
+    /// because Claude Code can read the system clipboard itself on the same machine.
     pub fn image_paste_tx(&self) -> Option<&flume::Sender<String>> {
         match self {
             Self::WebSocket(session) => Some(&session.image_paste_tx),
-            Self::Direct(_) => None,
+            Self::Direct(_) | Self::Bridge(_) => None,
         }
     }
 
     pub fn is_direct(&self) -> bool {
         matches!(self, Self::Direct(_))
+    }
+
+    pub fn is_bridge(&self) -> bool {
+        matches!(self, Self::Bridge(_))
     }
 }

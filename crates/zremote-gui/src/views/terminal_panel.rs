@@ -209,6 +209,8 @@ pub struct TerminalPanel {
     cc_metrics: Option<CcMetrics>,
     /// Claude Code agentic status for the current session.
     cc_status: Option<AgenticStatus>,
+    /// Tokio runtime handle for spawning async tasks (coalescing, etc.).
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl TerminalPanel {
@@ -309,6 +311,7 @@ impl TerminalPanel {
             disconnected: false,
             cc_metrics: None,
             cc_status: None,
+            tokio_handle: tokio_handle.clone(),
         }
     }
 
@@ -352,6 +355,7 @@ impl TerminalPanel {
         self.reader_started = false; // Allow start_output_reader to run again
         self.pty_write_listener.update_sender(handle.input_sender());
         self.handle = handle;
+        self.tokio_handle = tokio_handle.clone();
 
         // Set up new resize debounce pipeline for the new handle.
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
@@ -415,64 +419,125 @@ impl TerminalPanel {
         let content_generation = self.content_generation.clone();
         let pty_write_listener = self.pty_write_listener.clone();
 
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        /// Coalescing window for GUI repaints (~60 Hz, matches vsync).
+        const REPAINT_COALESCE_MS: u64 = 16;
+
+        // Unified channel for GPUI thread: either a repaint signal or a control event.
+        enum GuiSignal {
+            Repaint,
+            Event(TerminalEvent),
+        }
+        let (gui_tx, gui_rx) = flume::bounded::<GuiSignal>(32);
+
+        // Tokio task: processes VTE eagerly, coalesces repaints at 16ms.
+        let gui_tx_clone = gui_tx.clone();
+        self.tokio_handle.spawn(async move {
+            let gui_tx = gui_tx_clone;
             let mut processor: Processor = Processor::new();
+            let mut needs_repaint = false;
+            let mut coalesce_deadline: Option<tokio::time::Instant> = None;
 
             loop {
-                match output_rx.recv_async().await {
-                    Ok(TerminalEvent::Output(bytes)) => {
-                        let clean = strip_cpr_responses(&bytes);
-                        if let Ok(mut term) = term.lock() {
-                            processor.advance(&mut *term, &clean);
+                let flush_sleep = async {
+                    match coalesce_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                };
+
+                tokio::select! {
+                    event = output_rx.recv_async() => {
+                        match event {
+                            Ok(TerminalEvent::Output(bytes)) => {
+                                let clean = strip_cpr_responses(&bytes);
+                                if let Ok(mut t) = term.lock() {
+                                    processor.advance(&mut *t, &clean);
+                                }
+                                needs_repaint = true;
+                                if coalesce_deadline.is_none() {
+                                    coalesce_deadline = Some(
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_millis(REPAINT_COALESCE_MS),
+                                    );
+                                }
+                            }
+                            Ok(TerminalEvent::ScrollbackStart { cols: sb_cols, rows: sb_rows }) => {
+                                if let Ok(mut t) = term.lock() {
+                                    let size = if sb_cols > 0 && sb_rows > 0 {
+                                        TermSize::new(usize::from(sb_cols), usize::from(sb_rows))
+                                    } else {
+                                        let cols = t.columns();
+                                        let rows = t.screen_lines();
+                                        if cols > 0 && rows > 0 {
+                                            TermSize::new(cols, rows)
+                                        } else {
+                                            TermSize::new(
+                                                usize::from(DEFAULT_COLS),
+                                                usize::from(DEFAULT_ROWS),
+                                            )
+                                        }
+                                    };
+                                    *t = alacritty_terminal::Term::new(
+                                        TermConfig::default(),
+                                        &size,
+                                        pty_write_listener.clone(),
+                                    );
+                                }
+                                content_generation.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(other) => {
+                                // Non-output events: flush pending repaint, then forward.
+                                if needs_repaint {
+                                    content_generation.fetch_add(1, Ordering::Relaxed);
+                                    let _ = gui_tx.try_send(GuiSignal::Repaint);
+                                    needs_repaint = false;
+                                    coalesce_deadline = None;
+                                }
+                                let _ = gui_tx.send_async(GuiSignal::Event(other)).await;
+                            }
+                            Err(_) => break,
                         }
-                        // Bump generation so cell run cache invalidates.
-                        content_generation.fetch_add(1, Ordering::Relaxed);
+                    }
+                    () = flush_sleep => {
+                        if needs_repaint {
+                            content_generation.fetch_add(1, Ordering::Relaxed);
+                            let _ = gui_tx.try_send(GuiSignal::Repaint);
+                            needs_repaint = false;
+                        }
+                        coalesce_deadline = None;
+                    }
+                }
+            }
+
+            // Final flush
+            if needs_repaint {
+                content_generation.fetch_add(1, Ordering::Relaxed);
+                let _ = gui_tx.try_send(GuiSignal::Repaint);
+            }
+        });
+
+        // GPUI task: reads unified signal channel and updates UI accordingly.
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                match gui_rx.recv_async().await {
+                    Ok(GuiSignal::Repaint) => {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
                     }
-                    Ok(TerminalEvent::SessionClosed { .. }) => {
+                    Ok(GuiSignal::Event(TerminalEvent::SessionClosed { .. })) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.closed = true;
                             cx.notify();
                         });
                         break;
                     }
-                    Ok(TerminalEvent::ScrollbackStart {
-                        cols: sb_cols,
-                        rows: sb_rows,
-                    }) => {
-                        if let Ok(mut term) = term.lock() {
-                            let size = if sb_cols > 0 && sb_rows > 0 {
-                                // Use server-reported size (the size at which scrollback was captured)
-                                TermSize::new(usize::from(sb_cols), usize::from(sb_rows))
-                            } else {
-                                let cols = term.columns();
-                                let rows = term.screen_lines();
-                                if cols > 0 && rows > 0 {
-                                    TermSize::new(cols, rows)
-                                } else {
-                                    TermSize::new(
-                                        usize::from(DEFAULT_COLS),
-                                        usize::from(DEFAULT_ROWS),
-                                    )
-                                }
-                            };
-                            *term = alacritty_terminal::Term::new(
-                                TermConfig::default(),
-                                &size,
-                                pty_write_listener.clone(),
-                            );
-                        }
-                        // Invalidate cell run cache - term was recreated
-                        content_generation.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok(TerminalEvent::ScrollbackEnd { truncated: _ }) => {
+                    Ok(GuiSignal::Event(TerminalEvent::ScrollbackEnd { .. })) => {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
                     }
-                    Ok(TerminalEvent::Error { message }) => {
+                    Ok(GuiSignal::Event(TerminalEvent::Error { message })) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.error_message = Some(message);
                             this.closed = true;
@@ -480,21 +545,15 @@ impl TerminalPanel {
                         });
                         break;
                     }
-                    Ok(TerminalEvent::Disconnected) => {
+                    Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.disconnected = true;
                             cx.notify();
                         });
                         break;
                     }
-                    Ok(
-                        TerminalEvent::PaneOutput { .. }
-                        | TerminalEvent::PaneAdded { .. }
-                        | TerminalEvent::PaneRemoved { .. }
-                        | TerminalEvent::SessionSuspended
-                        | TerminalEvent::SessionResumed,
-                    ) => {
-                        // Pane and suspension events not yet handled in single-pane terminal
+                    Ok(GuiSignal::Event(_)) => {
+                        // Pane and suspension events not yet handled
                     }
                     Err(_) => break,
                 }
@@ -1417,6 +1476,7 @@ impl Render for TerminalPanel {
 
         // Connection type indicator (bottom-right pill badge).
         let is_direct = self.handle.is_direct();
+        let is_bridge = self.handle.is_bridge();
         let tmux_name = self.tmux_name.clone();
         let tooltip_text = if is_direct {
             if let Some(ref name) = tmux_name {
@@ -1424,14 +1484,22 @@ impl Render for TerminalPanel {
             } else {
                 "Direct tmux connection (FIFO bypass, lower latency)".to_string()
             }
+        } else if is_bridge {
+            "Direct bridge to agent (bypasses server relay)".to_string()
+        } else if self.mode == "local" {
+            "Local WebSocket connection".to_string()
         } else {
-            if self.mode == "local" {
-                "Local WebSocket connection".to_string()
-            } else {
-                "WebSocket relay through server/agent".to_string()
-            }
+            "WebSocket relay through server/agent".to_string()
         };
+        let fast_path = is_direct || is_bridge;
         let clickable = is_direct && tmux_name.is_some();
+        let badge_label = if is_direct {
+            "Direct"
+        } else if is_bridge {
+            "Bridge"
+        } else {
+            "WS"
+        };
         let mut badge = div()
             .id("connection-indicator")
             .absolute()
@@ -1445,9 +1513,9 @@ impl Render for TerminalPanel {
             .rounded(px(8.0))
             .bg(gpui::rgba(0x1111_1399))
             .child(
-                icon(if is_direct { Icon::Zap } else { Icon::Wifi })
+                icon(if fast_path { Icon::Zap } else { Icon::Wifi })
                     .size(px(10.0))
-                    .text_color(if is_direct {
+                    .text_color(if fast_path {
                         theme::success()
                     } else {
                         theme::text_tertiary()
@@ -1457,7 +1525,7 @@ impl Render for TerminalPanel {
                 div()
                     .text_size(px(10.0))
                     .text_color(theme::text_tertiary())
-                    .child(if is_direct { "Direct" } else { "WS" }),
+                    .child(badge_label),
             )
             .child(
                 // Connection status dot: green = connected, red = disconnected.
