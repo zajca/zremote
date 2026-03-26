@@ -153,6 +153,8 @@ pub struct TerminalPanel {
     _keystroke_subscription: Subscription,
     /// Tmux session name (for click-to-copy attach command on Direct badge).
     tmux_name: Option<String>,
+    /// Connection mode: "local" or "server".
+    mode: String,
     /// Whether the terminal WebSocket connection has been lost
     /// (session may still be alive on server, waiting for reconnect).
     disconnected: bool,
@@ -164,6 +166,7 @@ impl TerminalPanel {
         handle: TerminalHandle,
         tokio_handle: &tokio::runtime::Handle,
         tmux_name: Option<String>,
+        mode: String,
         cx: &mut Context<Self>,
     ) -> Self {
         let config = TermConfig::default();
@@ -248,6 +251,7 @@ impl TerminalPanel {
             double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
             tmux_name,
+            mode,
             disconnected: false,
         }
     }
@@ -1327,7 +1331,11 @@ impl Render for TerminalPanel {
                 "Direct tmux connection (FIFO bypass, lower latency)".to_string()
             }
         } else {
-            "WebSocket relay through server/agent".to_string()
+            if self.mode == "local" {
+                "Local WebSocket connection".to_string()
+            } else {
+                "WebSocket relay through server/agent".to_string()
+            }
         };
         let clickable = is_direct && tmux_name.is_some();
         let mut badge = div()

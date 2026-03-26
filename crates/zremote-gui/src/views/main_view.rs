@@ -121,8 +121,16 @@ impl MainView {
             return;
         };
         let tokio_handle = self.app_state.tokio_handle.clone();
-        let terminal =
-            cx.new(|cx| TerminalPanel::new(session_id_owned, handle, &tokio_handle, tmux_name, cx));
+        let terminal = cx.new(|cx| {
+            TerminalPanel::new(
+                session_id_owned,
+                handle,
+                &tokio_handle,
+                tmux_name,
+                self.app_state.mode.clone(),
+                cx,
+            )
+        });
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         self.terminal = Some(terminal);
         cx.notify();
