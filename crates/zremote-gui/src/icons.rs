@@ -23,6 +23,7 @@ pub enum Icon {
     Zap,
     MessageCircle,
     CircleHelp,
+    Bot,
 }
 
 impl Icon {
@@ -49,6 +50,7 @@ impl Icon {
             Self::Zap => "icons/zap.svg",
             Self::MessageCircle => "icons/message-circle.svg",
             Self::CircleHelp => "icons/circle-help.svg",
+            Self::Bot => "icons/bot.svg",
         }
     }
 }

@@ -63,7 +63,10 @@ use crate::views::command_palette::PaletteTab;
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
 use crate::views::url_detector::UrlDetector;
-use zremote_client::TerminalEvent;
+use zremote_client::{AgenticStatus, TerminalEvent};
+
+use crate::views::cc_widgets;
+use crate::views::sidebar::CcMetrics;
 
 /// Cursor blink interval (standard terminal blink rate).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -200,6 +203,10 @@ pub struct TerminalPanel {
     /// Whether the terminal WebSocket connection has been lost
     /// (session may still be alive on server, waiting for reconnect).
     disconnected: bool,
+    /// Claude Code session metrics for the current session.
+    cc_metrics: Option<CcMetrics>,
+    /// Claude Code agentic status for the current session.
+    cc_status: Option<AgenticStatus>,
 }
 
 impl TerminalPanel {
@@ -297,6 +304,8 @@ impl TerminalPanel {
             tmux_name,
             mode,
             disconnected: false,
+            cc_metrics: None,
+            cc_status: None,
         }
     }
 
@@ -307,6 +316,22 @@ impl TerminalPanel {
     /// Whether the terminal WebSocket connection has been lost.
     pub fn is_disconnected(&self) -> bool {
         self.disconnected
+    }
+
+    /// Update Claude Code metrics for this terminal's session.
+    pub fn update_cc_metrics(&mut self, metrics: CcMetrics) {
+        self.cc_metrics = Some(metrics);
+    }
+
+    /// Update Claude Code agentic status.
+    pub fn update_cc_status(&mut self, status: Option<AgenticStatus>) {
+        self.cc_status = status;
+    }
+
+    /// Clear Claude Code state (e.g., on session close).
+    pub fn clear_cc_state(&mut self) {
+        self.cc_metrics = None;
+        self.cc_status = None;
     }
 
     /// Reconnect with a new terminal handle after session resume.
@@ -1431,6 +1456,55 @@ impl Render for TerminalPanel {
                 },
             );
         }
+        // CC metrics badge (above connection badge)
+        if let Some(ref metrics) = self.cc_metrics
+            && let Some(status) = self.cc_status
+        {
+            let mut cc_badge = div()
+                .id("cc-metrics-badge")
+                .absolute()
+                .bottom(px(28.0))
+                .right(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(8.0))
+                .bg(gpui::rgba(0x1111_1399));
+
+            // Bot icon
+            cc_badge = cc_badge.child(cc_widgets::cc_bot_icon(status, 10.0));
+
+            // Model name
+            if let Some(ref model) = metrics.model {
+                cc_badge = cc_badge.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme::text_tertiary())
+                        .child(cc_widgets::short_model_name(model)),
+                );
+            }
+
+            // Context bar
+            cc_badge = cc_badge.child(cc_widgets::render_context_bar(metrics, 50.0, 4.0));
+
+            // Context percentage text
+            if let Some(pct) = metrics.context_used_pct {
+                let window = metrics.context_window_size.unwrap_or(200_000);
+                let tokens_used = (pct / 100.0) * window as f64;
+                let pct_200k = tokens_used / 200_000.0 * 100.0;
+                cc_badge = cc_badge.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme::text_tertiary())
+                        .child(format!("{pct_200k:.0}%")),
+                );
+            }
+
+            content = content.child(cc_badge);
+        }
+
         content = content.child(badge);
 
         // Wrap in a vertical container with optional search overlay on top.

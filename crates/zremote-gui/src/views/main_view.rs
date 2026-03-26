@@ -7,6 +7,8 @@ use gpui::*;
 
 use zremote_client::{ClientEvent, ServerEvent};
 
+use crate::views::sidebar::CcMetrics;
+
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
@@ -204,6 +206,66 @@ impl MainView {
                 }
             }
         }
+
+        // Forward CC metrics to terminal panel
+        if let ServerEvent::ClaudeSessionMetrics {
+            session_id,
+            model,
+            context_used_pct,
+            context_window_size,
+            cost_usd,
+            tokens_in,
+            tokens_out,
+            lines_added,
+            lines_removed,
+            rate_limit_5h_pct,
+            rate_limit_7d_pct,
+        } = event
+            && let Some(terminal) = &self.terminal
+            && terminal.read(cx).session_id() == session_id.as_str()
+        {
+            terminal.update(cx, |panel, cx| {
+                panel.update_cc_metrics(CcMetrics {
+                    model: model.clone(),
+                    context_used_pct: *context_used_pct,
+                    context_window_size: *context_window_size,
+                    cost_usd: *cost_usd,
+                    tokens_in: *tokens_in,
+                    tokens_out: *tokens_out,
+                    lines_added: *lines_added,
+                    lines_removed: *lines_removed,
+                    rate_limit_5h_pct: *rate_limit_5h_pct,
+                    rate_limit_7d_pct: *rate_limit_7d_pct,
+                });
+                cx.notify();
+            });
+        }
+
+        // Forward agentic loop status to terminal panel
+        match event {
+            ServerEvent::LoopDetected { loop_info, .. }
+            | ServerEvent::LoopStatusChanged { loop_info, .. } => {
+                if let Some(terminal) = &self.terminal
+                    && terminal.read(cx).session_id() == loop_info.session_id.as_str()
+                {
+                    terminal.update(cx, |panel, cx| {
+                        panel.update_cc_status(Some(loop_info.status));
+                        cx.notify();
+                    });
+                }
+            }
+            ServerEvent::LoopEnded { loop_info, .. } => {
+                if let Some(terminal) = &self.terminal
+                    && terminal.read(cx).session_id() == loop_info.session_id.as_str()
+                {
+                    terminal.update(cx, |panel, cx| {
+                        panel.clear_cc_state();
+                        cx.notify();
+                    });
+                }
+            }
+            _ => {}
+        }
     }
 
     // -- Command palette ---------------------------------------------------------
@@ -235,6 +297,7 @@ impl MainView {
             .map(|p| p.state().recent_sessions.clone())
             .unwrap_or_default();
         let cc_states = snapshot.cc_states().clone();
+        let cc_metrics = snapshot.cc_metrics().clone();
         let palette_snapshot = PaletteSnapshot::capture(
             Rc::clone(snapshot.hosts_rc()),
             Rc::clone(snapshot.sessions_rc()),
@@ -243,6 +306,7 @@ impl MainView {
             snapshot.selected_session_id().map(String::from),
             &recent_sessions,
             cc_states,
+            cc_metrics,
         );
         let palette = cx.new(|cx| CommandPalette::new(palette_snapshot, tab, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();
@@ -354,6 +418,7 @@ impl MainView {
         let sessions = Rc::clone(snapshot.sessions_rc());
         let projects = Rc::clone(snapshot.projects_rc());
         let cc_states = snapshot.cc_states().clone();
+        let cc_metrics = snapshot.cc_metrics().clone();
         let mode = self.app_state.mode.clone();
 
         let switcher = cx.new(|cx| {
@@ -365,6 +430,7 @@ impl MainView {
                 current_session_id.as_deref(),
                 &mode,
                 &cc_states,
+                &cc_metrics,
                 cx,
             )
         });

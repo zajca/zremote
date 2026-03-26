@@ -23,7 +23,8 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use crate::views::sidebar::CcState;
+use crate::views::cc_widgets;
+use crate::views::sidebar::{CcMetrics, CcState};
 use zremote_client::{AgenticStatus, Host, Project, Session};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,8 @@ struct SwitcherEntry {
     is_current: bool,
     /// Agentic state: (status, task_name)
     cc_state: Option<(AgenticStatus, Option<String>)>,
+    /// Claude Code session metrics (context, cost, model).
+    cc_metrics: Option<CcMetrics>,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +87,7 @@ impl SessionSwitcher {
         current_session_id: Option<&str>,
         mode: &str,
         cc_states: &HashMap<String, CcState>,
+        cc_metrics: &HashMap<String, CcMetrics>,
         cx: &mut Context<Self>,
     ) -> Self {
         let entries = build_entries(
@@ -94,6 +98,7 @@ impl SessionSwitcher {
             current_session_id,
             mode,
             cc_states,
+            cc_metrics,
         );
         let focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
@@ -272,18 +277,29 @@ impl Render for SessionSwitcher {
                             .when_some(
                                 entry.cc_state.as_ref(),
                                 |d: Stateful<Div>, (status, task_name)| {
-                                    let (cc_icon, cc_color) =
-                                        if *status == AgenticStatus::WaitingForInput {
-                                            (Icon::MessageCircle, theme::warning())
-                                        } else {
-                                            (Icon::Loader, theme::accent())
-                                        };
-                                    let mut indicator = div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .flex_shrink_0()
-                                        .child(icon(cc_icon).size(px(12.0)).text_color(cc_color));
+                                    let mut indicator =
+                                        div().flex().items_center().gap(px(4.0)).flex_shrink_0();
+
+                                    // Context bar + model (if metrics available)
+                                    if let Some(ref metrics) = entry.cc_metrics {
+                                        indicator = indicator.child(
+                                            cc_widgets::render_context_bar(metrics, 40.0, 3.0),
+                                        );
+                                        if let Some(ref model) = metrics.model {
+                                            indicator = indicator.child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme::text_tertiary())
+                                                    .child(cc_widgets::short_model_name(model)),
+                                            );
+                                        }
+                                    }
+
+                                    // Bot icon
+                                    indicator =
+                                        indicator.child(cc_widgets::cc_bot_icon(*status, 12.0));
+
+                                    // Task name
                                     if let Some(task) = task_name {
                                         indicator = indicator.child(
                                             div()
@@ -317,6 +333,7 @@ impl Render for SessionSwitcher {
 // Entry builder
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_entries(
     sessions: &Rc<Vec<Session>>,
     hosts: &Rc<Vec<Host>>,
@@ -325,6 +342,7 @@ fn build_entries(
     current_session_id: Option<&str>,
     mode: &str,
     cc_states: &HashMap<String, CcState>,
+    cc_metrics: &HashMap<String, CcMetrics>,
 ) -> Vec<SwitcherEntry> {
     let host_names: HashMap<&str, &str> = hosts
         .iter()
@@ -394,6 +412,7 @@ fn build_entries(
                 subtitle,
                 is_current: current_session_id == Some(s.id.as_str()),
                 cc_state,
+                cc_metrics: cc_metrics.get(&s.id).cloned(),
             }
         })
         .collect()
