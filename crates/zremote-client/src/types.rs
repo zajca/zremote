@@ -48,6 +48,13 @@ pub struct Host {
     pub updated_at: String,
 }
 
+/// Minimal response from the session-creation endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionResponse {
+    pub id: String,
+    pub status: String,
+}
+
 /// Terminal session as returned by the `ZRemote` API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

@@ -6,11 +6,11 @@ use crate::error::ApiError;
 use crate::terminal::TerminalSession;
 use crate::types::{
     AddProjectRequest, AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue,
-    CreateClaudeTaskRequest, CreateSessionRequest, CreateWorktreeRequest, DirectoryEntry,
-    ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase, ListClaudeTasksFilter,
-    ListLoopsFilter, Memory, ModeResponse, Project, ProjectAction, ProjectSettings,
-    ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest, Session,
-    SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
+    CreateClaudeTaskRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
+    DirectoryEntry, ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase,
+    ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, Project, ProjectAction,
+    ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest,
+    Session, SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
     UpdateSessionRequest, WorktreeInfo,
 };
 
@@ -114,7 +114,7 @@ impl ApiClient {
         &self,
         host_id: &str,
         req: &CreateSessionRequest,
-    ) -> Result<(Session, TerminalSession), ApiError> {
+    ) -> Result<(CreateSessionResponse, TerminalSession), ApiError> {
         let session = self.create_session(host_id, req).await?;
         let url = self.terminal_ws_url(&session.id);
         let handle = tokio::runtime::Handle::current();
@@ -258,7 +258,7 @@ impl ApiClient {
         &self,
         host_id: &str,
         req: &CreateSessionRequest,
-    ) -> Result<Session, ApiError> {
+    ) -> Result<CreateSessionResponse, ApiError> {
         let resp = self
             .client
             .post(format!(

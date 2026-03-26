@@ -32,6 +32,7 @@ pub use types::{
     ConfigValue,
     CreateClaudeTaskRequest,
     CreateSessionRequest,
+    CreateSessionResponse,
     CreateWorktreeRequest,
     DirectoryEntry,
     // Constants
