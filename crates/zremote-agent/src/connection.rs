@@ -370,14 +370,17 @@ pub async fn run_connection(
             });
             // Send captured pane content through the output channel so the
             // server receives it as TerminalOutput and populates scrollback.
-            if let Some(data) = captured {
-                let _ = session_manager
+            if let Some(data) = captured
+                && session_manager
                     .output_tx()
                     .try_send(crate::session::PtyOutput {
                         session_id: *session_id,
                         pane_id: None,
                         data: data.clone(),
-                    });
+                    })
+                    .is_err()
+            {
+                tracing::warn!(session_id = %session_id, "pty output channel full, scrollback dropped");
             }
         }
 
@@ -433,12 +436,13 @@ pub async fn run_connection(
                 "re-announcing agentic loops after reconnect"
             );
             for msg in loop_messages {
-                let loop_id = match &msg {
-                    AgenticAgentMessage::LoopDetected { loop_id, .. } => *loop_id,
-                    _ => uuid::Uuid::nil(),
+                // re_announce_loops() only produces LoopDetected variants
+                let AgenticAgentMessage::LoopDetected { loop_id, .. } = &msg else {
+                    continue;
                 };
+                let lid = *loop_id;
                 if agentic_tx.try_send(msg).is_err() {
-                    tracing::warn!(loop_id = %loop_id, "agentic channel full, loop re-announce dropped");
+                    tracing::warn!(loop_id = %lid, "agentic channel full, loop re-announce dropped");
                 }
             }
         }
