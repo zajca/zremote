@@ -1491,9 +1491,10 @@ impl Render for TerminalPanel {
 
             // Context percentage text
             if let Some(pct) = metrics.context_used_pct {
-                let window = metrics.context_window_size.unwrap_or(200_000);
-                let tokens_used = (pct / 100.0) * window as f64;
-                let pct_200k = tokens_used / 200_000.0 * 100.0;
+                let (_, pct_200k) = cc_widgets::context_usage_200k(
+                    pct,
+                    metrics.context_window_size.unwrap_or(200_000),
+                );
                 cc_badge = cc_badge.child(
                     div()
                         .text_size(px(10.0))

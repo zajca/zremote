@@ -264,6 +264,7 @@ impl SidebarView {
                     && state.loop_id == loop_info.id
                 {
                     self.cc_states.remove(&loop_info.session_id);
+                    self.cc_metrics.remove(&loop_info.session_id);
                 }
                 cx.notify();
             }

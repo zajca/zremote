@@ -14,7 +14,6 @@ pub struct CclineMessage {
     pub cost: Option<CclineCost>,
     pub context_window: Option<CclineContext>,
     pub rate_limits: Option<CclineRateLimits>,
-    pub exceeds_200k_tokens: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

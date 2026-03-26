@@ -23,7 +23,7 @@ pub fn render_context_bar(metrics: &CcMetrics, width: f32, height: f32) -> impl 
     let window_size = metrics.context_window_size.unwrap_or(200_000);
 
     // Calculate tokens used, then normalize to 200k baseline
-    let tokens_used = (pct / 100.0) * window_size as f64;
+    let (tokens_used, _) = context_usage_200k(pct, window_size);
     let fill_ratio_200k = (tokens_used / 200_000.0).min(1.0) as f32;
 
     let fill_color = if pct > 90.0 {
@@ -99,16 +99,38 @@ pub fn short_model_name(model: &str) -> String {
     model.chars().take(8).collect()
 }
 
-/// Extract version number from start of string (e.g. "4.6 (1M context)" -> "4.6")
+/// Extract version number (major.minor) from start of string.
+///
+/// Accepts dots or dashes as separators and normalizes to dots.
+/// Only keeps the first two numeric segments (major.minor):
+/// - `"4.6 (1M context)"` -> `"4.6"`
+/// - `"-4-6-20250514"` -> `"4.6"` (leading dashes stripped, trailing ignored)
 fn extract_version(s: &str) -> String {
     let s = s.trim_start_matches([' ', '-']);
-    s.chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect::<String>()
+    let raw: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    // Normalize dashes to dots and keep only major.minor
+    let normalized = raw.replace('-', ".");
+    let mut parts = normalized.split('.');
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        (Some(major), None) => major.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Calculate context usage normalized to a 200k token baseline.
+/// Returns (tokens_used, percentage_of_200k).
+pub fn context_usage_200k(pct: f64, window_size: u64) -> (f64, f64) {
+    let tokens_used = (pct / 100.0) * window_size as f64;
+    let pct_200k = tokens_used / 200_000.0 * 100.0;
+    (tokens_used, pct_200k)
 }
 
 /// Format cost as "$X.XX".
-pub fn format_cost(cost_usd: f64) -> String {
+fn format_cost(cost_usd: f64) -> String {
     format!("${cost_usd:.2}")
 }
 
@@ -163,11 +185,15 @@ pub fn render_cc_tooltip(
     // Context
     if let Some(pct) = metrics.context_used_pct {
         let window = metrics.context_window_size.unwrap_or(200_000);
-        let tokens_used = (pct / 100.0) * window as f64;
+        let (tokens_used, _) = context_usage_200k(pct, window);
+        let window_label = if window >= 1_000_000 {
+            format!("{}M", window / 1_000_000)
+        } else {
+            format!("{}k", window / 1000)
+        };
         content = content.child(div().child(format!(
-            "Context: {:.0}k / 200k tokens ({:.1}%)",
+            "Context: {:.0}k tokens ({pct:.0}% of {window_label})",
             tokens_used / 1000.0,
-            tokens_used / 200_000.0 * 100.0
         )));
     }
 
@@ -195,4 +221,59 @@ pub fn render_cc_tooltip(
     }
 
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{context_usage_200k, extract_version, format_cost, short_model_name};
+
+    #[test]
+    fn short_model_name_display_names() {
+        assert_eq!(short_model_name("Opus 4.6 (1M context)"), "Opus4.6");
+        assert_eq!(short_model_name("Sonnet 4.6"), "Son4.6");
+        assert_eq!(short_model_name("Haiku 4.5"), "Hai4.5");
+    }
+
+    #[test]
+    fn short_model_name_raw_ids() {
+        assert_eq!(short_model_name("claude-opus-4-6"), "Opus4.6");
+        assert_eq!(short_model_name("claude-sonnet-4-6"), "Son4.6");
+        assert_eq!(short_model_name("claude-haiku-4-5"), "Hai4.5");
+    }
+
+    #[test]
+    fn short_model_name_fallback() {
+        assert_eq!(short_model_name("gpt-4o"), "gpt-4o");
+        assert_eq!(short_model_name("some-long-model-name"), "some-lon");
+    }
+
+    #[test]
+    fn extract_version_patterns() {
+        assert_eq!(extract_version("4.6 (1M context)"), "4.6");
+        assert_eq!(extract_version("4-6"), "4.6");
+        assert_eq!(extract_version("-4-6-20250514"), "4.6");
+        assert_eq!(extract_version(""), "");
+    }
+
+    #[test]
+    fn context_usage_200k_basic() {
+        let (tokens, pct) = context_usage_200k(50.0, 200_000);
+        assert!((tokens - 100_000.0).abs() < 1.0);
+        assert!((pct - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn context_usage_200k_large_window() {
+        // 10% of 1M = 100k tokens = 50% of 200k
+        let (tokens, pct) = context_usage_200k(10.0, 1_000_000);
+        assert!((tokens - 100_000.0).abs() < 1.0);
+        assert!((pct - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn format_cost_basic() {
+        assert_eq!(format_cost(1.5), "$1.50");
+        assert_eq!(format_cost(0.0), "$0.00");
+        assert_eq!(format_cost(99.999), "$100.00");
+    }
 }
