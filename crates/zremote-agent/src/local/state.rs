@@ -46,7 +46,7 @@ impl LocalAppState {
         let sessions = SessionStore::default();
         let agentic_loops = AgenticLoopStore::default();
 
-        let (pty_output_tx, pty_output_rx) = mpsc::channel(256);
+        let (pty_output_tx, pty_output_rx) = mpsc::channel(4096);
         let session_manager = SessionManager::new(pty_output_tx, backend);
 
         let agentic_manager = AgenticLoopManager::new();

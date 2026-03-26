@@ -63,8 +63,10 @@ impl PtySession {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF -- child closed the PTY
-                        let _ = output_tx.blocking_send(PtyOutput {
+                        // EOF -- child closed the PTY. Use try_send to avoid
+                        // blocking if channel is full during disconnect.
+                        // If dropped, the session is cleaned up by periodic GC.
+                        let _ = output_tx.try_send(PtyOutput {
                             session_id,
                             pane_id: None,
                             data: Vec::new(),
@@ -72,21 +74,26 @@ impl PtySession {
                         break;
                     }
                     Ok(n) => {
-                        if output_tx
-                            .blocking_send(PtyOutput {
-                                session_id,
-                                pane_id: None,
-                                data: buf[..n].to_vec(),
-                            })
-                            .is_err()
-                        {
-                            // Receiver dropped -- connection gone
-                            break;
+                        match output_tx.try_send(PtyOutput {
+                            session_id,
+                            pane_id: None,
+                            data: buf[..n].to_vec(),
+                        }) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                // Channel full (disconnect, consumer not draining).
+                                // Drop this chunk rather than blocking the reader thread.
+                                // Terminal scrollback in the PTY retains the data.
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Receiver dropped -- session manager gone
+                                break;
+                            }
                         }
                     }
                     Err(_) => {
                         // Read error -- PTY closed
-                        let _ = output_tx.blocking_send(PtyOutput {
+                        let _ = output_tx.try_send(PtyOutput {
                             session_id,
                             pane_id: None,
                             data: Vec::new(),

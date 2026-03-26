@@ -323,9 +323,13 @@ async fn handle_session_create(
 pub async fn run_connection(
     config: &AgentConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
-    backend: crate::config::PersistenceBackend,
+    session_manager: &mut SessionManager,
+    pty_output_rx: &mut mpsc::Receiver<crate::session::PtyOutput>,
+    agentic_manager: &mut AgenticLoopManager,
+    session_mapper: &SessionMapper,
+    sent_cc_session_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 ) -> Result<(), ConnectionError> {
-    let supports_persistence = backend != crate::config::PersistenceBackend::None;
+    let supports_persistence = session_manager.supports_persistence();
     tracing::info!(server_url = %config.server_url, "connecting to server");
 
     let mut ws = connect(config).await?;
@@ -339,49 +343,64 @@ pub async fn run_connection(
     // Channel for outbound agent messages (from main loop + PTY output)
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(256);
 
-    // Channel for PTY output data
-    let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<crate::session::PtyOutput>(256);
-
-    // Session manager
-    let mut session_manager = SessionManager::new(pty_output_tx.clone(), backend);
-
-    // Discover and report recovered sessions
+    // Re-announce sessions that survived the reconnect + discover new ones
     {
-        let recovered = session_manager.discover_existing().await;
-        if !recovered.is_empty() {
-            let sessions: Vec<zremote_protocol::RecoveredSession> = recovered
-                .iter()
-                .map(
-                    |(session_id, shell, pid, _)| zremote_protocol::RecoveredSession {
+        let mut recovered_sessions = Vec::new();
+
+        // Sessions already tracked in the hoisted manager (survived reconnect)
+        for (session_id, shell, pid) in session_manager.active_session_info() {
+            recovered_sessions.push(zremote_protocol::RecoveredSession {
+                session_id,
+                shell,
+                pid,
+            });
+        }
+
+        // Capture survived count before appending discovered sessions
+        let survived_count = recovered_sessions.len();
+
+        // Discover sessions from previous agent lifecycle (daemon/tmux state files).
+        // discover_existing() skips sessions already tracked in the manager.
+        let discovered = session_manager.discover_existing().await;
+        for (session_id, shell, pid, captured) in &discovered {
+            recovered_sessions.push(zremote_protocol::RecoveredSession {
+                session_id: *session_id,
+                shell: shell.clone(),
+                pid: *pid,
+            });
+            // Send captured pane content through the output channel so the
+            // server receives it as TerminalOutput and populates scrollback.
+            if let Some(data) = captured
+                && session_manager
+                    .output_tx()
+                    .try_send(crate::session::PtyOutput {
                         session_id: *session_id,
-                        shell: shell.clone(),
-                        pid: *pid,
-                    },
-                )
-                .collect();
-            tracing::info!(count = sessions.len(), "reporting recovered tmux sessions");
+                        pane_id: None,
+                        data: data.clone(),
+                    })
+                    .is_err()
+            {
+                tracing::warn!(session_id = %session_id, "pty output channel full, scrollback dropped");
+            }
+        }
+
+        if !recovered_sessions.is_empty() {
+            tracing::info!(
+                count = recovered_sessions.len(),
+                survived = survived_count,
+                discovered = discovered.len(),
+                "re-announcing sessions after reconnect"
+            );
             if outbound_tx
-                .try_send(AgentMessage::SessionsRecovered { sessions })
+                .try_send(AgentMessage::SessionsRecovered {
+                    sessions: recovered_sessions,
+                })
                 .is_err()
             {
                 tracing::warn!("outbound channel full, SessionsRecovered dropped");
             }
-            // Send captured pane content through the output channel so the
-            // server receives it as TerminalOutput and populates scrollback.
-            for (session_id, _, _, captured) in &recovered {
-                if let Some(data) = captured {
-                    let _ = pty_output_tx.try_send(crate::session::PtyOutput {
-                        session_id: *session_id,
-                        pane_id: None,
-                        data: data.clone(),
-                    });
-                }
-            }
         }
     }
-
-    // Agentic loop manager
-    let mut agentic_manager = AgenticLoopManager::new();
 
     // Project scanner
     let mut project_scanner = ProjectScanner::new();
@@ -407,14 +426,35 @@ pub async fn run_connection(
     // Channel for outbound agentic messages
     let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
 
+    // Re-announce active agentic loops so the server restores monitoring state.
+    // Also prunes loops whose processes died during disconnect (sends LoopEnded).
+    // Must happen after agentic_tx is created since we send through it.
+    {
+        let loop_messages = agentic_manager.re_announce_loops();
+        if !loop_messages.is_empty() {
+            tracing::info!(
+                count = loop_messages.len(),
+                "re-announcing agentic loops after reconnect"
+            );
+            for msg in loop_messages {
+                if agentic_tx.try_send(msg).is_err() {
+                    tracing::warn!("agentic channel full, loop re-announce message dropped");
+                }
+            }
+        }
+    }
+
     // Hooks sidecar (CC hook integration)
-    let session_mapper = SessionMapper::new();
+    // Use a per-connection shutdown signal so the HooksServer stops when this
+    // connection ends (sender is dropped on function exit → server stops).
+    let (hooks_shutdown_tx, hooks_shutdown_rx) = tokio::sync::watch::channel(false);
     let hooks_server = HooksServer::new(
         agentic_tx.clone(),
         session_mapper.clone(),
         outbound_tx.clone(),
+        sent_cc_session_ids.clone(),
     );
-    match hooks_server.start(shutdown.clone()).await {
+    match hooks_server.start(hooks_shutdown_rx).await {
         Ok(addr) => {
             tracing::info!(port = addr.port(), "hooks sidecar started");
             // Install hooks into Claude Code settings
@@ -524,13 +564,13 @@ pub async fn run_connection(
                                 handle_server_message(
                                     &server_msg,
                                     &host_id,
-                                    &mut session_manager,
-                                    &mut agentic_manager,
+                                    session_manager,
+                                    agentic_manager,
                                     &mut project_scanner,
                                     &outbound_tx,
                                     &agentic_tx,
                                     knowledge_sender.as_ref(),
-                                    &session_mapper,
+                                    session_mapper,
                                 ).await;
                             }
                             Err(e) => {
@@ -610,6 +650,29 @@ pub async fn run_connection(
                 }
             }
             _ = agentic_check_interval.tick() => {
+                // Periodic GC: close sessions whose child process has died but
+                // EOF was lost (try_send dropped it when channel was full).
+                let dead_sessions: Vec<SessionId> = session_manager
+                    .session_pids()
+                    .filter(|(_, pid)| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+                    .map(|(id, _)| id)
+                    .collect();
+                for session_id in dead_sessions {
+                    if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
+                        && agentic_tx.try_send(loop_ended).is_err()
+                    {
+                        tracing::warn!("agentic channel full, LoopEnded dropped");
+                    }
+                    let exit_code = session_manager.close(&session_id);
+                    tracing::info!(session_id = %session_id, exit_code = ?exit_code, "GC: cleaned up dead session");
+                    if outbound_tx.try_send(AgentMessage::SessionClosed {
+                        session_id,
+                        exit_code,
+                    }).is_err() {
+                        tracing::warn!("outbound channel full, SessionClosed dropped");
+                    }
+                }
+
                 let messages = agentic_manager.check_sessions(session_manager.session_pids());
                 for msg in &messages {
                     // Register loop mapping when a new loop is detected
@@ -643,12 +706,11 @@ pub async fn run_connection(
         }
     };
 
-    // Clean up sessions: detach persistent ones (they survive), kill plain PTY
-    if session_manager.supports_persistence() {
-        session_manager.detach_all();
-    } else {
-        session_manager.close_all();
-    }
+    // Sessions are NOT cleaned up here — they survive across reconnects.
+    // Final cleanup (detach/close) happens in run_agent() after the reconnect loop exits.
+
+    // Stop the per-connection HooksServer (sender drop also works, but explicit is clearer)
+    let _ = hooks_shutdown_tx.send(true);
 
     // Wait for sender task to finish and close the WebSocket cleanly
     match sender_handle.await {

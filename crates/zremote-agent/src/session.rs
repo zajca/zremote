@@ -34,6 +34,8 @@ pub struct DirectAttachInfo {
 
 pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
+    /// Shell name cached at creation time (avoids re-deriving via sysinfo on reconnect).
+    shell_names: HashMap<SessionId, String>,
     output_tx: mpsc::Sender<PtyOutput>,
     backend: PersistenceBackend,
     direct_attached: HashSet<SessionId>,
@@ -43,6 +45,7 @@ impl SessionManager {
     pub fn new(output_tx: mpsc::Sender<PtyOutput>, backend: PersistenceBackend) -> Self {
         Self {
             sessions: HashMap::new(),
+            shell_names: HashMap::new(),
             output_tx,
             backend,
             direct_attached: HashSet::new(),
@@ -62,6 +65,12 @@ impl SessionManager {
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        // Extract short shell name (e.g., "/bin/zsh" → "zsh") and cache it.
+        // This avoids re-deriving via sysinfo on reconnect (which can degrade to "shell").
+        let shell_name = std::path::Path::new(shell)
+            .file_name()
+            .map_or_else(|| shell.to_string(), |n| n.to_string_lossy().into_owned());
+
         match self.backend {
             PersistenceBackend::Tmux => {
                 let (session, pid) = TmuxSession::spawn(
@@ -75,6 +84,7 @@ impl SessionManager {
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Tmux(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
             PersistenceBackend::Daemon => {
@@ -90,6 +100,7 @@ impl SessionManager {
                 .await?;
                 self.sessions
                     .insert(session_id, SessionBackend::Daemon(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
             PersistenceBackend::None => {
@@ -104,6 +115,7 @@ impl SessionManager {
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Pty(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
         }
@@ -147,6 +159,7 @@ impl SessionManager {
 
     /// Close a session, killing the child process. Returns the exit code if available.
     pub fn close(&mut self, session_id: &SessionId) -> Option<i32> {
+        self.shell_names.remove(session_id);
         let backend = self.sessions.remove(session_id)?;
         match backend {
             SessionBackend::Pty(mut session) => {
@@ -178,6 +191,7 @@ impl SessionManager {
     pub fn detach_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
+            self.shell_names.remove(&id);
             if let Some(backend) = self.sessions.remove(&id) {
                 match backend {
                     SessionBackend::Tmux(mut session) => session.detach(),
@@ -209,9 +223,16 @@ impl SessionManager {
 
                 for (session, captured) in recovered {
                     let session_id = session.session_id();
+                    // Skip sessions already tracked (reconnect case) to avoid
+                    // duplicate reader tasks
+                    if self.sessions.contains_key(&session_id) {
+                        tracing::debug!(session_id = %session_id, "skipping already-tracked tmux session");
+                        continue;
+                    }
                     let pid = session.pid();
                     // Get shell name from sysinfo or default to "shell"
                     let shell = get_process_name(pid);
+                    self.shell_names.insert(session_id, shell.clone());
                     result.push((session_id, shell, pid, captured));
                     self.sessions
                         .insert(session_id, SessionBackend::Tmux(session));
@@ -230,8 +251,15 @@ impl SessionManager {
 
                 for (session, scrollback) in recovered {
                     let session_id = session.session_id();
+                    // Skip sessions already tracked (reconnect case) to avoid
+                    // duplicate reader tasks
+                    if self.sessions.contains_key(&session_id) {
+                        tracing::debug!(session_id = %session_id, "skipping already-tracked daemon session");
+                        continue;
+                    }
                     let pid = session.pid();
                     let shell = get_process_name(pid);
+                    self.shell_names.insert(session_id, shell.clone());
                     result.push((session_id, shell, pid, scrollback));
                     self.sessions
                         .insert(session_id, SessionBackend::Daemon(session));
@@ -240,6 +268,34 @@ impl SessionManager {
                 result
             }
         }
+    }
+
+    /// Return a reference to the PTY output sender.
+    ///
+    /// Used to clone the sender when hoisting the channel above the reconnect loop.
+    pub fn output_tx(&self) -> &mpsc::Sender<PtyOutput> {
+        &self.output_tx
+    }
+
+    /// Return info about all currently active sessions for re-announcement after reconnect.
+    /// Uses cached shell names from creation time to avoid sysinfo degradation to "shell".
+    pub fn active_session_info(&self) -> Vec<(SessionId, String, u32)> {
+        self.sessions
+            .iter()
+            .map(|(id, backend)| {
+                let pid = match backend {
+                    SessionBackend::Pty(s) => s.pid(),
+                    SessionBackend::Tmux(s) => s.pid(),
+                    SessionBackend::Daemon(s) => s.pid(),
+                };
+                let shell = self
+                    .shell_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| get_process_name(pid));
+                (*id, shell, pid)
+            })
+            .collect()
     }
 
     /// Return an iterator of `(session_id, shell_pid)` for all active sessions.

@@ -25,15 +25,14 @@ impl HooksServer {
         agentic_tx: mpsc::Sender<AgenticAgentMessage>,
         mapper: SessionMapper,
         outbound_tx: mpsc::Sender<AgentMessage>,
+        sent_cc_session_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     ) -> Self {
         Self {
             state: HooksState {
                 agentic_tx,
                 mapper,
                 outbound_tx,
-                sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(
-                    std::collections::HashSet::new(),
-                )),
+                sent_cc_session_ids,
             },
         }
     }
@@ -74,10 +73,10 @@ impl HooksServer {
                 .with_graceful_shutdown(wait_for_shutdown(shutdown))
                 .await
                 .ok();
-            // Clean up port file on shutdown
-            if let Err(e) = remove_port_file().await {
-                tracing::debug!(error = %e, "failed to remove hooks port file");
-            }
+            // Do NOT remove port file here: on reconnect a new HooksServer may
+            // have already written its port, and removing it would break hook
+            // delivery for the rest of the connection. The port file is overwritten
+            // on each new server start, so stale files are harmless.
             tracing::debug!("hooks sidecar stopped");
         });
 
@@ -96,8 +95,8 @@ async fn write_port_file(port: u16) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Remove the port file on shutdown.
-async fn remove_port_file() -> Result<(), std::io::Error> {
+/// Remove the port file (called during agent shutdown, not per-connection).
+pub async fn remove_port_file() -> Result<(), std::io::Error> {
     let path = port_file_path()?;
     tokio::fs::remove_file(&path).await
 }
@@ -121,6 +120,8 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use uuid::Uuid;
 
@@ -137,7 +138,12 @@ mod tests {
         let loop_id = Uuid::new_v4();
         mapper.register_loop(session_id, loop_id).await;
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         // Send a PreToolUse hook
@@ -183,7 +189,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -216,7 +227,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -246,7 +262,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -299,7 +320,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -329,7 +355,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -373,7 +404,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
@@ -409,7 +445,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let server = HooksServer::new(agentic_tx, mapper, outbound_tx);
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        );
         let addr = server.start(shutdown_rx).await.unwrap();
 
         let client = reqwest::Client::new();
