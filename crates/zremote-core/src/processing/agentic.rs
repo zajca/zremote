@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
@@ -9,9 +7,6 @@ use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
-
-/// Duration of inactivity before a working loop is considered idle.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// DB row for an agentic loop, matching the `agentic_loops` table columns.
 #[derive(sqlx::FromRow)]
@@ -52,55 +47,16 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
     })
 }
 
-/// Check all active loops for idle state and transition them to `WaitingForInput`.
+/// No-op: auto-idle detection removed. Real `WaitingForInput` status is set
+/// by explicit hook signals (idle_prompt, permission_prompt, Elicitation).
+/// The previous 5-second timeout caused false "Waiting for input" when CC was
+/// actively thinking between tool uses.
+#[allow(clippy::unused_async)]
 pub async fn check_idle_loops(
-    agentic_loops: &AgenticLoopStore,
-    db: &SqlitePool,
-    events: &broadcast::Sender<ServerEvent>,
+    _agentic_loops: &AgenticLoopStore,
+    _db: &SqlitePool,
+    _events: &broadcast::Sender<ServerEvent>,
 ) {
-    // Collect candidates first (avoid holding DashMap refs across await)
-    let candidates: Vec<(AgenticLoopId, HostId)> = agentic_loops
-        .iter()
-        .filter(|e| e.status == AgenticStatus::Working && e.last_updated.elapsed() >= IDLE_TIMEOUT)
-        .map(|e| (e.loop_id, e.host_id))
-        .collect();
-
-    for (loop_id, host_id) in candidates {
-        // Double-check and update atomically
-        if let Some(mut entry) = agentic_loops.get_mut(&loop_id) {
-            if entry.status != AgenticStatus::Working || entry.last_updated.elapsed() < IDLE_TIMEOUT
-            {
-                continue;
-            }
-            entry.status = AgenticStatus::WaitingForInput;
-            entry.last_updated = Instant::now();
-        } else {
-            continue;
-        }
-
-        let loop_id_str = loop_id.to_string();
-        // Conditional update: only transition if still 'working' in DB.
-        // Prevents overwriting 'completed' set by a concurrent LoopEnded handler.
-        let result = sqlx::query(
-            "UPDATE agentic_loops SET status = 'waiting_for_input' WHERE id = ? AND status = 'working'",
-        )
-        .bind(&loop_id_str)
-        .execute(db)
-        .await;
-
-        // If the DB row was already updated (e.g., to 'completed'), skip the event.
-        if result.map_or(true, |r| r.rows_affected() == 0) {
-            continue;
-        }
-
-        if let Some(loop_info) = fetch_loop_info_by_id(db, &loop_id_str).await {
-            let _ = events.send(ServerEvent::LoopStatusChanged {
-                loop_info,
-                host_id: host_id.to_string(),
-                hostname: String::new(),
-            });
-        }
-    }
 }
 
 /// Processor for agentic loop messages from agents.
@@ -118,10 +74,10 @@ impl AgenticProcessor {
         fetch_loop_info_by_id(&self.db, loop_id).await
     }
 
-    /// Check all active loops for idle state and transition them to `WaitingForInput`.
-    pub async fn check_idle_loops(&self) {
-        check_idle_loops(&self.agentic_loops, &self.db, &self.events).await;
-    }
+    /// No-op: auto-idle detection removed (false positives). Real `WaitingForInput`
+    /// is set by explicit hook signals.
+    #[allow(clippy::unused_async)]
+    pub async fn check_idle_loops(&self) {}
 
     /// Handle an agentic agent message: update DB and in-memory state.
     pub async fn handle_message(&self, msg: AgenticAgentMessage) -> Result<(), AppError> {
@@ -1242,192 +1198,5 @@ mod tests {
 
         let entry = proc.agentic_loops.get(&loop_id).unwrap();
         assert_eq!(entry.task_name.as_deref(), Some("second-task"));
-    }
-
-    #[tokio::test]
-    async fn check_idle_loops_transitions_to_waiting_for_input() {
-        let db = test_db().await;
-        let proc = make_processor(db.clone());
-        let host_id_str = proc.host_id.to_string();
-        insert_host(&db, &host_id_str).await;
-
-        let session_id = Uuid::new_v4();
-        let loop_id = Uuid::new_v4();
-        insert_session(&db, &session_id.to_string(), &host_id_str).await;
-
-        proc.handle_message(AgenticAgentMessage::LoopDetected {
-            loop_id,
-            session_id,
-            project_path: "/proj".to_string(),
-            tool_name: "claude-code".to_string(),
-        })
-        .await
-        .unwrap();
-
-        // Manually set last_updated to well in the past
-        if let Some(mut entry) = proc.agentic_loops.get_mut(&loop_id) {
-            entry.last_updated = Instant::now() - Duration::from_secs(60);
-        }
-
-        let mut rx = proc.events.subscribe();
-
-        proc.check_idle_loops().await;
-
-        // Verify in-memory status changed
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
-        drop(entry);
-
-        // Verify DB status changed
-        let (status_str,): (String,) =
-            sqlx::query_as("SELECT status FROM agentic_loops WHERE id = ?")
-                .bind(loop_id.to_string())
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(status_str, "waiting_for_input");
-
-        // Verify LoopStatusChanged event was emitted
-        let mut found_event = false;
-        while let Ok(event) = rx.try_recv() {
-            if let ServerEvent::LoopStatusChanged { ref loop_info, .. } = event
-                && loop_info.id == loop_id.to_string()
-            {
-                assert_eq!(loop_info.status, "waiting_for_input");
-                found_event = true;
-            }
-        }
-        assert!(found_event, "expected LoopStatusChanged event");
-    }
-
-    #[tokio::test]
-    async fn check_idle_loops_skips_recently_updated() {
-        let db = test_db().await;
-        let proc = make_processor(db.clone());
-        let host_id_str = proc.host_id.to_string();
-        insert_host(&db, &host_id_str).await;
-
-        let session_id = Uuid::new_v4();
-        let loop_id = Uuid::new_v4();
-        insert_session(&db, &session_id.to_string(), &host_id_str).await;
-
-        proc.handle_message(AgenticAgentMessage::LoopDetected {
-            loop_id,
-            session_id,
-            project_path: "/proj".to_string(),
-            tool_name: "claude-code".to_string(),
-        })
-        .await
-        .unwrap();
-
-        // last_updated is fresh (just created), so check_idle_loops should not transition
-        proc.check_idle_loops().await;
-
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(
-            entry.status,
-            AgenticStatus::Working,
-            "recently updated loop should remain Working"
-        );
-    }
-
-    #[tokio::test]
-    async fn check_idle_loops_idempotent() {
-        let db = test_db().await;
-        let proc = make_processor(db.clone());
-        let host_id_str = proc.host_id.to_string();
-        insert_host(&db, &host_id_str).await;
-
-        let session_id = Uuid::new_v4();
-        let loop_id = Uuid::new_v4();
-        insert_session(&db, &session_id.to_string(), &host_id_str).await;
-
-        proc.handle_message(AgenticAgentMessage::LoopDetected {
-            loop_id,
-            session_id,
-            project_path: "/proj".to_string(),
-            tool_name: "claude-code".to_string(),
-        })
-        .await
-        .unwrap();
-
-        // Make it idle
-        if let Some(mut entry) = proc.agentic_loops.get_mut(&loop_id) {
-            entry.last_updated = Instant::now() - Duration::from_secs(60);
-        }
-
-        // First call transitions
-        proc.check_idle_loops().await;
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
-        drop(entry);
-
-        let mut rx = proc.events.subscribe();
-
-        // Second call should be a no-op (status is already WaitingForInput, not Working)
-        proc.check_idle_loops().await;
-
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
-        drop(entry);
-
-        // No new events should have been emitted
-        assert!(
-            rx.try_recv().is_err(),
-            "no events expected on idempotent check"
-        );
-    }
-
-    #[tokio::test]
-    async fn check_idle_loops_recovery_on_new_activity() {
-        let db = test_db().await;
-        let proc = make_processor(db.clone());
-        let host_id_str = proc.host_id.to_string();
-        insert_host(&db, &host_id_str).await;
-
-        let session_id = Uuid::new_v4();
-        let loop_id = Uuid::new_v4();
-        insert_session(&db, &session_id.to_string(), &host_id_str).await;
-
-        proc.handle_message(AgenticAgentMessage::LoopDetected {
-            loop_id,
-            session_id,
-            project_path: "/proj".to_string(),
-            tool_name: "claude-code".to_string(),
-        })
-        .await
-        .unwrap();
-
-        // Make it idle and transition
-        if let Some(mut entry) = proc.agentic_loops.get_mut(&loop_id) {
-            entry.last_updated = Instant::now() - Duration::from_secs(60);
-        }
-        proc.check_idle_loops().await;
-
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(entry.status, AgenticStatus::WaitingForInput);
-        drop(entry);
-
-        // New activity: LoopStateUpdate(Working) should bring it back
-        proc.handle_message(AgenticAgentMessage::LoopStateUpdate {
-            loop_id,
-            status: AgenticStatus::Working,
-            task_name: None,
-        })
-        .await
-        .unwrap();
-
-        let entry = proc.agentic_loops.get(&loop_id).unwrap();
-        assert_eq!(entry.status, AgenticStatus::Working);
-        drop(entry);
-
-        // Verify DB also updated back to working
-        let (status_str,): (String,) =
-            sqlx::query_as("SELECT status FROM agentic_loops WHERE id = ?")
-                .bind(loop_id.to_string())
-                .fetch_one(&db)
-                .await
-                .unwrap();
-        assert_eq!(status_str, "working");
     }
 }

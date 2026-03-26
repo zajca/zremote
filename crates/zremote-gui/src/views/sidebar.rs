@@ -871,15 +871,21 @@ impl SidebarView {
         let session_id = session.id.clone();
         let host_id = host_id.to_string();
 
-        let display_name = session
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("Session {}", &session.id[..8]));
-
         // Claude Code agentic state for this session
         let cc_state = self.cc_states.get(&session.id);
         let cc_metrics = self.cc_metrics.get(&session.id);
         let has_second_row = cc_metrics.is_some();
+
+        let display_name = session.name.clone().unwrap_or_else(|| {
+            if let Some(cc) = cc_state
+                && let Some(ref task) = cc.task_name
+            {
+                return task.clone();
+            }
+            format!("Session {}", &session.id[..8])
+        });
+        let name_is_task =
+            session.name.is_none() && cc_state.is_some_and(|cc| cc.task_name.is_some());
 
         let bg_color = if is_selected {
             theme::bg_tertiary()
@@ -994,18 +1000,28 @@ impl SidebarView {
                     );
                 }
 
-                // Session name
-                row1 = row1.child(
-                    div()
-                        .text_color(text_color)
-                        .text_size(px(12.0))
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .child(display_name),
-                );
+                // Session name -- pill badge with semi-transparent bg when from task_name
+                let mut name_div = div()
+                    .text_color(text_color)
+                    .text_size(px(12.0))
+                    .whitespace_nowrap()
+                    .truncate();
 
-                // Task name (without secondary icon)
-                if let Some(cc) = cc_state
+                if name_is_task {
+                    name_div = name_div
+                        .px(px(4.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .bg(gpui::rgba(0xffffff12));
+                } else {
+                    name_div = name_div.flex_shrink_0();
+                }
+
+                row1 = row1.child(name_div.child(display_name));
+
+                // Task name suffix (only when session has a custom name)
+                if session.name.is_some()
+                    && let Some(cc) = cc_state
                     && let Some(ref task) = cc.task_name
                 {
                     row1 = row1.child(
