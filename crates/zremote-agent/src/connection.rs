@@ -427,6 +427,7 @@ pub async fn run_connection(
     let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
 
     // Re-announce active agentic loops so the server restores monitoring state.
+    // Also prunes loops whose processes died during disconnect (sends LoopEnded).
     // Must happen after agentic_tx is created since we send through it.
     {
         let loop_messages = agentic_manager.re_announce_loops();
@@ -436,13 +437,8 @@ pub async fn run_connection(
                 "re-announcing agentic loops after reconnect"
             );
             for msg in loop_messages {
-                // re_announce_loops() only produces LoopDetected variants
-                let AgenticAgentMessage::LoopDetected { loop_id, .. } = &msg else {
-                    continue;
-                };
-                let lid = *loop_id;
                 if agentic_tx.try_send(msg).is_err() {
-                    tracing::warn!(loop_id = %lid, "agentic channel full, loop re-announce dropped");
+                    tracing::warn!("agentic channel full, loop re-announce message dropped");
                 }
             }
         }

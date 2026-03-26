@@ -317,9 +317,9 @@ async fn run_agent() {
     // Persistent state that survives WebSocket reconnects.
     // These are hoisted above the reconnect loop so PTY sessions, agentic loop
     // state, and CC session mappings are preserved across disconnects.
-    // Capacity 4096: during disconnect, PTY readers use blocking_send which stalls
-    // when full. With 4KB chunks this buffers ~16MB, enough for most reconnect windows
-    // (backoff up to 300s). Prevents terminal output loss during short disconnects.
+    // Capacity 4096: during disconnect, PTY readers use try_send and drop output
+    // when full rather than blocking. With 4KB chunks this buffers ~16MB before
+    // dropping, enough for most reconnect windows (backoff up to 300s).
     let (pty_output_tx, mut pty_output_rx) = tokio::sync::mpsc::channel::<session::PtyOutput>(4096);
     let mut session_manager = session::SessionManager::new(pty_output_tx, backend);
     let mut agentic_manager = agentic::manager::AgenticLoopManager::new();

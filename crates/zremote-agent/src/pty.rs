@@ -72,16 +72,21 @@ impl PtySession {
                         break;
                     }
                     Ok(n) => {
-                        if output_tx
-                            .blocking_send(PtyOutput {
-                                session_id,
-                                pane_id: None,
-                                data: buf[..n].to_vec(),
-                            })
-                            .is_err()
-                        {
-                            // Receiver dropped -- connection gone
-                            break;
+                        match output_tx.try_send(PtyOutput {
+                            session_id,
+                            pane_id: None,
+                            data: buf[..n].to_vec(),
+                        }) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                // Channel full (disconnect, consumer not draining).
+                                // Drop this chunk rather than blocking the reader thread.
+                                // Terminal scrollback in the PTY retains the data.
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Receiver dropped -- session manager gone
+                                break;
+                            }
                         }
                     }
                     Err(_) => {

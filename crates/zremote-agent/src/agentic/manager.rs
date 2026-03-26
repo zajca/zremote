@@ -12,6 +12,8 @@ struct ActiveLoop {
     loop_id: AgenticLoopId,
     tool_name: String,
     detected_pid: u32,
+    /// Working directory captured at detection time (avoids sysinfo on reconnect).
+    project_path: String,
 }
 
 /// Manages agentic loop detection and event processing across sessions.
@@ -69,21 +71,22 @@ impl AgenticLoopManager {
                     "agentic tool detected"
                 );
 
-                self.loops.insert(
-                    session_id,
-                    ActiveLoop {
-                        loop_id,
-                        tool_name: detected.tool_name.clone(),
-                        detected_pid: detected.pid,
-                    },
-                );
-
                 let project_path = self
                     .system
                     .process(sysinfo::Pid::from_u32(detected.pid))
                     .and_then(|p| p.cwd())
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
+
+                self.loops.insert(
+                    session_id,
+                    ActiveLoop {
+                        loop_id,
+                        tool_name: detected.tool_name.clone(),
+                        detected_pid: detected.pid,
+                        project_path: project_path.clone(),
+                    },
+                );
 
                 messages.push(AgenticAgentMessage::LoopDetected {
                     loop_id,
@@ -108,30 +111,39 @@ impl AgenticLoopManager {
     }
 
     /// Re-announce all active loops to the server after a reconnect.
-    /// Returns `LoopDetected` messages for every tracked loop so the server
-    /// restores agentic monitoring state immediately (instead of waiting for
-    /// the next periodic check which only detects *new* loops).
+    /// Returns `LoopDetected` messages for loops whose processes are still alive,
+    /// and `LoopEnded` messages for loops whose processes died during the disconnect.
+    /// Uses stored `project_path` from detection time — no sysinfo call needed.
     pub fn re_announce_loops(&mut self) -> Vec<AgenticAgentMessage> {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        let mut messages = Vec::new();
+        let mut dead_sessions = Vec::new();
 
-        self.loops
-            .iter()
-            .map(|(session_id, active)| {
-                let project_path = self
-                    .system
-                    .process(sysinfo::Pid::from_u32(active.detected_pid))
-                    .and_then(|p| p.cwd())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+        for (session_id, active) in &self.loops {
+            // Simple liveness check via /proc — avoids full sysinfo refresh
+            let alive = std::path::Path::new(&format!("/proc/{}", active.detected_pid)).exists();
 
-                AgenticAgentMessage::LoopDetected {
+            if alive {
+                messages.push(AgenticAgentMessage::LoopDetected {
                     loop_id: active.loop_id,
                     session_id: *session_id,
-                    project_path,
+                    project_path: active.project_path.clone(),
                     tool_name: active.tool_name.clone(),
-                }
-            })
-            .collect()
+                });
+            } else {
+                messages.push(AgenticAgentMessage::LoopEnded {
+                    loop_id: active.loop_id,
+                    reason: "process_exited".to_string(),
+                });
+                dead_sessions.push(*session_id);
+            }
+        }
+
+        // Prune dead loops
+        for session_id in dead_sessions {
+            self.loops.remove(&session_id);
+        }
+
+        messages
     }
 
     /// Check if a given `loop_id` is tracked by this manager.
@@ -228,6 +240,7 @@ mod tests {
                 loop_id,
                 tool_name: "claude-code".to_string(),
                 detected_pid: 12345,
+                project_path: String::new(),
             },
         );
 
@@ -273,6 +286,7 @@ mod tests {
                 loop_id: loop_a,
                 tool_name: "claude-code".to_string(),
                 detected_pid: 11111,
+                project_path: String::new(),
             },
         );
         manager.loops.insert(
@@ -281,6 +295,7 @@ mod tests {
                 loop_id: loop_b,
                 tool_name: "claude-code".to_string(),
                 detected_pid: 22222,
+                project_path: String::new(),
             },
         );
 
@@ -313,6 +328,7 @@ mod tests {
                 loop_id,
                 tool_name: "claude-code".to_string(),
                 detected_pid: 12345,
+                project_path: String::new(),
             },
         );
 
@@ -338,6 +354,7 @@ mod tests {
                 loop_id,
                 tool_name: "claude-code".to_string(),
                 detected_pid: u32::MAX - 1,
+                project_path: String::new(),
             },
         );
 
