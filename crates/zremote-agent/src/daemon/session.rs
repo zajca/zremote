@@ -132,9 +132,20 @@ impl DaemonSession {
         Ok(())
     }
 
-    /// Send shutdown request to the daemon (kills shell, cleans up).
+    /// Kill the daemon process and clean up state/socket files.
+    ///
+    /// Sends SIGTERM directly to the daemon process instead of relying on the
+    /// async Shutdown channel message (which is lost because `Drop` aborts the
+    /// writer task before delivery). When the daemon dies, its PTY master fd
+    /// closes, which delivers SIGHUP to the shell's process group.
     pub fn kill(&self) {
-        let _ = self.writer_tx.try_send(DaemonRequest::Shutdown);
+        // Kill daemon process directly (no race with Drop aborting writer task)
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(self.daemon_pid).unwrap_or(i32::MAX));
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+        // Clean up files from agent side (don't rely on daemon cleanup running)
+        let _ = std::fs::remove_file(&self.state_path);
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 
     /// Detach from the daemon without sending shutdown.
@@ -300,7 +311,7 @@ fn start_io_tasks(
                 }
                 Err(e) => {
                     // Connection lost - signal EOF
-                    tracing::debug!(error = %e, session_id = %session_id, "daemon socket read error");
+                    tracing::warn!(error = %e, session_id = %session_id, "daemon socket read error, session ending");
                     let _ = output_tx
                         .send(PtyOutput {
                             session_id,
