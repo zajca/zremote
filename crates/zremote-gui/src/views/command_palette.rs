@@ -21,7 +21,8 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::persistence::RecentSession;
 use crate::theme;
-use crate::views::sidebar::CcState;
+use crate::views::cc_widgets;
+use crate::views::sidebar::{CcMetrics, CcState};
 use zremote_client::{AgenticStatus, Host, Project, Session};
 
 use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
@@ -223,9 +224,11 @@ pub struct PaletteSnapshot {
     project_names: HashMap<String, String>,
     recent_set: HashSet<String>,
     cc_states: HashMap<String, CcState>,
+    cc_metrics: HashMap<String, CcMetrics>,
 }
 
 impl PaletteSnapshot {
+    #[allow(clippy::too_many_arguments)]
     pub fn capture(
         hosts: Rc<Vec<Host>>,
         sessions: Rc<Vec<Session>>,
@@ -234,6 +237,7 @@ impl PaletteSnapshot {
         active_session_id: Option<String>,
         recent_sessions: &[RecentSession],
         cc_states: HashMap<String, CcState>,
+        cc_metrics: HashMap<String, CcMetrics>,
     ) -> Self {
         let host_names: HashMap<String, String> = hosts
             .iter()
@@ -257,6 +261,7 @@ impl PaletteSnapshot {
             project_names,
             recent_set,
             cc_states,
+            cc_metrics,
         }
     }
 
@@ -1522,17 +1527,7 @@ impl CommandPalette {
 
         // Agentic state indicator
         if let Some(cc) = cc_state {
-            let (cc_icon, cc_color) = if cc.status == AgenticStatus::WaitingForInput {
-                (Icon::MessageCircle, theme::warning())
-            } else {
-                (Icon::Loader, theme::accent())
-            };
-            row = row.child(
-                icon(cc_icon)
-                    .size(px(12.0))
-                    .flex_shrink_0()
-                    .text_color(cc_color),
-            );
+            row = row.child(cc_widgets::cc_bot_icon(cc.status, 12.0).flex_shrink_0());
             if let Some(ref task) = cc.task_name {
                 row = row.child(
                     div()
@@ -1543,6 +1538,18 @@ impl CommandPalette {
                         .whitespace_nowrap()
                         .child(task.clone()),
                 );
+            }
+            // Context bar + model from metrics
+            if let Some(metrics) = self.snapshot.cc_metrics.get(&session.id) {
+                row = row.child(cc_widgets::render_context_bar(metrics, 40.0, 3.0));
+                if let Some(ref model) = metrics.model {
+                    row = row.child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme::text_tertiary())
+                            .child(cc_widgets::short_model_name(model)),
+                    );
+                }
             }
         }
 
@@ -3003,6 +3010,7 @@ mod tests {
             Some("sess-1".to_string()),
             &[],
             std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         )
     }
 
@@ -3251,6 +3259,7 @@ mod tests {
             "local".to_string(),
             None,
             &[],
+            std::collections::HashMap::new(),
             std::collections::HashMap::new(),
         );
         let session_items = build_session_items(&snapshot);

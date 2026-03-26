@@ -7,6 +7,7 @@ use gpui::*;
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::cc_widgets;
 use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
@@ -20,6 +21,21 @@ pub struct CcState {
     pub loop_id: String,
     pub status: AgenticStatus,
     pub task_name: Option<String>,
+}
+
+/// Claude Code session metrics (context, cost, model, rate limits).
+#[derive(Clone, Default)]
+pub struct CcMetrics {
+    pub model: Option<String>,
+    pub context_used_pct: Option<f64>,
+    pub context_window_size: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub tokens_in: Option<u64>,
+    pub tokens_out: Option<u64>,
+    pub lines_added: Option<i64>,
+    pub lines_removed: Option<i64>,
+    pub rate_limit_5h_pct: Option<u64>,
+    pub rate_limit_7d_pct: Option<u64>,
 }
 
 /// A project with its associated sessions.
@@ -45,6 +61,8 @@ pub struct SidebarView {
     load_generation: u64,
     /// Claude Code agentic loop state per session_id.
     cc_states: HashMap<String, CcState>,
+    /// Claude Code session metrics per session_id.
+    cc_metrics: HashMap<String, CcMetrics>,
 }
 
 impl SidebarView {
@@ -68,6 +86,10 @@ impl SidebarView {
         &self.cc_states
     }
 
+    pub fn cc_metrics(&self) -> &HashMap<String, CcMetrics> {
+        &self.cc_metrics
+    }
+
     pub fn new(app_state: Arc<AppState>, cx: &mut Context<Self>) -> Self {
         // Restore previously selected session from persistence.
         let restored_session_id = app_state
@@ -85,6 +107,7 @@ impl SidebarView {
             loading: true,
             load_generation: 0,
             cc_states: HashMap::new(),
+            cc_metrics: HashMap::new(),
         };
         view.load_data(cx);
         view
@@ -191,14 +214,16 @@ impl SidebarView {
             }
             ServerEvent::SessionClosed { session_id, .. } => {
                 self.cc_states.remove(session_id);
+                self.cc_metrics.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::SessionSuspended { session_id } => {
                 self.cc_states.remove(session_id);
+                self.cc_metrics.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::HostDisconnected { host_id } => {
-                // Remove cc_states for all sessions belonging to this host.
+                // Remove cc_states and cc_metrics for all sessions belonging to this host.
                 let session_ids: Vec<String> = self
                     .sessions
                     .iter()
@@ -207,6 +232,7 @@ impl SidebarView {
                     .collect();
                 for sid in &session_ids {
                     self.cc_states.remove(sid);
+                    self.cc_metrics.remove(sid);
                 }
                 self.load_data(cx);
             }
@@ -238,7 +264,38 @@ impl SidebarView {
                     && state.loop_id == loop_info.id
                 {
                     self.cc_states.remove(&loop_info.session_id);
+                    self.cc_metrics.remove(&loop_info.session_id);
                 }
+                cx.notify();
+            }
+            ServerEvent::ClaudeSessionMetrics {
+                session_id,
+                model,
+                context_used_pct,
+                context_window_size,
+                cost_usd,
+                tokens_in,
+                tokens_out,
+                lines_added,
+                lines_removed,
+                rate_limit_5h_pct,
+                rate_limit_7d_pct,
+            } => {
+                self.cc_metrics.insert(
+                    session_id.clone(),
+                    CcMetrics {
+                        model: model.clone(),
+                        context_used_pct: *context_used_pct,
+                        context_window_size: *context_window_size,
+                        cost_usd: *cost_usd,
+                        tokens_in: *tokens_in,
+                        tokens_out: *tokens_out,
+                        lines_added: *lines_added,
+                        lines_removed: *lines_removed,
+                        rate_limit_5h_pct: *rate_limit_5h_pct,
+                        rate_limit_7d_pct: *rate_limit_7d_pct,
+                    },
+                );
                 cx.notify();
             }
             _ => {}
@@ -821,6 +878,8 @@ impl SidebarView {
 
         // Claude Code agentic state for this session
         let cc_state = self.cc_states.get(&session.id);
+        let cc_metrics = self.cc_metrics.get(&session.id);
+        let has_second_row = cc_metrics.is_some();
 
         let bg_color = if is_selected {
             theme::bg_tertiary()
@@ -861,6 +920,9 @@ impl SidebarView {
             div().into_any_element()
         };
 
+        // Row height: taller when we have a second row with metrics
+        let row_height = if has_second_row { px(38.0) } else { px(22.0) };
+
         div()
             .id(SharedString::from(format!("session-{session_id}")))
             .flex()
@@ -868,7 +930,7 @@ impl SidebarView {
             .justify_between()
             .pl(indent)
             .pr(px(12.0))
-            .h(px(22.0))
+            .h(row_height)
             .cursor_pointer()
             .rounded(px(4.0))
             .mx(px(4.0))
@@ -889,62 +951,108 @@ impl SidebarView {
                 })
             })
             .child({
-                let mut left = div()
+                // Two-row layout container
+                let mut col = div().flex().flex_col().flex_1().min_w(px(0.0));
+
+                // Row 1: icon + name + task
+                let mut row1 = div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .min_w(px(0.0))
-                    .overflow_hidden()
-                    .child(
+                    .overflow_hidden();
+
+                // Status indicator: Bot icon when CC is active, dot otherwise
+                if let Some(cc) = cc_state {
+                    let bot_icon_id = SharedString::from(format!("cc-bot-{}", session.id));
+                    let tooltip_metrics = cc_metrics.cloned().unwrap_or_default();
+                    let tooltip_status = Some(cc.status);
+                    let tooltip_task = cc.task_name.clone();
+
+                    row1 = row1.child(
+                        div()
+                            .id(bot_icon_id)
+                            .flex_shrink_0()
+                            .child(cc_widgets::cc_bot_icon(cc.status, 12.0))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| CcTooltipView {
+                                    metrics: tooltip_metrics.clone(),
+                                    status: tooltip_status,
+                                    task_name: tooltip_task.clone(),
+                                })
+                                .into()
+                            }),
+                    );
+                } else {
+                    row1 = row1.child(
                         div()
                             .w(px(6.0))
                             .h(px(6.0))
                             .flex_shrink_0()
                             .rounded(px(3.0))
                             .bg(status_color),
-                    )
-                    .child(
-                        div()
-                            .text_color(text_color)
-                            .text_size(px(12.0))
-                            .flex_shrink_0()
-                            .whitespace_nowrap()
-                            .child(display_name),
                     );
-
-                if let Some(cc) = cc_state {
-                    let cc_icon = if cc.status == AgenticStatus::WaitingForInput {
-                        Icon::MessageCircle
-                    } else {
-                        Icon::Loader
-                    };
-                    let cc_color = if cc.status == AgenticStatus::WaitingForInput {
-                        theme::warning()
-                    } else {
-                        theme::accent()
-                    };
-
-                    left = left.child(
-                        icon(cc_icon)
-                            .size(px(12.0))
-                            .flex_shrink_0()
-                            .text_color(cc_color),
-                    );
-
-                    if let Some(ref task) = cc.task_name {
-                        left = left.child(
-                            div()
-                                .text_color(theme::text_tertiary())
-                                .text_size(px(11.0))
-                                .truncate()
-                                .child(format!("— {task}")),
-                        );
-                    }
                 }
 
-                left
+                // Session name
+                row1 = row1.child(
+                    div()
+                        .text_color(text_color)
+                        .text_size(px(12.0))
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .child(display_name),
+                );
+
+                // Task name (without secondary icon)
+                if let Some(cc) = cc_state
+                    && let Some(ref task) = cc.task_name
+                {
+                    row1 = row1.child(
+                        div()
+                            .text_color(theme::text_tertiary())
+                            .text_size(px(11.0))
+                            .truncate()
+                            .child(format!("— {task}")),
+                    );
+                }
+
+                col = col.child(row1);
+
+                // Row 2: context bar + model (only when metrics available)
+                if let Some(metrics) = cc_metrics {
+                    let mut row2 = div().flex().items_center().gap(px(4.0)).ml(px(18.0));
+
+                    row2 = row2.child(cc_widgets::render_context_bar(metrics, 60.0, 4.0));
+
+                    if let Some(ref model) = metrics.model {
+                        row2 = row2.child(
+                            div()
+                                .text_color(theme::text_tertiary())
+                                .text_size(px(10.0))
+                                .child(cc_widgets::short_model_name(model)),
+                        );
+                    }
+
+                    col = col.child(row2);
+                }
+
+                col
             })
             .child(close_button)
+    }
+}
+
+/// Tooltip view for Claude Code session metrics.
+struct CcTooltipView {
+    metrics: CcMetrics,
+    status: Option<AgenticStatus>,
+    task_name: Option<String>,
+}
+
+impl Render for CcTooltipView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        cc_widgets::render_cc_tooltip(&self.metrics, self.status, self.task_name.as_deref())
     }
 }
 

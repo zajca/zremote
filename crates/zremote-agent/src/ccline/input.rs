@@ -19,7 +19,6 @@ pub struct StatusInput {
     pub output_style: Option<OutputStyle>,
     pub cost: Option<CostInfo>,
     pub context_window: Option<ContextWindow>,
-    pub exceeds_200k_tokens: Option<bool>,
     pub rate_limits: Option<RateLimits>,
 }
 
