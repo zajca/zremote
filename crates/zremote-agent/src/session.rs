@@ -191,6 +191,7 @@ impl SessionManager {
     pub fn detach_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
+            self.shell_names.remove(&id);
             if let Some(backend) = self.sessions.remove(&id) {
                 match backend {
                     SessionBackend::Tmux(mut session) => session.detach(),

@@ -433,8 +433,12 @@ pub async fn run_connection(
                 "re-announcing agentic loops after reconnect"
             );
             for msg in loop_messages {
+                let loop_id = match &msg {
+                    AgenticAgentMessage::LoopDetected { loop_id, .. } => *loop_id,
+                    _ => uuid::Uuid::nil(),
+                };
                 if agentic_tx.try_send(msg).is_err() {
-                    tracing::warn!("agentic channel full, loop re-announce dropped");
+                    tracing::warn!(loop_id = %loop_id, "agentic channel full, loop re-announce dropped");
                 }
             }
         }
