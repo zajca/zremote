@@ -1,4 +1,4 @@
-use crate::input::StatusInput;
+use super::input::StatusInput;
 use std::fmt::Write;
 
 // ANSI color codes
@@ -112,8 +112,8 @@ pub fn format_status(input: &StatusInput, git_branch: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::input::{ContextWindow, CostInfo, ModelInfo, RateLimit, RateLimits};
     use super::*;
-    use crate::input::{ContextWindow, CostInfo, ModelInfo, RateLimit, RateLimits};
 
     #[test]
     fn format_full_status() {

@@ -7,7 +7,6 @@ members = [
     "crates/zremote-agent",
     "crates/zremote-gui",
     "crates/zremote-client",
-    "crates/zremote-ccline",
 ]
 
 [workspace.package]

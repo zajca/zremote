@@ -205,6 +205,9 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
         }
     }
 
+    // Set statusLine to use the agent's own ccline subcommand
+    install_status_line(&mut settings);
+
     // Write back
     let formatted =
         serde_json::to_string_pretty(&settings).map_err(|_| InstallError::InvalidSettings)?;
@@ -218,6 +221,33 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
     );
 
     Ok(())
+}
+
+/// Install the `statusLine` config pointing to `zremote-agent ccline`.
+/// Always overwrites any existing statusLine configuration.
+fn install_status_line(settings: &mut serde_json::Value) {
+    let agent_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+
+    let Some(agent_path) = agent_path else {
+        tracing::warn!("cannot determine agent binary path, skipping statusLine install");
+        return;
+    };
+
+    let command = format!("{agent_path} ccline");
+
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            "statusLine".to_string(),
+            serde_json::json!({
+                "type": "command",
+                "command": command,
+                "padding": 0
+            }),
+        );
+        tracing::info!(command, "statusLine configured");
+    }
 }
 
 /// Remove zremote hooks from Claude Code settings.

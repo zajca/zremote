@@ -185,12 +185,9 @@ pub async fn run(
                     Ok((stream, _)) => {
                         let db = db.clone();
                         let events = events.clone();
-                        let permit = match semaphore.clone().try_acquire_owned() {
-                            Ok(p) => p,
-                            Err(_) => {
-                                tracing::debug!("ccline connection limit reached, dropping");
-                                continue;
-                            }
+                        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+                            tracing::debug!("ccline connection limit reached, dropping");
+                            continue;
                         };
                         tokio::spawn(async move {
                             let _permit = permit; // held until task completes

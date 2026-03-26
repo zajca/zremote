@@ -2,6 +2,10 @@ use serde::Deserialize;
 
 /// Top-level JSON received from Claude Code's status line feature via stdin.
 /// All fields are optional with `serde(default)` for forward-compatibility.
+///
+/// SYNC: This struct mirrors `CclineMessage` in `types.rs` (used by the listener).
+/// Both model the same Claude Code JSON schema. Changes to the schema must be
+/// applied in both files.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct StatusInput {
