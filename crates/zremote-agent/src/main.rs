@@ -21,6 +21,7 @@
 )]
 
 mod agentic;
+mod ccline;
 mod claude;
 mod config;
 mod connection;
@@ -94,6 +95,9 @@ enum Commands {
         #[arg(long)]
         skip_permissions: bool,
     },
+    /// Internal: Claude Code status line handler (reads JSON from stdin, outputs formatted status)
+    #[command(hide = true)]
+    Ccline,
     /// Internal: run as a PTY daemon process (not for direct use)
     #[command(hide = true)]
     PtyDaemon {
@@ -120,6 +124,12 @@ enum Commands {
 fn main() {
     // Parse CLI first (before tokio) so PtyDaemon can call setsid() before runtime
     let cli = Cli::try_parse().unwrap_or_default();
+
+    // Ccline: synchronous, no tokio runtime needed
+    if matches!(cli.command, Some(Commands::Ccline)) {
+        ccline::run_ccline();
+        return;
+    }
 
     // PtyDaemon: setsid() FIRST, then single-thread tokio runtime
     if let Some(Commands::PtyDaemon {
@@ -219,7 +229,7 @@ async fn async_main(cli: Cli) {
         } => {
             run_configure(&project, &model, skip_permissions);
         }
-        Commands::PtyDaemon { .. } => unreachable!("handled above"),
+        Commands::Ccline | Commands::PtyDaemon { .. } => unreachable!("handled above"),
     }
 }
 

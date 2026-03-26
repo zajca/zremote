@@ -206,6 +206,14 @@ pub async fn run_local(
     // Spawn periodic agentic tool detection loop
     spawn_agentic_detection_loop(state.clone());
 
+    // Start ccline Unix socket listener for Claude Code status line data
+    {
+        let db = state.db.clone();
+        let events = state.events.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(crate::ccline::listener::run(db, events, shutdown));
+    }
+
     // Upsert synthetic host row so queries against hosts table work
     upsert_local_host(&pool, &host_id, &hostname).await?;
 

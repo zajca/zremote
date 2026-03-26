@@ -25,11 +25,21 @@ pub struct ClaudeTaskRow {
     pub summary: Option<String>,
     pub task_name: Option<String>,
     pub created_at: String,
+    // Status line metrics (from migration 017)
+    pub context_used_pct: Option<f64>,
+    pub context_window_size: Option<i64>,
+    pub rate_limit_5h_pct: Option<i64>,
+    pub rate_limit_7d_pct: Option<i64>,
+    pub lines_added: Option<i64>,
+    pub lines_removed: Option<i64>,
+    pub cc_version: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, session_id, host_id, project_path, project_id, model, initial_prompt, \
      claude_session_id, resume_from, status, options_json, loop_id, started_at, ended_at, \
-     total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at";
+     total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at, \
+     context_used_pct, context_window_size, rate_limit_5h_pct, rate_limit_7d_pct, \
+     lines_added, lines_removed, cc_version";
 
 pub struct ListClaudeTasksFilter {
     pub host_id: Option<String>,
@@ -173,6 +183,56 @@ pub async fn insert_resumed_claude_task(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Update real-time metrics for a Claude session from status line data.
+/// Matches by `claude_session_id` (the CC session UUID).
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+pub async fn update_session_metrics(
+    pool: &SqlitePool,
+    claude_session_id: &str,
+    model: Option<&str>,
+    cost_usd: Option<f64>,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+    context_used_pct: Option<f64>,
+    context_window_size: Option<i64>,
+    rate_limit_5h_pct: Option<i64>,
+    rate_limit_7d_pct: Option<i64>,
+    lines_added: Option<i64>,
+    lines_removed: Option<i64>,
+    cc_version: Option<&str>,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        "UPDATE claude_sessions SET \
+         model = COALESCE(?, model), \
+         total_cost_usd = COALESCE(?, total_cost_usd), \
+         total_tokens_in = COALESCE(?, total_tokens_in), \
+         total_tokens_out = COALESCE(?, total_tokens_out), \
+         context_used_pct = COALESCE(?, context_used_pct), \
+         context_window_size = COALESCE(?, context_window_size), \
+         rate_limit_5h_pct = COALESCE(?, rate_limit_5h_pct), \
+         rate_limit_7d_pct = COALESCE(?, rate_limit_7d_pct), \
+         lines_added = COALESCE(?, lines_added), \
+         lines_removed = COALESCE(?, lines_removed), \
+         cc_version = COALESCE(?, cc_version) \
+         WHERE claude_session_id = ?",
+    )
+    .bind(model)
+    .bind(cost_usd)
+    .bind(tokens_in)
+    .bind(tokens_out)
+    .bind(context_used_pct)
+    .bind(context_window_size)
+    .bind(rate_limit_5h_pct)
+    .bind(rate_limit_7d_pct)
+    .bind(lines_added)
+    .bind(lines_removed)
+    .bind(cc_version)
+    .bind(claude_session_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 #[cfg(test)]
@@ -613,6 +673,76 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_session_metrics_updates_matching_session() {
+        let pool = test_db().await;
+        let host_id = "host-1";
+        insert_host(&pool, host_id).await;
+        insert_session(&pool, "sess-1", host_id).await;
+
+        insert_claude_task(
+            &pool, "task-1", "sess-1", host_id, "/proj", None, None, None, None,
+        )
+        .await
+        .unwrap();
+
+        // Set claude_session_id so the metric update can find it
+        sqlx::query(
+            "UPDATE claude_sessions SET claude_session_id = 'cc-abc-123' WHERE id = 'task-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let updated = update_session_metrics(
+            &pool,
+            "cc-abc-123",
+            Some("opus"),
+            Some(2.93),
+            Some(30000),
+            Some(15000),
+            Some(45.0),
+            Some(1_000_000),
+            Some(11),
+            Some(85),
+            Some(168),
+            Some(2),
+            Some("2.1.83"),
+        )
+        .await
+        .unwrap();
+        assert!(updated);
+
+        let task = get_claude_task(&pool, "task-1").await.unwrap();
+        assert_eq!(task.model, Some("opus".to_string()));
+        assert_eq!(task.total_cost_usd, Some(2.93));
+        assert_eq!(task.total_tokens_in, Some(30000));
+        assert_eq!(task.total_tokens_out, Some(15000));
+    }
+
+    #[tokio::test]
+    async fn update_session_metrics_returns_false_for_no_match() {
+        let pool = test_db().await;
+        let updated = update_session_metrics(
+            &pool,
+            "nonexistent",
+            Some("opus"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!updated);
     }
 
     #[tokio::test]
