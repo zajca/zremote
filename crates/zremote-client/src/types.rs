@@ -362,6 +362,11 @@ pub(crate) enum TerminalServerMessage {
     PaneAdded { pane_id: String, index: u16 },
     #[serde(rename = "pane_removed")]
     PaneRemoved { pane_id: String },
+    #[serde(rename = "error")]
+    Error {
+        #[serde(default)]
+        message: String,
+    },
 }
 
 /// Terminal WebSocket message to server (text frames).
@@ -410,6 +415,8 @@ pub enum TerminalEvent {
     SessionSuspended,
     /// Session was resumed (agent reconnected).
     SessionResumed,
+    /// Server-side error (session not found, stale, etc.)
+    Error { message: String },
     /// WebSocket connection lost (session may still be alive on the server).
     Disconnected,
 }

@@ -338,6 +338,12 @@ async fn run_terminal_ws(
                                 let _ =
                                     output_tx.send(TerminalEvent::PaneRemoved { pane_id });
                             }
+                            Ok(TerminalServerMessage::Error { message }) => {
+                                warn!(error = %message, "terminal server error");
+                                let _ = output_tx.send(TerminalEvent::Error { message });
+                                session_closed = true;
+                                break;
+                            }
                             Err(e) => {
                                 warn!(error = %e, "failed to parse terminal message");
                             }

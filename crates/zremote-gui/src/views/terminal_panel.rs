@@ -158,6 +158,8 @@ pub struct TerminalPanel {
     handle: TerminalHandle,
     focus_handle: FocusHandle,
     closed: bool,
+    /// Error message from server (shown in UI when set).
+    error_message: Option<String>,
     reader_started: bool,
     /// Whether the cursor is currently visible (toggled by blink timer).
     cursor_visible: bool,
@@ -283,6 +285,7 @@ impl TerminalPanel {
             handle,
             focus_handle,
             closed: false,
+            error_message: None,
             reader_started: false,
             cursor_visible: true,
             blink_started: false,
@@ -345,6 +348,7 @@ impl TerminalPanel {
     ) {
         self.disconnected = false;
         self.closed = false;
+        self.error_message = None;
         self.reader_started = false; // Allow start_output_reader to run again
         self.pty_write_listener.update_sender(handle.input_sender());
         self.handle = handle;
@@ -466,6 +470,14 @@ impl TerminalPanel {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
                         });
+                    }
+                    Ok(TerminalEvent::Error { message }) => {
+                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            this.error_message = Some(message);
+                            this.closed = true;
+                            cx.notify();
+                        });
+                        break;
                     }
                     Ok(TerminalEvent::Disconnected) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
@@ -1375,12 +1387,22 @@ impl Render for TerminalPanel {
         }
 
         if self.closed {
+            let label = if let Some(ref msg) = self.error_message {
+                format!("[Error: {msg}]")
+            } else {
+                "[Session closed]".to_string()
+            };
+            let color = if self.error_message.is_some() {
+                theme::error()
+            } else {
+                theme::text_tertiary()
+            };
             content = content.child(
                 div()
                     .pt(px(8.0))
-                    .text_color(theme::text_tertiary())
+                    .text_color(color)
                     .text_size(px(12.0))
-                    .child("[Session closed]"),
+                    .child(label),
             );
         } else if self.disconnected {
             content = content.child(
