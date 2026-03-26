@@ -996,7 +996,7 @@ fn spawn_fifo_reader(
                     error = %e,
                     "failed to open FIFO for reading"
                 );
-                let _ = output_tx.blocking_send(PtyOutput {
+                let _ = output_tx.try_send(PtyOutput {
                     session_id,
                     pane_id: pane_id.clone(),
                     data: Vec::new(),
@@ -1012,7 +1012,7 @@ fn spawn_fifo_reader(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // EOF -- pipe-pane stopped or tmux session ended
-                    let _ = output_tx.blocking_send(PtyOutput {
+                    let _ = output_tx.try_send(PtyOutput {
                         session_id,
                         pane_id: pane_id.clone(),
                         data: Vec::new(),
@@ -1042,7 +1042,7 @@ fn spawn_fifo_reader(
                         error = %e,
                         "FIFO read error"
                     );
-                    let _ = output_tx.blocking_send(PtyOutput {
+                    let _ = output_tx.try_send(PtyOutput {
                         session_id,
                         pane_id: pane_id.clone(),
                         data: Vec::new(),

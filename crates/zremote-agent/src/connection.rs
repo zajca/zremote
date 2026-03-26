@@ -650,6 +650,29 @@ pub async fn run_connection(
                 }
             }
             _ = agentic_check_interval.tick() => {
+                // Periodic GC: close sessions whose child process has died but
+                // EOF was lost (try_send dropped it when channel was full).
+                let dead_sessions: Vec<SessionId> = session_manager
+                    .session_pids()
+                    .filter(|(_, pid)| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+                    .map(|(id, _)| id)
+                    .collect();
+                for session_id in dead_sessions {
+                    if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
+                        && agentic_tx.try_send(loop_ended).is_err()
+                    {
+                        tracing::warn!("agentic channel full, LoopEnded dropped");
+                    }
+                    let exit_code = session_manager.close(&session_id);
+                    tracing::info!(session_id = %session_id, exit_code = ?exit_code, "GC: cleaned up dead session");
+                    if outbound_tx.try_send(AgentMessage::SessionClosed {
+                        session_id,
+                        exit_code,
+                    }).is_err() {
+                        tracing::warn!("outbound channel full, SessionClosed dropped");
+                    }
+                }
+
                 let messages = agentic_manager.check_sessions(session_manager.session_pids());
                 for msg in &messages {
                     // Register loop mapping when a new loop is detected

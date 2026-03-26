@@ -63,8 +63,10 @@ impl PtySession {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF -- child closed the PTY
-                        let _ = output_tx.blocking_send(PtyOutput {
+                        // EOF -- child closed the PTY. Use try_send to avoid
+                        // blocking if channel is full during disconnect.
+                        // If dropped, the session is cleaned up by periodic GC.
+                        let _ = output_tx.try_send(PtyOutput {
                             session_id,
                             pane_id: None,
                             data: Vec::new(),
@@ -91,7 +93,7 @@ impl PtySession {
                     }
                     Err(_) => {
                         // Read error -- PTY closed
-                        let _ = output_tx.blocking_send(PtyOutput {
+                        let _ = output_tx.try_send(PtyOutput {
                             session_id,
                             pane_id: None,
                             data: Vec::new(),
