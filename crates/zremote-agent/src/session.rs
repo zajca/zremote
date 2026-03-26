@@ -209,6 +209,12 @@ impl SessionManager {
 
                 for (session, captured) in recovered {
                     let session_id = session.session_id();
+                    // Skip sessions already tracked (reconnect case) to avoid
+                    // duplicate reader tasks
+                    if self.sessions.contains_key(&session_id) {
+                        tracing::debug!(session_id = %session_id, "skipping already-tracked tmux session");
+                        continue;
+                    }
                     let pid = session.pid();
                     // Get shell name from sysinfo or default to "shell"
                     let shell = get_process_name(pid);
@@ -230,6 +236,12 @@ impl SessionManager {
 
                 for (session, scrollback) in recovered {
                     let session_id = session.session_id();
+                    // Skip sessions already tracked (reconnect case) to avoid
+                    // duplicate reader tasks
+                    if self.sessions.contains_key(&session_id) {
+                        tracing::debug!(session_id = %session_id, "skipping already-tracked daemon session");
+                        continue;
+                    }
                     let pid = session.pid();
                     let shell = get_process_name(pid);
                     result.push((session_id, shell, pid, scrollback));
@@ -240,6 +252,29 @@ impl SessionManager {
                 result
             }
         }
+    }
+
+    /// Return a reference to the PTY output sender.
+    ///
+    /// Used to clone the sender when hoisting the channel above the reconnect loop.
+    pub fn output_tx(&self) -> &mpsc::Sender<PtyOutput> {
+        &self.output_tx
+    }
+
+    /// Return info about all currently active sessions for re-announcement after reconnect.
+    pub fn active_session_info(&self) -> Vec<(SessionId, String, u32)> {
+        self.sessions
+            .iter()
+            .map(|(id, backend)| {
+                let pid = match backend {
+                    SessionBackend::Pty(s) => s.pid(),
+                    SessionBackend::Tmux(s) => s.pid(),
+                    SessionBackend::Daemon(s) => s.pid(),
+                };
+                let shell = get_process_name(pid);
+                (*id, shell, pid)
+            })
+            .collect()
     }
 
     /// Return an iterator of `(session_id, shell_pid)` for all active sessions.

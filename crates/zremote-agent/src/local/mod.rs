@@ -467,7 +467,15 @@ async fn start_hooks_server(state: Arc<LocalAppState>, shutdown: CancellationTok
     // dummy channel that we drain and discard.
     let (outbound_tx, _outbound_rx) = mpsc::channel::<AgentMessage>(64);
 
-    let hooks_server = HooksServer::new(agentic_tx, state.session_mapper.clone(), outbound_tx);
+    let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let hooks_server = HooksServer::new(
+        agentic_tx,
+        state.session_mapper.clone(),
+        outbound_tx,
+        sent_cc_session_ids,
+    );
 
     // Convert CancellationToken to a watch channel for the hooks server
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

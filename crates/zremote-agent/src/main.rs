@@ -314,6 +314,17 @@ async fn run_agent() {
         let _ = shutdown_tx.send(true);
     });
 
+    // Persistent state that survives WebSocket reconnects.
+    // These are hoisted above the reconnect loop so PTY sessions, agentic loop
+    // state, and CC session mappings are preserved across disconnects.
+    let (pty_output_tx, mut pty_output_rx) = tokio::sync::mpsc::channel::<session::PtyOutput>(256);
+    let mut session_manager = session::SessionManager::new(pty_output_tx, backend);
+    let mut agentic_manager = agentic::manager::AgenticLoopManager::new();
+    let session_mapper = hooks::mapper::SessionMapper::new();
+    let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+
     // Reconnection loop with exponential backoff
     let mut backoff = MIN_BACKOFF;
     let mut attempt_num: u64 = 0;
@@ -326,7 +337,17 @@ async fn run_agent() {
 
         attempt_num += 1;
 
-        match connection::run_connection(&config, shutdown_rx.clone(), backend).await {
+        match connection::run_connection(
+            &config,
+            shutdown_rx.clone(),
+            &mut session_manager,
+            &mut pty_output_rx,
+            &mut agentic_manager,
+            &session_mapper,
+            &sent_cc_session_ids,
+        )
+        .await
+        {
             Ok(()) => {
                 // Clean disconnect (e.g. server closed, or we received shutdown)
                 tracing::info!("connection closed cleanly");
@@ -373,6 +394,18 @@ async fn run_agent() {
 
         // Exponential backoff: double the delay, cap at MAX_BACKOFF
         backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+
+    // Final cleanup: detach persistent sessions, kill plain PTY
+    if session_manager.supports_persistence() {
+        session_manager.detach_all();
+    } else {
+        session_manager.close_all();
+    }
+
+    // Remove hooks port file so stale file doesn't mislead CC after agent exit
+    if let Err(e) = hooks::server::remove_port_file().await {
+        tracing::debug!(error = %e, "failed to remove hooks port file on exit");
     }
 
     tracing::info!("zremote-agent stopped");
