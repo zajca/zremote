@@ -33,6 +33,27 @@ impl InputSender {
             Self::Direct(tx) => tx.send(data),
         }
     }
+
+    /// Non-blocking send — used by the terminal event listener to avoid
+    /// blocking while the term mutex is held (e.g. during DSR responses).
+    pub fn try_send(&self, data: Vec<u8>) {
+        let result = match self {
+            Self::WebSocket(tx) => tx
+                .try_send(TerminalInput::Data(data))
+                .err()
+                .map(|e| match e {
+                    flume::TrySendError::Full(_) => "channel full",
+                    flume::TrySendError::Disconnected(_) => "channel disconnected",
+                }),
+            Self::Direct(tx) => tx.try_send(data).err().map(|e| match e {
+                flume::TrySendError::Full(_) => "channel full",
+                flume::TrySendError::Disconnected(_) => "channel disconnected",
+            }),
+        };
+        if let Some(reason) = result {
+            tracing::warn!("PtyWrite response dropped: {reason}");
+        }
+    }
 }
 
 impl TerminalHandle {

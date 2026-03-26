@@ -95,7 +95,6 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -105,7 +104,7 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor}
 use gpui::*;
 
 use crate::theme;
-use crate::views::terminal_panel::TerminalLayoutInfo;
+use crate::views::terminal_panel::{TerminalLayoutInfo, TerminalTerm};
 
 const FONT_SIZE: f32 = 14.0;
 const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
@@ -268,7 +267,7 @@ impl GlyphCache {
 /// at exact line boundaries. This eliminates constant repaints from fractional offsets
 /// and matches how native terminals feel.
 pub struct TerminalElement {
-    term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
+    term: Arc<Mutex<TerminalTerm>>,
     resize_tx: flume::Sender<(u16, u16)>,
     /// Whether the cursor should be painted (controlled by blink timer in the panel).
     cursor_visible: bool,
@@ -298,7 +297,7 @@ pub struct TerminalElementLayoutState {
 impl TerminalElement {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
+        term: Arc<Mutex<TerminalTerm>>,
         resize_tx: flume::Sender<(u16, u16)>,
         cursor_visible: bool,
         layout_info: Rc<Cell<TerminalLayoutInfo>>,
@@ -389,7 +388,7 @@ impl TerminalElement {
 
     /// Extract cell runs from the terminal grid, batching adjacent cells with the same style.
     /// Accounts for `display_offset` so scrolled-back content is rendered correctly.
-    fn build_cell_runs(term: &alacritty_terminal::Term<VoidListener>) -> Vec<CellRun> {
+    fn build_cell_runs(term: &TerminalTerm) -> Vec<CellRun> {
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_offset = term.grid().display_offset() as i32;
@@ -679,7 +678,7 @@ impl TerminalElement {
 
     /// Paint semi-transparent highlight rectangles over selected cells.
     fn paint_selection(
-        term: &alacritty_terminal::Term<VoidListener>,
+        term: &TerminalTerm,
         bounds: &Bounds<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
@@ -846,7 +845,7 @@ impl TerminalElement {
     }
 
     fn paint_cursor(
-        term: &alacritty_terminal::Term<VoidListener>,
+        term: &TerminalTerm,
         bounds: &Bounds<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,

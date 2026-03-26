@@ -4,11 +4,11 @@
 //! results by `(display_offset, content_generation)` -- same invalidation
 //! strategy as [`CellRunCache`].
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point};
-use alacritty_terminal::term::Term;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
+
+use super::terminal_panel::TerminalTerm;
 
 const URL_PATTERN: &str = r#"(?:https?://|file://)[^\s<>\[\]{}()'"`,;]+"#;
 
@@ -40,7 +40,7 @@ impl UrlDetector {
     /// display_offset and content_generation haven't changed.
     pub fn detect(
         &mut self,
-        term: &Term<VoidListener>,
+        term: &TerminalTerm,
         display_offset: usize,
         generation: u64,
     ) -> &[Match] {
@@ -95,7 +95,7 @@ impl UrlDetector {
     }
 
     /// Extract the URL text for a match at the given index by walking grid cells.
-    pub fn url_text(&self, term: &Term<VoidListener>, idx: usize) -> String {
+    pub fn url_text(&self, term: &TerminalTerm, idx: usize) -> String {
         let Some(m) = self.cached_matches.get(idx) else {
             return String::new();
         };

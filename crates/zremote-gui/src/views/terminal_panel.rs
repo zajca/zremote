@@ -46,7 +46,6 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -58,7 +57,7 @@ use alacritty_terminal::vte::ansi::Processor;
 use gpui::*;
 
 use crate::icons::{Icon, icon};
-use crate::terminal_handle::TerminalHandle;
+use crate::terminal_handle::{InputSender, TerminalHandle};
 use crate::theme;
 use crate::views::command_palette::PaletteTab;
 use crate::views::double_shift::DoubleShiftDetector;
@@ -107,9 +106,52 @@ pub struct TerminalLayoutInfo {
     pub bounds: Bounds<Pixels>,
 }
 
+/// Captures `Event::PtyWrite` from alacritty_terminal and sends the response
+/// bytes back through the terminal input channel (same path as keyboard input).
+/// This enables DSR (Device Status Report) and other terminal query responses.
+#[derive(Clone)]
+pub(crate) struct PtyWriteListener {
+    /// Swappable sender so reconnect can update without recreating the Term.
+    inner: Arc<std::sync::Mutex<InputSender>>,
+}
+
+impl PtyWriteListener {
+    fn new(input_tx: InputSender) -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(input_tx)),
+        }
+    }
+
+    /// Replace the input sender (called on reconnect).
+    fn update_sender(&self, input_tx: InputSender) {
+        match self.inner.lock() {
+            Ok(mut guard) => *guard = input_tx,
+            Err(poisoned) => {
+                tracing::warn!("PtyWriteListener mutex poisoned during update_sender, recovering");
+                *poisoned.into_inner() = input_tx;
+            }
+        }
+    }
+}
+
+impl alacritty_terminal::event::EventListener for PtyWriteListener {
+    fn send_event(&self, event: alacritty_terminal::event::Event) {
+        if let alacritty_terminal::event::Event::PtyWrite(text) = event {
+            match self.inner.lock() {
+                Ok(guard) => guard.try_send(text.into_bytes()),
+                Err(poisoned) => poisoned.into_inner().try_send(text.into_bytes()),
+            }
+        }
+    }
+}
+
+/// Alacritty terminal type parameterized with our `PtyWriteListener`.
+pub(crate) type TerminalTerm = alacritty_terminal::Term<PtyWriteListener>;
+
 pub struct TerminalPanel {
     session_id: String,
-    term: Arc<Mutex<alacritty_terminal::Term<VoidListener>>>,
+    term: Arc<Mutex<TerminalTerm>>,
+    pty_write_listener: PtyWriteListener,
     handle: TerminalHandle,
     focus_handle: FocusHandle,
     closed: bool,
@@ -171,7 +213,8 @@ impl TerminalPanel {
     ) -> Self {
         let config = TermConfig::default();
         let size = TermSize::new(usize::from(DEFAULT_COLS), usize::from(DEFAULT_ROWS));
-        let term = alacritty_terminal::Term::new(config, &size, VoidListener);
+        let pty_write_listener = PtyWriteListener::new(handle.input_sender());
+        let term = alacritty_terminal::Term::new(config, &size, pty_write_listener.clone());
         let term = Arc::new(Mutex::new(term));
 
         let focus_handle = cx.focus_handle();
@@ -229,6 +272,7 @@ impl TerminalPanel {
         Self {
             session_id,
             term,
+            pty_write_listener,
             handle,
             focus_handle,
             closed: false,
@@ -277,6 +321,7 @@ impl TerminalPanel {
         self.disconnected = false;
         self.closed = false;
         self.reader_started = false; // Allow start_output_reader to run again
+        self.pty_write_listener.update_sender(handle.input_sender());
         self.handle = handle;
 
         // Set up new resize debounce pipeline for the new handle.
@@ -339,6 +384,7 @@ impl TerminalPanel {
         let output_rx = self.handle.output_rx().clone();
         let term = self.term.clone();
         let content_generation = self.content_generation.clone();
+        let pty_write_listener = self.pty_write_listener.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut processor: Processor = Processor::new();
@@ -385,7 +431,7 @@ impl TerminalPanel {
                             *term = alacritty_terminal::Term::new(
                                 TermConfig::default(),
                                 &size,
-                                VoidListener,
+                                pty_write_listener.clone(),
                             );
                         }
                         // Invalidate cell run cache - term was recreated
