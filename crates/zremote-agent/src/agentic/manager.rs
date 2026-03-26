@@ -107,6 +107,33 @@ impl AgenticLoopManager {
         })
     }
 
+    /// Re-announce all active loops to the server after a reconnect.
+    /// Returns `LoopDetected` messages for every tracked loop so the server
+    /// restores agentic monitoring state immediately (instead of waiting for
+    /// the next periodic check which only detects *new* loops).
+    pub fn re_announce_loops(&mut self) -> Vec<AgenticAgentMessage> {
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+
+        self.loops
+            .iter()
+            .map(|(session_id, active)| {
+                let project_path = self
+                    .system
+                    .process(sysinfo::Pid::from_u32(active.detected_pid))
+                    .and_then(|p| p.cwd())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
+                AgenticAgentMessage::LoopDetected {
+                    loop_id: active.loop_id,
+                    session_id: *session_id,
+                    project_path,
+                    tool_name: active.tool_name.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Check if a given `loop_id` is tracked by this manager.
     #[allow(dead_code)]
     pub fn has_loop(&self, loop_id: &AgenticLoopId) -> bool {

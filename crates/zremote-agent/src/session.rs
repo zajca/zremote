@@ -34,6 +34,8 @@ pub struct DirectAttachInfo {
 
 pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
+    /// Shell name cached at creation time (avoids re-deriving via sysinfo on reconnect).
+    shell_names: HashMap<SessionId, String>,
     output_tx: mpsc::Sender<PtyOutput>,
     backend: PersistenceBackend,
     direct_attached: HashSet<SessionId>,
@@ -43,6 +45,7 @@ impl SessionManager {
     pub fn new(output_tx: mpsc::Sender<PtyOutput>, backend: PersistenceBackend) -> Self {
         Self {
             sessions: HashMap::new(),
+            shell_names: HashMap::new(),
             output_tx,
             backend,
             direct_attached: HashSet::new(),
@@ -62,6 +65,12 @@ impl SessionManager {
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        // Extract short shell name (e.g., "/bin/zsh" → "zsh") and cache it.
+        // This avoids re-deriving via sysinfo on reconnect (which can degrade to "shell").
+        let shell_name = std::path::Path::new(shell)
+            .file_name()
+            .map_or_else(|| shell.to_string(), |n| n.to_string_lossy().into_owned());
+
         match self.backend {
             PersistenceBackend::Tmux => {
                 let (session, pid) = TmuxSession::spawn(
@@ -75,6 +84,7 @@ impl SessionManager {
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Tmux(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
             PersistenceBackend::Daemon => {
@@ -90,6 +100,7 @@ impl SessionManager {
                 .await?;
                 self.sessions
                     .insert(session_id, SessionBackend::Daemon(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
             PersistenceBackend::None => {
@@ -104,6 +115,7 @@ impl SessionManager {
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Pty(session));
+                self.shell_names.insert(session_id, shell_name);
                 Ok(pid)
             }
         }
@@ -147,6 +159,7 @@ impl SessionManager {
 
     /// Close a session, killing the child process. Returns the exit code if available.
     pub fn close(&mut self, session_id: &SessionId) -> Option<i32> {
+        self.shell_names.remove(session_id);
         let backend = self.sessions.remove(session_id)?;
         match backend {
             SessionBackend::Pty(mut session) => {
@@ -218,6 +231,7 @@ impl SessionManager {
                     let pid = session.pid();
                     // Get shell name from sysinfo or default to "shell"
                     let shell = get_process_name(pid);
+                    self.shell_names.insert(session_id, shell.clone());
                     result.push((session_id, shell, pid, captured));
                     self.sessions
                         .insert(session_id, SessionBackend::Tmux(session));
@@ -244,6 +258,7 @@ impl SessionManager {
                     }
                     let pid = session.pid();
                     let shell = get_process_name(pid);
+                    self.shell_names.insert(session_id, shell.clone());
                     result.push((session_id, shell, pid, scrollback));
                     self.sessions
                         .insert(session_id, SessionBackend::Daemon(session));
@@ -262,6 +277,7 @@ impl SessionManager {
     }
 
     /// Return info about all currently active sessions for re-announcement after reconnect.
+    /// Uses cached shell names from creation time to avoid sysinfo degradation to "shell".
     pub fn active_session_info(&self) -> Vec<(SessionId, String, u32)> {
         self.sessions
             .iter()
@@ -271,7 +287,11 @@ impl SessionManager {
                     SessionBackend::Tmux(s) => s.pid(),
                     SessionBackend::Daemon(s) => s.pid(),
                 };
-                let shell = get_process_name(pid);
+                let shell = self
+                    .shell_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| get_process_name(pid));
                 (*id, shell, pid)
             })
             .collect()

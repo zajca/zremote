@@ -423,6 +423,23 @@ pub async fn run_connection(
     // Channel for outbound agentic messages
     let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
 
+    // Re-announce active agentic loops so the server restores monitoring state.
+    // Must happen after agentic_tx is created since we send through it.
+    {
+        let loop_messages = agentic_manager.re_announce_loops();
+        if !loop_messages.is_empty() {
+            tracing::info!(
+                count = loop_messages.len(),
+                "re-announcing agentic loops after reconnect"
+            );
+            for msg in loop_messages {
+                if agentic_tx.try_send(msg).is_err() {
+                    tracing::warn!("agentic channel full, loop re-announce dropped");
+                }
+            }
+        }
+    }
+
     // Hooks sidecar (CC hook integration)
     // Use a per-connection shutdown signal so the HooksServer stops when this
     // connection ends (sender is dropped on function exit → server stops).
