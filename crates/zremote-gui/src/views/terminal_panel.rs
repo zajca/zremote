@@ -421,8 +421,9 @@ impl TerminalPanel {
             loop {
                 match output_rx.recv_async().await {
                     Ok(TerminalEvent::Output(bytes)) => {
+                        let clean = strip_cpr_responses(&bytes);
                         if let Ok(mut term) = term.lock() {
-                            processor.advance(&mut *term, &bytes);
+                            processor.advance(&mut *term, &clean);
                         }
                         // Bump generation so cell run cache invalidates.
                         content_generation.fetch_add(1, Ordering::Relaxed);
@@ -1571,4 +1572,170 @@ fn escape_regex(input: &str) -> String {
         }
     }
     result
+}
+
+/// Strip Cursor Position Report responses (`ESC [ Ps ; Ps R`) from output bytes.
+///
+/// These are terminal-to-host responses that should never appear in the display stream,
+/// but can leak through PTY echo during shell initialization (before the shell disables
+/// echo mode). Only allocates when a CPR sequence is actually found.
+///
+/// **Limitation:** CPR sequences split across chunk boundaries are not stripped.
+/// In practice this is acceptable because CPR leakage during shell init arrives
+/// in a single PTY read, but callers should be aware.
+fn strip_cpr_responses(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+
+    // Quick scan: if no ESC byte exists, return the original slice unchanged.
+    if !data.contains(&0x1b) {
+        return Cow::Borrowed(data);
+    }
+
+    let mut result = Vec::with_capacity(data.len());
+    let mut i = 0;
+    let mut found_cpr = false;
+
+    while i < data.len() {
+        if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'[' {
+            // Try to match CPR pattern: ESC [ digits ; digits R
+            let start = i;
+            let mut j = i + 2;
+            // First group of digits
+            let d1_start = j;
+            while j < data.len() && data[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > d1_start && j < data.len() && data[j] == b';' {
+                j += 1;
+                let d2_start = j;
+                while j < data.len() && data[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > d2_start && j < data.len() && data[j] == b'R' {
+                    // Matched CPR response — skip it
+                    if !found_cpr {
+                        // First CPR found: copy everything before this point
+                        result.extend_from_slice(&data[..start]);
+                        found_cpr = true;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            // Not a CPR — copy bytes from start of this sequence
+            if found_cpr {
+                result.extend_from_slice(&data[start..j]);
+            }
+            i = j;
+        } else {
+            if found_cpr {
+                result.push(data[i]);
+            }
+            i += 1;
+        }
+    }
+
+    if found_cpr {
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(data)
+    }
+}
+
+#[cfg(test)]
+mod strip_cpr_tests {
+    use super::strip_cpr_responses;
+
+    #[test]
+    fn no_esc_returns_borrowed() {
+        let data = b"hello world";
+        let result = strip_cpr_responses(data);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*result, b"hello world");
+    }
+
+    #[test]
+    fn empty_input() {
+        let result = strip_cpr_responses(b"");
+        assert_eq!(&*result, b"");
+    }
+
+    #[test]
+    fn single_cpr_stripped() {
+        // ESC [ 4 ; 1 R
+        let data = b"\x1b[4;1R";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"");
+    }
+
+    #[test]
+    fn two_cprs_stripped() {
+        let data = b"\x1b[4;1R\x1b[19;1R";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"");
+    }
+
+    #[test]
+    fn cpr_embedded_in_text() {
+        let data = b"before\x1b[4;1Rafter";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"beforeafter");
+    }
+
+    #[test]
+    fn non_cpr_esc_sequence_preserved() {
+        // SGR: ESC [ 1 m (bold)
+        let data = b"\x1b[1m";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"\x1b[1m");
+    }
+
+    #[test]
+    fn mixed_cpr_and_sgr() {
+        // CPR then SGR then text
+        let data = b"\x1b[4;1R\x1b[1mhello";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"\x1b[1mhello");
+    }
+
+    #[test]
+    fn cpr_between_text_and_sgr() {
+        let data = b"prompt\x1b[12;5R\x1b[32mgreen";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"prompt\x1b[32mgreen");
+    }
+
+    #[test]
+    fn split_boundary_not_stripped() {
+        // CPR split across chunks — first chunk has ESC [ digits
+        let chunk1 = b"\x1b[12";
+        let chunk2 = b";34R";
+        let r1 = strip_cpr_responses(chunk1);
+        let r2 = strip_cpr_responses(chunk2);
+        // Split CPR is NOT stripped (documented limitation)
+        assert_eq!(&*r1, b"\x1b[12");
+        assert_eq!(&*r2, b";34R");
+    }
+
+    #[test]
+    fn esc_at_end_of_buffer() {
+        let data = b"text\x1b";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"text\x1b");
+    }
+
+    #[test]
+    fn esc_bracket_at_end_of_buffer() {
+        let data = b"text\x1b[";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"text\x1b[");
+    }
+
+    #[test]
+    fn multi_param_sgr_after_cpr_preserved() {
+        // ESC[1;32m is a two-param SGR (bold green) — must not be confused with CPR
+        let data = b"\x1b[4;1R\x1b[1;32mtext";
+        let result = strip_cpr_responses(data);
+        assert_eq!(&*result, b"\x1b[1;32mtext");
+    }
 }
