@@ -346,7 +346,7 @@ pub async fn run_connection(
     let (mut ws_sink, mut ws_stream) = ws.split();
 
     // Channel for outbound agent messages (from main loop + PTY output)
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(256);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(2048);
 
     // Re-announce sessions that survived the reconnect + discover new ones
     {
@@ -501,7 +501,32 @@ pub async fn run_connection(
         heartbeat_interval.tick().await;
 
         loop {
+            // biased: shutdown + heartbeat checked first so they aren't
+            // starved when outbound_rx is saturated with PTY output.
             tokio::select! {
+                biased;
+
+                () = wait_for_shutdown(sender_shutdown.clone()) => {
+                    tracing::debug!("sender task shutting down");
+                    return ws_sink;
+                }
+                _ = heartbeat_interval.tick() => {
+                    let msg = AgentMessage::Heartbeat {
+                        timestamp: Utc::now(),
+                    };
+                    match serialize_agent_message(&msg) {
+                        Ok(ws_msg) => {
+                            if let Err(e) = ws_sink.send(ws_msg).await {
+                                tracing::error!(error = %e, "failed to send heartbeat");
+                                return ws_sink;
+                            }
+                            tracing::debug!("heartbeat sent");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize heartbeat");
+                        }
+                    }
+                }
                 Some(msg) = outbound_rx.recv() => {
                     match serialize_agent_message(&msg) {
                         Ok(ws_msg) => {
@@ -527,27 +552,6 @@ pub async fn run_connection(
                             tracing::error!(error = %e, "failed to serialize agentic message");
                         }
                     }
-                }
-                _ = heartbeat_interval.tick() => {
-                    let msg = AgentMessage::Heartbeat {
-                        timestamp: Utc::now(),
-                    };
-                    match serialize_agent_message(&msg) {
-                        Ok(ws_msg) => {
-                            if let Err(e) = ws_sink.send(ws_msg).await {
-                                tracing::error!(error = %e, "failed to send heartbeat");
-                                return ws_sink;
-                            }
-                            tracing::debug!("heartbeat sent");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to serialize heartbeat");
-                        }
-                    }
-                }
-                () = wait_for_shutdown(sender_shutdown.clone()) => {
-                    tracing::debug!("sender task shutting down");
-                    return ws_sink;
                 }
             }
         }
@@ -610,6 +614,43 @@ pub async fn run_connection(
                         // EOF from extra pane -- ignore, sync_panes handles cleanup
                         continue;
                     }
+
+                    // Daemon session with process still alive: reconnect instead
+                    // of killing. The daemon may have disconnected us due to
+                    // backpressure (write timeout) -- data is in the ring buffer.
+                    if session_manager.is_daemon_alive(&session_id) {
+                        tracing::info!(session_id = %session_id, "daemon still alive, attempting reconnect");
+                        match session_manager.reconnect_daemon(&session_id).await {
+                            Ok(scrollback) => {
+                                tracing::info!(session_id = %session_id, "daemon reconnect successful");
+                                // Forward scrollback so the GUI/server can repaint
+                                if let Some(sb) = scrollback
+                                    && !sb.is_empty()
+                                {
+                                    bridge::fan_out(
+                                        bridge_senders,
+                                        session_id,
+                                        zremote_core::state::BrowserMessage::Output {
+                                            pane_id: None,
+                                            data: sb.clone(),
+                                        },
+                                    ).await;
+                                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
+                                        session_id,
+                                        data: sb,
+                                    }).is_err() {
+                                        tracing::warn!("outbound channel full, scrollback dropped");
+                                    }
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!(session_id = %session_id, error = %e, "daemon reconnect failed, closing session");
+                                // Fall through to close
+                            }
+                        }
+                    }
+
                     // Session ended (EOF from main PTY reader)
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()

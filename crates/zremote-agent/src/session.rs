@@ -178,6 +178,61 @@ impl SessionManager {
         }
     }
 
+    /// Check if a session is backed by a daemon that is still alive.
+    /// Returns `true` if the session is a daemon session and the daemon process
+    /// is still running (i.e., the socket EOF was transient, not a real exit).
+    pub fn is_daemon_alive(&self, session_id: &SessionId) -> bool {
+        matches!(
+            self.sessions.get(session_id),
+            Some(SessionBackend::Daemon(s)) if s.try_wait().is_none()
+        )
+    }
+
+    /// Reconnect to a daemon whose socket connection was lost but process is
+    /// still alive. Replaces the old `DaemonSession` with a fresh one.
+    /// Returns scrollback data on success.
+    pub async fn reconnect_daemon(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(SessionBackend::Daemon(old)) = self.sessions.remove(session_id) else {
+            return Err("session not found or not a daemon".into());
+        };
+        let socket_path = old.socket_path().clone();
+        let state_path = old.state_path().clone();
+        let daemon_pid = old.daemon_pid();
+        let shell_pid = old.pid();
+        // Detach cleanly (abort IO tasks, don't kill daemon)
+        old.detach();
+
+        match DaemonSession::reconnect(
+            *session_id,
+            socket_path.clone(),
+            state_path.clone(),
+            daemon_pid,
+            shell_pid,
+            self.output_tx.clone(),
+        )
+        .await
+        {
+            Ok((new_session, scrollback, _started_at)) => {
+                self.sessions
+                    .insert(*session_id, SessionBackend::Daemon(new_session));
+                Ok(scrollback)
+            }
+            Err(e) => {
+                // Reconnect failed -- kill the orphaned daemon directly so it
+                // doesn't linger forever (the session is already removed from
+                // self.sessions, so the fallthrough close() won't find it).
+                let pid = nix::unistd::Pid::from_raw(i32::try_from(daemon_pid).unwrap_or(i32::MAX));
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+                let _ = std::fs::remove_file(&state_path);
+                let _ = std::fs::remove_file(&socket_path);
+                Err(e)
+            }
+        }
+    }
+
     /// Close all sessions. Used during agent disconnect/shutdown.
     pub fn close_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();

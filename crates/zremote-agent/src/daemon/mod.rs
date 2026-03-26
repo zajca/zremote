@@ -296,16 +296,32 @@ pub async fn run_pty_daemon(
                     ring_buffer.drain(..overflow);
                 }
 
-                // Forward to connected client (with timeout, skip on failure)
+                // Forward to connected client. On failure, disconnect to avoid
+                // corrupting the length-prefixed protocol (partial frame from
+                // cancelled write_all). Data is safe in ring buffer; agent can
+                // reconnect and get scrollback via GetState.
                 if let Some(ref mut w) = client_writer {
                     let resp = DaemonResponse::Output { data };
                     let result = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
+                        std::time::Duration::from_millis(500),
                         send_response(w, &resp),
                     ).await;
-                    if result.is_err() || result.is_ok_and(|r| r.is_err()) {
-                        // Write failed or timed out - data is in ring buffer
-                        tracing::debug!("socket write failed/timeout, data in ring buffer only");
+                    let failed = match result {
+                        Ok(Ok(())) => false,
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "socket write error, disconnecting client");
+                            true
+                        }
+                        Err(_) => {
+                            tracing::warn!("socket write timed out, disconnecting client");
+                            true
+                        }
+                    };
+                    if failed {
+                        client_writer = None;
+                        if let Some(handle) = reader_handle.take() {
+                            handle.abort();
+                        }
                     }
                 }
             }

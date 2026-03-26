@@ -161,6 +161,11 @@ impl DaemonSession {
         self.shell_pid
     }
 
+    /// Return the daemon process PID.
+    pub fn daemon_pid(&self) -> u32 {
+        self.daemon_pid
+    }
+
     /// Check if the daemon process is still alive.
     /// Returns `None` if alive, `Some(exit_code)` if dead (exit code unavailable, returns 1).
     pub fn try_wait(&self) -> Option<i32> {
