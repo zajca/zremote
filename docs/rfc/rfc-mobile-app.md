@@ -154,7 +154,15 @@ zremote-client            (SDK: REST + WS client, platform-independent)
 
 ---
 
-## Phase 1: `zremote-ffi` Crate + UniFFI Bindings
+## Phase 1: `zremote-ffi` Crate + UniFFI Bindings [COMPLETED]
+
+> **Implementation notes (vs original RFC):**
+> - `FfiGitInfo`/`FfiGitRemote` omitted -- not needed (GitInfo is nested in ProjectSettings which crosses FFI as JSON string)
+> - `FfiWorktreeInfo`/`FfiDirectoryEntry` fields match actual protocol types (RFC had placeholders)
+> - `on_claude_session_metrics` uses `FfiClaudeSessionMetrics` record instead of 12 parameters
+> - `FfiError::WebSocket` variant instead of `Disconnected` (more specific)
+> - Foreign callback dispatch uses `spawn_blocking` to avoid blocking tokio worker threads
+> - `Arc<Runtime>` shared between client and stream handles for safe lifetime management
 
 ### Architecture Decision: Separate FFI Crate
 
@@ -489,7 +497,14 @@ terminal.disconnect()
 
 ---
 
-## Phase 2: Android Build Pipeline
+## Phase 2: Android Build Pipeline [COMPLETED]
+
+> **Implementation notes:**
+> - `scripts/build-android.sh` supports `--all-abis` and `--generate-only` flags
+> - `[profile.release-android]` inherits from release with `opt-level = "z"`, full LTO, `codegen-units = 1`
+> - CI workflow in `.github/workflows/android-build.yml` triggers on release tags + manual dispatch
+> - arm64-v8a only for MVP (covers 95%+ modern Android devices)
+> - .aar packaging deferred to Phase 3 (when Gradle project exists)
 
 ### Toolchain Setup
 

@@ -1,0 +1,74 @@
+name: Android Build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NDK_VERSION: "27.2.12479018"
+
+jobs:
+  build-android:
+    name: Build Android Native Library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;${{ env.NDK_VERSION }}"
+
+      - name: Set ANDROID_NDK_HOME
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: Run FFI tests
+        run: cargo test -p zremote-ffi
+
+      - name: Build for arm64-v8a
+        run: |
+          cargo ndk -t arm64-v8a \
+            -o ./android-output/jniLibs \
+            build --profile release-android -p zremote-ffi
+
+      - name: Generate Kotlin bindings
+        run: |
+          mkdir -p ./android-output/kotlin
+          cargo run -p zremote-ffi --bin uniffi-bindgen generate \
+            --library target/aarch64-linux-android/release-android/libzremote_ffi.so \
+            --language kotlin \
+            --out-dir ./android-output/kotlin
+
+      - name: Report binary size
+        run: |
+          echo "=== Binary sizes ==="
+          find ./android-output/jniLibs -name "*.so" -exec ls -lh {} \;
+          echo ""
+          echo "=== Kotlin bindings ==="
+          find ./android-output/kotlin -name "*.kt" -exec wc -l {} \;
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zremote-android-${{ github.ref_name || github.sha }}
+          path: |
+            android-output/jniLibs/
+            android-output/kotlin/
+          retention-days: 90
