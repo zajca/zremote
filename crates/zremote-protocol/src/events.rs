@@ -1,0 +1,310 @@
+use serde::{Deserialize, Serialize};
+
+use crate::AgenticStatus;
+
+/// Loop information for server events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopInfo {
+    pub id: String,
+    pub session_id: String,
+    pub project_path: Option<String>,
+    pub tool_name: String,
+    pub status: AgenticStatus,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub end_reason: Option<String>,
+    pub task_name: Option<String>,
+}
+
+/// Nested host info in server events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub id: String,
+    pub hostname: String,
+    #[serde(default)]
+    pub status: String,
+    pub agent_version: Option<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+}
+
+/// Nested session info in server events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub host_id: String,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// Real-time events broadcast to WebSocket clients and integrations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServerEvent {
+    #[serde(rename = "host_connected")]
+    HostConnected { host: HostInfo },
+    #[serde(rename = "host_disconnected")]
+    HostDisconnected { host_id: String },
+    #[serde(rename = "host_status_changed")]
+    HostStatusChanged { host_id: String, status: String },
+    #[serde(rename = "session_created")]
+    SessionCreated { session: SessionInfo },
+    #[serde(rename = "session_closed")]
+    SessionClosed {
+        session_id: String,
+        exit_code: Option<i32>,
+    },
+    #[serde(rename = "session_suspended")]
+    SessionSuspended { session_id: String },
+    #[serde(rename = "session_resumed")]
+    SessionResumed { session_id: String },
+    #[serde(rename = "session_updated")]
+    SessionUpdated { session_id: String },
+    #[serde(rename = "agentic_loop_detected")]
+    LoopDetected {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfo,
+        host_id: String,
+        hostname: String,
+    },
+    #[serde(rename = "agentic_loop_state_update")]
+    LoopStatusChanged {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfo,
+        host_id: String,
+        hostname: String,
+    },
+    #[serde(rename = "agentic_loop_ended")]
+    LoopEnded {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfo,
+        host_id: String,
+        hostname: String,
+    },
+    #[serde(rename = "projects_updated")]
+    ProjectsUpdated { host_id: String },
+    #[serde(rename = "knowledge_status_changed")]
+    KnowledgeStatusChanged {
+        host_id: String,
+        status: String,
+        error: Option<String>,
+    },
+    #[serde(rename = "indexing_progress")]
+    IndexingProgress {
+        project_id: String,
+        project_path: String,
+        status: String,
+        files_processed: u64,
+        files_total: u64,
+    },
+    #[serde(rename = "memory_extracted")]
+    MemoryExtracted {
+        project_id: String,
+        loop_id: String,
+        memory_count: u32,
+    },
+    #[serde(rename = "worktree_error")]
+    WorktreeError {
+        host_id: String,
+        project_path: String,
+        message: String,
+    },
+    #[serde(rename = "claude_task_started")]
+    ClaudeTaskStarted {
+        task_id: String,
+        session_id: String,
+        host_id: String,
+        project_path: String,
+    },
+    #[serde(rename = "claude_task_updated")]
+    ClaudeTaskUpdated {
+        task_id: String,
+        status: String,
+        loop_id: Option<String>,
+    },
+    #[serde(rename = "claude_task_ended")]
+    ClaudeTaskEnded {
+        task_id: String,
+        status: String,
+        summary: Option<String>,
+    },
+    #[serde(rename = "claude_session_metrics")]
+    ClaudeSessionMetrics {
+        session_id: String,
+        model: Option<String>,
+        context_used_pct: Option<f64>,
+        context_window_size: Option<u64>,
+        cost_usd: Option<f64>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        lines_added: Option<i64>,
+        lines_removed: Option<i64>,
+        rate_limit_5h_pct: Option<u64>,
+        rate_limit_7d_pct: Option<u64>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_loop_info(status: AgenticStatus) -> LoopInfo {
+        LoopInfo {
+            id: "l1".to_string(),
+            session_id: "s1".to_string(),
+            project_path: None,
+            tool_name: "claude-code".to_string(),
+            status,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            end_reason: None,
+            task_name: None,
+        }
+    }
+
+    #[test]
+    fn server_event_roundtrip() {
+        let events = vec![
+            ServerEvent::HostConnected {
+                host: HostInfo {
+                    id: "h1".to_string(),
+                    hostname: "host".to_string(),
+                    status: "online".to_string(),
+                    agent_version: None,
+                    os: None,
+                    arch: None,
+                },
+            },
+            ServerEvent::HostDisconnected {
+                host_id: "h1".to_string(),
+            },
+            ServerEvent::HostStatusChanged {
+                host_id: "h1".to_string(),
+                status: "offline".to_string(),
+            },
+            ServerEvent::SessionCreated {
+                session: SessionInfo {
+                    id: "s1".to_string(),
+                    host_id: "h1".to_string(),
+                    shell: None,
+                    status: "creating".to_string(),
+                },
+            },
+            ServerEvent::SessionClosed {
+                session_id: "s1".to_string(),
+                exit_code: Some(1),
+            },
+            ServerEvent::SessionSuspended {
+                session_id: "s1".to_string(),
+            },
+            ServerEvent::SessionResumed {
+                session_id: "s1".to_string(),
+            },
+            ServerEvent::SessionUpdated {
+                session_id: "s1".to_string(),
+            },
+            ServerEvent::LoopDetected {
+                loop_info: make_loop_info(AgenticStatus::Working),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+            },
+            ServerEvent::LoopStatusChanged {
+                loop_info: make_loop_info(AgenticStatus::WaitingForInput),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+            },
+            ServerEvent::LoopEnded {
+                loop_info: LoopInfo {
+                    ended_at: Some("2026-01-01T01:00:00Z".to_string()),
+                    end_reason: Some("completed".to_string()),
+                    ..make_loop_info(AgenticStatus::Completed)
+                },
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+            },
+            ServerEvent::ProjectsUpdated {
+                host_id: "h1".to_string(),
+            },
+            ServerEvent::KnowledgeStatusChanged {
+                host_id: "h1".to_string(),
+                status: "ready".to_string(),
+                error: None,
+            },
+            ServerEvent::IndexingProgress {
+                project_id: "p1".to_string(),
+                project_path: "/home/user/project".to_string(),
+                status: "in_progress".to_string(),
+                files_processed: 10,
+                files_total: 100,
+            },
+            ServerEvent::MemoryExtracted {
+                project_id: "p1".to_string(),
+                loop_id: "l1".to_string(),
+                memory_count: 5,
+            },
+            ServerEvent::WorktreeError {
+                host_id: "h1".to_string(),
+                project_path: "/home/user/repo".to_string(),
+                message: "error message".to_string(),
+            },
+            ServerEvent::ClaudeTaskStarted {
+                task_id: "t1".to_string(),
+                session_id: "s1".to_string(),
+                host_id: "h1".to_string(),
+                project_path: "/home/user/project".to_string(),
+            },
+            ServerEvent::ClaudeTaskUpdated {
+                task_id: "t1".to_string(),
+                status: "active".to_string(),
+                loop_id: Some("l1".to_string()),
+            },
+            ServerEvent::ClaudeTaskEnded {
+                task_id: "t1".to_string(),
+                status: "completed".to_string(),
+                summary: Some("done".to_string()),
+            },
+            ServerEvent::ClaudeSessionMetrics {
+                session_id: "cs1".to_string(),
+                model: Some("opus".to_string()),
+                context_used_pct: Some(45.0),
+                context_window_size: Some(1_000_000),
+                cost_usd: Some(2.5),
+                tokens_in: Some(30000),
+                tokens_out: Some(15000),
+                lines_added: Some(100),
+                lines_removed: Some(10),
+                rate_limit_5h_pct: Some(11),
+                rate_limit_7d_pct: Some(85),
+            },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+        }
+    }
+
+    #[test]
+    fn loop_info_status_unknown_variant() {
+        let json = r#"{"id":"l1","session_id":"s1","project_path":null,"tool_name":"t","status":"some_future_status","started_at":"2026-01-01T00:00:00Z","ended_at":null,"end_reason":null,"task_name":null}"#;
+        let info: LoopInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.status, AgenticStatus::Unknown);
+    }
+
+    #[test]
+    fn host_info_missing_status_defaults() {
+        let json = r#"{"id":"h1","hostname":"host","agent_version":null,"os":null,"arch":null}"#;
+        let info: HostInfo = serde_json::from_str(json).unwrap();
+        assert!(info.status.is_empty());
+    }
+
+    #[test]
+    fn session_info_missing_fields_default() {
+        let json = r#"{"id":"s1","host_id":"h1"}"#;
+        let info: SessionInfo = serde_json::from_str(json).unwrap();
+        assert!(info.shell.is_none());
+        assert!(info.status.is_empty());
+    }
+}

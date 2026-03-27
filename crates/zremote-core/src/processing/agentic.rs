@@ -6,6 +6,7 @@ use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
+use crate::queries::loops::parse_status;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
 
 /// DB row for an agentic loop, matching the `agentic_loops` table columns.
@@ -39,7 +40,7 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
         session_id: row.session_id,
         project_path: row.project_path,
         tool_name: row.tool_name,
-        status: row.status,
+        status: parse_status(&row.status),
         started_at: row.started_at,
         ended_at: row.ended_at,
         end_reason: row.end_reason,
@@ -915,7 +916,7 @@ mod tests {
         assert_eq!(info.session_id, session_id.to_string());
         assert_eq!(info.project_path.as_deref(), Some("/home/user/myproject"));
         assert_eq!(info.tool_name, "aider");
-        assert_eq!(info.status, "working");
+        assert_eq!(info.status, AgenticStatus::Working);
         assert!(info.ended_at.is_none());
         assert!(info.end_reason.is_none());
         assert!(info.task_name.is_none());
@@ -1008,7 +1009,7 @@ mod tests {
             {
                 assert_eq!(loop_info.id, loop_id.to_string());
                 assert_eq!(loop_info.end_reason.as_deref(), Some("timeout"));
-                assert_eq!(loop_info.status, "completed");
+                assert_eq!(loop_info.status, AgenticStatus::Completed);
                 assert_eq!(hostname, "test-host");
                 found_loop_ended = true;
             }
@@ -1055,7 +1056,7 @@ mod tests {
             } = event
             {
                 assert_eq!(loop_info.id, loop_id.to_string());
-                assert_eq!(loop_info.status, "waiting_for_input");
+                assert_eq!(loop_info.status, AgenticStatus::WaitingForInput);
                 assert_eq!(hostname, "test-host");
                 found_status_changed = true;
             }

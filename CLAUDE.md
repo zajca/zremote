@@ -86,6 +86,12 @@ nix develop --command bash -c 'git commit -m "message"'
 
 *Safe only if old version uses `#[serde(other)]` or ignores unknown variants.
 
+### SDK Sync
+
+`ServerEvent`, `HostInfo`, `SessionInfo`, `LoopInfo` live in `zremote-protocol/src/events.rs`.
+Both `zremote-core` and `zremote-client` re-export them. Any new server event type or field
+change goes into `zremote-protocol` -- never duplicate types between core and client.
+
 ### Deployment Order
 
 1. **Server first** -- agents auto-reconnect with backoff, daemon sessions survive

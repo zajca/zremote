@@ -1,11 +1,13 @@
 pub mod agentic;
 pub mod claude;
+pub mod events;
 pub mod knowledge;
 pub mod project;
 mod terminal;
 
 pub use agentic::{AgenticAgentMessage, AgenticStatus};
 pub use claude::*;
+pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
 pub use knowledge::*;
 pub use project::*;
 pub use terminal::*;

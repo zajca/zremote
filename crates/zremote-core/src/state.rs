@@ -163,149 +163,7 @@ pub struct AgenticLoopState {
 /// Thread-safe store for active agentic loop state.
 pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
 
-/// Loop information matching the frontend `AgenticLoop` interface.
-///
-/// SYNC: This struct must stay in sync with `LoopInfo` in `zremote-client/src/types.rs`.
-/// They are defined separately because core uses `String` for status (raw DB value),
-/// while the SDK uses `AgenticStatus` enum (with `#[serde(other)]` for forward compatibility).
-/// Both serialize to the same JSON shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopInfo {
-    pub id: String,
-    pub session_id: String,
-    pub project_path: Option<String>,
-    pub tool_name: String,
-    pub status: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub end_reason: Option<String>,
-    pub task_name: Option<String>,
-}
-
-/// Real-time events broadcast to browser WebSocket clients and Telegram bot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ServerEvent {
-    #[serde(rename = "host_connected")]
-    HostConnected { host: HostInfo },
-    #[serde(rename = "host_disconnected")]
-    HostDisconnected { host_id: String },
-    #[serde(rename = "host_status_changed")]
-    HostStatusChanged { host_id: String, status: String },
-    #[serde(rename = "session_created")]
-    SessionCreated { session: SessionInfo },
-    #[serde(rename = "session_closed")]
-    SessionClosed {
-        session_id: String,
-        exit_code: Option<i32>,
-    },
-    #[serde(rename = "session_suspended")]
-    SessionSuspended { session_id: String },
-    #[serde(rename = "session_resumed")]
-    SessionResumed { session_id: String },
-    #[serde(rename = "session_updated")]
-    SessionUpdated { session_id: String },
-    #[serde(rename = "agentic_loop_detected")]
-    LoopDetected {
-        #[serde(rename = "loop")]
-        loop_info: LoopInfo,
-        host_id: String,
-        hostname: String,
-    },
-    #[serde(rename = "agentic_loop_state_update")]
-    LoopStatusChanged {
-        #[serde(rename = "loop")]
-        loop_info: LoopInfo,
-        host_id: String,
-        hostname: String,
-    },
-    #[serde(rename = "agentic_loop_ended")]
-    LoopEnded {
-        #[serde(rename = "loop")]
-        loop_info: LoopInfo,
-        host_id: String,
-        hostname: String,
-    },
-    #[serde(rename = "projects_updated")]
-    ProjectsUpdated { host_id: String },
-    #[serde(rename = "knowledge_status_changed")]
-    KnowledgeStatusChanged {
-        host_id: String,
-        status: String,
-        error: Option<String>,
-    },
-    #[serde(rename = "indexing_progress")]
-    IndexingProgress {
-        project_id: String,
-        project_path: String,
-        status: String,
-        files_processed: u64,
-        files_total: u64,
-    },
-    #[serde(rename = "memory_extracted")]
-    MemoryExtracted {
-        project_id: String,
-        loop_id: String,
-        memory_count: u32,
-    },
-    #[serde(rename = "worktree_error")]
-    WorktreeError {
-        host_id: String,
-        project_path: String,
-        message: String,
-    },
-    #[serde(rename = "claude_task_started")]
-    ClaudeTaskStarted {
-        task_id: String,
-        session_id: String,
-        host_id: String,
-        project_path: String,
-    },
-    #[serde(rename = "claude_task_updated")]
-    ClaudeTaskUpdated {
-        task_id: String,
-        status: String,
-        loop_id: Option<String>,
-    },
-    #[serde(rename = "claude_task_ended")]
-    ClaudeTaskEnded {
-        task_id: String,
-        status: String,
-        summary: Option<String>,
-    },
-    #[serde(rename = "claude_session_metrics")]
-    ClaudeSessionMetrics {
-        session_id: String,
-        model: Option<String>,
-        context_used_pct: Option<f64>,
-        context_window_size: Option<u64>,
-        cost_usd: Option<f64>,
-        tokens_in: Option<u64>,
-        tokens_out: Option<u64>,
-        lines_added: Option<i64>,
-        lines_removed: Option<i64>,
-        rate_limit_5h_pct: Option<u64>,
-        rate_limit_7d_pct: Option<u64>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HostInfo {
-    pub id: String,
-    pub hostname: String,
-    pub status: String,
-    pub agent_version: Option<String>,
-    pub os: Option<String>,
-    pub arch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub host_id: String,
-    pub shell: Option<String>,
-    pub status: String,
-}
+pub use zremote_protocol::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
 
 #[cfg(test)]
 mod tests {
@@ -851,7 +709,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    status: "working".to_string(),
+                    status: zremote_protocol::AgenticStatus::Working,
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: None,
                     end_reason: None,
@@ -866,7 +724,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    status: "working".to_string(),
+                    status: zremote_protocol::AgenticStatus::Working,
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: None,
                     end_reason: None,
@@ -881,7 +739,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     project_path: None,
                     tool_name: "claude-code".to_string(),
-                    status: "completed".to_string(),
+                    status: zremote_protocol::AgenticStatus::Completed,
                     started_at: "2026-01-01T00:00:00Z".to_string(),
                     ended_at: Some("2026-01-01T01:00:00Z".to_string()),
                     end_reason: Some("completed".to_string()),

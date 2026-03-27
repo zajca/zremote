@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+use zremote_protocol::AgenticStatus;
+
 use crate::error::AppError;
 use crate::state::LoopInfo;
 
@@ -18,6 +20,12 @@ pub struct LoopRow {
     pub task_name: Option<String>,
 }
 
+/// Parse a status string from DB into `AgenticStatus`.
+pub fn parse_status(s: &str) -> AgenticStatus {
+    serde_json::from_value(serde_json::Value::String(s.to_owned()))
+        .unwrap_or(AgenticStatus::Unknown)
+}
+
 /// Convert a `LoopRow` (DB data) to a `LoopInfo`.
 pub fn enrich_loop(row: LoopRow) -> LoopInfo {
     LoopInfo {
@@ -25,7 +33,7 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         session_id: row.session_id,
         project_path: row.project_path,
         tool_name: row.tool_name,
-        status: row.status,
+        status: parse_status(&row.status),
         started_at: row.started_at,
         ended_at: row.ended_at,
         end_reason: row.end_reason,
@@ -251,5 +259,27 @@ mod tests {
         let pool = setup_db().await;
         let host_id = get_session_host_id(&pool, "nonexistent").await.unwrap();
         assert!(host_id.is_none());
+    }
+
+    #[test]
+    fn parse_status_known_variants() {
+        assert_eq!(super::parse_status("working"), AgenticStatus::Working);
+        assert_eq!(
+            super::parse_status("waiting_for_input"),
+            AgenticStatus::WaitingForInput
+        );
+        assert_eq!(super::parse_status("error"), AgenticStatus::Error);
+        assert_eq!(super::parse_status("completed"), AgenticStatus::Completed);
+    }
+
+    #[test]
+    fn parse_status_unknown_falls_back() {
+        assert_eq!(super::parse_status("active"), AgenticStatus::Unknown);
+        assert_eq!(super::parse_status("paused"), AgenticStatus::Unknown);
+        assert_eq!(super::parse_status(""), AgenticStatus::Unknown);
+        assert_eq!(
+            super::parse_status("some_future_status"),
+            AgenticStatus::Unknown
+        );
     }
 }

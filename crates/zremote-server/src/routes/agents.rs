@@ -1132,7 +1132,7 @@ async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
         session_id: row.session_id,
         project_path: row.project_path,
         tool_name: row.tool_name,
-        status: row.status,
+        status: zremote_core::queries::loops::parse_status(&row.status),
         started_at: row.started_at,
         ended_at: row.ended_at,
         end_reason: row.end_reason,
@@ -2437,7 +2437,7 @@ mod tests {
         // Insert agentic loop
         sqlx::query(
             "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, status) \
-             VALUES (?, ?, '/tmp/project', 'bash', 'active')",
+             VALUES (?, ?, '/tmp/project', 'bash', 'working')",
         )
         .bind(loop_id.to_string())
         .bind(session_id.to_string())
@@ -2450,7 +2450,7 @@ mod tests {
         assert_eq!(info.session_id, session_id.to_string());
         assert_eq!(info.project_path.as_deref(), Some("/tmp/project"));
         assert_eq!(info.tool_name, "bash");
-        assert_eq!(info.status, "active");
+        assert_eq!(info.status, zremote_protocol::AgenticStatus::Working);
         assert!(info.ended_at.is_none());
         assert!(info.end_reason.is_none());
     }

@@ -81,12 +81,19 @@ fn format_event(event: &ServerEvent) -> Option<String> {
             ..
         } => {
             // Only notify on notable status changes
-            match loop_info.status.as_str() {
-                "waiting_for_input" | "error" | "paused" => Some(format::format_loop_status(
-                    hostname,
-                    &loop_info.tool_name,
-                    &loop_info.status,
-                )),
+            match loop_info.status {
+                zremote_protocol::AgenticStatus::WaitingForInput
+                | zremote_protocol::AgenticStatus::Error => {
+                    let status_str = serde_json::to_value(loop_info.status)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| format!("{:?}", loop_info.status));
+                    Some(format::format_loop_status(
+                        hostname,
+                        &loop_info.tool_name,
+                        &status_str,
+                    ))
+                }
                 _ => None,
             }
         }
@@ -107,13 +114,13 @@ fn format_event(event: &ServerEvent) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn make_loop_info(status: &str) -> crate::state::LoopInfo {
+    fn make_loop_info(status: zremote_protocol::AgenticStatus) -> crate::state::LoopInfo {
         crate::state::LoopInfo {
             id: "l1".to_string(),
             session_id: "s1".to_string(),
             project_path: None,
             tool_name: "claude-code".to_string(),
-            status: status.to_string(),
+            status,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             ended_at: None,
             end_reason: None,
@@ -135,7 +142,7 @@ mod tests {
     #[test]
     fn working_status_does_not_notify() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_info: make_loop_info("working"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Working),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
         };
@@ -145,7 +152,7 @@ mod tests {
     #[test]
     fn waiting_for_input_notifies() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_info: make_loop_info("waiting_for_input"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::WaitingForInput),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
         };
@@ -154,7 +161,7 @@ mod tests {
 
     #[test]
     fn loop_ended_produces_notification() {
-        let mut info = make_loop_info("completed");
+        let mut info = make_loop_info(zremote_protocol::AgenticStatus::Completed);
         info.ended_at = Some("2026-01-01T01:00:00Z".to_string());
         info.end_reason = Some("completed".to_string());
         let event = ServerEvent::LoopEnded {
@@ -182,7 +189,7 @@ mod tests {
     #[test]
     fn loop_detected_does_not_notify() {
         let event = ServerEvent::LoopDetected {
-            loop_info: make_loop_info("working"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Working),
             host_id: "h1".to_string(),
             hostname: "my-host".to_string(),
         };
@@ -192,7 +199,7 @@ mod tests {
     #[test]
     fn error_status_notifies() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_info: make_loop_info("error"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Error),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
         };
@@ -200,19 +207,19 @@ mod tests {
     }
 
     #[test]
-    fn paused_status_notifies() {
+    fn unknown_status_does_not_notify() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_info: make_loop_info("paused"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Unknown),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
         };
-        assert!(format_event(&event).is_some());
+        assert!(format_event(&event).is_none());
     }
 
     #[test]
     fn completed_status_does_not_notify() {
         let event = ServerEvent::LoopStatusChanged {
-            loop_info: make_loop_info("completed"),
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Completed),
             host_id: "h1".to_string(),
             hostname: "host".to_string(),
         };
@@ -221,7 +228,7 @@ mod tests {
 
     #[test]
     fn loop_ended_without_reason() {
-        let info = make_loop_info("completed");
+        let info = make_loop_info(zremote_protocol::AgenticStatus::Completed);
         let event = ServerEvent::LoopEnded {
             loop_info: info,
             host_id: "h1".to_string(),
@@ -235,7 +242,7 @@ mod tests {
 
     #[test]
     fn loop_ended_with_reason() {
-        let mut info = make_loop_info("completed");
+        let mut info = make_loop_info(zremote_protocol::AgenticStatus::Completed);
         info.end_reason = Some("user_abort".to_string());
         let event = ServerEvent::LoopEnded {
             loop_info: info,
