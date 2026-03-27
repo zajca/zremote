@@ -539,10 +539,17 @@ impl TerminalPanel {
                     }
                     Ok(GuiSignal::Event(TerminalEvent::Error { message })) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            this.error_message = Some(message);
-                            this.closed = true;
-                            cx.notify();
+                            if this.handle.is_bridge() {
+                                let sid = this.session_id.clone();
+                                cx.emit(TerminalPanelEvent::BridgeFailed { session_id: sid });
+                            } else {
+                                this.error_message = Some(message);
+                                this.closed = true;
+                                cx.notify();
+                            }
                         });
+                        // Always break: for bridge errors, reconnect() starts a fresh reader;
+                        // for other errors, the terminal is closed.
                         break;
                     }
                     Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
@@ -783,6 +790,7 @@ pub enum TerminalPanelEvent {
     OpenCommandPalette { tab: PaletteTab },
     OpenSessionSwitcher,
     OpenHelp,
+    BridgeFailed { session_id: String },
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}

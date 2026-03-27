@@ -157,6 +157,11 @@ impl SessionManager {
         }
     }
 
+    /// Check whether a session is tracked by this manager.
+    pub fn has_session(&self, session_id: &SessionId) -> bool {
+        self.sessions.contains_key(session_id)
+    }
+
     /// Close a session, killing the child process. Returns the exit code if available.
     pub fn close(&mut self, session_id: &SessionId) -> Option<i32> {
         self.shell_names.remove(session_id);

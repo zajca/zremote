@@ -790,40 +790,73 @@ pub async fn run_connection(
             Some(bridge_cmd) = bridge_cmd_rx.recv() => {
                 match bridge_cmd {
                     BridgeCommand::Write { session_id, pane_id, data } => {
+                        let session_exists = session_manager.has_session(&session_id);
                         let result = if let Some(ref pid) = pane_id {
                             session_manager.write_to_pane(&session_id, pid, &data)
                         } else {
                             session_manager.write_to(&session_id, &data)
                         };
                         if let Err(e) = result {
-                            let known: Vec<String> = session_manager
-                                .session_pids()
-                                .map(|(id, _)| format!("{}...", &id.to_string()[..8]))
-                                .collect();
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                known_sessions = ?known,
-                                "bridge: write failed, session not in agent SessionManager"
-                            );
+                            if session_exists {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    "bridge: write I/O error"
+                                );
+                            } else {
+                                let known: Vec<String> = session_manager
+                                    .session_pids()
+                                    .map(|(id, _)| format!("{}...", &id.to_string()[..8]))
+                                    .collect();
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    known_sessions = ?known,
+                                    "bridge: write failed, session not in agent SessionManager"
+                                );
+                                bridge::fan_out(
+                                    bridge_senders,
+                                    session_id,
+                                    zremote_core::state::BrowserMessage::Error {
+                                        message: format!("Session not found: {e}"),
+                                    },
+                                ).await;
+                            }
                         }
                     }
                     BridgeCommand::Resize { session_id, pane_id, cols, rows } => {
+                        let session_exists = session_manager.has_session(&session_id);
                         let result = if let Some(ref pid) = pane_id {
                             session_manager.resize_pane(&session_id, pid, cols, rows)
                         } else {
                             session_manager.resize(&session_id, cols, rows)
                         };
                         if let Err(e) = result {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                cols = cols,
-                                rows = rows,
-                                error = %e,
-                                "bridge: resize failed, session not in agent SessionManager"
-                            );
-                        }
-                        if pane_id.is_none() {
+                            if session_exists {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    cols = cols,
+                                    rows = rows,
+                                    error = %e,
+                                    "bridge: resize I/O error"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    cols = cols,
+                                    rows = rows,
+                                    error = %e,
+                                    "bridge: resize failed, session not in agent SessionManager"
+                                );
+                                bridge::fan_out(
+                                    bridge_senders,
+                                    session_id,
+                                    zremote_core::state::BrowserMessage::Error {
+                                        message: format!("Session not found: {e}"),
+                                    },
+                                ).await;
+                            }
+                        } else if pane_id.is_none() {
                             bridge::record_resize(bridge_scrollback, session_id, cols, rows).await;
                         }
                     }
@@ -976,8 +1009,9 @@ async fn handle_server_message(
         } => {
             if let Err(e) = session_manager.resize(session_id, *cols, *rows) {
                 tracing::warn!(session_id = %session_id, error = %e, "failed to resize PTY");
+            } else {
+                bridge::record_resize(bridge_scrollback, *session_id, *cols, *rows).await;
             }
-            bridge::record_resize(bridge_scrollback, *session_id, *cols, *rows).await;
         }
         ServerMessage::Error { message } => {
             tracing::error!(host_id = %host_id, error = %message, "server error");
@@ -2040,13 +2074,12 @@ mod tests {
         )
         .await;
 
-        // Verify bridge scrollback recorded the resize dimensions.
+        // Resize for nonexistent session should NOT create a phantom scrollback entry.
         let guard = bsb.read().await;
-        let sb = guard
-            .get(&session_id)
-            .expect("scrollback entry should exist");
-        assert_eq!(sb.cols, 120);
-        assert_eq!(sb.rows, 40);
+        assert!(
+            guard.get(&session_id).is_none(),
+            "scrollback entry should not exist for unknown session"
+        );
     }
 
     #[tokio::test]

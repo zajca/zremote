@@ -119,7 +119,7 @@ impl MainView {
             let _ = p.save_if_changed();
         }
 
-        let Some(handle) = connect_terminal(&self.app_state, session_id) else {
+        let Some(handle) = connect_terminal(&self.app_state, session_id, false) else {
             return;
         };
         let tokio_handle = self.app_state.tokio_handle.clone();
@@ -199,7 +199,7 @@ impl MainView {
             if is_current && terminal.read(cx).is_disconnected() {
                 // Re-establish the terminal connection (new WS, scrollback replay).
                 let session_id = session_id.clone();
-                if let Some(handle) = connect_terminal(&self.app_state, &session_id) {
+                if let Some(handle) = connect_terminal(&self.app_state, &session_id, false) {
                     terminal.update(cx, |panel, cx| {
                         panel.reconnect(handle, &self.app_state.tokio_handle, cx);
                     });
@@ -321,7 +321,7 @@ impl MainView {
 
     fn on_terminal_event(
         &mut self,
-        _: Entity<TerminalPanel>,
+        terminal: Entity<TerminalPanel>,
         event: &TerminalPanelEvent,
         cx: &mut Context<Self>,
     ) {
@@ -334,6 +334,14 @@ impl MainView {
             }
             TerminalPanelEvent::OpenHelp => {
                 self.open_help_modal(cx);
+            }
+            TerminalPanelEvent::BridgeFailed { session_id } => {
+                tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
+                if let Some(handle) = connect_terminal(&self.app_state, session_id, true) {
+                    terminal.update(cx, |panel, cx| {
+                        panel.reconnect(handle, &self.app_state.tokio_handle, cx);
+                    });
+                }
             }
         }
     }
@@ -766,8 +774,9 @@ impl Render for MainView {
 fn connect_terminal(
     app_state: &std::sync::Arc<AppState>,
     session_id: &str,
+    skip_bridge: bool,
 ) -> Option<crate::terminal_handle::TerminalHandle> {
-    // 1. Try direct tmux
+    // 1. Try direct tmux (independent of bridge -- always attempt)
     if crate::terminal_direct::tmux_available()
         && let Some(pane_id) = crate::terminal_direct::probe_local_session(session_id)
     {
@@ -787,7 +796,7 @@ fn connect_terminal(
     }
 
     // 2. Try direct bridge (same-machine agent)
-    if let Some(port) = read_bridge_port() {
+    if !skip_bridge && let Some(port) = read_bridge_port() {
         let bridge_url = format!("ws://127.0.0.1:{port}/ws/bridge/{session_id}");
         tracing::info!(port = port, session_id = %session_id, "attempting direct bridge connection");
         let session =
