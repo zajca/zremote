@@ -109,19 +109,30 @@ pub struct TerminalLayoutInfo {
     pub bounds: Bounds<Pixels>,
 }
 
-/// Captures `Event::PtyWrite` from alacritty_terminal and sends the response
-/// bytes back through the terminal input channel (same path as keyboard input).
-/// This enables DSR (Device Status Report) and other terminal query responses.
+/// A pending terminal title change from OSC escape sequences.
+enum TitleChange {
+    /// Program set a new title via OSC 0/2.
+    Set(String),
+    /// Program reset the title via OSC reset.
+    Reset,
+}
+
+/// Captures `Event::PtyWrite` and `Event::Title` from alacritty_terminal.
+/// `PtyWrite` sends DSR responses back through the terminal input channel.
+/// `Title` captures OSC title changes for display in the sidebar.
 #[derive(Clone)]
 pub(crate) struct PtyWriteListener {
     /// Swappable sender so reconnect can update without recreating the Term.
     inner: Arc<std::sync::Mutex<InputSender>>,
+    /// Pending title change from OSC escape sequences, consumed by the reader task.
+    pending_title: Arc<std::sync::Mutex<Option<TitleChange>>>,
 }
 
 impl PtyWriteListener {
     fn new(input_tx: InputSender) -> Self {
         Self {
             inner: Arc::new(std::sync::Mutex::new(input_tx)),
+            pending_title: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -135,15 +146,32 @@ impl PtyWriteListener {
             }
         }
     }
+
+    /// Take the pending title change (if any) set by OSC sequences since last check.
+    fn take_pending_title(&self) -> Option<TitleChange> {
+        self.pending_title
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+    }
 }
 
 impl alacritty_terminal::event::EventListener for PtyWriteListener {
     fn send_event(&self, event: alacritty_terminal::event::Event) {
-        if let alacritty_terminal::event::Event::PtyWrite(text) = event {
-            match self.inner.lock() {
+        match event {
+            alacritty_terminal::event::Event::PtyWrite(text) => match self.inner.lock() {
                 Ok(guard) => guard.try_send(text.into_bytes()),
                 Err(poisoned) => poisoned.into_inner().try_send(text.into_bytes()),
+            },
+            alacritty_terminal::event::Event::Title(title) => {
+                *self.pending_title.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(TitleChange::Set(title));
             }
+            alacritty_terminal::event::Event::ResetTitle => {
+                *self.pending_title.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(TitleChange::Reset);
+            }
+            _ => {}
         }
     }
 }
@@ -203,6 +231,8 @@ pub struct TerminalPanel {
     /// Whether the terminal WebSocket connection has been lost
     /// (session may still be alive on server, waiting for reconnect).
     disconnected: bool,
+    /// Terminal title set by OSC escape sequences (e.g. `\e]0;title\a`).
+    terminal_title: Option<String>,
     /// Claude Code session metrics for the current session.
     cc_metrics: Option<CcMetrics>,
     /// Claude Code agentic status for the current session.
@@ -305,6 +335,7 @@ impl TerminalPanel {
             _keystroke_subscription: keystroke_subscription,
             mode,
             disconnected: false,
+            terminal_title: None,
             cc_metrics: None,
             cc_status: None,
             tokio_handle: tokio_handle.clone(),
@@ -348,6 +379,7 @@ impl TerminalPanel {
         self.disconnected = false;
         self.closed = false;
         self.error_message = None;
+        self.terminal_title = None;
         self.reader_started = false; // Allow start_output_reader to run again
         self.pty_write_listener.update_sender(handle.input_sender());
         self.handle = handle;
@@ -421,6 +453,7 @@ impl TerminalPanel {
         // Unified channel for GPUI thread: either a repaint signal or a control event.
         enum GuiSignal {
             Repaint,
+            TitleChanged(Option<String>), // Some(title) = set, None = reset
             Event(TerminalEvent),
         }
         let (gui_tx, gui_rx) = flume::bounded::<GuiSignal>(32);
@@ -448,6 +481,13 @@ impl TerminalPanel {
                                 let clean = strip_cpr_responses(&bytes);
                                 if let Ok(mut t) = term.lock() {
                                     processor.advance(&mut *t, &clean);
+                                }
+                                if let Some(change) = pty_write_listener.take_pending_title() {
+                                    let title = match change {
+                                        TitleChange::Set(t) => Some(t),
+                                        TitleChange::Reset => None,
+                                    };
+                                    let _ = gui_tx.try_send(GuiSignal::TitleChanged(title));
                                 }
                                 needs_repaint = true;
                                 if coalesce_deadline.is_none() {
@@ -519,6 +559,17 @@ impl TerminalPanel {
                     Ok(GuiSignal::Repaint) => {
                         let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.notify();
+                        });
+                    }
+                    Ok(GuiSignal::TitleChanged(new_title)) => {
+                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                            if this.terminal_title != new_title {
+                                this.terminal_title = new_title.clone();
+                                cx.emit(TerminalPanelEvent::TitleChanged {
+                                    session_id: this.session_id.clone(),
+                                    title: new_title,
+                                });
+                            }
                         });
                     }
                     Ok(GuiSignal::Event(TerminalEvent::SessionClosed { .. })) => {
@@ -783,10 +834,18 @@ impl TerminalPanel {
 
 #[allow(clippy::enum_variant_names)]
 pub enum TerminalPanelEvent {
-    OpenCommandPalette { tab: PaletteTab },
+    OpenCommandPalette {
+        tab: PaletteTab,
+    },
     OpenSessionSwitcher,
     OpenHelp,
-    BridgeFailed { session_id: String },
+    BridgeFailed {
+        session_id: String,
+    },
+    TitleChanged {
+        session_id: String,
+        title: Option<String>,
+    },
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}

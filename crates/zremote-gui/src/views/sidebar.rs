@@ -63,6 +63,8 @@ pub struct SidebarView {
     cc_states: HashMap<String, CcState>,
     /// Claude Code session metrics per session_id.
     cc_metrics: HashMap<String, CcMetrics>,
+    /// Terminal titles set by OSC escape sequences, per session_id.
+    terminal_titles: HashMap<String, String>,
 }
 
 impl SidebarView {
@@ -90,6 +92,18 @@ impl SidebarView {
         &self.cc_metrics
     }
 
+    /// Set or clear the OSC terminal title for a session.
+    pub fn set_terminal_title(&mut self, session_id: String, title: Option<String>) {
+        match title {
+            Some(t) if !t.is_empty() => {
+                self.terminal_titles.insert(session_id, t);
+            }
+            _ => {
+                self.terminal_titles.remove(&session_id);
+            }
+        }
+    }
+
     pub fn new(app_state: Arc<AppState>, cx: &mut Context<Self>) -> Self {
         // Restore previously selected session from persistence.
         let restored_session_id = app_state
@@ -108,6 +122,7 @@ impl SidebarView {
             load_generation: 0,
             cc_states: HashMap::new(),
             cc_metrics: HashMap::new(),
+            terminal_titles: HashMap::new(),
         };
         view.load_data(cx);
         view
@@ -211,11 +226,13 @@ impl SidebarView {
             ServerEvent::SessionClosed { session_id, .. } => {
                 self.cc_states.remove(session_id);
                 self.cc_metrics.remove(session_id);
+                self.terminal_titles.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::SessionSuspended { session_id } => {
                 self.cc_states.remove(session_id);
                 self.cc_metrics.remove(session_id);
+                self.terminal_titles.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::HostDisconnected { host_id } => {
@@ -229,6 +246,7 @@ impl SidebarView {
                 for sid in &session_ids {
                     self.cc_states.remove(sid);
                     self.cc_metrics.remove(sid);
+                    self.terminal_titles.remove(sid);
                 }
                 self.load_data(cx);
             }
@@ -869,6 +887,9 @@ impl SidebarView {
         let has_second_row = cc_metrics.is_some();
 
         let display_name = session.name.clone().unwrap_or_else(|| {
+            if let Some(title) = self.terminal_titles.get(&session.id) {
+                return title.clone();
+            }
             if let Some(cc) = cc_state
                 && let Some(ref task) = cc.task_name
             {

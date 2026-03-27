@@ -343,6 +343,12 @@ impl MainView {
                     });
                 }
             }
+            TerminalPanelEvent::TitleChanged { session_id, title } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_terminal_title(session_id.clone(), title.clone());
+                    cx.notify();
+                });
+            }
         }
     }
 
