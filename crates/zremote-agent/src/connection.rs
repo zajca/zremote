@@ -281,7 +281,7 @@ async fn handle_session_create(
             } else {
                 None
             };
-            tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created");
+            tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created (available via bridge)");
             if outbound_tx
                 .try_send(AgentMessage::SessionCreated {
                     session_id,
@@ -796,7 +796,16 @@ pub async fn run_connection(
                             session_manager.write_to(&session_id, &data)
                         };
                         if let Err(e) = result {
-                            tracing::warn!(session_id = %session_id, error = %e, "bridge: failed to write to PTY");
+                            let known: Vec<String> = session_manager
+                                .session_pids()
+                                .map(|(id, _)| format!("{}...", &id.to_string()[..8]))
+                                .collect();
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %e,
+                                known_sessions = ?known,
+                                "bridge: write failed, session not in agent SessionManager"
+                            );
                         }
                     }
                     BridgeCommand::Resize { session_id, pane_id, cols, rows } => {
@@ -806,7 +815,13 @@ pub async fn run_connection(
                             session_manager.resize(&session_id, cols, rows)
                         };
                         if let Err(e) = result {
-                            tracing::warn!(session_id = %session_id, error = %e, "bridge: failed to resize PTY");
+                            tracing::warn!(
+                                session_id = %session_id,
+                                cols = cols,
+                                rows = rows,
+                                error = %e,
+                                "bridge: resize failed, session not in agent SessionManager"
+                            );
                         }
                         if pane_id.is_none() {
                             bridge::record_resize(bridge_scrollback, session_id, cols, rows).await;

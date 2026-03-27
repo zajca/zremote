@@ -61,11 +61,12 @@ async fn handle_bridge_connection(
     state: BridgeState,
 ) {
     let Ok(session_id) = session_id_str.parse::<SessionId>() else {
+        tracing::warn!(raw_id = %session_id_str, "bridge: invalid session ID, closing");
         let _ = socket.send(Message::Close(None)).await;
         return;
     };
 
-    tracing::info!(session_id = %session_id, "direct bridge GUI connected");
+    tracing::info!(session_id = %session_id, "bridge: GUI connected");
 
     // Snapshot scrollback while holding the read lock, then drop it before
     // any async I/O so we don't hold the lock across socket.send() awaits.
@@ -82,17 +83,26 @@ async fn handle_bridge_connection(
     // replay window is not delivered to this connection (acceptable trade-off
     // vs. the alternative of interleaving live data before history).
     if let Some((cols, rows, chunks)) = replay {
+        let total_bytes: usize = chunks.iter().map(Vec::len).sum();
+        tracing::info!(
+            session_id = %session_id,
+            chunks = chunks.len(),
+            bytes = total_bytes,
+            cols = cols,
+            rows = rows,
+            "bridge: sending scrollback replay"
+        );
         let start = BrowserMessage::ScrollbackStart { cols, rows };
         if let Ok(json) = serde_json::to_string(&start)
             && socket.send(Message::Text(json.into())).await.is_err()
         {
-            tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+            tracing::info!(session_id = %session_id, "bridge: GUI disconnected during scrollback replay");
             return;
         }
         for chunk in &chunks {
             let frame = encode_binary_output(None, chunk);
             if socket.send(Message::Binary(frame.into())).await.is_err() {
-                tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+                tracing::info!(session_id = %session_id, "bridge: GUI disconnected during scrollback replay");
                 return;
             }
         }
@@ -100,9 +110,11 @@ async fn handle_bridge_connection(
         if let Ok(json) = serde_json::to_string(&end)
             && socket.send(Message::Text(json.into())).await.is_err()
         {
-            tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+            tracing::info!(session_id = %session_id, "bridge: GUI disconnected during scrollback replay");
             return;
         }
+    } else {
+        tracing::debug!(session_id = %session_id, "bridge: no scrollback to replay");
     }
 
     // Register output sender AFTER scrollback replay is complete.
@@ -126,7 +138,7 @@ async fn handle_bridge_connection(
                             Ok(BridgeInput::Input { mut data, pane_id }) => {
                                 const MAX_INPUT_BYTES: usize = 1_048_576;
                                 if data.len() > MAX_INPUT_BYTES {
-                                    tracing::warn!(len = data.len(), "bridge input exceeds 1 MB, truncating");
+                                    tracing::warn!(session_id = %session_id, len = data.len(), "bridge: input exceeds 1 MB, truncating");
                                     let boundary = data.floor_char_boundary(MAX_INPUT_BYTES);
                                     data.truncate(boundary);
                                 }
@@ -135,7 +147,7 @@ async fn handle_bridge_connection(
                                     pane_id,
                                     data: data.into_bytes(),
                                 }).is_err() {
-                                    tracing::warn!("bridge command channel full, input dropped");
+                                    tracing::warn!(session_id = %session_id, "bridge: command channel full, input dropped");
                                 }
                             }
                             Ok(BridgeInput::Resize { cols, rows, pane_id }) => {
@@ -145,21 +157,28 @@ async fn handle_bridge_connection(
                                     cols,
                                     rows,
                                 }).is_err() {
-                                    tracing::warn!("bridge command channel full, resize dropped");
+                                    tracing::warn!(session_id = %session_id, "bridge: command channel full, resize dropped");
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "invalid bridge terminal message");
+                                tracing::warn!(session_id = %session_id, error = %e, "bridge: invalid terminal message");
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        tracing::debug!(session_id = %session_id, "bridge: GUI sent close frame");
+                        break;
+                    }
+                    None => {
+                        tracing::debug!(session_id = %session_id, "bridge: GUI WebSocket stream ended");
+                        break;
+                    }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                     Some(Ok(Message::Binary(_))) => {
-                        tracing::warn!("unexpected binary message from bridge GUI");
+                        tracing::warn!(session_id = %session_id, "bridge: unexpected binary message from GUI");
                     }
                     Some(Err(e)) => {
-                        tracing::warn!(error = %e, "bridge WebSocket error");
+                        tracing::warn!(session_id = %session_id, error = %e, "bridge: WebSocket error");
                         break;
                     }
                 }
@@ -186,6 +205,6 @@ async fn handle_bridge_connection(
         }
     }
 
-    tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+    tracing::info!(session_id = %session_id, "bridge: GUI disconnected");
     // Sender drops automatically; fan_out will clean it up on next send.
 }
