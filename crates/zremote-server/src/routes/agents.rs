@@ -556,20 +556,22 @@ async fn handle_agent_message(
 
             let now = chrono::Utc::now().to_rfc3339();
 
-            // Get all currently suspended sessions for this host from BOTH
-            // in-memory store and DB (DB may have sessions from before server restart).
-            let suspended_session_ids: Vec<uuid::Uuid> = {
+            // Get all non-closed sessions for this host from BOTH in-memory
+            // store and DB. This covers suspended sessions (normal reconnect) AND
+            // active sessions (e.g. daemon sessions that weren't suspended due to
+            // server restart or race conditions).
+            let host_session_ids: Vec<uuid::Uuid> = {
                 let mut ids: HashSet<uuid::Uuid> = {
                     let sessions_store = state.sessions.read().await;
                     sessions_store
                         .iter()
-                        .filter(|(_, s)| s.host_id == host_id && s.status == "suspended")
+                        .filter(|(_, s)| s.host_id == host_id && s.status != "closed")
                         .map(|(id, _)| *id)
                         .collect()
                 };
-                // Also check DB for suspended sessions not yet in memory (server restart case)
+                // Also check DB for sessions not yet in memory (server restart case)
                 if let Ok(db_rows) = sqlx::query_scalar::<_, String>(
-                    "SELECT id FROM sessions WHERE host_id = ? AND status = 'suspended'",
+                    "SELECT id FROM sessions WHERE host_id = ? AND status != 'closed'",
                 )
                 .bind(host_id.to_string())
                 .fetch_all(&state.db)
@@ -641,8 +643,8 @@ async fn handle_agent_message(
                 );
             }
 
-            // Close sessions that were suspended but NOT recovered
-            for sid in &suspended_session_ids {
+            // Close sessions that were NOT recovered by the agent
+            for sid in &host_session_ids {
                 if !recovered_ids.contains(sid) {
                     let sid_str = sid.to_string();
 
@@ -674,7 +676,7 @@ async fn handle_agent_message(
                         exit_code: None,
                     });
 
-                    tracing::info!(session_id = %sid, "closed unrecovered suspended session");
+                    tracing::info!(session_id = %sid, "closed unrecovered session");
                 }
             }
 
