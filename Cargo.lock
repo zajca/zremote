@@ -8847,7 +8847,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-client"
-version = "0.7.6"
+version = "0.7.8"
 dependencies = [
  "axum",
  "chrono",
@@ -8888,7 +8888,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-gui"
-version = "0.7.6"
+version = "0.7.8"
 dependencies = [
  "alacritty_terminal",
  "arboard",
