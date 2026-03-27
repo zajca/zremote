@@ -28,6 +28,7 @@ import com.zremote.ui.screens.loops.LoopListScreen
 import com.zremote.ui.screens.sessions.SessionListScreen
 import com.zremote.ui.screens.settings.SettingsScreen
 import com.zremote.ui.screens.tasks.TaskListScreen
+import com.zremote.ui.screens.terminal.TerminalScreen
 import kotlinx.serialization.Serializable
 
 // Route definitions
@@ -37,6 +38,7 @@ import kotlinx.serialization.Serializable
 @Serializable object SettingsRoute
 @Serializable data class SessionsRoute(val hostId: String)
 @Serializable data class LoopDetailRoute(val loopId: String)
+@Serializable data class TerminalRoute(val sessionId: String)
 
 data class BottomNavItem(
     val label: String,
@@ -105,6 +107,10 @@ fun ZRemoteNavHost(navController: NavHostController = rememberNavController()) {
             }
             composable<TasksRoute> {
                 TaskListScreen()
+            }
+            composable<TerminalRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<TerminalRoute>()
+                TerminalScreen(sessionId = route.sessionId)
             }
             composable<SettingsRoute> {
                 SettingsScreen()

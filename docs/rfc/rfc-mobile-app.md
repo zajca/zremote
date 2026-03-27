@@ -774,7 +774,16 @@ class ZRemoteEventRepository @Inject constructor(
 
 ---
 
-## Phase 4: Terminal Viewer + Push Notifications
+## Phase 4: Terminal Viewer + Push Notifications [COMPLETED]
+
+> **Implementation notes:**
+> - Terminal uses ANSI SGR parser (8-color, 256-color, bold) with AnnotatedString rendering
+> - Quick-command bar with Ctrl+C, Tab, Esc, Up, Down buttons + text input field
+> - Push notifications use Option A (client-driven via foreground service)
+> - 7 notification channels matching RFC priority spec
+> - `NotificationEventListener` fires notifications for loop end/error, permission requests, task end/error, host disconnect
+> - `ZRemoteEventService` foreground service keeps WebSocket alive in background
+> - Full VT100 emulation deferred (ANSI color parsing sufficient for MVP log viewing)
 
 ### Read-Only Terminal Viewer (P1)
 
