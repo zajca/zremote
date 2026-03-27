@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -67,6 +68,9 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
+
+    // Serialization (for type-safe navigation routes)
+    implementation(libs.kotlinx.serialization.json)
 
     // DataStore (for settings persistence)
     implementation(libs.datastore.preferences)

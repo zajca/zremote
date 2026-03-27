@@ -10,6 +10,7 @@ import com.zremote.sdk.ZRemoteEventStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,13 +49,7 @@ class ZRemoteEventRepository @Inject constructor() {
         _isConnected.value = false
         _loops.value = emptyList()
         _sessionMetrics.value = emptyMap()
-    }
-
-    private fun refreshAfterEvent() {
-        val c = client ?: return
-        scope.launch {
-            // Subclasses or screens can observe StateFlows and refresh as needed
-        }
+        scope.coroutineContext[Job]?.cancelChildren()
     }
 
     private inner class Listener : EventListener {

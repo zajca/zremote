@@ -1,5 +1,6 @@
 package com.zremote.ui.screens.sessions
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,6 +32,7 @@ import com.zremote.ui.theme.StatusOnline
 @Composable
 fun SessionListScreen(
     hostId: String,
+    onSessionClick: (String) -> Unit = {},
     viewModel: SessionListViewModel = hiltViewModel(),
 ) {
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
@@ -41,13 +43,16 @@ fun SessionListScreen(
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         items(sessions, key = { it.id }) { session ->
-            SessionCard(session)
+            SessionCard(
+                session = session,
+                onClick = { onSessionClick(session.id) },
+            )
         }
     }
 }
 
 @Composable
-private fun SessionCard(session: FfiSession) {
+private fun SessionCard(session: FfiSession, onClick: () -> Unit) {
     val statusColor = when (session.status) {
         "active" -> StatusOnline
         "closed" -> StatusOffline
@@ -58,7 +63,8 @@ private fun SessionCard(session: FfiSession) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(16.dp),

@@ -92,7 +92,12 @@ fun ZRemoteNavHost(navController: NavHostController = rememberNavController()) {
             }
             composable<SessionsRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<SessionsRoute>()
-                SessionListScreen(hostId = route.hostId)
+                SessionListScreen(
+                    hostId = route.hostId,
+                    onSessionClick = { sessionId ->
+                        navController.navigate(TerminalRoute(sessionId))
+                    },
+                )
             }
             composable<LoopsRoute> {
                 LoopListScreen(
