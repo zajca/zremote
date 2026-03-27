@@ -576,7 +576,16 @@ Expected size per ABI: ~5-8MB for the `.so` file. For MVP, `aarch64` only is suf
 
 ---
 
-## Phase 3: Android MVP App (Jetpack Compose)
+## Phase 3: Android MVP App (Jetpack Compose) [COMPLETED]
+
+> **Implementation notes:**
+> - Gradle project uses version catalog (`libs.versions.toml`) instead of inline versions
+> - DI via Hilt with `ConnectionManager` singleton (wraps `ZRemoteClient` + `ZRemoteEventRepository`)
+> - Settings persistence via DataStore Preferences (server URL)
+> - Bottom navigation: Hosts, Loops, Tasks, Settings
+> - Type-safe navigation with `@Serializable` route objects (Navigation Compose 2.8+)
+> - Loop transcript viewer shows detail info (full transcript requires server-side API extension)
+> - Approve/deny deferred to Phase 4 (requires server-side permission forwarding endpoint)
 
 ### Project Structure
 
