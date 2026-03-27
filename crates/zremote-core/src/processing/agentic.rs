@@ -48,7 +48,7 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
 }
 
 /// No-op: auto-idle detection removed. Real `WaitingForInput` status is set
-/// by explicit hook signals (idle_prompt, permission_prompt, Elicitation).
+/// by explicit hook signals (`idle_prompt`, `permission_prompt`, Elicitation).
 /// The previous 5-second timeout caused false "Waiting for input" when CC was
 /// actively thinking between tool uses.
 #[allow(clippy::unused_async)]

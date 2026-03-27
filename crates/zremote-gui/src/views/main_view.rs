@@ -36,6 +36,8 @@ pub struct MainView {
     /// Whether the event WebSocket has ever successfully connected.
     /// Used to suppress the disconnect banner before the first connection.
     ever_connected: bool,
+    /// Host ID of the currently open terminal session (for bridge host matching).
+    current_host_id: Option<String>,
 }
 
 impl MainView {
@@ -64,6 +66,7 @@ impl MainView {
             double_shift: DoubleShiftDetector::new(),
             server_connected: true, // Assume connected until first Disconnected event
             ever_connected: false,
+            current_host_id: None,
         }
     }
 
@@ -103,7 +106,7 @@ impl MainView {
         }
     }
 
-    fn open_terminal(&mut self, session_id: &str, _host_id: &str, cx: &mut Context<Self>) {
+    fn open_terminal(&mut self, session_id: &str, host_id: &str, cx: &mut Context<Self>) {
         let session_id_owned = session_id.to_string();
 
         // Persist active session.
@@ -112,7 +115,9 @@ impl MainView {
             let _ = p.save_if_changed();
         }
 
-        let Some(handle) = connect_terminal(&self.app_state, session_id, false) else {
+        self.current_host_id = Some(host_id.to_string());
+
+        let Some(handle) = connect_terminal(&self.app_state, session_id, host_id, false) else {
             return;
         };
         let tokio_handle = self.app_state.tokio_handle.clone();
@@ -191,7 +196,10 @@ impl MainView {
             if is_current && terminal.read(cx).is_disconnected() {
                 // Re-establish the terminal connection (new WS, scrollback replay).
                 let session_id = session_id.clone();
-                if let Some(handle) = connect_terminal(&self.app_state, &session_id, false) {
+                let host_id = self.current_host_id.clone().unwrap_or_default();
+                if let Some(handle) =
+                    connect_terminal(&self.app_state, &session_id, &host_id, false)
+                {
                     terminal.update(cx, |panel, cx| {
                         panel.reconnect(handle, &self.app_state.tokio_handle, cx);
                     });
@@ -329,7 +337,7 @@ impl MainView {
             }
             TerminalPanelEvent::BridgeFailed { session_id } => {
                 tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
-                if let Some(handle) = connect_terminal(&self.app_state, session_id, true) {
+                if let Some(handle) = connect_terminal(&self.app_state, session_id, "", true) {
                     terminal.update(cx, |panel, cx| {
                         panel.reconnect(handle, &self.app_state.tokio_handle, cx);
                     });
@@ -763,10 +771,14 @@ impl Render for MainView {
 fn connect_terminal(
     app_state: &std::sync::Arc<AppState>,
     session_id: &str,
+    host_id: &str,
     skip_bridge: bool,
 ) -> Option<crate::terminal_handle::TerminalHandle> {
-    // 1. Try direct bridge (same-machine agent)
-    if !skip_bridge && let Some(port) = read_bridge_port() {
+    // 1. Try direct bridge (same-machine agent only)
+    if !skip_bridge
+        && is_bridge_host(host_id)
+        && let Some(port) = read_bridge_port()
+    {
         let bridge_url = format!("ws://127.0.0.1:{port}/ws/bridge/{session_id}");
         tracing::info!(port = port, session_id = %session_id, "attempting direct bridge connection");
         let session =
@@ -783,6 +795,21 @@ fn connect_terminal(
     ))
 }
 
+/// Check whether a session's host_id matches the local agent's bridge host_id.
+///
+/// Returns `true` (allow bridge) when:
+/// - The host_id file exists and matches the session's host_id
+/// - The host_id file doesn't exist (local mode / old agent without this feature)
+///
+/// Returns `false` (skip bridge) when the file exists but doesn't match.
+fn is_bridge_host(host_id: &str) -> bool {
+    let Some(bridge_host_id) = read_bridge_host_id() else {
+        // No file = local mode or old agent; allow bridge attempt (fallback handles failure)
+        return true;
+    };
+    bridge_host_id == host_id
+}
+
 /// Read the bridge port from `~/.zremote/bridge-port`.
 ///
 /// Returns `None` if the file doesn't exist or contains invalid data.
@@ -796,6 +823,21 @@ fn read_bridge_port() -> Option<u16> {
         .join("bridge-port");
     let content = std::fs::read_to_string(&path).ok()?;
     content.trim().parse().ok()
+}
+
+/// Read the bridge host_id from `~/.zremote/bridge-host-id`.
+fn read_bridge_host_id() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home)
+        .join(".zremote")
+        .join("bridge-host-id");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Events emitted by the sidebar for the main view to handle.

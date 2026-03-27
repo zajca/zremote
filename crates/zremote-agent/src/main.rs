@@ -462,6 +462,7 @@ async fn run_agent() {
     if let Err(e) = bridge::remove_port_file().await {
         tracing::debug!(error = %e, "failed to remove bridge port file on exit");
     }
+    bridge::remove_host_id_file().await;
 
     tracing::info!("zremote-agent stopped");
 }

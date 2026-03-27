@@ -102,6 +102,20 @@ pub async fn remove_port_file() -> Result<(), std::io::Error> {
     tokio::fs::remove_file(&path).await
 }
 
+/// Write the agent's host_id so the GUI can skip bridge for non-local sessions.
+pub async fn write_host_id_file(host_id: &uuid::Uuid) {
+    if let Err(e) = write_host_id_file_inner(host_id).await {
+        tracing::warn!(error = %e, "failed to write bridge host_id file");
+    }
+}
+
+/// Remove the host_id file (called during agent shutdown / local mode cleanup).
+pub async fn remove_host_id_file() {
+    if let Ok(path) = host_id_file_path() {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+}
+
 /// Fan out a `BrowserMessage` to all registered bridge senders for a session.
 ///
 /// Removes closed senders (where `try_send` returns `Closed`).
@@ -182,6 +196,22 @@ fn port_file_path() -> Result<PathBuf, std::io::Error> {
     let home = std::env::var("HOME")
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"))?;
     Ok(PathBuf::from(home).join(".zremote").join("bridge-port"))
+}
+
+fn host_id_file_path() -> Result<PathBuf, std::io::Error> {
+    let home = std::env::var("HOME")
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"))?;
+    Ok(PathBuf::from(home).join(".zremote").join("bridge-host-id"))
+}
+
+async fn write_host_id_file_inner(host_id: &uuid::Uuid) -> Result<(), std::io::Error> {
+    let path = host_id_file_path()?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&path, host_id.to_string()).await?;
+    tracing::debug!(path = %path.display(), host_id = %host_id, "wrote bridge host_id file");
+    Ok(())
 }
 
 async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {

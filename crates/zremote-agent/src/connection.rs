@@ -337,6 +337,9 @@ pub async fn run_connection(
 
     let host_id = register(&mut ws, config, supports_persistence).await?;
 
+    // Write host_id for GUI bridge discovery (skip bridge for non-local sessions)
+    bridge::write_host_id_file(&host_id).await;
+
     // Split the WebSocket for concurrent read/write
     let (mut ws_sink, mut ws_stream) = ws.split();
 

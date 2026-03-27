@@ -52,6 +52,7 @@ pub async fn run_local(
     if let Err(e) = crate::bridge::remove_port_file().await {
         tracing::debug!(error = %e, "no stale bridge port file to clean up");
     }
+    crate::bridge::remove_host_id_file().await;
 
     // Ensure parent directory exists
     if let Some(parent) = db_file.parent() {
