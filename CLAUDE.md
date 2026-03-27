@@ -163,7 +163,17 @@ Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.
 
 ## Implementation Workflow
 
-Multi-phase features (3+ files or architectural changes) use a **team-based workflow**. You act as **team lead** -- plan, delegate, review, merge. Teammates implement.
+### Mandatory for ALL changes
+
+These apply to every change, regardless of size:
+
+1. **Tests are mandatory.** Write tests for all new and changed code. No exceptions. If changing behavior, update existing tests. If adding functionality, add new tests. Skip only for: config files, type definitions, trivial one-liners.
+2. **Code review is mandatory.** After implementation, always spawn `rust-reviewer`. Add `code-reviewer` for multi-file changes. Add `security-reviewer` for endpoints, auth, or data handling. Do not offer to commit until review is done.
+3. **Fix ALL review findings.** Every issue found in code review must be fixed before commit. Never dismiss findings as "non-critical" or offer to defer them. The only exception is if a finding is factually wrong -- then explain why.
+
+### Multi-phase features
+
+Features touching 3+ files or architectural changes use a **team-based workflow**. You act as **team lead** -- plan, delegate, review, merge. Teammates implement.
 
 ### Phase 0: RFC & Task Plan
 
