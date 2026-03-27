@@ -316,3 +316,244 @@ async fn handle_terminal_connection(
     // Cleanup: sender drops automatically when this function returns,
     // try_send in the relay loop will detect it and remove it.
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{
+        BINARY_TAG_OUTPUT, BINARY_TAG_PANE_OUTPUT, BrowserMessage, decode_binary_output,
+        encode_binary_output,
+    };
+
+    // --- BrowserInput deserialization ---
+
+    #[test]
+    fn deserialize_input_variant() {
+        let json = r#"{"type": "input", "data": "hello"}"#;
+        let msg: BrowserInput = serde_json::from_str(json).unwrap();
+        match msg {
+            BrowserInput::Input { data } => assert_eq!(data, "hello"),
+            other => panic!("expected Input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_resize_variant() {
+        let json = r#"{"type": "resize", "cols": 120, "rows": 40}"#;
+        let msg: BrowserInput = serde_json::from_str(json).unwrap();
+        match msg {
+            BrowserInput::Resize { cols, rows } => {
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 40);
+            }
+            other => panic!("expected Resize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_image_paste_variant() {
+        let json = r#"{"type": "image_paste", "data": "base64data=="}"#;
+        let msg: BrowserInput = serde_json::from_str(json).unwrap();
+        match msg {
+            BrowserInput::ImagePaste { data } => assert_eq!(data, "base64data=="),
+            other => panic!("expected ImagePaste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_unknown_type_returns_error() {
+        let json = r#"{"type": "unknown_variant", "data": "x"}"#;
+        let result = serde_json::from_str::<BrowserInput>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_missing_type_field_returns_error() {
+        let json = r#"{"data": "hello"}"#;
+        let result = serde_json::from_str::<BrowserInput>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_input_missing_data_returns_error() {
+        let json = r#"{"type": "input"}"#;
+        let result = serde_json::from_str::<BrowserInput>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_resize_missing_cols_returns_error() {
+        let json = r#"{"type": "resize", "rows": 40}"#;
+        let result = serde_json::from_str::<BrowserInput>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_resize_missing_rows_returns_error() {
+        let json = r#"{"type": "resize", "cols": 120}"#;
+        let result = serde_json::from_str::<BrowserInput>(json);
+        assert!(result.is_err());
+    }
+
+    // --- BrowserMessage serialization ---
+
+    #[test]
+    fn serialize_scrollback_start() {
+        let msg = BrowserMessage::ScrollbackStart { cols: 80, rows: 24 };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "scrollback_start");
+        assert_eq!(json["cols"], 80);
+        assert_eq!(json["rows"], 24);
+    }
+
+    #[test]
+    fn serialize_scrollback_end() {
+        let msg = BrowserMessage::ScrollbackEnd;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "scrollback_end");
+    }
+
+    #[test]
+    fn serialize_session_closed() {
+        let msg = BrowserMessage::SessionClosed { exit_code: Some(0) };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert_eq!(json["exit_code"], 0);
+    }
+
+    #[test]
+    fn serialize_session_closed_no_exit_code() {
+        let msg = BrowserMessage::SessionClosed { exit_code: None };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_closed");
+        assert!(json["exit_code"].is_null());
+    }
+
+    #[test]
+    fn serialize_session_suspended() {
+        let msg = BrowserMessage::SessionSuspended;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_suspended");
+    }
+
+    #[test]
+    fn serialize_session_resumed() {
+        let msg = BrowserMessage::SessionResumed;
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "session_resumed");
+    }
+
+    #[test]
+    fn serialize_output_main_pane() {
+        let msg = BrowserMessage::Output {
+            pane_id: None,
+            data: b"hello".to_vec(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "output");
+        // data is base64 encoded
+        assert!(json.get("pane_id").is_none());
+        assert!(json["data"].is_string());
+    }
+
+    #[test]
+    fn serialize_output_specific_pane() {
+        let msg = BrowserMessage::Output {
+            pane_id: Some("pane-1".to_string()),
+            data: b"world".to_vec(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "output");
+        assert_eq!(json["pane_id"], "pane-1");
+    }
+
+    #[test]
+    fn serialize_error() {
+        let msg = BrowserMessage::Error {
+            message: "something went wrong".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["message"], "something went wrong");
+    }
+
+    #[test]
+    fn serialize_pane_added() {
+        let msg = BrowserMessage::PaneAdded {
+            pane_id: "pane-2".to_string(),
+            index: 1,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "pane_added");
+        assert_eq!(json["pane_id"], "pane-2");
+        assert_eq!(json["index"], 1);
+    }
+
+    #[test]
+    fn serialize_pane_removed() {
+        let msg = BrowserMessage::PaneRemoved {
+            pane_id: "pane-3".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "pane_removed");
+        assert_eq!(json["pane_id"], "pane-3");
+    }
+
+    // --- encode_binary_output / decode_binary_output ---
+
+    #[test]
+    fn encode_main_pane_output() {
+        let data = b"terminal output";
+        let frame = encode_binary_output(None, data);
+        assert_eq!(frame[0], BINARY_TAG_OUTPUT);
+        assert_eq!(&frame[1..], data);
+    }
+
+    #[test]
+    fn encode_specific_pane_output() {
+        let data = b"pane data";
+        let pane_id = "my-pane";
+        let frame = encode_binary_output(Some(pane_id), data);
+        assert_eq!(frame[0], BINARY_TAG_PANE_OUTPUT);
+        assert_eq!(frame[1], pane_id.len() as u8);
+        assert_eq!(&frame[2..2 + pane_id.len()], pane_id.as_bytes());
+        assert_eq!(&frame[2 + pane_id.len()..], data);
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_main_pane() {
+        let data = b"roundtrip test";
+        let frame = encode_binary_output(None, data);
+        let (pane_id, decoded) = decode_binary_output(&frame).unwrap();
+        assert!(pane_id.is_none());
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_specific_pane() {
+        let data = b"pane roundtrip";
+        let frame = encode_binary_output(Some("p1"), data);
+        let (pane_id, decoded) = decode_binary_output(&frame).unwrap();
+        assert_eq!(pane_id.as_deref(), Some("p1"));
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn encode_empty_data() {
+        let frame = encode_binary_output(None, b"");
+        assert_eq!(frame, vec![BINARY_TAG_OUTPUT]);
+        let (pane_id, decoded) = decode_binary_output(&frame).unwrap();
+        assert!(pane_id.is_none());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_empty_frame_returns_none() {
+        assert!(decode_binary_output(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_unknown_tag_returns_none() {
+        assert!(decode_binary_output(&[0xFF, 0x01, 0x02]).is_none());
+    }
+}
