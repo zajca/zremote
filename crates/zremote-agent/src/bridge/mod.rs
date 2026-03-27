@@ -1,6 +1,6 @@
 mod handler;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::get;
 use tokio::sync::{RwLock, mpsc};
-use zremote_core::state::BrowserMessage;
+use zremote_core::state::{BrowserMessage, MAX_SCROLLBACK_BYTES};
 use zremote_protocol::SessionId;
 
 pub use handler::BridgeCommand;
@@ -16,11 +16,54 @@ pub use handler::BridgeCommand;
 /// Per-session list of senders for direct GUI connections.
 pub type BridgeSenders = Arc<RwLock<HashMap<SessionId, Vec<mpsc::Sender<BrowserMessage>>>>>;
 
+/// Per-session scrollback buffer kept by the bridge so new GUI connections
+/// receive terminal history immediately (the server holds the authoritative
+/// copy, but the bridge needs its own for direct connections).
+pub type BridgeScrollbackStore = Arc<RwLock<HashMap<SessionId, BridgeScrollback>>>;
+
+/// Scrollback state for a single session.
+#[derive(Debug)]
+pub struct BridgeScrollback {
+    pub(super) chunks: VecDeque<Vec<u8>>,
+    total_bytes: usize,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl BridgeScrollback {
+    fn new() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            total_bytes: 0,
+            cols: 0,
+            rows: 0,
+        }
+    }
+
+    fn append(&mut self, data: Vec<u8>) {
+        self.total_bytes += data.len();
+        self.chunks.push_back(data);
+        while self.total_bytes > MAX_SCROLLBACK_BYTES {
+            if let Some(old) = self.chunks.pop_front() {
+                self.total_bytes -= old.len();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Collect all scrollback chunks into a single snapshot.
+    pub fn snapshot(&self) -> Vec<Vec<u8>> {
+        self.chunks.iter().cloned().collect()
+    }
+}
+
 /// Shared state for the bridge Axum server.
 #[derive(Clone)]
 pub struct BridgeState {
     pub senders: BridgeSenders,
     pub command_tx: mpsc::Sender<BridgeCommand>,
+    pub scrollback: BridgeScrollbackStore,
 }
 
 /// Start the direct bridge server on a random localhost port.
@@ -92,6 +135,39 @@ pub async fn fan_out(senders: &BridgeSenders, session_id: SessionId, msg: Browse
     }
 }
 
+/// Record terminal output into the bridge scrollback buffer for a session.
+///
+/// Called from the connection loop alongside `fan_out` so that new GUI
+/// connections can receive history.
+pub async fn record_output(store: &BridgeScrollbackStore, session_id: SessionId, data: Vec<u8>) {
+    let mut guard = store.write().await;
+    guard
+        .entry(session_id)
+        .or_insert_with(BridgeScrollback::new)
+        .append(data);
+}
+
+/// Update the last-known terminal dimensions for a session's scrollback framing.
+pub async fn record_resize(
+    store: &BridgeScrollbackStore,
+    session_id: SessionId,
+    cols: u16,
+    rows: u16,
+) {
+    let mut guard = store.write().await;
+    let entry = guard
+        .entry(session_id)
+        .or_insert_with(BridgeScrollback::new);
+    entry.cols = cols;
+    entry.rows = rows;
+}
+
+/// Remove scrollback data for a closed session.
+pub async fn remove_session(store: &BridgeScrollbackStore, session_id: &SessionId) {
+    let mut guard = store.write().await;
+    guard.remove(session_id);
+}
+
 async fn write_port_file(port: u16) -> Result<(), std::io::Error> {
     let path = port_file_path()?;
     if let Some(parent) = path.parent() {
@@ -116,5 +192,127 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
         if *rx.borrow() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn make_store() -> BridgeScrollbackStore {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    // --- BridgeScrollback unit tests ---
+
+    #[test]
+    fn append_within_limit() {
+        let mut sb = BridgeScrollback::new();
+        sb.append(vec![0x41; 100]);
+        assert_eq!(sb.chunks.len(), 1);
+        assert_eq!(sb.total_bytes, 100);
+    }
+
+    #[test]
+    fn append_evicts_old_chunks() {
+        let mut sb = BridgeScrollback::new();
+        let chunk_size = 40_000;
+        sb.append(vec![1; chunk_size]);
+        sb.append(vec![2; chunk_size]);
+        sb.append(vec![3; chunk_size]); // 120k > 100k limit
+        assert!(sb.total_bytes <= MAX_SCROLLBACK_BYTES);
+        assert_eq!(sb.chunks.len(), 2);
+        assert_eq!(sb.chunks[0][0], 2);
+        assert_eq!(sb.chunks[1][0], 3);
+    }
+
+    #[test]
+    fn append_empty_deque_does_not_loop() {
+        let mut sb = BridgeScrollback::new();
+        // Force inconsistent state to verify the else-break guard prevents
+        // an infinite loop when the deque is empty but total_bytes > limit.
+        sb.total_bytes = MAX_SCROLLBACK_BYTES + 1;
+        sb.append(vec![1; 10]); // should not infinite-loop
+        // The new chunk was added then immediately evicted (still over limit),
+        // then the while loop hits the empty deque and breaks.
+        assert!(sb.chunks.is_empty());
+    }
+
+    #[test]
+    fn snapshot_returns_all_chunks() {
+        let mut sb = BridgeScrollback::new();
+        sb.append(vec![1; 50]);
+        sb.append(vec![2; 75]);
+        let snap = sb.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].len(), 50);
+        assert_eq!(snap[1].len(), 75);
+    }
+
+    #[test]
+    fn snapshot_empty() {
+        let sb = BridgeScrollback::new();
+        assert!(sb.snapshot().is_empty());
+    }
+
+    #[test]
+    fn new_has_zero_dimensions() {
+        let sb = BridgeScrollback::new();
+        assert_eq!(sb.cols, 0);
+        assert_eq!(sb.rows, 0);
+    }
+
+    // --- Async store function tests ---
+
+    #[tokio::test]
+    async fn record_output_creates_entry() {
+        let store = make_store();
+        let sid = Uuid::new_v4();
+        record_output(&store, sid, vec![0x41; 100]).await;
+        let guard = store.read().await;
+        let sb = guard.get(&sid).unwrap();
+        assert_eq!(sb.total_bytes, 100);
+        assert_eq!(sb.chunks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_output_appends_multiple() {
+        let store = make_store();
+        let sid = Uuid::new_v4();
+        record_output(&store, sid, vec![1; 50]).await;
+        record_output(&store, sid, vec![2; 60]).await;
+        let guard = store.read().await;
+        let sb = guard.get(&sid).unwrap();
+        assert_eq!(sb.total_bytes, 110);
+        assert_eq!(sb.chunks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_resize_updates_dimensions() {
+        let store = make_store();
+        let sid = Uuid::new_v4();
+        record_resize(&store, sid, 120, 40).await;
+        let guard = store.read().await;
+        let sb = guard.get(&sid).unwrap();
+        assert_eq!(sb.cols, 120);
+        assert_eq!(sb.rows, 40);
+    }
+
+    #[tokio::test]
+    async fn remove_session_clears_entry() {
+        let store = make_store();
+        let sid = Uuid::new_v4();
+        record_output(&store, sid, vec![1; 100]).await;
+        assert!(store.read().await.contains_key(&sid));
+        remove_session(&store, &sid).await;
+        assert!(!store.read().await.contains_key(&sid));
+    }
+
+    #[tokio::test]
+    async fn remove_session_nonexistent_is_noop() {
+        let store = make_store();
+        remove_session(&store, &Uuid::new_v4()).await;
+        assert!(store.read().await.is_empty());
     }
 }

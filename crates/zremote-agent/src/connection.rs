@@ -332,6 +332,7 @@ pub async fn run_connection(
     sent_cc_session_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     ccline_rx: &mut mpsc::Receiver<AgentMessage>,
     bridge_senders: &BridgeSenders,
+    bridge_scrollback: &bridge::BridgeScrollbackStore,
     bridge_cmd_rx: &mut mpsc::Receiver<BridgeCommand>,
 ) -> Result<(), ConnectionError> {
     let supports_persistence = session_manager.supports_persistence();
@@ -581,6 +582,7 @@ pub async fn run_connection(
                                     knowledge_sender.as_ref(),
                                     session_mapper,
                                     bridge_senders,
+                                    bridge_scrollback,
                                 ).await;
                             }
                             Err(e) => {
@@ -635,6 +637,7 @@ pub async fn run_connection(
                                             data: sb.clone(),
                                         },
                                     ).await;
+                                    bridge::record_output(bridge_scrollback, session_id, sb.clone()).await;
                                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                                         session_id,
                                         data: sb,
@@ -664,6 +667,7 @@ pub async fn run_connection(
                         session_id,
                         zremote_core::state::BrowserMessage::SessionClosed { exit_code },
                     ).await;
+                    bridge::remove_session(bridge_scrollback, &session_id).await;
                     if outbound_tx.try_send(AgentMessage::SessionClosed {
                         session_id,
                         exit_code,
@@ -681,6 +685,7 @@ pub async fn run_connection(
                             data: data.clone(),
                         },
                     ).await;
+                    bridge::record_output(bridge_scrollback, session_id, data.clone()).await;
                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
@@ -688,7 +693,9 @@ pub async fn run_connection(
                         tracing::warn!("outbound channel full, message dropped");
                     }
                 } else {
-                    // Extra pane output -- forward to server + bridge
+                    // Extra pane output -- forward to server + bridge.
+                    // Not recorded in bridge scrollback (same as server: pane
+                    // scrollback replay is not implemented for either path).
                     let pane_id_str = pty_output.pane_id;
                     bridge::fan_out(
                         bridge_senders,
@@ -740,6 +747,7 @@ pub async fn run_connection(
                         session_id,
                         zremote_core::state::BrowserMessage::SessionClosed { exit_code },
                     ).await;
+                    bridge::remove_session(bridge_scrollback, &session_id).await;
                     if outbound_tx.try_send(AgentMessage::SessionClosed {
                         session_id,
                         exit_code,
@@ -799,6 +807,9 @@ pub async fn run_connection(
                         };
                         if let Err(e) = result {
                             tracing::warn!(session_id = %session_id, error = %e, "bridge: failed to resize PTY");
+                        }
+                        if pane_id.is_none() {
+                            bridge::record_resize(bridge_scrollback, session_id, cols, rows).await;
                         }
                     }
                 }
@@ -877,6 +888,7 @@ async fn handle_server_message(
     knowledge_tx: Option<&mpsc::Sender<KnowledgeServerMessage>>,
     session_mapper: &SessionMapper,
     bridge_senders: &BridgeSenders,
+    bridge_scrollback: &bridge::BridgeScrollbackStore,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -919,6 +931,7 @@ async fn handle_server_message(
                 zremote_core::state::BrowserMessage::SessionClosed { exit_code },
             )
             .await;
+            bridge::remove_session(bridge_scrollback, session_id).await;
             if outbound_tx
                 .try_send(AgentMessage::SessionClosed {
                     session_id: *session_id,
@@ -949,6 +962,7 @@ async fn handle_server_message(
             if let Err(e) = session_manager.resize(session_id, *cols, *rows) {
                 tracing::warn!(session_id = %session_id, error = %e, "failed to resize PTY");
             }
+            bridge::record_resize(bridge_scrollback, *session_id, *cols, *rows).await;
         }
         ServerMessage::Error { message } => {
             tracing::error!(host_id = %host_id, error = %message, "server error");
@@ -1784,6 +1798,7 @@ mod tests {
         Option<mpsc::Sender<KnowledgeServerMessage>>,
         SessionMapper,
         BridgeSenders,
+        bridge::BridgeScrollbackStore,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx, crate::config::PersistenceBackend::None);
@@ -1793,6 +1808,8 @@ mod tests {
         let (agentic_tx, agentic_rx) = mpsc::channel(16);
         let session_mapper = SessionMapper::new();
         let bridge_senders: BridgeSenders =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let bridge_scrollback: bridge::BridgeScrollbackStore =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         (
             session_manager,
@@ -1805,6 +1822,7 @@ mod tests {
             None,
             session_mapper,
             bridge_senders,
+            bridge_scrollback,
         )
     }
 
@@ -1851,7 +1869,8 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+            make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
         };
@@ -1866,6 +1885,7 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
     }
@@ -1873,7 +1893,8 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+            make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
         };
@@ -1888,6 +1909,7 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
     }
@@ -1895,7 +1917,8 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+            make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
         };
@@ -1910,6 +1933,7 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
     }
@@ -1917,7 +1941,7 @@ mod tests {
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs) =
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb) =
             make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
@@ -1932,6 +1956,7 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
 
@@ -1952,7 +1977,8 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+            make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
             data: vec![0x41],
@@ -1968,6 +1994,7 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
     }
@@ -1975,9 +2002,11 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs) = make_test_context();
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+            make_test_context();
+        let session_id = Uuid::new_v4();
         let msg = ServerMessage::TerminalResize {
-            session_id: Uuid::new_v4(),
+            session_id,
             cols: 120,
             rows: 40,
         };
@@ -1992,8 +2021,17 @@ mod tests {
             ktx.as_ref(),
             &mapper,
             &bs,
+            &bsb,
         )
         .await;
+
+        // Verify bridge scrollback recorded the resize dimensions.
+        let guard = bsb.read().await;
+        let sb = guard
+            .get(&session_id)
+            .expect("scrollback entry should exist");
+        assert_eq!(sb.cols, 120);
+        assert_eq!(sb.rows, 40);
     }
 
     #[tokio::test]

@@ -357,12 +357,15 @@ async fn run_agent() {
     // Lives outside the reconnect loop so bridge connections survive server reconnects.
     let bridge_senders: bridge::BridgeSenders =
         std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let bridge_scrollback: bridge::BridgeScrollbackStore =
+        std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let (bridge_cmd_tx, mut bridge_cmd_rx) =
         tokio::sync::mpsc::channel::<bridge::BridgeCommand>(256);
     {
         let bridge_state = bridge::BridgeState {
             senders: bridge_senders.clone(),
             command_tx: bridge_cmd_tx,
+            scrollback: bridge_scrollback.clone(),
         };
         match bridge::start(bridge_state, shutdown_rx.clone()).await {
             Ok(addr) => {
@@ -396,6 +399,7 @@ async fn run_agent() {
             &sent_cc_session_ids,
             &mut ccline_rx,
             &bridge_senders,
+            &bridge_scrollback,
             &mut bridge_cmd_rx,
         )
         .await

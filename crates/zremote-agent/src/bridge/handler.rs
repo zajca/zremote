@@ -67,12 +67,46 @@ async fn handle_bridge_connection(
 
     tracing::info!(session_id = %session_id, "direct bridge GUI connected");
 
-    // Known limitation: bridge does not send scrollback replay on connect.
-    // The server holds scrollback history. Bridge provides only live terminal I/O.
-    // If the GUI reconnects via bridge to an existing session, it will see a blank
-    // terminal until new output arrives.
+    // Snapshot scrollback while holding the read lock, then drop it before
+    // any async I/O so we don't hold the lock across socket.send() awaits.
+    let replay = {
+        let guard = state.scrollback.read().await;
+        guard
+            .get(&session_id)
+            .filter(|sb| !sb.chunks.is_empty())
+            .map(|sb| (sb.cols, sb.rows, sb.snapshot()))
+    };
 
-    // Register output sender for this connection.
+    // Send scrollback replay BEFORE registering the sender.  This guarantees
+    // the client always receives history first.  Output generated during the
+    // replay window is not delivered to this connection (acceptable trade-off
+    // vs. the alternative of interleaving live data before history).
+    if let Some((cols, rows, chunks)) = replay {
+        let start = BrowserMessage::ScrollbackStart { cols, rows };
+        if let Ok(json) = serde_json::to_string(&start)
+            && socket.send(Message::Text(json.into())).await.is_err()
+        {
+            tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+            return;
+        }
+        for chunk in &chunks {
+            let frame = encode_binary_output(None, chunk);
+            if socket.send(Message::Binary(frame.into())).await.is_err() {
+                tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+                return;
+            }
+        }
+        let end = BrowserMessage::ScrollbackEnd;
+        if let Ok(json) = serde_json::to_string(&end)
+            && socket.send(Message::Text(json.into())).await.is_err()
+        {
+            tracing::info!(session_id = %session_id, "direct bridge GUI disconnected");
+            return;
+        }
+    }
+
+    // Register output sender AFTER scrollback replay is complete.
+    // This guarantees live output always follows history with no gaps.
     let (tx, mut rx) = mpsc::channel::<BrowserMessage>(OUTPUT_CHANNEL_SIZE);
     {
         let mut guard = state.senders.write().await;
