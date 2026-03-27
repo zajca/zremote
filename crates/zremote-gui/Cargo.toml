@@ -1,6 +1,6 @@
 [package]
 name = "zremote-gui"
-version = "0.3.1"
+version = "0.7.6"
 edition.workspace = true
 
 [lints]

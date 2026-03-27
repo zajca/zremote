@@ -1,6 +1,6 @@
 [package]
 name = "zremote-client"
-version = "0.3.10"
+version = "0.7.6"
 edition.workspace = true
 
 [lints]

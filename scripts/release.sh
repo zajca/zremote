@@ -8,6 +8,8 @@ CARGO_FILES=(
     crates/zremote-core/Cargo.toml
     crates/zremote-agent/Cargo.toml
     crates/zremote-server/Cargo.toml
+    crates/zremote-gui/Cargo.toml
+    crates/zremote-client/Cargo.toml
 )
 
 # ---------------------------------------------------------------------------
