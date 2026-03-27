@@ -477,28 +477,6 @@ mod tests {
         assert_eq!(json["message"], "something went wrong");
     }
 
-    #[test]
-    fn serialize_pane_added() {
-        let msg = BrowserMessage::PaneAdded {
-            pane_id: "pane-2".to_string(),
-            index: 1,
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["type"], "pane_added");
-        assert_eq!(json["pane_id"], "pane-2");
-        assert_eq!(json["index"], 1);
-    }
-
-    #[test]
-    fn serialize_pane_removed() {
-        let msg = BrowserMessage::PaneRemoved {
-            pane_id: "pane-3".to_string(),
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["type"], "pane_removed");
-        assert_eq!(json["pane_id"], "pane-3");
-    }
-
     // --- encode_binary_output / decode_binary_output ---
 
     #[test]

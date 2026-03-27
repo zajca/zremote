@@ -168,11 +168,9 @@ impl SidebarView {
                         if session.status == "active" {
                             let session_id = session.id.clone();
                             let host_id = session.host_id.clone();
-                            let tmux_name = session.tmux_name.clone();
                             cx.emit(SidebarEvent::SessionSelected {
                                 session_id,
                                 host_id,
-                                tmux_name,
                             });
                         }
                     } else {
@@ -187,12 +185,10 @@ impl SidebarView {
                 {
                     let session_id = session.id.clone();
                     let host_id = session.host_id.clone();
-                    let tmux_name = session.tmux_name.clone();
                     this.selected_session_id = Some(session_id.clone());
                     cx.emit(SidebarEvent::SessionSelected {
                         session_id,
                         host_id,
-                        tmux_name,
                     });
                 }
 
@@ -419,13 +415,11 @@ impl SidebarView {
                     let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                         // Guard against duplicates: load_data() may have already
                         // added this session via the SessionCreated WebSocket event.
-                        if let Some(existing) = this.sessions.iter().find(|s| s.id == session_id) {
-                            let tmux_name = existing.tmux_name.clone();
+                        if this.sessions.iter().any(|s| s.id == session_id) {
                             this.selected_session_id = Some(session_id.clone());
                             cx.emit(SidebarEvent::SessionSelected {
                                 session_id,
                                 host_id,
-                                tmux_name,
                             });
                             cx.notify();
                             return;
@@ -455,14 +449,12 @@ impl SidebarView {
                             closed_at: None,
                             project_id: resolved_project_id,
                             working_dir: working_dir_clone,
-                            tmux_name: None,
                         };
                         Rc::make_mut(&mut this.sessions).push(session);
                         this.selected_session_id = Some(session_id.clone());
                         cx.emit(SidebarEvent::SessionSelected {
                             session_id,
                             host_id,
-                            tmux_name: None,
                         });
                         cx.notify();
                     });
@@ -945,13 +937,11 @@ impl SidebarView {
             .on_click({
                 let session_id = session_id.clone();
                 let host_id = host_id.clone();
-                let tmux_name = session.tmux_name.clone();
                 cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                     this.selected_session_id = Some(session_id.clone());
                     cx.emit(SidebarEvent::SessionSelected {
                         session_id: session_id.clone(),
                         host_id: host_id.clone(),
-                        tmux_name: tmux_name.clone(),
                     });
                     cx.notify();
                 })

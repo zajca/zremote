@@ -98,9 +98,6 @@ pub async fn run_local(
         crate::config::PersistenceBackend::Daemon => {
             tracing::info!("using PTY daemon backend for persistent sessions");
         }
-        crate::config::PersistenceBackend::Tmux => {
-            tracing::info!("using tmux backend for persistent sessions");
-        }
         crate::config::PersistenceBackend::None => {
             tracing::info!("no persistence backend, using standard PTY sessions");
         }
@@ -133,7 +130,7 @@ pub async fn run_local(
         .execute(&pool)
         .await?;
     } else {
-        // No tmux = no persistence, close everything
+        // No persistence, close everything
         sqlx::query(
             "UPDATE sessions SET status = 'closed', closed_at = ? \
              WHERE host_id = ? AND status IN ('creating', 'active')",
@@ -179,7 +176,7 @@ pub async fn run_local(
         sessions.insert(*session_id, session_state);
     }
 
-    // Close suspended sessions that weren't recovered (dead tmux sessions)
+    // Close suspended sessions that weren't recovered (dead daemon sessions)
     let suspended_rows: Vec<String> =
         sqlx::query_scalar("SELECT id FROM sessions WHERE host_id = ? AND status = 'suspended'")
             .bind(host_id.to_string())
@@ -273,14 +270,6 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
         .route(
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
-        )
-        .route(
-            "/api/sessions/{session_id}/direct-attach",
-            post(routes::sessions::direct_attach),
-        )
-        .route(
-            "/api/sessions/{session_id}/direct-detach",
-            post(routes::sessions::direct_detach),
         )
         // Agentic loop endpoints
         .route("/api/loops", get(routes::agentic::list_loops))
@@ -562,72 +551,6 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
                         mgr.session_pids().collect()
                     };
 
-                    // Sync tmux panes and broadcast changes
-                    let pane_changes = {
-                        let mut mgr = state.session_manager.lock().await;
-                        mgr.sync_all_panes()
-                    };
-                    for (session_id, changes) in pane_changes {
-                        // Collect messages first, then send them
-                        let mut browser_msgs = Vec::new();
-                        let mut removed_pane_ids = Vec::new();
-                        for change in changes {
-                            match change {
-                                crate::tmux::PaneChange::Added(info) => {
-                                    browser_msgs.push(zremote_core::state::BrowserMessage::PaneAdded {
-                                        pane_id: info.pane_id,
-                                        index: info.index,
-                                    });
-                                }
-                                crate::tmux::PaneChange::Removed(pane_id) => {
-                                    browser_msgs.push(zremote_core::state::BrowserMessage::PaneRemoved {
-                                        pane_id: pane_id.clone(),
-                                    });
-                                    removed_pane_ids.push(pane_id);
-                                }
-                            }
-                        }
-                        // Send all messages and clean up scrollbacks
-                        {
-                            let mut sessions = state.sessions.write().await;
-                            if let Some(session_state) = sessions.get_mut(&session_id) {
-                                for pid in &removed_pane_ids {
-                                    session_state.remove_pane_scrollback(pid);
-                                }
-                                for msg in browser_msgs {
-                                    session_state
-                                        .browser_senders
-                                        .retain(|tx| match tx.try_send(msg.clone()) {
-                                            Ok(()) => true,
-                                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
-                                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                                        });
-                                }
-                            }
-                        }
-                    }
-
-                    // Check for orphaned direct-attach sessions (GUI crashed)
-                    let orphaned = {
-                        let mgr = state.session_manager.lock().await;
-                        mgr.find_orphaned_direct_attached()
-                    };
-                    for orphan_id in orphaned {
-                        let mut mgr = state.session_manager.lock().await;
-                        if let Err(e) = mgr.reattach_after_direct(&orphan_id) {
-                            tracing::warn!(
-                                session_id = %orphan_id,
-                                error = %e,
-                                "failed to recover orphaned direct-attach session"
-                            );
-                        } else {
-                            tracing::info!(
-                                session_id = %orphan_id,
-                                "recovered orphaned direct-attach session"
-                            );
-                        }
-                    }
-
                     // Check for agentic tools
                     let messages = {
                         let mut mgr = state.agentic_manager.lock().await;
@@ -683,17 +606,9 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
         let mut pty_output_rx = state.pty_output_rx.lock().await;
         while let Some(pty_output) = pty_output_rx.recv().await {
             let session_id = pty_output.session_id;
-            let pane_id = pty_output.pane_id;
             let data = pty_output.data;
 
             if data.is_empty() {
-                if pane_id.is_some() {
-                    // EOF from an extra pane -- don't close the session,
-                    // just clean up that pane's scrollback.
-                    // The pane removal is handled by sync_panes().
-                    continue;
-                }
-
                 // EOF from main pane -- session ended
 
                 // Notify agentic manager that session closed
@@ -759,21 +674,6 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                         session_id: session_id.to_string(),
                         exit_code,
                     });
-            } else if pane_id.is_some() {
-                // Extra pane output -> per-pane scrollback + browser senders
-                let mut sessions = state.sessions.write().await;
-                if let Some(session_state) = sessions.get_mut(&session_id) {
-                    session_state
-                        .append_pane_scrollback(pane_id.as_deref().unwrap_or(""), data.clone());
-                    let msg = zremote_core::state::BrowserMessage::Output { pane_id, data };
-                    session_state
-                        .browser_senders
-                        .retain(|tx| match tx.try_send(msg.clone()) {
-                            Ok(()) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                        });
-                }
             } else {
                 // Main pane output -> scrollback + browser senders
                 let mut sessions = state.sessions.write().await;

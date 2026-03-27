@@ -216,9 +216,9 @@ async fn main() {
     });
 
     // Clean stale data from previous server runs.
-    // All active sessions are suspended: both tmux and daemon sessions are persistent
-    // and may be recovered when the agent reconnects. The agent's SessionsRecovered
-    // message will close any sessions that weren't actually recovered.
+    // All active sessions are suspended: daemon sessions are persistent and may be
+    // recovered when the agent reconnects. The agent's SessionsRecovered message
+    // will close any sessions that weren't actually recovered.
     let startup_now = chrono::Utc::now().to_rfc3339();
 
     if let Err(e) = sqlx::query(

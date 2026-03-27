@@ -412,17 +412,16 @@ async fn handle_agent_message(
             session_id,
             shell,
             pid,
-            tmux_name,
+            ..
         } => {
             // Update DB
             let session_id_str = session_id.to_string();
             let now = chrono::Utc::now().to_rfc3339();
             if let Err(e) = sqlx::query(
-                "UPDATE sessions SET status = 'active', shell = ?, pid = ?, tmux_name = ?, created_at = ? WHERE id = ?",
+                "UPDATE sessions SET status = 'active', shell = ?, pid = ?, created_at = ? WHERE id = ?",
             )
             .bind(&shell)
             .bind(i64::from(pid))
-            .bind(&tmux_name)
             .bind(&now)
             .bind(&session_id_str)
             .execute(&state.db)

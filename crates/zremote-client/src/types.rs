@@ -69,7 +69,6 @@ pub struct Session {
     pub exit_code: Option<i32>,
     pub created_at: String,
     pub closed_at: Option<String>,
-    pub tmux_name: Option<String>,
 }
 
 /// Project as returned by the `ZRemote` API.

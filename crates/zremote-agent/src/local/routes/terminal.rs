@@ -19,18 +19,9 @@ const BROWSER_CHANNEL_SIZE: usize = 256;
 #[serde(tag = "type")]
 enum BrowserInput {
     #[serde(rename = "input")]
-    Input {
-        #[serde(default)]
-        pane_id: Option<String>,
-        data: String,
-    },
+    Input { data: String },
     #[serde(rename = "resize")]
-    Resize {
-        #[serde(default)]
-        pane_id: Option<String>,
-        cols: u16,
-        rows: u16,
-    },
+    Resize { cols: u16, rows: u16 },
     #[serde(rename = "image_paste")]
     ImagePaste { data: String },
 }
@@ -167,33 +158,6 @@ async fn handle_terminal_connection(
         }
     }
 
-    // Send extra pane info and scrollback
-    {
-        let sessions = state.sessions.read().await;
-        if let Some(session) = sessions.get(&session_id) {
-            for (pane_id, (chunks, _size)) in &session.pane_scrollbacks {
-                // Notify about existing pane
-                let pane_added = BrowserMessage::PaneAdded {
-                    pane_id: pane_id.clone(),
-                    index: 0, // index not stored in scrollback, will be refreshed by sync
-                };
-                if let Ok(json) = serde_json::to_string(&pane_added)
-                    && socket.send(Message::Text(json.into())).await.is_err()
-                {
-                    return;
-                }
-
-                // Send pane scrollback as individual binary frames
-                for chunk in chunks {
-                    let frame = encode_binary_output(Some(pane_id), chunk);
-                    if socket.send(Message::Binary(frame.into())).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
     // If session is currently suspended, notify the browser immediately
     {
         let sessions = state.sessions.read().await;
@@ -229,7 +193,7 @@ async fn handle_terminal_connection(
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<BrowserInput>(&text) {
-                            Ok(BrowserInput::Input { pane_id: target_pane, mut data }) => {
+                            Ok(BrowserInput::Input { mut data }) => {
                                 const MAX_INPUT_BYTES: usize = 1_048_576;
                                 if data.len() > MAX_INPUT_BYTES {
                                     tracing::warn!(len = data.len(), "browser terminal input exceeds 1 MB, truncating");
@@ -244,30 +208,22 @@ async fn handle_terminal_connection(
                                         break;
                                     }
                                 }
-                                // Write to specific pane or main pane
+                                // Write to session (pane_id ignored, no pane targeting)
                                 let mut mgr = state.session_manager.lock().await;
-                                let result = if let Some(ref pid) = target_pane {
-                                    mgr.write_to_pane(&session_id, pid, data.as_bytes())
-                                } else {
-                                    mgr.write_to(&session_id, data.as_bytes())
-                                };
+                                let result = mgr.write_to(&session_id, data.as_bytes());
                                 if let Err(e) = result {
                                     tracing::warn!(error = %e, "failed to write to PTY");
                                     break;
                                 }
                             }
-                            Ok(BrowserInput::Resize { pane_id: target_pane, cols, rows }) => {
+                            Ok(BrowserInput::Resize { cols, rows }) => {
                                 let mgr = state.session_manager.lock().await;
-                                let result = if let Some(ref pid) = target_pane {
-                                    mgr.resize_pane(&session_id, pid, cols, rows)
-                                } else {
-                                    mgr.resize(&session_id, cols, rows)
-                                };
+                                let result = mgr.resize(&session_id, cols, rows);
                                 if let Err(e) = result {
                                     tracing::warn!(error = %e, "failed to resize PTY");
                                 }
-                                // Track terminal size for scrollback replay (main pane only)
-                                if target_pane.is_none() {
+                                // Track terminal size for scrollback replay
+                                {
                                     let mut sessions = state.sessions.write().await;
                                     if let Some(session) = sessions.get_mut(&session_id) {
                                         session.last_cols = cols;

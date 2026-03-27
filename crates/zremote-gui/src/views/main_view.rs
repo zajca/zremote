@@ -77,7 +77,6 @@ impl MainView {
             SidebarEvent::SessionSelected {
                 session_id,
                 host_id,
-                tmux_name,
             } => {
                 // Skip if this session is already open (prevents duplicate open_terminal
                 // from sidebar re-emitting SessionSelected after data reload).
@@ -87,7 +86,7 @@ impl MainView {
                     return;
                 }
                 self.record_recent_session(session_id);
-                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
+                self.open_terminal(session_id, host_id, cx);
             }
             SidebarEvent::SessionClosed { session_id } => {
                 if let Some(terminal) = &self.terminal {
@@ -104,13 +103,7 @@ impl MainView {
         }
     }
 
-    fn open_terminal(
-        &mut self,
-        session_id: &str,
-        _host_id: &str,
-        tmux_name: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_terminal(&mut self, session_id: &str, _host_id: &str, cx: &mut Context<Self>) {
         let session_id_owned = session_id.to_string();
 
         // Persist active session.
@@ -128,7 +121,6 @@ impl MainView {
                 session_id_owned,
                 handle,
                 &tokio_handle,
-                tmux_name,
                 self.app_state.mode.clone(),
                 cx,
             )
@@ -356,10 +348,9 @@ impl MainView {
             CommandPaletteEvent::SelectSession {
                 session_id,
                 host_id,
-                tmux_name,
             } => {
                 self.record_recent_session(session_id);
-                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
+                self.open_terminal(session_id, host_id, cx);
             }
             CommandPaletteEvent::CreateSessionInProject {
                 host_id,
@@ -505,10 +496,9 @@ impl MainView {
             SessionSwitcherEvent::Select {
                 session_id,
                 host_id,
-                tmux_name,
             } => {
                 self.record_recent_session(session_id);
-                self.open_terminal(session_id, host_id, tmux_name.clone(), cx);
+                self.open_terminal(session_id, host_id, cx);
             }
             SessionSwitcherEvent::Cancel => {}
         }
@@ -768,34 +758,14 @@ impl Render for MainView {
 /// Establish a terminal connection for the given session.
 ///
 /// Connection priority:
-/// 1. Direct tmux (control mode attach, zero latency, local only)
-/// 2. Direct bridge (bypasses server relay, same-machine agent)
-/// 3. WebSocket relay through server (default, works for remote hosts)
+/// 1. Direct bridge (bypasses server relay, same-machine agent)
+/// 2. WebSocket relay through server (default, works for remote hosts)
 fn connect_terminal(
     app_state: &std::sync::Arc<AppState>,
     session_id: &str,
     skip_bridge: bool,
 ) -> Option<crate::terminal_handle::TerminalHandle> {
-    // 1. Try direct tmux (independent of bridge -- always attempt)
-    if crate::terminal_direct::tmux_available()
-        && let Some(pane_id) = crate::terminal_direct::probe_local_session(session_id)
-    {
-        match crate::terminal_direct::connect_standalone(
-            session_id.to_string(),
-            pane_id,
-            &app_state.tokio_handle,
-        ) {
-            Ok(direct) => {
-                tracing::info!(session_id = %session_id, "using direct tmux connection");
-                return Some(crate::terminal_handle::TerminalHandle::Direct(direct));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "direct tmux failed, trying bridge");
-            }
-        }
-    }
-
-    // 2. Try direct bridge (same-machine agent)
+    // 1. Try direct bridge (same-machine agent)
     if !skip_bridge && let Some(port) = read_bridge_port() {
         let bridge_url = format!("ws://127.0.0.1:{port}/ws/bridge/{session_id}");
         tracing::info!(port = port, session_id = %session_id, "attempting direct bridge connection");
@@ -804,7 +774,7 @@ fn connect_terminal(
         return Some(crate::terminal_handle::TerminalHandle::Bridge(session));
     }
 
-    // 3. Fall back to WebSocket relay through server
+    // 2. Fall back to WebSocket relay through server
     let ws_url = app_state.api.terminal_ws_url(session_id);
     let handle = &app_state.tokio_handle;
     let session = zremote_client::TerminalSession::connect_spawned(ws_url, handle);
@@ -830,14 +800,8 @@ fn read_bridge_port() -> Option<u16> {
 
 /// Events emitted by the sidebar for the main view to handle.
 pub enum SidebarEvent {
-    SessionSelected {
-        session_id: String,
-        host_id: String,
-        tmux_name: Option<String>,
-    },
-    SessionClosed {
-        session_id: String,
-    },
+    SessionSelected { session_id: String, host_id: String },
+    SessionClosed { session_id: String },
     OpenHelp,
 }
 

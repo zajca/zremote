@@ -140,7 +140,6 @@ pub enum PaletteAction {
     SwitchToSession {
         session_id: String,
         host_id: String,
-        tmux_name: Option<String>,
     },
     SwitchSession,
 }
@@ -293,7 +292,6 @@ pub enum CommandPaletteEvent {
     SelectSession {
         session_id: String,
         host_id: String,
-        tmux_name: Option<String>,
     },
     CreateSessionInProject {
         host_id: String,
@@ -487,7 +485,6 @@ impl CommandPalette {
                 cx.emit(CommandPaletteEvent::SelectSession {
                     session_id: session.id.clone(),
                     host_id: session.host_id.clone(),
-                    tmux_name: session.tmux_name.clone(),
                 });
             }
             PaletteItem::Project { project_idx } => {
@@ -548,12 +545,10 @@ impl CommandPalette {
                 PaletteAction::SwitchToSession {
                     session_id,
                     host_id,
-                    tmux_name,
                 } => {
                     cx.emit(CommandPaletteEvent::SelectSession {
                         session_id: session_id.clone(),
                         host_id: host_id.clone(),
-                        tmux_name: tmux_name.clone(),
                     });
                 }
                 PaletteAction::SwitchSession => {
@@ -2632,7 +2627,6 @@ fn build_session_drill_items_from(
             item: PaletteItem::Action(PaletteAction::SwitchToSession {
                 session_id: session.id.clone(),
                 host_id: session.host_id.clone(),
-                tmux_name: session.tmux_name.clone(),
             }),
             title: "Already Active".to_string(),
             subtitle: String::new(),
@@ -2644,7 +2638,6 @@ fn build_session_drill_items_from(
             item: PaletteItem::Action(PaletteAction::SwitchToSession {
                 session_id: session.id.clone(),
                 host_id: session.host_id.clone(),
-                tmux_name: session.tmux_name.clone(),
             }),
             title: "Switch to Session".to_string(),
             subtitle: String::new(),
@@ -2927,7 +2920,6 @@ mod tests {
                 closed_at: None,
                 project_id: Some("proj-1".to_string()),
                 working_dir: Some("/home/user/project-a".to_string()),
-                tmux_name: None,
             },
             Session {
                 id: "sess-2".to_string(),
@@ -2941,7 +2933,6 @@ mod tests {
                 closed_at: None,
                 project_id: Some("proj-1".to_string()),
                 working_dir: Some("/home/user/project-a".to_string()),
-                tmux_name: None,
             },
             Session {
                 id: "sess-3".to_string(),
@@ -2955,7 +2946,6 @@ mod tests {
                 closed_at: None,
                 project_id: Some("proj-2".to_string()),
                 working_dir: Some("/home/user/project-b".to_string()),
-                tmux_name: None,
             },
         ]);
 

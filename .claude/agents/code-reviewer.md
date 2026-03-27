@@ -21,7 +21,7 @@ You are a senior code reviewer for the ZRemote project -- a Rust multi-crate wor
 
 - Hardcoded credentials, tokens, or secrets
 - SQL injection (string interpolation in queries)
-- Command injection (unvalidated input in Command/tmux)
+- Command injection (unvalidated input in Command)
 - WebSocket auth bypass
 - Path traversal with user input
 - Secret leakage in tracing/logging output

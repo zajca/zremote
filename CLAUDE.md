@@ -88,7 +88,7 @@ nix develop --command bash -c 'git commit -m "message"'
 
 ### Deployment Order
 
-1. **Server first** -- agents auto-reconnect with backoff, tmux sessions survive
+1. **Server first** -- agents auto-reconnect with backoff, daemon sessions survive
 2. **Agents rolling** -- one at a time, verify reconnection before next
 
 ## Environment Variables

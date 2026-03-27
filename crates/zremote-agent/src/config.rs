@@ -124,39 +124,18 @@ impl std::error::Error for ConfigError {}
 pub enum PersistenceBackend {
     /// Per-session PTY daemon processes (preferred, no external deps).
     Daemon,
-    /// tmux-backed sessions (legacy).
-    Tmux,
     /// No persistence - plain PTY sessions die with the agent.
     None,
 }
 
-/// Check if tmux is available on the system.
-pub fn detect_tmux() -> bool {
-    std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
 /// Detect the best available persistence backend.
 ///
-/// Priority: Daemon (always available) > Tmux (if installed) > None.
-/// Currently defaults to Daemon, with Tmux as fallback controlled by
-/// `ZREMOTE_SESSION_BACKEND` env var.
+/// Defaults to Daemon. Can be overridden via `ZREMOTE_SESSION_BACKEND` env var.
 pub fn detect_persistence_backend() -> PersistenceBackend {
     // Allow explicit override via env var
     if let Ok(val) = std::env::var("ZREMOTE_SESSION_BACKEND") {
         match val.to_lowercase().as_str() {
             "daemon" => return PersistenceBackend::Daemon,
-            "tmux" => {
-                if detect_tmux() {
-                    return PersistenceBackend::Tmux;
-                }
-                tracing::warn!(
-                    "ZREMOTE_SESSION_BACKEND=tmux but tmux not found, falling back to daemon"
-                );
-                return PersistenceBackend::Daemon;
-            }
             "none" | "pty" => return PersistenceBackend::None,
             other => {
                 tracing::warn!(
@@ -255,15 +234,6 @@ mod tests {
             remove_env("ZREMOTE_SERVER_URL");
             remove_env("ZREMOTE_TOKEN");
         }
-    }
-
-    #[test]
-    fn detect_tmux_returns_bool() {
-        // Just verify detect_tmux doesn't panic and returns a bool.
-        let result = super::detect_tmux();
-        // On CI or systems without tmux, this will be false; on dev machines, true.
-        // We can't assert either way, but we verify it runs without error.
-        let _ = result;
     }
 
     #[test]

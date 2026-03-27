@@ -7,7 +7,7 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 **Terminal & Sessions**
 - Interactive PTY sessions in a native GPUI desktop app
 - Terminal rendering via alacritty_terminal with per-character glyph caching
-- Persistent sessions via tmux -- survive agent restarts, crashes, and updates
+- Persistent sessions via daemon backend -- survive agent restarts, crashes, and updates
 - Multi-host management from a single sidebar
 
 **AI Agent Monitoring**
@@ -108,7 +108,7 @@ LOCAL MODE:
 SERVER MODE:
 
   GPUI App <--REST/WS--> Server (Axum + SQLite) <--WS--> Agent(s)
-                                |                          |-- PTY/tmux sessions
+                                |                          |-- PTY sessions
                                 |-- Telegram bot           |-- Agentic detection
                                 |-- REST API               |-- Project scanning
                                 |-- Event broadcast        |-- Claude Code hooks
@@ -173,28 +173,19 @@ zremote-agent mcp-serve --project PATH [--ov-port 8741]
 zremote-agent configure --project PATH [--model sonnet] [--skip-permissions]
 ```
 
-## Persistent Sessions (tmux)
+## Persistent Sessions
 
-When [tmux](https://github.com/tmux/tmux) is installed, terminal sessions automatically survive agent restarts in both local and server mode. No configuration needed -- the agent detects tmux at startup.
+Terminal sessions automatically survive agent restarts, crashes, and updates in both local and server mode. No configuration needed.
 
 ### How it works
 
-Without tmux, killing the agent kills all terminal sessions. With tmux:
+The agent spawns a per-session daemon process that owns the PTY:
 
-1. Sessions spawn inside a dedicated tmux server (`tmux -L zremote`)
-2. When the agent stops (crash, update, restart), tmux keeps the shells alive
+1. Each session runs in its own daemon subprocess communicating via Unix socket
+2. When the agent stops (crash, update, restart), daemon processes keep the shells alive
 3. The GPUI client shows sessions as **suspended**
-4. When the agent reconnects, it discovers surviving tmux sessions and resumes them
+4. When the agent reconnects, it discovers surviving daemon sessions and resumes them
 5. Scrollback is preserved -- the terminal continues seamlessly
-
-### Requirements
-
-- `tmux` installed on the host (any recent version)
-- That's it. No configuration, no environment variables.
-
-### Fallback
-
-If tmux is not installed, the agent uses standard PTY sessions (sessions will not survive agent restarts).
 
 ## Development
 

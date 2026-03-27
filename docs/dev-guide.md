@@ -64,7 +64,7 @@ When changing message types in `zremote-protocol`, follow these rules to avoid b
 
 When deploying changes to production:
 
-1. **Server first** -- agents auto-reconnect with exponential backoff, tmux sessions survive restart
+1. **Server first** -- agents auto-reconnect with exponential backoff, daemon sessions survive restart
 2. **Agents rolling** -- update one at a time, verify reconnection before proceeding to next
 
 ## Project Structure
@@ -86,9 +86,6 @@ crates/
 ## Useful Commands
 
 ```bash
-# Check if tmux sessions survived agent restart
-tmux -L zremote ls
-
 # Run agent with verbose logging
 RUST_LOG=debug cargo run -p zremote-agent -- local --port 3000
 ```

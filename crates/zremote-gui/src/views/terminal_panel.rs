@@ -198,8 +198,6 @@ pub struct TerminalPanel {
     double_shift: DoubleShiftDetector,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
-    /// Tmux session name (for click-to-copy attach command on Direct badge).
-    tmux_name: Option<String>,
     /// Connection mode: "local" or "server".
     mode: String,
     /// Whether the terminal WebSocket connection has been lost
@@ -218,7 +216,6 @@ impl TerminalPanel {
         session_id: String,
         handle: TerminalHandle,
         tokio_handle: &tokio::runtime::Handle,
-        tmux_name: Option<String>,
         mode: String,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -306,7 +303,6 @@ impl TerminalPanel {
             search_current_idx: None,
             double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
-            tmux_name,
             mode,
             disconnected: false,
             cc_metrics: None,
@@ -1483,32 +1479,16 @@ impl Render for TerminalPanel {
         }
 
         // Connection type indicator (bottom-right pill badge).
-        let is_direct = self.handle.is_direct();
         let is_bridge = self.handle.is_bridge();
-        let tmux_name = self.tmux_name.clone();
-        let tooltip_text = if is_direct {
-            if let Some(ref name) = tmux_name {
-                format!("Direct tmux | Click to copy: tmux -L zremote attach-session -t {name}")
-            } else {
-                "Direct tmux connection (FIFO bypass, lower latency)".to_string()
-            }
-        } else if is_bridge {
+        let tooltip_text = if is_bridge {
             "Direct bridge to agent (bypasses server relay)".to_string()
         } else if self.mode == "local" {
             "Local WebSocket connection".to_string()
         } else {
             "WebSocket relay through server/agent".to_string()
         };
-        let fast_path = is_direct || is_bridge;
-        let clickable = is_direct && tmux_name.is_some();
-        let badge_label = if is_direct {
-            "Direct"
-        } else if is_bridge {
-            "Bridge"
-        } else {
-            "WS"
-        };
-        let mut badge = div()
+        let badge_label = if is_bridge { "Bridge" } else { "WS" };
+        let badge = div()
             .id("connection-indicator")
             .absolute()
             .bottom(px(8.0))
@@ -1521,9 +1501,9 @@ impl Render for TerminalPanel {
             .rounded(px(8.0))
             .bg(gpui::rgba(0x1111_1399))
             .child(
-                icon(if fast_path { Icon::Zap } else { Icon::Wifi })
+                icon(if is_bridge { Icon::Zap } else { Icon::Wifi })
                     .size(px(10.0))
-                    .text_color(if fast_path {
+                    .text_color(if is_bridge {
                         theme::success()
                     } else {
                         theme::text_tertiary()
@@ -1544,17 +1524,6 @@ impl Render for TerminalPanel {
                 }),
             )
             .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into());
-        if clickable {
-            let attach_cmd = format!(
-                "tmux -L zremote attach-session -t {}",
-                tmux_name.as_deref().unwrap_or_default()
-            );
-            badge = badge.cursor(gpui::CursorStyle::PointingHand).on_click(
-                move |_event, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(attach_cmd.clone()));
-                },
-            );
-        }
         // CC metrics badge (above connection badge)
         if let Some(ref metrics) = self.cc_metrics
             && let Some(status) = self.cc_status

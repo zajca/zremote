@@ -16,12 +16,10 @@ const OUTPUT_CHANNEL_SIZE: usize = 256;
 pub enum BridgeCommand {
     Write {
         session_id: SessionId,
-        pane_id: Option<String>,
         data: Vec<u8>,
     },
     Resize {
         session_id: SessionId,
-        pane_id: Option<String>,
         cols: u16,
         rows: u16,
     },
@@ -32,18 +30,9 @@ pub enum BridgeCommand {
 #[serde(tag = "type")]
 enum BridgeInput {
     #[serde(rename = "input")]
-    Input {
-        #[serde(default)]
-        pane_id: Option<String>,
-        data: String,
-    },
+    Input { data: String },
     #[serde(rename = "resize")]
-    Resize {
-        #[serde(default)]
-        pane_id: Option<String>,
-        cols: u16,
-        rows: u16,
-    },
+    Resize { cols: u16, rows: u16 },
 }
 
 /// WebSocket upgrade handler for direct bridge terminal connections.
@@ -135,7 +124,7 @@ async fn handle_bridge_connection(
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<BridgeInput>(&text) {
-                            Ok(BridgeInput::Input { mut data, pane_id }) => {
+                            Ok(BridgeInput::Input { mut data }) => {
                                 const MAX_INPUT_BYTES: usize = 1_048_576;
                                 if data.len() > MAX_INPUT_BYTES {
                                     tracing::warn!(session_id = %session_id, len = data.len(), "bridge: input exceeds 1 MB, truncating");
@@ -144,16 +133,14 @@ async fn handle_bridge_connection(
                                 }
                                 if state.command_tx.try_send(BridgeCommand::Write {
                                     session_id,
-                                    pane_id,
                                     data: data.into_bytes(),
                                 }).is_err() {
                                     tracing::warn!(session_id = %session_id, "bridge: command channel full, input dropped");
                                 }
                             }
-                            Ok(BridgeInput::Resize { cols, rows, pane_id }) => {
+                            Ok(BridgeInput::Resize { cols, rows }) => {
                                 if state.command_tx.try_send(BridgeCommand::Resize {
                                     session_id,
-                                    pane_id,
                                     cols,
                                     rows,
                                 }).is_err() {

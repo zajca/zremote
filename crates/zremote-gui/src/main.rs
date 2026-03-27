@@ -30,7 +30,6 @@ mod app_state;
 mod assets;
 mod icons;
 mod persistence;
-mod terminal_direct;
 mod terminal_handle;
 #[allow(dead_code)]
 mod theme;

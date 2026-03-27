@@ -36,7 +36,6 @@ mod mcp;
 mod project;
 mod pty;
 mod session;
-mod tmux;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -294,9 +293,6 @@ async fn run_agent() {
     match backend {
         config::PersistenceBackend::Daemon => {
             tracing::info!("using PTY daemon backend for persistent sessions");
-        }
-        config::PersistenceBackend::Tmux => {
-            tracing::info!("using tmux backend for persistent sessions");
         }
         config::PersistenceBackend::None => {
             tracing::info!("no persistence backend, using standard PTY sessions");

@@ -21,8 +21,6 @@ pub struct SessionState {
     /// Last known terminal dimensions (updated on resize, sent with scrollback).
     pub last_cols: u16,
     pub last_rows: u16,
-    /// Per-pane scrollback buffers for extra tmux panes (`pane_id` -> (chunks, `total_size`)).
-    pub pane_scrollbacks: HashMap<String, (VecDeque<Vec<u8>>, usize)>,
 }
 
 impl SessionState {
@@ -36,7 +34,6 @@ impl SessionState {
             scrollback_size: 0,
             last_cols: 0,
             last_rows: 0,
-            pane_scrollbacks: HashMap::new(),
         }
     }
 
@@ -48,26 +45,6 @@ impl SessionState {
                 self.scrollback_size -= old.len();
             }
         }
-    }
-
-    /// Append data to a specific pane's scrollback buffer.
-    pub fn append_pane_scrollback(&mut self, pane_id: &str, data: Vec<u8>) {
-        let (chunks, size) = self
-            .pane_scrollbacks
-            .entry(pane_id.to_owned())
-            .or_insert_with(|| (VecDeque::new(), 0));
-        *size += data.len();
-        chunks.push_back(data);
-        while *size > MAX_SCROLLBACK_BYTES {
-            if let Some(old) = chunks.pop_front() {
-                *size -= old.len();
-            }
-        }
-    }
-
-    /// Remove a pane's scrollback buffer.
-    pub fn remove_pane_scrollback(&mut self, pane_id: &str) {
-        self.pane_scrollbacks.remove(pane_id);
     }
 }
 
@@ -167,10 +144,6 @@ pub enum BrowserMessage {
     },
     #[serde(rename = "scrollback_end")]
     ScrollbackEnd,
-    #[serde(rename = "pane_added")]
-    PaneAdded { pane_id: String, index: u16 },
-    #[serde(rename = "pane_removed")]
-    PaneRemoved { pane_id: String },
 }
 
 /// Thread-safe store for active session state.
@@ -492,13 +465,6 @@ mod tests {
                 rows: 40,
             },
             BrowserMessage::ScrollbackEnd,
-            BrowserMessage::PaneAdded {
-                pane_id: "%5".to_string(),
-                index: 1,
-            },
-            BrowserMessage::PaneRemoved {
-                pane_id: "%5".to_string(),
-            },
         ];
         for msg in &messages {
             let json = serde_json::to_string(msg).unwrap();
@@ -524,42 +490,6 @@ mod tests {
             BrowserMessage::Output { data, .. } => assert_eq!(data, vec![72, 101, 108, 108, 111]),
             _ => panic!("expected Output variant"),
         }
-    }
-
-    #[test]
-    fn browser_message_pane_added_serialization() {
-        let msg = BrowserMessage::PaneAdded {
-            pane_id: "%7".to_string(),
-            index: 2,
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["type"], "pane_added");
-        assert_eq!(json["pane_id"], "%7");
-        assert_eq!(json["index"], 2);
-    }
-
-    #[test]
-    fn browser_message_pane_removed_serialization() {
-        let msg = BrowserMessage::PaneRemoved {
-            pane_id: "%7".to_string(),
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["type"], "pane_removed");
-        assert_eq!(json["pane_id"], "%7");
-    }
-
-    #[test]
-    fn session_state_pane_scrollback() {
-        let mut state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
-        state.append_pane_scrollback("%5", vec![1, 2, 3]);
-        state.append_pane_scrollback("%5", vec![4, 5]);
-        assert_eq!(state.pane_scrollbacks.len(), 1);
-        let (chunks, size) = state.pane_scrollbacks.get("%5").unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(*size, 5);
-
-        state.remove_pane_scrollback("%5");
-        assert!(state.pane_scrollbacks.is_empty());
     }
 
     #[test]

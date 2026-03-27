@@ -20,7 +20,7 @@ When invoked:
 - **Unchecked `unwrap()`/`expect()`**: In production code paths -- use `?` or handle explicitly
 - **Unsafe without justification**: Missing `// SAFETY:` comment (project uses `unsafe_code = "deny"`)
 - **SQL injection**: String interpolation in SQLite queries -- use parameterized queries (sqlx `query!` / `query_as!`)
-- **Command injection**: Unvalidated input in `std::process::Command` or tmux commands
+- **Command injection**: Unvalidated input in `std::process::Command`
 - **Path traversal**: User-controlled paths without canonicalization and prefix check
 - **Hardcoded secrets**: API keys, tokens in source -- must use env vars
 - **Terminal escape injection**: Unvalidated escape sequences in PTY output

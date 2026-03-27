@@ -276,18 +276,12 @@ async fn handle_session_create(
         .await
     {
         Ok(pid) => {
-            let tmux_name = if session_manager.use_tmux() {
-                Some(format!("zremote-{session_id}"))
-            } else {
-                None
-            };
             tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created (available via bridge)");
             if outbound_tx
                 .try_send(AgentMessage::SessionCreated {
                     session_id,
                     shell: shell.to_string(),
                     pid,
-                    tmux_name,
                 })
                 .is_err()
             {
@@ -365,7 +359,7 @@ pub async fn run_connection(
         // Capture survived count before appending discovered sessions
         let survived_count = recovered_sessions.len();
 
-        // Discover sessions from previous agent lifecycle (daemon/tmux state files).
+        // Discover sessions from previous agent lifecycle (daemon state files).
         // discover_existing() skips sessions already tracked in the manager.
         let discovered = session_manager.discover_existing().await;
         for (session_id, shell, pid, captured) in &discovered {
@@ -612,11 +606,6 @@ pub async fn run_connection(
                 let data = pty_output.data;
 
                 if data.is_empty() {
-                    if pty_output.pane_id.is_some() {
-                        // EOF from extra pane -- ignore, sync_panes handles cleanup
-                        continue;
-                    }
-
                     // Daemon session with process still alive: reconnect instead
                     // of killing. The daemon may have disconnected us due to
                     // backpressure (write timeout) -- data is in the ring buffer.
@@ -674,9 +663,8 @@ pub async fn run_connection(
                     }).is_err() {
                         tracing::warn!("outbound channel full, message dropped");
                     }
-                } else if pty_output.pane_id.is_none() {
-                    // Main pane output -- forward to server
-                    // Also fan out to direct bridge GUI connections
+                } else {
+                    // Forward output to server and direct bridge GUI connections
                     bridge::fan_out(
                         bridge_senders,
                         session_id,
@@ -686,25 +674,6 @@ pub async fn run_connection(
                         },
                     ).await;
                     bridge::record_output(bridge_scrollback, session_id, data.clone()).await;
-                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
-                        session_id,
-                        data,
-                    }).is_err() {
-                        tracing::warn!("outbound channel full, message dropped");
-                    }
-                } else {
-                    // Extra pane output -- forward to server + bridge.
-                    // Not recorded in bridge scrollback (same as server: pane
-                    // scrollback replay is not implemented for either path).
-                    let pane_id_str = pty_output.pane_id;
-                    bridge::fan_out(
-                        bridge_senders,
-                        session_id,
-                        zremote_core::state::BrowserMessage::Output {
-                            pane_id: pane_id_str.clone(),
-                            data: data.clone(),
-                        },
-                    ).await;
                     if outbound_tx.try_send(AgentMessage::TerminalOutput {
                         session_id,
                         data,
@@ -789,13 +758,9 @@ pub async fn run_connection(
             }
             Some(bridge_cmd) = bridge_cmd_rx.recv() => {
                 match bridge_cmd {
-                    BridgeCommand::Write { session_id, pane_id, data } => {
+                    BridgeCommand::Write { session_id, data } => {
                         let session_exists = session_manager.has_session(&session_id);
-                        let result = if let Some(ref pid) = pane_id {
-                            session_manager.write_to_pane(&session_id, pid, &data)
-                        } else {
-                            session_manager.write_to(&session_id, &data)
-                        };
+                        let result = session_manager.write_to(&session_id, &data);
                         if let Err(e) = result {
                             if session_exists {
                                 tracing::warn!(
@@ -824,13 +789,9 @@ pub async fn run_connection(
                             }
                         }
                     }
-                    BridgeCommand::Resize { session_id, pane_id, cols, rows } => {
+                    BridgeCommand::Resize { session_id, cols, rows } => {
                         let session_exists = session_manager.has_session(&session_id);
-                        let result = if let Some(ref pid) = pane_id {
-                            session_manager.resize_pane(&session_id, pid, cols, rows)
-                        } else {
-                            session_manager.resize(&session_id, cols, rows)
-                        };
+                        let result = session_manager.resize(&session_id, cols, rows);
                         if let Err(e) = result {
                             if session_exists {
                                 tracing::warn!(
@@ -856,7 +817,7 @@ pub async fn run_connection(
                                     },
                                 ).await;
                             }
-                        } else if pane_id.is_none() {
+                        } else {
                             bridge::record_resize(bridge_scrollback, session_id, cols, rows).await;
                         }
                     }
@@ -1721,17 +1682,11 @@ async fn handle_claude_server_message(
                     );
 
                     // Notify that the PTY session is created
-                    let tmux_name = if session_manager.use_tmux() {
-                        Some(format!("zremote-{session_id}"))
-                    } else {
-                        None
-                    };
                     if outbound_tx
                         .try_send(AgentMessage::SessionCreated {
                             session_id: *session_id,
                             shell: shell.to_string(),
                             pid,
-                            tmux_name,
                         })
                         .is_err()
                     {

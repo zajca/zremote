@@ -17,7 +17,6 @@ pub struct SessionRow {
     pub exit_code: Option<i32>,
     pub created_at: String,
     pub closed_at: Option<String>,
-    pub tmux_name: Option<String>,
 }
 
 pub async fn host_exists(pool: &SqlitePool, host_id: &str) -> Result<bool, AppError> {
@@ -67,7 +66,7 @@ pub async fn insert_session(
 
 pub async fn list_sessions(pool: &SqlitePool, host_id: &str) -> Result<Vec<SessionRow>, AppError> {
     let sessions: Vec<SessionRow> = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at, tmux_name \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
     )
     .bind(host_id)
@@ -78,7 +77,7 @@ pub async fn list_sessions(pool: &SqlitePool, host_id: &str) -> Result<Vec<Sessi
 
 pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<SessionRow, AppError> {
     let session: SessionRow = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at, tmux_name \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE id = ?",
     )
     .bind(session_id)
@@ -145,7 +144,7 @@ pub async fn list_sessions_by_project(
     project_id: &str,
 ) -> Result<Vec<SessionRow>, AppError> {
     let sessions: Vec<SessionRow> = sqlx::query_as(
-        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at, tmux_name \
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
          FROM sessions WHERE project_id = ? ORDER BY created_at DESC",
     )
     .bind(project_id)

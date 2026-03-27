@@ -62,8 +62,7 @@ fn session_deserialize() {
         "pid": 12345,
         "exit_code": null,
         "created_at": "2026-03-24T09:00:00Z",
-        "closed_at": null,
-        "tmux_name": "zremote-s-abcd"
+        "closed_at": null
     }"#;
     let session: Session = serde_json::from_str(json).unwrap();
     assert_eq!(session.id, "s-abcd");
@@ -73,7 +72,6 @@ fn session_deserialize() {
     assert_eq!(session.status, "active");
     assert_eq!(session.pid, Some(12345));
     assert!(session.exit_code.is_none());
-    assert_eq!(session.tmux_name.as_deref(), Some("zremote-s-abcd"));
 }
 
 #[test]

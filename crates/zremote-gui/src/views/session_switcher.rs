@@ -34,7 +34,6 @@ use zremote_client::{AgenticStatus, Host, Project, Session};
 struct SwitcherEntry {
     session_id: String,
     host_id: String,
-    tmux_name: Option<String>,
     title: String,
     subtitle: String,
     is_current: bool,
@@ -49,11 +48,7 @@ struct SwitcherEntry {
 // ---------------------------------------------------------------------------
 
 pub enum SessionSwitcherEvent {
-    Select {
-        session_id: String,
-        host_id: String,
-        tmux_name: Option<String>,
-    },
+    Select { session_id: String, host_id: String },
     Cancel,
 }
 
@@ -138,7 +133,6 @@ impl SessionSwitcher {
             cx.emit(SessionSwitcherEvent::Select {
                 session_id: entry.session_id.clone(),
                 host_id: entry.host_id.clone(),
-                tmux_name: entry.tmux_name.clone(),
             });
         } else {
             cx.emit(SessionSwitcherEvent::Cancel);
@@ -407,7 +401,6 @@ fn build_entries(
             SwitcherEntry {
                 session_id: s.id.clone(),
                 host_id: s.host_id.clone(),
-                tmux_name: s.tmux_name.clone(),
                 title,
                 subtitle,
                 is_current: current_session_id == Some(s.id.as_str()),
