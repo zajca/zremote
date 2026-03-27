@@ -157,6 +157,10 @@ pub fn render_cc_tooltip(
         .flex_col()
         .gap(px(4.0))
         .p(px(8.0))
+        .rounded(px(6.0))
+        .bg(theme::bg_tertiary())
+        .border_1()
+        .border_color(theme::border())
         .max_w(px(280.0))
         .text_size(px(12.0))
         .text_color(theme::text_primary());

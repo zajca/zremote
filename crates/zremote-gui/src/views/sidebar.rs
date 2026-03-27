@@ -876,8 +876,6 @@ impl SidebarView {
             }
             format!("Session {}", &session.id[..8])
         });
-        let name_is_task =
-            session.name.is_none() && cc_state.is_some_and(|cc| cc.task_name.is_some());
 
         let bg_color = if is_selected {
             theme::bg_tertiary()
@@ -997,15 +995,7 @@ impl SidebarView {
                     .whitespace_nowrap()
                     .truncate();
 
-                if name_is_task {
-                    name_div = name_div
-                        .px(px(4.0))
-                        .py(px(1.0))
-                        .rounded(px(4.0))
-                        .bg(gpui::rgba(0xffffff12));
-                } else {
-                    name_div = name_div.flex_shrink_0();
-                }
+                name_div = name_div.flex_shrink_0();
 
                 row1 = row1.child(name_div.child(display_name));
 
