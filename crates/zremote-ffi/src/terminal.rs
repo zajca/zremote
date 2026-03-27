@@ -116,10 +116,14 @@ async fn dispatch_terminal_events(
             }
             result = output_rx.recv_async() => {
                 if let Ok(event) = result {
-                    dispatch_terminal_event(&listener, event);
+                    let l = Arc::clone(&listener);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        dispatch_terminal_event(&l, event);
+                    }).await;
                 } else {
                     debug!("terminal output channel closed");
-                    listener.on_disconnected();
+                    let l = Arc::clone(&listener);
+                    let _ = tokio::task::spawn_blocking(move || l.on_disconnected()).await;
                     return;
                 }
             }

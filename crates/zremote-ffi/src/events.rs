@@ -112,12 +112,16 @@ async fn dispatch_events(
         tokio::select! {
             () = cancel.cancelled() => {
                 debug!("event stream dispatcher cancelled");
-                listener.on_disconnected();
+                let l = Arc::clone(&listener);
+                let _ = tokio::task::spawn_blocking(move || l.on_disconnected()).await;
                 return;
             }
             result = event_stream.rx.recv_async() => {
                 if let Ok(event) = result {
-                    dispatch_single_event(&listener, event);
+                    let l = Arc::clone(&listener);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        dispatch_single_event(&l, event);
+                    }).await;
                 } else {
                     debug!("event stream channel closed");
                     return;
