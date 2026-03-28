@@ -7,6 +7,7 @@ members = [
     "crates/zremote-agent",
     "crates/zremote-gui",
     "crates/zremote-client",
+    "crates/zremote-ffi",
 ]
 
 [workspace.package]
@@ -86,3 +87,9 @@ opt-level = 3
 [profile.release]
 strip = true
 lto = "thin"
+
+[profile.release-android]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1

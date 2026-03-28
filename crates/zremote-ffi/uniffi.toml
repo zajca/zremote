@@ -1,0 +1,6 @@
+[bindings.kotlin]
+package_name = "com.zremote.sdk"
+cdylib_name = "zremote_ffi"
+
+[bindings.swift]
+module_name = "ZRemoteSDK"
