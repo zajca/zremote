@@ -7,8 +7,8 @@ use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
 use crate::queries::loops::parse_status;
-use zremote_protocol::claude::ClaudeTaskStatus;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
+use zremote_protocol::claude::ClaudeTaskStatus;
 
 /// DB row for an agentic loop, matching the `agentic_loops` table columns.
 #[derive(sqlx::FromRow)]

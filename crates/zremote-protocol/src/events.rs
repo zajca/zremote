@@ -50,10 +50,7 @@ pub enum ServerEvent {
     #[serde(rename = "host_disconnected")]
     HostDisconnected { host_id: String },
     #[serde(rename = "host_status_changed")]
-    HostStatusChanged {
-        host_id: String,
-        status: HostStatus,
-    },
+    HostStatusChanged { host_id: String, status: HostStatus },
     #[serde(rename = "session_created")]
     SessionCreated { session: SessionInfo },
     #[serde(rename = "session_closed")]
