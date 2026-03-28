@@ -25,8 +25,10 @@ import androidx.navigation.toRoute
 import com.zremote.ui.screens.hosts.HostListScreen
 import com.zremote.ui.screens.loops.LoopDetailScreen
 import com.zremote.ui.screens.loops.LoopListScreen
+import com.zremote.ui.screens.projects.ProjectListScreen
 import com.zremote.ui.screens.sessions.SessionListScreen
 import com.zremote.ui.screens.settings.SettingsScreen
+import com.zremote.ui.screens.tasks.TaskDetailScreen
 import com.zremote.ui.screens.tasks.TaskListScreen
 import com.zremote.ui.screens.terminal.TerminalScreen
 import kotlinx.serialization.Serializable
@@ -37,7 +39,9 @@ import kotlinx.serialization.Serializable
 @Serializable object TasksRoute
 @Serializable object SettingsRoute
 @Serializable data class SessionsRoute(val hostId: String)
+@Serializable data class ProjectsRoute(val hostId: String)
 @Serializable data class LoopDetailRoute(val loopId: String)
+@Serializable data class TaskDetailRoute(val taskId: String)
 @Serializable data class TerminalRoute(val sessionId: String)
 
 data class BottomNavItem(
@@ -88,6 +92,9 @@ fun ZRemoteNavHost(navController: NavHostController = rememberNavController()) {
                     onHostClick = { hostId ->
                         navController.navigate(SessionsRoute(hostId))
                     },
+                    onProjectsClick = { hostId ->
+                        navController.navigate(ProjectsRoute(hostId))
+                    },
                 )
             }
             composable<SessionsRoute> { backStackEntry ->
@@ -98,6 +105,10 @@ fun ZRemoteNavHost(navController: NavHostController = rememberNavController()) {
                         navController.navigate(TerminalRoute(sessionId))
                     },
                 )
+            }
+            composable<ProjectsRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<ProjectsRoute>()
+                ProjectListScreen(hostId = route.hostId)
             }
             composable<LoopsRoute> {
                 LoopListScreen(
@@ -111,7 +122,20 @@ fun ZRemoteNavHost(navController: NavHostController = rememberNavController()) {
                 LoopDetailScreen(loopId = route.loopId)
             }
             composable<TasksRoute> {
-                TaskListScreen()
+                TaskListScreen(
+                    onTaskClick = { taskId ->
+                        navController.navigate(TaskDetailRoute(taskId))
+                    },
+                )
+            }
+            composable<TaskDetailRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<TaskDetailRoute>()
+                TaskDetailScreen(
+                    taskId = route.taskId,
+                    onLoopClick = { loopId ->
+                        navController.navigate(LoopDetailRoute(loopId))
+                    },
+                )
             }
             composable<TerminalRoute> { backStackEntry ->
                 val route = backStackEntry.toRoute<TerminalRoute>()

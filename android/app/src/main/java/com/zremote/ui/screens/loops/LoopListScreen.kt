@@ -4,11 +4,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -20,6 +20,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zremote.sdk.FfiAgenticLoop
 import com.zremote.sdk.FfiAgenticStatus
+import com.zremote.ui.components.EmptyState
+import com.zremote.ui.components.ErrorState
+import com.zremote.ui.components.LoadingState
+import com.zremote.ui.components.RefreshableList
 import com.zremote.ui.theme.StatusCompleted
 import com.zremote.ui.theme.StatusError
 import com.zremote.ui.theme.StatusOffline
@@ -32,10 +36,28 @@ fun LoopListScreen(
     viewModel: LoopListViewModel = hiltViewModel(),
 ) {
     val loops by viewModel.loops.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
 
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
-        items(loops, key = { it.id }) { loop ->
-            LoopCard(loop = loop, onClick = { onLoopClick(loop.id) })
+    val currentError = error
+    when {
+        isLoading && loops.isEmpty() -> LoadingState()
+        currentError != null && loops.isEmpty() -> ErrorState(
+            message = currentError,
+            onRetry = { viewModel.refresh() },
+        )
+        loops.isEmpty() && !isLoading -> EmptyState(
+            icon = Icons.Default.Loop,
+            message = "No agentic loops",
+            hint = "Loops will appear when agents are running",
+        )
+        else -> RefreshableList(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.refresh() },
+        ) {
+            items(loops, key = { it.id }) { loop ->
+                LoopCard(loop = loop, onClick = { onLoopClick(loop.id) })
+            }
         }
     }
 }

@@ -23,6 +23,9 @@ class TaskListViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
     init {
         refresh()
     }
@@ -31,12 +34,13 @@ class TaskListViewModel @Inject constructor(
         val client = connectionManager.client ?: return
         viewModelScope.launch {
             _isLoading.value = true
+            _error.value = null
             try {
                 _tasks.value = client.listClaudeTasks(FfiListClaudeTasksFilter(
                     hostId = null, status = null, projectId = null,
                 ))
-            } catch (_: Exception) {
-                _tasks.value = emptyList()
+            } catch (e: Exception) {
+                _error.value = e.message
             } finally {
                 _isLoading.value = false
             }

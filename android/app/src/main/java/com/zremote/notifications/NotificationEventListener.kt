@@ -12,6 +12,7 @@ import com.zremote.sdk.FfiSessionInfo
 class NotificationEventListener(
     private val context: Context,
     private val isAppBackgrounded: () -> Boolean,
+    private val preferences: NotificationPreferences = NotificationPreferences(),
 ) : EventListener {
 
     private val notificationManager = NotificationManagerCompat.from(context)
@@ -36,6 +37,7 @@ class NotificationEventListener(
     override fun onHostConnected(host: FfiHostInfo) {}
 
     override fun onHostDisconnected(hostId: String) {
+        if (!preferences.hostDisconnections) return
         notifyIfBackgrounded(
             hostId.hashCode(),
             NotificationHelper.CHANNEL_HOST_STATUS,
@@ -60,7 +62,7 @@ class NotificationEventListener(
     override fun onLoopDetected(loopInfo: FfiLoopInfo, hostId: String, hostname: String) {}
 
     override fun onLoopStatusChanged(loopInfo: FfiLoopInfo, hostId: String, hostname: String) {
-        if (loopInfo.status == FfiAgenticStatus.WAITING_FOR_INPUT) {
+        if (loopInfo.status == FfiAgenticStatus.WAITING_FOR_INPUT && preferences.permissionRequests) {
             notifyIfBackgrounded(
                 loopInfo.id.hashCode(),
                 NotificationHelper.CHANNEL_PERMISSIONS,
@@ -71,16 +73,20 @@ class NotificationEventListener(
     }
 
     override fun onLoopEnded(loopInfo: FfiLoopInfo, hostId: String, hostname: String) {
-        val (channel, title) = when (loopInfo.status) {
-            FfiAgenticStatus.ERROR -> Pair(
+        val (channel, title, enabled) = when (loopInfo.status) {
+            FfiAgenticStatus.ERROR -> Triple(
                 NotificationHelper.CHANNEL_LOOP_ERRORS,
                 "Loop error on $hostname",
+                preferences.loopErrors,
             )
-            else -> Pair(
+            else -> Triple(
                 NotificationHelper.CHANNEL_LOOP_STATUS,
                 "Loop completed on $hostname",
+                preferences.loopCompletions,
             )
         }
+
+        if (!enabled) return
 
         notifyIfBackgrounded(
             loopInfo.id.hashCode(),
@@ -107,10 +113,11 @@ class NotificationEventListener(
     override fun onClaudeTaskUpdated(taskId: String, status: String, loopId: String?) {}
 
     override fun onClaudeTaskEnded(taskId: String, status: String, summary: String?) {
-        val (channel, title) = when (status) {
-            "error" -> Pair(NotificationHelper.CHANNEL_TASK_ERRORS, "Task failed")
-            else -> Pair(NotificationHelper.CHANNEL_TASK_STATUS, "Task completed")
+        val (channel, title, enabled) = when (status) {
+            "error" -> Triple(NotificationHelper.CHANNEL_TASK_ERRORS, "Task failed", preferences.taskErrors)
+            else -> Triple(NotificationHelper.CHANNEL_TASK_STATUS, "Task completed", preferences.taskCompletions)
         }
+        if (!enabled) return
         notifyIfBackgrounded(
             taskId.hashCode(),
             channel,
@@ -121,3 +128,12 @@ class NotificationEventListener(
 
     override fun onClaudeSessionMetrics(metrics: FfiClaudeSessionMetrics) {}
 }
+
+data class NotificationPreferences(
+    val loopCompletions: Boolean = true,
+    val loopErrors: Boolean = true,
+    val permissionRequests: Boolean = true,
+    val taskCompletions: Boolean = true,
+    val taskErrors: Boolean = true,
+    val hostDisconnections: Boolean = true,
+)

@@ -1,13 +1,14 @@
 package com.zremote.ui.screens.tasks
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Task
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,24 +20,48 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zremote.sdk.FfiClaudeTask
 import com.zremote.sdk.FfiClaudeTaskStatus
+import com.zremote.ui.components.EmptyState
+import com.zremote.ui.components.ErrorState
+import com.zremote.ui.components.LoadingState
+import com.zremote.ui.components.RefreshableList
 import com.zremote.ui.theme.StatusCompleted
 import com.zremote.ui.theme.StatusError
-import com.zremote.ui.theme.StatusOffline
 import com.zremote.ui.theme.StatusWorking
 
 @Composable
-fun TaskListScreen(viewModel: TaskListViewModel = hiltViewModel()) {
+fun TaskListScreen(
+    onTaskClick: (String) -> Unit = {},
+    viewModel: TaskListViewModel = hiltViewModel(),
+) {
     val tasks by viewModel.tasks.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
 
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
-        items(tasks, key = { it.id }) { task ->
-            TaskCard(task)
+    val currentError = error
+    when {
+        isLoading && tasks.isEmpty() -> LoadingState()
+        currentError != null && tasks.isEmpty() -> ErrorState(
+            message = currentError,
+            onRetry = { viewModel.refresh() },
+        )
+        tasks.isEmpty() && !isLoading -> EmptyState(
+            icon = Icons.Default.Task,
+            message = "No tasks",
+            hint = "Tasks will appear when Claude sessions are active",
+        )
+        else -> RefreshableList(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.refresh() },
+        ) {
+            items(tasks, key = { it.id }) { task ->
+                TaskCard(task = task, onClick = { onTaskClick(task.id) })
+            }
         }
     }
 }
 
 @Composable
-private fun TaskCard(task: FfiClaudeTask) {
+private fun TaskCard(task: FfiClaudeTask, onClick: () -> Unit) {
     val statusColor = when (task.status) {
         FfiClaudeTaskStatus.STARTING -> StatusWorking
         FfiClaudeTaskStatus.ACTIVE -> StatusWorking
@@ -47,7 +72,8 @@ private fun TaskCard(task: FfiClaudeTask) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(onClick = onClick),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(

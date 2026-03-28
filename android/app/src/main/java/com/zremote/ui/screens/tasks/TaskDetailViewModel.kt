@@ -1,9 +1,9 @@
-package com.zremote.ui.screens.loops
+package com.zremote.ui.screens.tasks
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zremote.data.ConnectionManager
-import com.zremote.sdk.FfiAgenticLoop
+import com.zremote.sdk.FfiClaudeTask
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,12 +12,12 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
-class LoopDetailViewModel @Inject constructor(
+class TaskDetailViewModel @Inject constructor(
     private val connectionManager: ConnectionManager,
 ) : ViewModel() {
 
-    private val _loop = MutableStateFlow<FfiAgenticLoop?>(null)
-    val loop: StateFlow<FfiAgenticLoop?> = _loop.asStateFlow()
+    private val _task = MutableStateFlow<FfiClaudeTask?>(null)
+    val task: StateFlow<FfiClaudeTask?> = _task.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -25,21 +25,21 @@ class LoopDetailViewModel @Inject constructor(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    private var currentLoopId: String? = null
+    private var currentTaskId: String? = null
 
-    fun loadLoop(loopId: String) {
-        currentLoopId = loopId
+    fun loadTask(taskId: String) {
+        currentTaskId = taskId
         refresh()
     }
 
     fun refresh() {
-        val loopId = currentLoopId ?: return
+        val taskId = currentTaskId ?: return
         val client = connectionManager.client ?: return
         viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
             try {
-                _loop.value = client.getLoop(loopId)
+                _task.value = client.getClaudeTask(taskId)
             } catch (e: Exception) {
                 _error.value = e.message
             } finally {

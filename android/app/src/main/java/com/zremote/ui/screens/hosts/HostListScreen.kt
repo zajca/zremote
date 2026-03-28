@@ -2,28 +2,23 @@ package com.zremote.ui.screens.hosts
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -32,13 +27,18 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zremote.sdk.FfiHost
+import com.zremote.ui.components.EmptyState
+import com.zremote.ui.components.ErrorState
+import com.zremote.ui.components.LoadingState
+import com.zremote.ui.components.RefreshableList
+import com.zremote.ui.components.StatusDot
 import com.zremote.ui.theme.StatusOffline
 import com.zremote.ui.theme.StatusOnline
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HostListScreen(
     onHostClick: (String) -> Unit,
+    onProjectsClick: (String) -> Unit = {},
     viewModel: HostListViewModel = hiltViewModel(),
 ) {
     val hosts by viewModel.hosts.collectAsStateWithLifecycle()
@@ -47,29 +47,43 @@ fun HostListScreen(
     val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
 
     if (!isConnected) {
-        NotConnectedState()
+        EmptyState(
+            icon = Icons.Default.CloudOff,
+            message = "Not connected",
+            hint = "Configure server URL in Settings",
+        )
         return
     }
 
-    PullToRefreshBox(
-        isRefreshing = isLoading,
-        onRefresh = { viewModel.refresh() },
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        if (hosts.isEmpty() && !isLoading) {
-            EmptyState(error = error)
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(hosts, key = { it.id }) { host ->
-                    HostCard(host = host, onClick = { onHostClick(host.id) })
-                }
+    val currentError = error
+    when {
+        isLoading && hosts.isEmpty() -> LoadingState()
+        currentError != null && hosts.isEmpty() -> ErrorState(
+            message = currentError,
+            onRetry = { viewModel.refresh() },
+        )
+        hosts.isEmpty() && !isLoading -> EmptyState(
+            icon = Icons.Default.Dns,
+            message = "No hosts found",
+            hint = "Hosts will appear when agents connect",
+        )
+        else -> RefreshableList(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.refresh() },
+        ) {
+            items(hosts, key = { it.id }) { host ->
+                HostCard(
+                    host = host,
+                    onClick = { onHostClick(host.id) },
+                    onProjectsClick = { onProjectsClick(host.id) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun HostCard(host: FfiHost, onClick: () -> Unit) {
+private fun HostCard(host: FfiHost, onClick: () -> Unit, onProjectsClick: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -80,11 +94,7 @@ private fun HostCard(host: FfiHost, onClick: () -> Unit) {
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Surface(
-                shape = CircleShape,
-                color = if (host.status == "online") StatusOnline else StatusOffline,
-                modifier = Modifier.size(10.dp),
-            ) {}
+            StatusDot(color = if (host.status == "online") StatusOnline else StatusOffline)
 
             Spacer(Modifier.width(12.dp))
 
@@ -102,41 +112,15 @@ private fun HostCard(host: FfiHost, onClick: () -> Unit) {
                     }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun NotConnectedState() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Default.CloudOff,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Not connected",
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Text(
-                text = "Configure server URL in Settings",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun EmptyState(error: String?) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (error != null) {
-            Text(text = error, color = MaterialTheme.colorScheme.error)
-        } else {
-            Text(text = "No hosts found", style = MaterialTheme.typography.bodyLarge)
+            IconButton(onClick = onProjectsClick, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Default.Folder,
+                    contentDescription = "Projects",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

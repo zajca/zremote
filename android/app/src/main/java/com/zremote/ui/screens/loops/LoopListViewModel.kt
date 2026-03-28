@@ -30,6 +30,9 @@ class LoopListViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
     init {
         refresh()
     }
@@ -38,12 +41,13 @@ class LoopListViewModel @Inject constructor(
         val client = connectionManager.client ?: return
         viewModelScope.launch {
             _isLoading.value = true
+            _error.value = null
             try {
                 _loops.value = client.listLoops(FfiListLoopsFilter(
                     status = null, hostId = null, sessionId = null, projectId = null,
                 ))
-            } catch (_: Exception) {
-                _loops.value = emptyList()
+            } catch (e: Exception) {
+                _error.value = e.message
             } finally {
                 _isLoading.value = false
             }
