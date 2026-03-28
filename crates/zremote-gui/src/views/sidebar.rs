@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
-    AgenticStatus, CreateSessionRequest, Host, ListLoopsFilter, Project, ServerEvent, Session,
+    AgenticStatus, CreateSessionRequest, Host, HostStatus, ListLoopsFilter, Project, ServerEvent,
+    Session, SessionStatus,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -175,12 +176,14 @@ impl SidebarView {
 
                 // If a session was restored/selected, keep it unless it's truly gone.
                 if let Some(ref restored_id) = this.selected_session_id {
-                    if let Some(session) = this.sessions.iter().find(|s| {
-                        s.id == *restored_id && s.status != "closed" && s.status != "error"
-                    }) {
+                    if let Some(session) = this
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == *restored_id && s.status != SessionStatus::Closed)
+                    {
                         // Only emit SessionSelected if the session is active
                         // (not suspended -- avoid opening terminal for a suspended session).
-                        if session.status == "active" {
+                        if session.status == SessionStatus::Active {
                             let session_id = session.id.clone();
                             let host_id = session.host_id.clone();
                             cx.emit(SidebarEvent::SessionSelected {
@@ -196,7 +199,10 @@ impl SidebarView {
 
                 // Auto-select first active session if none is selected.
                 if this.selected_session_id.is_none()
-                    && let Some(session) = this.sessions.iter().find(|s| s.status == "active")
+                    && let Some(session) = this
+                        .sessions
+                        .iter()
+                        .find(|s| s.status == SessionStatus::Active)
                 {
                     let session_id = session.id.clone();
                     let host_id = session.host_id.clone();
@@ -460,7 +466,7 @@ impl SidebarView {
                             host_id: host_id.clone(),
                             name: None,
                             shell: None,
-                            status: "active".to_string(),
+                            status: SessionStatus::Active,
                             pid: None,
                             exit_code: None,
                             created_at: String::new(),
@@ -518,7 +524,7 @@ impl SidebarView {
         let active_sessions: Vec<Session> = self
             .sessions
             .iter()
-            .filter(|s| s.host_id == host_id && s.status != "closed" && s.status != "error")
+            .filter(|s| s.host_id == host_id && s.status != SessionStatus::Closed)
             .cloned()
             .collect();
 
@@ -586,7 +592,7 @@ impl SidebarView {
 
     fn render_host_section(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
         let host_id = host.id.clone();
-        let is_online = host.status == "online";
+        let is_online = host.status == HostStatus::Online;
         let is_local = self.app_state.mode == "local";
 
         let items = self.compute_items(&host_id);
@@ -666,7 +672,7 @@ impl SidebarView {
     #[allow(clippy::unused_self)]
     fn render_host_header(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
         let host_id = host.id.clone();
-        let is_online = host.status == "online";
+        let is_online = host.status == HostStatus::Online;
 
         let status_color = if is_online {
             theme::success()
@@ -877,7 +883,7 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_selected = self.selected_session_id.as_deref() == Some(&session.id);
-        let is_active = session.status == "active";
+        let is_active = session.status == SessionStatus::Active;
         let session_id = session.id.clone();
         let host_id = host_id.to_string();
 
@@ -910,9 +916,9 @@ impl SidebarView {
             theme::text_secondary()
         };
 
-        let status_color = match session.status.as_str() {
-            "active" => theme::success(),
-            "suspended" => theme::warning(),
+        let status_color = match session.status {
+            SessionStatus::Active => theme::success(),
+            SessionStatus::Suspended => theme::warning(),
             _ => theme::text_tertiary(),
         };
 

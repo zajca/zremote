@@ -25,7 +25,7 @@ use crate::persistence::RecentSession;
 use crate::theme;
 use crate::views::cc_widgets;
 use crate::views::sidebar::{CcMetrics, CcState};
-use zremote_client::{AgenticStatus, Host, Project, Session};
+use zremote_client::{AgenticStatus, Host, Project, Session, SessionStatus};
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -355,7 +355,10 @@ fn build_entries(
         .collect();
 
     // Filter to active sessions only
-    let mut active: Vec<&Session> = sessions.iter().filter(|s| s.status == "active").collect();
+    let mut active: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.status == SessionStatus::Active)
+        .collect();
 
     // Sort: waiting_for_input first, then working, then MRU order
     active.sort_by(|a, b| {

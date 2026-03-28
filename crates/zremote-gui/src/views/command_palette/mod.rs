@@ -12,18 +12,29 @@
     clippy::wildcard_imports
 )]
 
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+pub mod actions;
+pub mod items;
+mod keybindings;
+
+use std::collections::HashSet;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::icons::{Icon, icon};
-use crate::persistence::RecentSession;
 use crate::theme;
 use crate::views::cc_widgets;
-use crate::views::sidebar::{CcMetrics, CcState};
-use zremote_client::{AgenticStatus, Host, Project, Session};
+use zremote_client::{Host, SessionStatus};
+
+pub use actions::PaletteAction;
+pub use items::{PaletteItem, PaletteSnapshot};
+
+use items::{
+    CategoryGroup, ItemSource, PaletteCategory, PaletteResults, ResultItem, ScoredEntry,
+    build_action_items, build_project_drill_items_from, build_project_items,
+    build_session_drill_items_from, build_session_items, compact_path, format_duration,
+    is_item_drillable, session_title,
+};
 
 use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
 
@@ -90,200 +101,6 @@ impl PaletteTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaletteCategory {
-    Recent,
-    Active,
-    Suspended,
-    Pinned,
-    AllProjects,
-    Actions,
-    DrillSessions,
-    DrillActions,
-}
-
-impl PaletteCategory {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Recent => "RECENT",
-            Self::Active => "ACTIVE",
-            Self::Suspended => "SUSPENDED",
-            Self::Pinned => "PINNED",
-            Self::AllProjects => "ALL PROJECTS",
-            Self::Actions | Self::DrillActions => "ACTIONS",
-            Self::DrillSessions => "SESSIONS",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaletteAction {
-    CloseCurrentSession {
-        session_id: String,
-    },
-    SearchInTerminal,
-    NewSession,
-    ToggleProjectPin {
-        project_id: String,
-        project_name: String,
-        currently_pinned: bool,
-    },
-    Reconnect,
-    NewSessionInProject {
-        host_id: String,
-        working_dir: String,
-        project_name: String,
-    },
-    CloseSession {
-        session_id: String,
-    },
-    SwitchToSession {
-        session_id: String,
-        host_id: String,
-    },
-    SwitchSession,
-}
-
-// ---------------------------------------------------------------------------
-// Item types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub enum PaletteItem {
-    /// Index into `snapshot.sessions` (filtered to active/suspended).
-    Session {
-        session_idx: usize,
-    },
-    /// Index into `snapshot.projects`.
-    Project {
-        project_idx: usize,
-    },
-    Action(PaletteAction),
-}
-
-// ---------------------------------------------------------------------------
-// Result types
-// ---------------------------------------------------------------------------
-
-struct ResultItem {
-    item: PaletteItem,
-    title: String,
-    subtitle: String,
-    selectable: bool,
-}
-
-struct CategoryGroup {
-    category: PaletteCategory,
-    indices: Vec<usize>,
-    source: ItemSource,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ItemSource {
-    Session,
-    Project,
-    Action,
-}
-
-struct ScoredEntry {
-    index: usize,
-    source: ItemSource,
-    fuzzy_match: FuzzyMatch,
-}
-
-enum PaletteResults {
-    Grouped(Vec<CategoryGroup>),
-    Scored(Vec<ScoredEntry>),
-}
-
-impl PaletteResults {
-    fn selectable_count(&self) -> usize {
-        match self {
-            Self::Grouped(groups) => groups.iter().map(|g| g.indices.len()).sum(),
-            Self::Scored(items) => items.len(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.selectable_count() == 0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Snapshot
-// ---------------------------------------------------------------------------
-
-pub struct PaletteSnapshot {
-    pub hosts: Rc<Vec<Host>>,
-    pub sessions: Rc<Vec<Session>>,
-    pub projects: Rc<Vec<Project>>,
-    pub mode: String,
-    pub active_session_id: Option<String>,
-    host_names: HashMap<String, String>,
-    project_names: HashMap<String, String>,
-    recent_set: HashSet<String>,
-    cc_states: HashMap<String, CcState>,
-    cc_metrics: HashMap<String, CcMetrics>,
-}
-
-impl PaletteSnapshot {
-    #[allow(clippy::too_many_arguments)]
-    pub fn capture(
-        hosts: Rc<Vec<Host>>,
-        sessions: Rc<Vec<Session>>,
-        projects: Rc<Vec<Project>>,
-        mode: String,
-        active_session_id: Option<String>,
-        recent_sessions: &[RecentSession],
-        cc_states: HashMap<String, CcState>,
-        cc_metrics: HashMap<String, CcMetrics>,
-    ) -> Self {
-        let host_names: HashMap<String, String> = hosts
-            .iter()
-            .map(|h| (h.id.clone(), h.hostname.clone()))
-            .collect();
-        let project_names: HashMap<String, String> = projects
-            .iter()
-            .map(|p| (p.id.clone(), p.name.clone()))
-            .collect();
-        let recent_set: HashSet<String> = recent_sessions
-            .iter()
-            .map(|r| r.session_id.clone())
-            .collect();
-        Self {
-            hosts,
-            sessions,
-            projects,
-            mode,
-            active_session_id,
-            host_names,
-            project_names,
-            recent_set,
-            cc_states,
-            cc_metrics,
-        }
-    }
-
-    fn host_name(&self, host_id: &str) -> String {
-        self.host_names
-            .get(host_id)
-            .cloned()
-            .unwrap_or_else(|| host_id[..8.min(host_id.len())].to_string())
-    }
-
-    fn project_name(&self, project_id: &str) -> Option<String> {
-        self.project_names.get(project_id).cloned()
-    }
-
-    fn is_recent(&self, session_id: &str) -> bool {
-        self.recent_set.contains(session_id)
-    }
-
-    fn online_hosts(&self) -> Vec<&Host> {
-        self.hosts.iter().filter(|h| h.status == "online").collect()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -320,7 +137,7 @@ impl EventEmitter<CommandPaletteEvent> for CommandPalette {}
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-enum DrillDownLevel {
+pub(super) enum DrillDownLevel {
     Project { project_idx: usize },
     Session { session_idx: usize },
     HostPicker,
@@ -334,20 +151,20 @@ struct SavedLevelState {
 
 pub struct CommandPalette {
     focus_handle: FocusHandle,
-    query: String,
+    pub(super) query: String,
     active_tab: PaletteTab,
-    selected_index: usize,
-    hovered_index: Option<usize>,
+    pub(super) selected_index: usize,
+    pub(super) hovered_index: Option<usize>,
     nav_stack: Vec<DrillDownLevel>,
     nav_saved_state: Vec<SavedLevelState>,
-    snapshot: PaletteSnapshot,
+    pub(super) snapshot: PaletteSnapshot,
     /// Pre-built item lists, created once at palette open time.
-    session_items: Vec<ResultItem>,
-    project_items: Vec<ResultItem>,
-    action_items: Vec<ResultItem>,
+    pub(super) session_items: Vec<ResultItem>,
+    pub(super) project_items: Vec<ResultItem>,
+    pub(super) action_items: Vec<ResultItem>,
     /// Items for the current drill-down level.
-    drill_items: Vec<ResultItem>,
-    results: PaletteResults,
+    pub(super) drill_items: Vec<ResultItem>,
+    pub(super) results: PaletteResults,
     /// Cached tab counts to avoid rebuilding item lists during render.
     tab_counts: [usize; 4],
 }
@@ -405,7 +222,7 @@ impl CommandPalette {
 // ---------------------------------------------------------------------------
 
 impl CommandPalette {
-    fn move_selection(&mut self, delta: i32) {
+    pub(super) fn move_selection(&mut self, delta: i32) {
         let count = self.results.selectable_count();
         if count == 0 {
             return;
@@ -415,17 +232,8 @@ impl CommandPalette {
         self.selected_index = next as usize;
     }
 
-    fn execute_selected(&mut self, cx: &mut Context<Self>) {
-        let item = self
-            .resolve_item(self.selected_index)
-            .map(|r| r.item.clone());
-        if let Some(item) = item {
-            self.execute_item(&item, cx);
-        }
-    }
-
     /// Look up the `ResultItem` for a given flat index in the current results.
-    fn resolve_item(&self, index: usize) -> Option<&ResultItem> {
+    pub(super) fn resolve_item(&self, index: usize) -> Option<&ResultItem> {
         if self.is_drilled_down()
             && !matches!(self.current_level(), Some(DrillDownLevel::HostPicker))
         {
@@ -478,92 +286,11 @@ impl CommandPalette {
         }
     }
 
-    fn execute_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
-        match item {
-            PaletteItem::Session { session_idx } => {
-                let session = &self.snapshot.sessions[*session_idx];
-                cx.emit(CommandPaletteEvent::SelectSession {
-                    session_id: session.id.clone(),
-                    host_id: session.host_id.clone(),
-                });
-            }
-            PaletteItem::Project { project_idx } => {
-                let project = &self.snapshot.projects[*project_idx];
-                cx.emit(CommandPaletteEvent::CreateSessionInProject {
-                    host_id: project.host_id.clone(),
-                    working_dir: project.path.clone(),
-                });
-            }
-            PaletteItem::Action(action) => match action {
-                PaletteAction::CloseCurrentSession { session_id }
-                | PaletteAction::CloseSession { session_id } => {
-                    cx.emit(CommandPaletteEvent::CloseSession {
-                        session_id: session_id.clone(),
-                    });
-                }
-                PaletteAction::SearchInTerminal => {
-                    cx.emit(CommandPaletteEvent::OpenSearch);
-                }
-                PaletteAction::NewSession => {
-                    let is_local = self.snapshot.mode == "local";
-                    let single_host = self.snapshot.hosts.len() == 1;
-                    if is_local || single_host {
-                        if let Some(host) = self.snapshot.hosts.first() {
-                            cx.emit(CommandPaletteEvent::CreateSession {
-                                host_id: host.id.clone(),
-                            });
-                        }
-                    } else {
-                        self.enter_host_picker();
-                        cx.notify();
-                        return; // Don't close
-                    }
-                }
-                PaletteAction::ToggleProjectPin {
-                    project_id,
-                    currently_pinned,
-                    ..
-                } => {
-                    cx.emit(CommandPaletteEvent::ToggleProjectPin {
-                        project_id: project_id.clone(),
-                        pinned: !currently_pinned,
-                    });
-                }
-                PaletteAction::Reconnect => {
-                    cx.emit(CommandPaletteEvent::Reconnect);
-                }
-                PaletteAction::NewSessionInProject {
-                    host_id,
-                    working_dir,
-                    ..
-                } => {
-                    cx.emit(CommandPaletteEvent::CreateSessionInProject {
-                        host_id: host_id.clone(),
-                        working_dir: working_dir.clone(),
-                    });
-                }
-                PaletteAction::SwitchToSession {
-                    session_id,
-                    host_id,
-                } => {
-                    cx.emit(CommandPaletteEvent::SelectSession {
-                        session_id: session_id.clone(),
-                        host_id: host_id.clone(),
-                    });
-                }
-                PaletteAction::SwitchSession => {
-                    cx.emit(CommandPaletteEvent::OpenSessionSwitcher);
-                }
-            },
-        }
-        cx.emit(CommandPaletteEvent::Close);
-    }
-
-    fn enter_host_picker(&mut self) {
+    pub(super) fn enter_host_picker(&mut self) {
         self.push_drill_down(DrillDownLevel::HostPicker);
     }
 
-    fn dismiss(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn dismiss(&mut self, cx: &mut Context<Self>) {
         cx.emit(CommandPaletteEvent::Close);
     }
 
@@ -580,7 +307,7 @@ impl CommandPalette {
         self.recompute_results();
     }
 
-    fn pop_drill_down(&mut self) -> bool {
+    pub(super) fn pop_drill_down(&mut self) -> bool {
         if self.nav_stack.pop().is_some() {
             if let Some(saved) = self.nav_saved_state.pop() {
                 self.query = saved.query;
@@ -595,15 +322,15 @@ impl CommandPalette {
         }
     }
 
-    fn is_drilled_down(&self) -> bool {
+    pub(super) fn is_drilled_down(&self) -> bool {
         !self.nav_stack.is_empty()
     }
 
-    fn current_level(&self) -> Option<&DrillDownLevel> {
+    pub(super) fn current_level(&self) -> Option<&DrillDownLevel> {
         self.nav_stack.last()
     }
 
-    fn drill_into_selected(&mut self) {
+    pub(super) fn drill_into_selected(&mut self) {
         let item = self
             .resolve_item(self.selected_index)
             .map(|r| r.item.clone());
@@ -620,7 +347,7 @@ impl CommandPalette {
 
     // -- Computation --------------------------------------------------------
 
-    fn recompute_results(&mut self) {
+    pub(super) fn recompute_results(&mut self) {
         match self.current_level() {
             None => {
                 self.drill_items.clear();
@@ -773,9 +500,9 @@ impl CommandPalette {
                 let session = &self.snapshot.sessions[*session_idx];
                 if self.snapshot.is_recent(&session.id) {
                     recent.push(i);
-                } else if session.status == "active" {
+                } else if session.status == SessionStatus::Active {
                     active.push(i);
-                } else if session.status == "suspended" {
+                } else if session.status == SessionStatus::Suspended {
                     suspended.push(i);
                 }
             }
@@ -853,296 +580,7 @@ impl CommandPalette {
         PaletteResults::Scored(scored)
     }
 
-    // -- Key handler --------------------------------------------------------
-
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
-
-        // Host picker has its own key handling
-        if matches!(self.current_level(), Some(DrillDownLevel::HostPicker)) {
-            self.handle_host_picker_key(event, cx);
-            return;
-        }
-
-        // Drill-down level key handling
-        if self.is_drilled_down() {
-            self.handle_drill_down_key(event, cx);
-            return;
-        }
-
-        if key == "escape" {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "enter" {
-            self.execute_selected(cx);
-            return;
-        }
-
-        if key == "up" || (key == "k" && mods.control) {
-            self.move_selection(-1);
-            cx.notify();
-            return;
-        }
-
-        if key == "down" || (key == "j" && mods.control) {
-            self.move_selection(1);
-            cx.notify();
-            return;
-        }
-
-        if key == "tab" && !mods.shift {
-            self.switch_tab(self.active_tab.next(), cx);
-            return;
-        }
-
-        if key == "tab" && mods.shift {
-            self.switch_tab(self.active_tab.prev(), cx);
-            return;
-        }
-
-        // Right arrow drills into selected item
-        if key == "right" && !mods.control && !mods.alt && !mods.platform {
-            if let Some(item) = self.resolve_item(self.selected_index)
-                && is_item_drillable(&item.item)
-            {
-                self.drill_into_selected();
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.dismiss(cx);
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
-            return;
-        }
-
-        // Toggle shortcuts
-        if key == "k" && mods.control && !mods.shift {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "e" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Sessions {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Sessions, cx);
-            }
-            return;
-        }
-
-        if key == "p" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Projects {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Projects, cx);
-            }
-            return;
-        }
-
-        if key == "a" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Actions {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Actions, cx);
-            }
-            return;
-        }
-
-        // Paste from clipboard
-        if key == "v" && mods.control {
-            if let Some(text) = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .filter(|t| !t.is_empty())
-            {
-                self.query.push_str(&text);
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
-            return;
-        }
-
-        // Consume other ctrl+letter combos to prevent leaking
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        // Printable characters
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            self.recompute_results();
-            cx.notify();
-        }
-    }
-
-    fn handle_drill_down_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
-
-        if key == "escape" {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "left" && !mods.control && !mods.alt {
-            self.pop_drill_down();
-            cx.notify();
-            return;
-        }
-
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "enter" {
-            self.execute_selected(cx);
-            return;
-        }
-
-        if key == "up" || (key == "k" && mods.control) {
-            self.move_selection(-1);
-            cx.notify();
-            return;
-        }
-
-        if key == "down" || (key == "j" && mods.control) {
-            self.move_selection(1);
-            cx.notify();
-            return;
-        }
-
-        // Right arrow to drill deeper (e.g. session within project)
-        if key == "right" && !mods.control && !mods.alt && !mods.platform {
-            if let Some(item) = self.resolve_item(self.selected_index)
-                && is_item_drillable(&item.item)
-            {
-                self.drill_into_selected();
-                cx.notify();
-            }
-            return;
-        }
-
-        // Tab is no-op in drill-down
-        if key == "tab" {
-            return;
-        }
-
-        // Consume modifier combos
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        // Printable characters
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            self.recompute_results();
-            cx.notify();
-        }
-    }
-
-    fn handle_host_picker_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
-
-        if key == "escape" {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "left" && !mods.control && !mods.alt {
-            self.pop_drill_down();
-            cx.notify();
-            return;
-        }
-
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "enter" {
-            let hosts = self.snapshot.online_hosts();
-            // Filter by query if non-empty
-            let filtered: Vec<&&Host> = if self.query.is_empty() {
-                hosts.iter().collect()
-            } else {
-                hosts
-                    .iter()
-                    .filter(|h| {
-                        h.hostname
-                            .to_lowercase()
-                            .contains(&self.query.to_lowercase())
-                    })
-                    .collect()
-            };
-            if let Some(host) = filtered.get(self.selected_index) {
-                cx.emit(CommandPaletteEvent::CreateSession {
-                    host_id: host.id.clone(),
-                });
-                cx.emit(CommandPaletteEvent::Close);
-            }
-            return;
-        }
-
-        if key == "up" {
-            self.move_host_picker_selection(-1);
-            cx.notify();
-            return;
-        }
-
-        if key == "down" {
-            self.move_host_picker_selection(1);
-            cx.notify();
-            return;
-        }
-
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            cx.notify();
-        }
-    }
-
-    fn move_host_picker_selection(&mut self, delta: i32) {
+    pub(super) fn move_host_picker_selection(&mut self, delta: i32) {
         let count = self.filtered_online_hosts_count();
         if count == 0 {
             return;
@@ -1508,10 +946,10 @@ impl CommandPalette {
         row
     }
 
-    fn render_session_accessory(&self, session: &Session) -> impl IntoElement {
-        let dot_color = match session.status.as_str() {
-            "active" => theme::success(),
-            "suspended" => theme::warning(),
+    fn render_session_accessory(&self, session: &zremote_client::Session) -> impl IntoElement {
+        let dot_color = match session.status {
+            SessionStatus::Active => theme::success(),
+            SessionStatus::Suspended => theme::warning(),
             _ => theme::text_tertiary(),
         };
 
@@ -1562,7 +1000,7 @@ impl CommandPalette {
         row
     }
 
-    fn render_project_accessory(&self, project: &Project) -> impl IntoElement {
+    fn render_project_accessory(&self, project: &zremote_client::Project) -> impl IntoElement {
         let mut row = div().flex().items_center().gap(px(6.0)).flex_shrink_0();
 
         if let Some(ref branch) = project.git_branch {
@@ -1997,13 +1435,13 @@ impl CommandPalette {
                     .as_deref()
                     .and_then(|pid| self.snapshot.project_name(pid));
 
-                let status_color = match session.status.as_str() {
-                    "active" => theme::success(),
-                    "suspended" => theme::warning(),
+                let status_color = match session.status {
+                    SessionStatus::Active => theme::success(),
+                    SessionStatus::Suspended => theme::warning(),
                     _ => theme::text_tertiary(),
                 };
 
-                let mut info_parts = vec![session.status.clone()];
+                let mut info_parts = vec![session.status.to_string()];
 
                 let duration = format_duration(Some(&session.created_at));
                 if !duration.is_empty() {
@@ -2381,394 +1819,8 @@ impl Render for CommandPalette {
 }
 
 // ---------------------------------------------------------------------------
-// Item builders (called once at palette creation)
+// Free functions (rendering helpers)
 // ---------------------------------------------------------------------------
-
-fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
-    let mut items: Vec<ResultItem> = snapshot
-        .sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.status == "active" || s.status == "suspended")
-        .map(|(idx, s)| {
-            let host_name = snapshot.host_name(&s.host_id);
-            let project_name = s
-                .project_id
-                .as_deref()
-                .and_then(|pid| snapshot.project_name(pid));
-
-            let title = session_title(s);
-            let subtitle = session_subtitle(s, &host_name, project_name.as_deref(), &snapshot.mode);
-
-            ResultItem {
-                item: PaletteItem::Session { session_idx: idx },
-                title,
-                subtitle,
-                selectable: true,
-            }
-        })
-        .collect();
-
-    // Sort: waiting_for_input first, then working, then rest
-    items.sort_by_key(|item| {
-        if let PaletteItem::Session { session_idx } = &item.item {
-            let session = &snapshot.sessions[*session_idx];
-            match snapshot.cc_states.get(&session.id).map(|c| c.status) {
-                Some(AgenticStatus::WaitingForInput) => 0,
-                Some(AgenticStatus::Working) => 1,
-                _ => 2,
-            }
-        } else {
-            2
-        }
-    });
-
-    items
-}
-
-fn build_project_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
-    snapshot
-        .projects
-        .iter()
-        .enumerate()
-        .map(|(idx, p)| {
-            let host_name = snapshot.host_name(&p.host_id);
-            let title = p.name.clone();
-            let subtitle = project_subtitle(p, &host_name, &snapshot.mode);
-
-            ResultItem {
-                item: PaletteItem::Project { project_idx: idx },
-                title,
-                subtitle,
-                selectable: true,
-            }
-        })
-        .collect()
-}
-
-fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> {
-    let mut items = Vec::new();
-
-    items.push(ResultItem {
-        item: PaletteItem::Action(PaletteAction::NewSession),
-        title: "New Terminal Session".to_string(),
-        subtitle: String::new(),
-        selectable: true,
-    });
-
-    if let Some(ref sid) = snapshot.active_session_id {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::CloseCurrentSession {
-                session_id: sid.clone(),
-            }),
-            title: "Close Current Session".to_string(),
-            subtitle: String::new(),
-            selectable: true,
-        });
-    }
-
-    if snapshot.active_session_id.is_some() {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::SearchInTerminal),
-            title: "Search in Terminal".to_string(),
-            subtitle: "Ctrl+F".to_string(),
-            selectable: true,
-        });
-    }
-
-    // Switch Session action (useful when 2+ active sessions exist)
-    let active_count = snapshot
-        .sessions
-        .iter()
-        .filter(|s| s.status == "active")
-        .count();
-    if active_count >= 2 {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::SwitchSession),
-            title: "Switch Session".to_string(),
-            subtitle: String::new(),
-            selectable: true,
-        });
-    }
-
-    for p in snapshot.projects.iter() {
-        let label = if p.pinned {
-            format!("Unpin {}", p.name)
-        } else {
-            format!("Pin {}", p.name)
-        };
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::ToggleProjectPin {
-                project_id: p.id.clone(),
-                project_name: p.name.clone(),
-                currently_pinned: p.pinned,
-            }),
-            title: label,
-            subtitle: String::new(),
-            selectable: true,
-        });
-    }
-
-    if snapshot.mode == "server" {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::Reconnect),
-            title: "Reconnect to Server".to_string(),
-            subtitle: String::new(),
-            selectable: true,
-        });
-    }
-
-    items
-}
-
-// ---------------------------------------------------------------------------
-// Drill-down item builders
-// ---------------------------------------------------------------------------
-
-fn is_item_drillable(item: &PaletteItem) -> bool {
-    matches!(
-        item,
-        PaletteItem::Session { .. } | PaletteItem::Project { .. }
-    )
-}
-
-fn build_project_drill_items_from(
-    project_idx: usize,
-    snapshot: &PaletteSnapshot,
-    session_items: &[ResultItem],
-) -> (Vec<ResultItem>, PaletteResults) {
-    let project = &snapshot.projects[project_idx];
-    let mut items = Vec::new();
-    let mut groups = Vec::new();
-
-    // Find sessions belonging to this project
-    let mut session_indices = Vec::new();
-    for sess_item in session_items {
-        if let PaletteItem::Session { session_idx } = &sess_item.item {
-            let session = &snapshot.sessions[*session_idx];
-            if session.project_id.as_deref() == Some(&project.id) {
-                session_indices.push(items.len());
-                items.push(ResultItem {
-                    item: sess_item.item.clone(),
-                    title: sess_item.title.clone(),
-                    subtitle: sess_item.subtitle.clone(),
-                    selectable: true,
-                });
-            }
-        }
-    }
-
-    if !session_indices.is_empty() {
-        groups.push(CategoryGroup {
-            category: PaletteCategory::DrillSessions,
-            indices: session_indices,
-            source: ItemSource::Session,
-        });
-    }
-
-    // Actions
-    let mut action_indices = Vec::new();
-
-    // "New Session in {project}"
-    let action_start = items.len();
-    items.push(ResultItem {
-        item: PaletteItem::Action(PaletteAction::NewSessionInProject {
-            host_id: project.host_id.clone(),
-            working_dir: project.path.clone(),
-            project_name: project.name.clone(),
-        }),
-        title: format!("New Session in {}", project.name),
-        subtitle: String::new(),
-        selectable: true,
-    });
-    action_indices.push(action_start);
-
-    // "Pin/Unpin"
-    let pin_idx = items.len();
-    let pin_label = if project.pinned {
-        format!("Unpin {}", project.name)
-    } else {
-        format!("Pin {}", project.name)
-    };
-    items.push(ResultItem {
-        item: PaletteItem::Action(PaletteAction::ToggleProjectPin {
-            project_id: project.id.clone(),
-            project_name: project.name.clone(),
-            currently_pinned: project.pinned,
-        }),
-        title: pin_label,
-        subtitle: String::new(),
-        selectable: true,
-    });
-    action_indices.push(pin_idx);
-
-    groups.push(CategoryGroup {
-        category: PaletteCategory::DrillActions,
-        indices: action_indices,
-        source: ItemSource::Action,
-    });
-
-    (items, PaletteResults::Grouped(groups))
-}
-
-fn build_session_drill_items_from(
-    session_idx: usize,
-    snapshot: &PaletteSnapshot,
-) -> (Vec<ResultItem>, PaletteResults) {
-    let session = &snapshot.sessions[session_idx];
-    let is_active = snapshot.active_session_id.as_deref() == Some(&session.id);
-    let mut items = Vec::new();
-    let mut action_indices = Vec::new();
-
-    // "Switch to Session" / "Already Active" action
-    let switch_idx = items.len();
-    if is_active {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::SwitchToSession {
-                session_id: session.id.clone(),
-                host_id: session.host_id.clone(),
-            }),
-            title: "Already Active".to_string(),
-            subtitle: String::new(),
-            selectable: false,
-        });
-        // Non-selectable: not added to action_indices
-    } else {
-        items.push(ResultItem {
-            item: PaletteItem::Action(PaletteAction::SwitchToSession {
-                session_id: session.id.clone(),
-                host_id: session.host_id.clone(),
-            }),
-            title: "Switch to Session".to_string(),
-            subtitle: String::new(),
-            selectable: true,
-        });
-        action_indices.push(switch_idx);
-    }
-
-    // "Close Session" action
-    let close_idx = items.len();
-    items.push(ResultItem {
-        item: PaletteItem::Action(PaletteAction::CloseSession {
-            session_id: session.id.clone(),
-        }),
-        title: "Close Session".to_string(),
-        subtitle: String::new(),
-        selectable: true,
-    });
-    action_indices.push(close_idx);
-
-    let groups = vec![CategoryGroup {
-        category: PaletteCategory::DrillActions,
-        indices: action_indices,
-        source: ItemSource::Action,
-    }];
-
-    (items, PaletteResults::Grouped(groups))
-}
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
-
-fn session_title(session: &Session) -> String {
-    let base = session
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("Session {}", &session.id[..8.min(session.id.len())]));
-
-    if session.name.is_some()
-        && let Some(ref shell) = session.shell
-    {
-        return format!("{base} ({shell})");
-    }
-
-    base
-}
-
-fn session_subtitle(
-    _session: &Session,
-    host_name: &str,
-    project_name: Option<&str>,
-    mode: &str,
-) -> String {
-    if mode == "local" {
-        project_name.unwrap_or("").to_string()
-    } else {
-        match project_name {
-            Some(proj) => format!("{host_name} / {proj}"),
-            None => host_name.to_string(),
-        }
-    }
-}
-
-fn project_subtitle(project: &Project, host_name: &str, mode: &str) -> String {
-    if mode == "local" {
-        compact_path(&project.path)
-    } else {
-        format!("{host_name} · {}", compact_path(&project.path))
-    }
-}
-
-fn format_duration(created_at: Option<&str>) -> String {
-    let Some(created) = created_at else {
-        return String::new();
-    };
-
-    // Try to parse ISO 8601 timestamp
-    let Ok(dt) = created.parse::<chrono::DateTime<chrono::Utc>>() else {
-        return String::new();
-    };
-
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(dt);
-    let total_secs = duration.num_seconds();
-    if total_secs < 0 {
-        return String::new();
-    }
-
-    let total_secs = total_secs as u64;
-    let minutes = total_secs / 60;
-    let hours = minutes / 60;
-    let days = hours / 24;
-
-    if hours < 1 {
-        let secs = total_secs % 60;
-        format!("{minutes}:{secs:02}")
-    } else if hours < 24 {
-        let rem_minutes = minutes % 60;
-        format!("{hours}h {rem_minutes}m")
-    } else {
-        let rem_hours = hours % 24;
-        format!("{days}d {rem_hours}h")
-    }
-}
-
-fn compact_path(path: &str) -> String {
-    let path = if let Some(home) = dirs::home_dir() {
-        if let Some(stripped) = path.strip_prefix(home.to_str().unwrap_or("")) {
-            format!("~{stripped}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    };
-
-    if path.len() > 50 {
-        // Find a reasonable split point
-        let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() > 4 {
-            let prefix = parts[..2].join("/");
-            let suffix = parts[parts.len() - 2..].join("/");
-            format!("{prefix}/.../{suffix}")
-        } else {
-            path
-        }
-    } else {
-        path
-    }
-}
 
 fn render_highlighted_text(
     title: &str,
@@ -2884,140 +1936,8 @@ fn render_footer_hint(key: &str, label: &str) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DrillDownLevel, PaletteAction, PaletteCategory, PaletteItem, PaletteResults,
-        PaletteSnapshot, PaletteTab, ResultItem, SavedLevelState, build_action_items,
-        build_project_drill_items_from, build_project_items, build_session_drill_items_from,
-        build_session_items, is_item_drillable,
-    };
-    use std::rc::Rc;
-    use zremote_client::{Host, Project, Session};
-
-    fn test_snapshot() -> PaletteSnapshot {
-        let hosts = Rc::new(vec![Host {
-            id: "host-1".to_string(),
-            name: "localhost".to_string(),
-            hostname: "localhost".to_string(),
-            status: "online".to_string(),
-            last_seen_at: None,
-            agent_version: None,
-            os: None,
-            arch: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }]);
-
-        let sessions = Rc::new(vec![
-            Session {
-                id: "sess-1".to_string(),
-                host_id: "host-1".to_string(),
-                name: Some("dev".to_string()),
-                shell: Some("zsh".to_string()),
-                status: "active".to_string(),
-                pid: Some(1234),
-                exit_code: None,
-                created_at: String::new(),
-                closed_at: None,
-                project_id: Some("proj-1".to_string()),
-                working_dir: Some("/home/user/project-a".to_string()),
-            },
-            Session {
-                id: "sess-2".to_string(),
-                host_id: "host-1".to_string(),
-                name: Some("test".to_string()),
-                shell: Some("bash".to_string()),
-                status: "suspended".to_string(),
-                pid: None,
-                exit_code: None,
-                created_at: String::new(),
-                closed_at: None,
-                project_id: Some("proj-1".to_string()),
-                working_dir: Some("/home/user/project-a".to_string()),
-            },
-            Session {
-                id: "sess-3".to_string(),
-                host_id: "host-1".to_string(),
-                name: None,
-                shell: Some("zsh".to_string()),
-                status: "active".to_string(),
-                pid: Some(5678),
-                exit_code: None,
-                created_at: String::new(),
-                closed_at: None,
-                project_id: Some("proj-2".to_string()),
-                working_dir: Some("/home/user/project-b".to_string()),
-            },
-        ]);
-
-        let projects = Rc::new(vec![
-            Project {
-                id: "proj-1".to_string(),
-                host_id: "host-1".to_string(),
-                path: "/home/user/project-a".to_string(),
-                name: "project-a".to_string(),
-                has_claude_config: false,
-                has_zremote_config: false,
-                project_type: "rust".to_string(),
-                created_at: String::new(),
-                parent_project_id: None,
-                git_branch: Some("main".to_string()),
-                git_commit_hash: None,
-                git_commit_message: None,
-                git_is_dirty: true,
-                git_ahead: 0,
-                git_behind: 0,
-                git_remotes: None,
-                git_updated_at: None,
-                pinned: true,
-            },
-            Project {
-                id: "proj-2".to_string(),
-                host_id: "host-1".to_string(),
-                path: "/home/user/project-b".to_string(),
-                name: "project-b".to_string(),
-                has_claude_config: false,
-                has_zremote_config: false,
-                project_type: "node".to_string(),
-                created_at: String::new(),
-                parent_project_id: None,
-                git_branch: Some("feature/test".to_string()),
-                git_commit_hash: None,
-                git_commit_message: None,
-                git_is_dirty: false,
-                git_ahead: 0,
-                git_behind: 0,
-                git_remotes: None,
-                git_updated_at: None,
-                pinned: false,
-            },
-        ]);
-
-        PaletteSnapshot::capture(
-            hosts,
-            sessions,
-            projects,
-            "local".to_string(),
-            Some("sess-1".to_string()),
-            &[],
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-        )
-    }
-
-    #[test]
-    fn test_is_item_drillable() {
-        assert!(is_item_drillable(&PaletteItem::Project { project_idx: 0 }));
-        assert!(is_item_drillable(&PaletteItem::Session { session_idx: 0 }));
-        assert!(!is_item_drillable(&PaletteItem::Action(
-            PaletteAction::NewSession
-        )));
-        assert!(!is_item_drillable(&PaletteItem::Action(
-            PaletteAction::SearchInTerminal
-        )));
-        assert!(!is_item_drillable(&PaletteItem::Action(
-            PaletteAction::Reconnect
-        )));
-    }
+    use super::items::PaletteCategory;
+    use super::{DrillDownLevel, PaletteTab, SavedLevelState};
 
     #[test]
     fn test_saved_level_state_preserves_values() {
@@ -3047,225 +1967,6 @@ mod tests {
 
         let host_level = DrillDownLevel::HostPicker;
         assert!(matches!(host_level, DrillDownLevel::HostPicker));
-    }
-
-    #[test]
-    fn test_project_drill_items_filter_sessions() {
-        let snapshot = test_snapshot();
-        let session_items = build_session_items(&snapshot);
-
-        // Project 0 (proj-1) has 2 sessions (sess-1, sess-2)
-        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
-
-        let session_count = items
-            .iter()
-            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
-            .count();
-        assert_eq!(session_count, 2, "project-a should have 2 sessions");
-
-        // Check results have groups
-        assert!(matches!(results, PaletteResults::Grouped(_)));
-
-        // Project 1 (proj-2) has 1 session (sess-3)
-        let (items, _) = build_project_drill_items_from(1, &snapshot, &session_items);
-        let session_count = items
-            .iter()
-            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
-            .count();
-        assert_eq!(session_count, 1, "project-b should have 1 session");
-    }
-
-    #[test]
-    fn test_project_drill_items_have_actions() {
-        let snapshot = test_snapshot();
-        let session_items = build_session_items(&snapshot);
-        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
-
-        let has_new_session = items.iter().any(|i| {
-            matches!(
-                &i.item,
-                PaletteItem::Action(PaletteAction::NewSessionInProject { .. })
-            )
-        });
-        assert!(
-            has_new_session,
-            "should have 'New Session in project' action"
-        );
-
-        let has_pin = items.iter().any(|i| {
-            matches!(
-                &i.item,
-                PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
-            )
-        });
-        assert!(has_pin, "should have pin/unpin action");
-    }
-
-    #[test]
-    fn test_project_drill_items_pin_label() {
-        let snapshot = test_snapshot();
-        let session_items = build_session_items(&snapshot);
-
-        // Project 0 is pinned -> should show "Unpin"
-        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
-        let pin_item = items
-            .iter()
-            .find(|i| {
-                matches!(
-                    &i.item,
-                    PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
-                )
-            })
-            .unwrap();
-        assert!(
-            pin_item.title.starts_with("Unpin"),
-            "pinned project should show 'Unpin'"
-        );
-
-        // Project 1 is not pinned -> should show "Pin"
-        let (items, _) = build_project_drill_items_from(1, &snapshot, &session_items);
-        let pin_item = items
-            .iter()
-            .find(|i| {
-                matches!(
-                    &i.item,
-                    PaletteItem::Action(PaletteAction::ToggleProjectPin { .. })
-                )
-            })
-            .unwrap();
-        assert!(
-            pin_item.title.starts_with("Pin"),
-            "unpinned project should show 'Pin'"
-        );
-    }
-
-    #[test]
-    fn test_session_drill_items_have_actions() {
-        let snapshot = test_snapshot();
-        let (items, _) = build_session_drill_items_from(0, &snapshot);
-
-        let has_switch = items.iter().any(|i| {
-            matches!(
-                &i.item,
-                PaletteItem::Action(PaletteAction::SwitchToSession { .. })
-            )
-        });
-        assert!(has_switch, "should have 'Switch to Session' action");
-
-        let has_close = items.iter().any(|i| {
-            matches!(
-                &i.item,
-                PaletteItem::Action(PaletteAction::CloseSession { .. })
-            )
-        });
-        assert!(has_close, "should have 'Close Session' action");
-    }
-
-    #[test]
-    fn test_session_drill_items_use_correct_ids() {
-        let snapshot = test_snapshot();
-        let (items, _) = build_session_drill_items_from(1, &snapshot);
-
-        let switch = items
-            .iter()
-            .find(|i| {
-                matches!(
-                    &i.item,
-                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
-                )
-            })
-            .unwrap();
-        if let PaletteItem::Action(PaletteAction::SwitchToSession {
-            session_id,
-            host_id,
-            ..
-        }) = &switch.item
-        {
-            assert_eq!(session_id, "sess-2");
-            assert_eq!(host_id, "host-1");
-        } else {
-            panic!("expected SwitchToSession");
-        }
-    }
-
-    #[test]
-    fn test_all_result_items_are_selectable() {
-        let snapshot = test_snapshot();
-        let session_items = build_session_items(&snapshot);
-        let project_items = build_project_items(&snapshot);
-        let action_items = build_action_items(&snapshot);
-
-        for item in &session_items {
-            assert!(item.selectable, "session items should be selectable");
-        }
-        for item in &project_items {
-            assert!(item.selectable, "project items should be selectable");
-        }
-        for item in &action_items {
-            assert!(item.selectable, "action items should be selectable");
-        }
-    }
-
-    #[test]
-    fn test_project_drill_no_sessions_still_has_actions() {
-        // Create a snapshot with a project that has no sessions
-        let hosts = Rc::new(vec![Host {
-            id: "host-1".to_string(),
-            name: "host-1".to_string(),
-            hostname: "localhost".to_string(),
-            status: "online".to_string(),
-            last_seen_at: None,
-            agent_version: None,
-            os: None,
-            arch: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }]);
-        let sessions = Rc::new(vec![]);
-        let projects = Rc::new(vec![Project {
-            id: "proj-1".to_string(),
-            host_id: "host-1".to_string(),
-            path: "/home/user/empty-project".to_string(),
-            name: "empty-project".to_string(),
-            has_claude_config: false,
-            has_zremote_config: false,
-            project_type: "rust".to_string(),
-            created_at: String::new(),
-            parent_project_id: None,
-            git_branch: None,
-            git_commit_hash: None,
-            git_commit_message: None,
-            git_is_dirty: false,
-            git_ahead: 0,
-            git_behind: 0,
-            git_remotes: None,
-            git_updated_at: None,
-            pinned: false,
-        }]);
-        let snapshot = PaletteSnapshot::capture(
-            hosts,
-            sessions,
-            projects,
-            "local".to_string(),
-            None,
-            &[],
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-        );
-        let session_items = build_session_items(&snapshot);
-        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
-
-        // No sessions, but should still have actions
-        let session_count = items
-            .iter()
-            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
-            .count();
-        assert_eq!(session_count, 0);
-        assert!(
-            !items.is_empty(),
-            "should have action items even with no sessions"
-        );
-        assert!(!results.is_empty());
     }
 
     #[test]
@@ -3315,71 +2016,5 @@ mod tests {
     fn test_palette_category_drill_labels() {
         assert_eq!(PaletteCategory::DrillSessions.label(), "SESSIONS");
         assert_eq!(PaletteCategory::DrillActions.label(), "ACTIONS");
-    }
-
-    #[test]
-    fn test_session_drill_active_session_shows_already_active() {
-        let snapshot = test_snapshot(); // active_session_id = Some("sess-1")
-
-        // Drill into the active session (sess-1, index 0)
-        let (items, _) = build_session_drill_items_from(0, &snapshot);
-
-        let switch_item = items
-            .iter()
-            .find(|i| {
-                matches!(
-                    &i.item,
-                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
-                )
-            })
-            .expect("should have switch/already-active item");
-
-        assert_eq!(switch_item.title, "Already Active");
-        assert!(
-            !switch_item.selectable,
-            "already active should not be selectable"
-        );
-    }
-
-    #[test]
-    fn test_session_drill_inactive_session_shows_switch() {
-        let snapshot = test_snapshot(); // active_session_id = Some("sess-1")
-
-        // Drill into an inactive session (sess-2, index 1)
-        let (items, _) = build_session_drill_items_from(1, &snapshot);
-
-        let switch_item = items
-            .iter()
-            .find(|i| {
-                matches!(
-                    &i.item,
-                    PaletteItem::Action(PaletteAction::SwitchToSession { .. })
-                )
-            })
-            .expect("should have switch item");
-
-        assert_eq!(switch_item.title, "Switch to Session");
-        assert!(
-            switch_item.selectable,
-            "switch should be selectable for inactive session"
-        );
-    }
-
-    #[test]
-    fn test_session_drill_active_close_is_default_selection() {
-        let snapshot = test_snapshot();
-
-        // Active session drill-down: "Already Active" is non-selectable,
-        // so "Close Session" should be the only selectable action
-        let (items, results) = build_session_drill_items_from(0, &snapshot);
-
-        let selectable: Vec<&ResultItem> = items.iter().filter(|i| i.selectable).collect();
-        assert_eq!(
-            selectable.len(),
-            1,
-            "only 'Close Session' should be selectable"
-        );
-        assert_eq!(selectable[0].title, "Close Session");
-        assert_eq!(results.selectable_count(), 1);
     }
 }

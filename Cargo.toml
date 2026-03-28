@@ -24,7 +24,7 @@ tokio = { version = "1.50", features = ["full"] }
 
 # Server-only
 axum = "0.8.8"
-tower = "0.5.3"
+tower = { version = "0.5.3", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
 sha2 = "0.10"

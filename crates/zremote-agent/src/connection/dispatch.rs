@@ -1,196 +1,71 @@
-use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio::time::{interval, timeout};
-use tokio_tungstenite::tungstenite::Message;
 use zremote_protocol::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use zremote_protocol::knowledge::KnowledgeServerMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, HostId, ServerMessage, SessionId};
 
+use super::registration::default_shell;
 use crate::agentic::manager::AgenticLoopManager;
-use crate::bridge::BridgeCommand;
 use crate::bridge::{self, BridgeSenders};
-use crate::config::AgentConfig;
 use crate::hooks::mapper::SessionMapper;
-use crate::hooks::server::HooksServer;
-use crate::knowledge::KnowledgeManager;
 use crate::project::ProjectScanner;
 use crate::project::git::GitInspector;
 use crate::session::SessionManager;
+use zremote_core::validation::validate_path_no_traversal;
 
-fn default_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| {
-        // Read login shell from passwd database instead of $SHELL.
-        // $SHELL can be overridden by nix develop to a non-interactive bash
-        // (without readline), which breaks PS1 escape processing in PTY sessions.
-        // The passwd entry always has the user's actual login shell.
-        login_shell_from_passwd()
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
-    })
-}
-
-/// Read the current user's login shell from the passwd database.
-fn login_shell_from_passwd() -> Option<String> {
-    let uid = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    let output = std::process::Command::new("getent")
-        .args(["passwd", uid.trim()])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    // passwd format: name:password:uid:gid:gecos:home:shell
-    let shell = output.trim().rsplit(':').next()?;
-    if shell.is_empty() {
-        return None;
-    }
-    Some(shell.to_string())
-}
-
-/// Errors that can occur during a WebSocket connection lifecycle.
-#[derive(Debug)]
-pub enum ConnectionError {
-    /// WebSocket connection failed.
-    Connect(tokio_tungstenite::tungstenite::Error),
-    /// Failed to serialize a message.
-    Serialize(serde_json::Error),
-    /// Failed to deserialize a message from the server.
-    Deserialize(serde_json::Error),
-    /// Failed to send a WebSocket message.
-    Send(tokio_tungstenite::tungstenite::Error),
-    /// Failed to receive a WebSocket message.
-    Receive(tokio_tungstenite::tungstenite::Error),
-    /// Registration timed out waiting for server acknowledgement.
-    RegisterTimeout,
-    /// Unexpected message received during registration.
-    UnexpectedRegisterResponse(String),
-    /// Failed to resolve the system hostname.
-    Hostname(std::io::Error),
-    /// Server sent an error message.
-    ServerError(String),
-    /// WebSocket connection was closed.
-    ConnectionClosed,
-}
-
-impl std::fmt::Display for ConnectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Connect(e) => write!(f, "WebSocket connection failed: {e}"),
-            Self::Serialize(e) => write!(f, "failed to serialize message: {e}"),
-            Self::Deserialize(e) => write!(f, "failed to deserialize server message: {e}"),
-            Self::Send(e) => write!(f, "failed to send WebSocket message: {e}"),
-            Self::Receive(e) => write!(f, "failed to receive WebSocket message: {e}"),
-            Self::RegisterTimeout => {
-                write!(f, "registration timed out (no RegisterAck within 10s)")
-            }
-            Self::UnexpectedRegisterResponse(msg) => {
-                write!(f, "unexpected response during registration: {msg}")
-            }
-            Self::Hostname(e) => write!(f, "failed to get hostname: {e}"),
-            Self::ServerError(msg) => write!(f, "server error: {msg}"),
-            Self::ConnectionClosed => write!(f, "WebSocket connection closed"),
-        }
-    }
-}
-
-impl std::error::Error for ConnectionError {}
-
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const AGENTIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Establish a WebSocket connection to the server.
-async fn connect(config: &AgentConfig) -> Result<WsStream, ConnectionError> {
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(config.server_url.as_str())
+/// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_session_create(
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    session_id: SessionId,
+    shell: Option<&str>,
+    cols: u16,
+    rows: u16,
+    working_dir: Option<&str>,
+    env: Option<&std::collections::HashMap<String, String>>,
+    initial_command: Option<&str>,
+) {
+    let shell = shell.unwrap_or(default_shell());
+    match session_manager
+        .create(session_id, shell, cols, rows, working_dir, env)
         .await
-        .map_err(ConnectionError::Connect)?;
-    Ok(ws_stream)
-}
-
-/// Send a JSON-encoded agent message over the WebSocket.
-async fn send_message(ws: &mut WsStream, msg: &AgentMessage) -> Result<(), ConnectionError> {
-    let json = serde_json::to_string(msg).map_err(ConnectionError::Serialize)?;
-    ws.send(Message::Text(json.into()))
-        .await
-        .map_err(ConnectionError::Send)
-}
-
-/// Register with the server and return the assigned host ID.
-async fn register(
-    ws: &mut WsStream,
-    config: &AgentConfig,
-    supports_persistence: bool,
-) -> Result<HostId, ConnectionError> {
-    let hostname = hostname::get()
-        .map_err(ConnectionError::Hostname)?
-        .to_string_lossy()
-        .into_owned();
-
-    let register_msg = AgentMessage::Register {
-        hostname,
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        token: config.token.clone(),
-        supports_persistent_sessions: supports_persistence,
-    };
-
-    send_message(ws, &register_msg).await?;
-    tracing::debug!("sent Register message, waiting for RegisterAck");
-
-    // Wait for RegisterAck with timeout
-    let ack = timeout(REGISTER_TIMEOUT, async {
-        while let Some(msg_result) = ws.next().await {
-            let msg = msg_result.map_err(ConnectionError::Receive)?;
-            match msg {
-                Message::Text(text) => {
-                    let server_msg: ServerMessage =
-                        serde_json::from_str(&text).map_err(ConnectionError::Deserialize)?;
-                    return Ok(server_msg);
+    {
+        Ok(pid) => {
+            tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created (available via bridge)");
+            if outbound_tx
+                .try_send(AgentMessage::SessionCreated {
+                    session_id,
+                    shell: shell.to_string(),
+                    pid,
+                })
+                .is_err()
+            {
+                tracing::warn!("outbound channel full, message dropped");
+            }
+            // Write initial command to PTY after a short delay for shell init
+            if let Some(cmd) = initial_command {
+                let cmd_with_newline = format!("{cmd}\n");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Err(e) = session_manager.write_to(&session_id, cmd_with_newline.as_bytes()) {
+                    tracing::warn!(session_id = %session_id, error = %e, "failed to write initial_command to PTY");
                 }
-                Message::Close(_) => return Err(ConnectionError::ConnectionClosed),
-                // Skip ping/pong/binary during registration
-                _ => {}
             }
         }
-        Err(ConnectionError::ConnectionClosed)
-    })
-    .await
-    .map_err(|_| ConnectionError::RegisterTimeout)??;
-
-    match ack {
-        ServerMessage::RegisterAck { host_id } => {
-            tracing::info!(host_id = %host_id, "registered with server");
-            Ok(host_id)
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "failed to create PTY session");
+            if outbound_tx
+                .try_send(AgentMessage::Error {
+                    session_id: Some(session_id),
+                    message: format!("failed to spawn PTY: {e}"),
+                })
+                .is_err()
+            {
+                tracing::warn!("outbound channel full, message dropped");
+            }
         }
-        ServerMessage::Error { message } => Err(ConnectionError::ServerError(message)),
-        other => Err(ConnectionError::UnexpectedRegisterResponse(format!(
-            "{other:?}"
-        ))),
     }
-}
-
-/// Serialize an `AgentMessage` to a WS text message.
-fn serialize_agent_message(msg: &AgentMessage) -> Result<Message, ConnectionError> {
-    let json = serde_json::to_string(msg).map_err(ConnectionError::Serialize)?;
-    Ok(Message::Text(json.into()))
-}
-
-/// Serialize an `AgenticAgentMessage` to a WS text message.
-fn serialize_agentic_message(msg: &AgenticAgentMessage) -> Result<Message, ConnectionError> {
-    let json = serde_json::to_string(msg).map_err(ConnectionError::Serialize)?;
-    Ok(Message::Text(json.into()))
 }
 
 /// Run a worktree lifecycle hook if configured in project settings.
@@ -257,602 +132,6 @@ async fn read_worktree_settings_server(
     settings.worktree
 }
 
-/// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
-#[allow(clippy::too_many_arguments)]
-async fn handle_session_create(
-    session_manager: &mut SessionManager,
-    outbound_tx: &mpsc::Sender<AgentMessage>,
-    session_id: SessionId,
-    shell: Option<&str>,
-    cols: u16,
-    rows: u16,
-    working_dir: Option<&str>,
-    env: Option<&std::collections::HashMap<String, String>>,
-    initial_command: Option<&str>,
-) {
-    let shell = shell.unwrap_or(default_shell());
-    match session_manager
-        .create(session_id, shell, cols, rows, working_dir, env)
-        .await
-    {
-        Ok(pid) => {
-            tracing::info!(session_id = %session_id, pid = pid, shell = shell, "PTY session created (available via bridge)");
-            if outbound_tx
-                .try_send(AgentMessage::SessionCreated {
-                    session_id,
-                    shell: shell.to_string(),
-                    pid,
-                })
-                .is_err()
-            {
-                tracing::warn!("outbound channel full, message dropped");
-            }
-            // Write initial command to PTY after a short delay for shell init
-            if let Some(cmd) = initial_command {
-                let cmd_with_newline = format!("{cmd}\n");
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                if let Err(e) = session_manager.write_to(&session_id, cmd_with_newline.as_bytes()) {
-                    tracing::warn!(session_id = %session_id, error = %e, "failed to write initial_command to PTY");
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!(session_id = %session_id, error = %e, "failed to create PTY session");
-            if outbound_tx
-                .try_send(AgentMessage::Error {
-                    session_id: Some(session_id),
-                    message: format!("failed to spawn PTY: {e}"),
-                })
-                .is_err()
-            {
-                tracing::warn!("outbound channel full, message dropped");
-            }
-        }
-    }
-}
-
-/// Run a single connection lifecycle: connect, register, then process messages.
-///
-/// Returns `Ok(())` on clean disconnect, `Err` on failure.
-/// The caller is responsible for reconnection logic.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub async fn run_connection(
-    config: &AgentConfig,
-    shutdown: tokio::sync::watch::Receiver<bool>,
-    session_manager: &mut SessionManager,
-    pty_output_rx: &mut mpsc::Receiver<crate::session::PtyOutput>,
-    agentic_manager: &mut AgenticLoopManager,
-    session_mapper: &SessionMapper,
-    sent_cc_session_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
-    ccline_rx: &mut mpsc::Receiver<AgentMessage>,
-    bridge_senders: &BridgeSenders,
-    bridge_scrollback: &bridge::BridgeScrollbackStore,
-    bridge_cmd_rx: &mut mpsc::Receiver<BridgeCommand>,
-) -> Result<(), ConnectionError> {
-    let supports_persistence = session_manager.supports_persistence();
-    tracing::info!(server_url = %config.server_url, "connecting to server");
-
-    let mut ws = connect(config).await?;
-    tracing::info!("WebSocket connection established");
-
-    let host_id = register(&mut ws, config, supports_persistence).await?;
-
-    // Write host_id for GUI bridge discovery (skip bridge for non-local sessions)
-    bridge::write_host_id_file(&host_id).await;
-
-    // Split the WebSocket for concurrent read/write
-    let (mut ws_sink, mut ws_stream) = ws.split();
-
-    // Channel for outbound agent messages (from main loop + PTY output)
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<AgentMessage>(2048);
-
-    // Re-announce sessions that survived the reconnect + discover new ones
-    {
-        let mut recovered_sessions = Vec::new();
-
-        // Sessions already tracked in the hoisted manager (survived reconnect)
-        for (session_id, shell, pid) in session_manager.active_session_info() {
-            recovered_sessions.push(zremote_protocol::RecoveredSession {
-                session_id,
-                shell,
-                pid,
-            });
-        }
-
-        // Capture survived count before appending discovered sessions
-        let survived_count = recovered_sessions.len();
-
-        // Discover sessions from previous agent lifecycle (daemon state files).
-        // discover_existing() skips sessions already tracked in the manager.
-        let discovered = session_manager.discover_existing().await;
-        for (session_id, shell, pid, captured) in &discovered {
-            recovered_sessions.push(zremote_protocol::RecoveredSession {
-                session_id: *session_id,
-                shell: shell.clone(),
-                pid: *pid,
-            });
-            // Send captured pane content through the output channel so the
-            // server receives it as TerminalOutput and populates scrollback.
-            if let Some(data) = captured
-                && session_manager
-                    .output_tx()
-                    .try_send(crate::session::PtyOutput {
-                        session_id: *session_id,
-                        pane_id: None,
-                        data: data.clone(),
-                    })
-                    .is_err()
-            {
-                tracing::warn!(session_id = %session_id, "pty output channel full, scrollback dropped");
-            }
-        }
-
-        if !recovered_sessions.is_empty() {
-            tracing::info!(
-                count = recovered_sessions.len(),
-                survived = survived_count,
-                discovered = discovered.len(),
-                "re-announcing sessions after reconnect"
-            );
-            if outbound_tx
-                .try_send(AgentMessage::SessionsRecovered {
-                    sessions: recovered_sessions,
-                })
-                .is_err()
-            {
-                tracing::warn!("outbound channel full, SessionsRecovered dropped");
-            }
-        }
-    }
-
-    // Project scanner
-    let mut project_scanner = ProjectScanner::new();
-
-    // Run initial project scan in background
-    {
-        let tx = outbound_tx.clone();
-        let mut scanner = ProjectScanner::new();
-        tokio::spawn(async move {
-            let projects = tokio::task::spawn_blocking(move || scanner.scan())
-                .await
-                .unwrap_or_default();
-            if tx
-                .send(AgentMessage::ProjectList { projects })
-                .await
-                .is_err()
-            {
-                tracing::warn!("outbound channel closed, initial project list dropped");
-            }
-        });
-    }
-
-    // Channel for outbound agentic messages
-    let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(64);
-
-    // Re-announce active agentic loops so the server restores monitoring state.
-    // Also prunes loops whose processes died during disconnect (sends LoopEnded).
-    // Must happen after agentic_tx is created since we send through it.
-    {
-        let loop_messages = agentic_manager.re_announce_loops();
-        if !loop_messages.is_empty() {
-            tracing::info!(
-                count = loop_messages.len(),
-                "re-announcing agentic loops after reconnect"
-            );
-            for msg in loop_messages {
-                if agentic_tx.try_send(msg).is_err() {
-                    tracing::warn!("agentic channel full, loop re-announce message dropped");
-                }
-            }
-        }
-    }
-
-    // Hooks sidecar (CC hook integration)
-    // Use a per-connection shutdown signal so the HooksServer stops when this
-    // connection ends (sender is dropped on function exit → server stops).
-    let (hooks_shutdown_tx, hooks_shutdown_rx) = tokio::sync::watch::channel(false);
-    let hooks_server = HooksServer::new(
-        agentic_tx.clone(),
-        session_mapper.clone(),
-        outbound_tx.clone(),
-        sent_cc_session_ids.clone(),
-    );
-    match hooks_server.start(hooks_shutdown_rx).await {
-        Ok(addr) => {
-            tracing::info!(port = addr.port(), "hooks sidecar started");
-            // Install hooks into Claude Code settings
-            if let Err(e) = crate::hooks::installer::install_hooks().await {
-                tracing::warn!(error = %e, "failed to install CC hooks (non-fatal)");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to start hooks sidecar (non-fatal)");
-        }
-    }
-
-    // Knowledge manager (optional, based on config)
-    #[allow(clippy::similar_names)]
-    let (knowledge_sender, mut knowledge_receiver) = if config.openviking_enabled {
-        let (tx, rx) = mpsc::channel::<KnowledgeServerMessage>(64);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-
-    let mut knowledge_manager = if config.openviking_enabled {
-        Some(KnowledgeManager::new(
-            config.openviking_binary.clone(),
-            config.openviking_port,
-            config.openviking_config_dir.clone(),
-            config.openviking_api_key.clone(),
-            outbound_tx.clone(),
-        ))
-    } else {
-        None
-    };
-
-    // Spawn sender task: drains outbound channel + agentic channel + heartbeats -> WS sink
-    let sender_shutdown = shutdown.clone();
-    let sender_handle = tokio::spawn(async move {
-        let mut heartbeat_interval = interval(HEARTBEAT_INTERVAL);
-        // Skip the first immediate tick
-        heartbeat_interval.tick().await;
-
-        loop {
-            // biased: shutdown + heartbeat checked first so they aren't
-            // starved when outbound_rx is saturated with PTY output.
-            tokio::select! {
-                biased;
-
-                () = wait_for_shutdown(sender_shutdown.clone()) => {
-                    tracing::debug!("sender task shutting down");
-                    return ws_sink;
-                }
-                _ = heartbeat_interval.tick() => {
-                    let msg = AgentMessage::Heartbeat {
-                        timestamp: Utc::now(),
-                    };
-                    match serialize_agent_message(&msg) {
-                        Ok(ws_msg) => {
-                            if let Err(e) = ws_sink.send(ws_msg).await {
-                                tracing::error!(error = %e, "failed to send heartbeat");
-                                return ws_sink;
-                            }
-                            tracing::debug!("heartbeat sent");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to serialize heartbeat");
-                        }
-                    }
-                }
-                Some(msg) = outbound_rx.recv() => {
-                    match serialize_agent_message(&msg) {
-                        Ok(ws_msg) => {
-                            if let Err(e) = ws_sink.send(ws_msg).await {
-                                tracing::error!(error = %e, "failed to send outbound message");
-                                return ws_sink;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to serialize outbound message");
-                        }
-                    }
-                }
-                Some(msg) = agentic_rx.recv() => {
-                    match serialize_agentic_message(&msg) {
-                        Ok(ws_msg) => {
-                            if let Err(e) = ws_sink.send(ws_msg).await {
-                                tracing::error!(error = %e, "failed to send agentic message");
-                                return ws_sink;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to serialize agentic message");
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // Periodic agentic tool detection
-    let mut agentic_check_interval = interval(AGENTIC_CHECK_INTERVAL);
-    // Skip the first immediate tick
-    agentic_check_interval.tick().await;
-
-    // Main message loop
-    let result = loop {
-        tokio::select! {
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<ServerMessage>(&text) {
-                            Ok(server_msg) => {
-                                handle_server_message(
-                                    &server_msg,
-                                    &host_id,
-                                    session_manager,
-                                    agentic_manager,
-                                    &mut project_scanner,
-                                    &outbound_tx,
-                                    &agentic_tx,
-                                    knowledge_sender.as_ref(),
-                                    session_mapper,
-                                    bridge_senders,
-                                    bridge_scrollback,
-                                ).await;
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to parse server message, ignoring");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!(host_id = %host_id, "server closed connection");
-                        break Ok(());
-                    }
-                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_))) => {
-                        // tokio-tungstenite handles ping/pong automatically
-                    }
-                    Some(Err(e)) => {
-                        tracing::error!(error = %e, "WebSocket error");
-                        break Err(ConnectionError::Receive(e));
-                    }
-                    None => {
-                        tracing::info!(host_id = %host_id, "WebSocket stream ended");
-                        break Err(ConnectionError::ConnectionClosed);
-                    }
-                }
-            }
-            Some(pty_output) = pty_output_rx.recv() => {
-                let session_id = pty_output.session_id;
-                let data = pty_output.data;
-
-                if data.is_empty() {
-                    // Daemon session with process still alive: reconnect instead
-                    // of killing. The daemon may have disconnected us due to
-                    // backpressure (write timeout) -- data is in the ring buffer.
-                    if session_manager.is_daemon_alive(&session_id) {
-                        tracing::info!(session_id = %session_id, "daemon still alive, attempting reconnect");
-                        match session_manager.reconnect_daemon(&session_id).await {
-                            Ok(scrollback) => {
-                                tracing::info!(session_id = %session_id, "daemon reconnect successful");
-                                // Forward scrollback so the GUI/server can repaint
-                                if let Some(sb) = scrollback
-                                    && !sb.is_empty()
-                                {
-                                    bridge::fan_out(
-                                        bridge_senders,
-                                        session_id,
-                                        zremote_core::state::BrowserMessage::Output {
-                                            pane_id: None,
-                                            data: sb.clone(),
-                                        },
-                                    ).await;
-                                    bridge::record_output(bridge_scrollback, session_id, sb.clone()).await;
-                                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
-                                        session_id,
-                                        data: sb,
-                                    }).is_err() {
-                                        tracing::warn!("outbound channel full, scrollback dropped");
-                                    }
-                                }
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!(session_id = %session_id, error = %e, "daemon reconnect failed, closing session");
-                                // Fall through to close
-                            }
-                        }
-                    }
-
-                    // Session ended (EOF from main PTY reader)
-                    if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
-                        && agentic_tx.try_send(loop_ended).is_err()
-                    {
-                        tracing::warn!("agentic channel full, LoopEnded dropped");
-                    }
-                    let exit_code = session_manager.close(&session_id);
-                    tracing::info!(session_id = %session_id, exit_code = ?exit_code, "PTY session ended");
-                    bridge::fan_out(
-                        bridge_senders,
-                        session_id,
-                        zremote_core::state::BrowserMessage::SessionClosed { exit_code },
-                    ).await;
-                    bridge::remove_session(bridge_scrollback, &session_id).await;
-                    if outbound_tx.try_send(AgentMessage::SessionClosed {
-                        session_id,
-                        exit_code,
-                    }).is_err() {
-                        tracing::warn!("outbound channel full, message dropped");
-                    }
-                } else {
-                    // Forward output to server and direct bridge GUI connections
-                    bridge::fan_out(
-                        bridge_senders,
-                        session_id,
-                        zremote_core::state::BrowserMessage::Output {
-                            pane_id: None,
-                            data: data.clone(),
-                        },
-                    ).await;
-                    bridge::record_output(bridge_scrollback, session_id, data.clone()).await;
-                    if outbound_tx.try_send(AgentMessage::TerminalOutput {
-                        session_id,
-                        data,
-                    }).is_err() {
-                        tracing::warn!("outbound channel full, message dropped");
-                    }
-                }
-            }
-            msg = async {
-                if let Some(ref mut rx) = knowledge_receiver {
-                    rx.recv().await
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                if let Some(msg) = msg
-                    && let Some(ref mut mgr) = knowledge_manager
-                {
-                    mgr.handle_message(msg).await;
-                }
-            }
-            _ = agentic_check_interval.tick() => {
-                // Periodic GC: close sessions whose child process has died but
-                // EOF was lost (try_send dropped it when channel was full).
-                let dead_sessions: Vec<SessionId> = session_manager
-                    .session_pids()
-                    .filter(|(_, pid)| !std::path::Path::new(&format!("/proc/{pid}")).exists())
-                    .map(|(id, _)| id)
-                    .collect();
-                for session_id in dead_sessions {
-                    if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
-                        && agentic_tx.try_send(loop_ended).is_err()
-                    {
-                        tracing::warn!("agentic channel full, LoopEnded dropped");
-                    }
-                    let exit_code = session_manager.close(&session_id);
-                    tracing::info!(session_id = %session_id, exit_code = ?exit_code, "GC: cleaned up dead session");
-                    bridge::fan_out(
-                        bridge_senders,
-                        session_id,
-                        zremote_core::state::BrowserMessage::SessionClosed { exit_code },
-                    ).await;
-                    bridge::remove_session(bridge_scrollback, &session_id).await;
-                    if outbound_tx.try_send(AgentMessage::SessionClosed {
-                        session_id,
-                        exit_code,
-                    }).is_err() {
-                        tracing::warn!("outbound channel full, SessionClosed dropped");
-                    }
-                }
-
-                let messages = agentic_manager.check_sessions(session_manager.session_pids());
-                for msg in &messages {
-                    // Register loop mapping when a new loop is detected
-                    if let AgenticAgentMessage::LoopDetected { loop_id, session_id, .. } = msg {
-                        let mapper = session_mapper.clone();
-                        let lid = *loop_id;
-                        let sid = *session_id;
-                        tokio::spawn(async move {
-                            mapper.register_loop(sid, lid).await;
-                        });
-                    }
-                    // Clean up mapping when loop ends
-                    if let AgenticAgentMessage::LoopEnded { loop_id, .. } = msg {
-                        let mapper = session_mapper.clone();
-                        let lid = *loop_id;
-                        tokio::spawn(async move {
-                            mapper.remove_loop(&lid).await;
-                        });
-                    }
-                }
-                for msg in messages {
-                    if agentic_tx.try_send(msg).is_err() {
-                        tracing::warn!("agentic channel full, message dropped");
-                    }
-                }
-            }
-            Some(ccline_msg) = ccline_rx.recv() => {
-                if outbound_tx.try_send(ccline_msg).is_err() {
-                    tracing::debug!("outbound channel full, ccline metrics dropped");
-                }
-            }
-            Some(bridge_cmd) = bridge_cmd_rx.recv() => {
-                match bridge_cmd {
-                    BridgeCommand::Write { session_id, data } => {
-                        let session_exists = session_manager.has_session(&session_id);
-                        let result = session_manager.write_to(&session_id, &data);
-                        if let Err(e) = result {
-                            if session_exists {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    error = %e,
-                                    "bridge: write I/O error"
-                                );
-                            } else {
-                                let known: Vec<String> = session_manager
-                                    .session_pids()
-                                    .map(|(id, _)| format!("{}...", &id.to_string()[..8]))
-                                    .collect();
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    error = %e,
-                                    known_sessions = ?known,
-                                    "bridge: write failed, session not in agent SessionManager"
-                                );
-                                bridge::fan_out(
-                                    bridge_senders,
-                                    session_id,
-                                    zremote_core::state::BrowserMessage::Error {
-                                        message: format!("Session not found: {e}"),
-                                    },
-                                ).await;
-                            }
-                        }
-                    }
-                    BridgeCommand::Resize { session_id, cols, rows } => {
-                        let session_exists = session_manager.has_session(&session_id);
-                        let result = session_manager.resize(&session_id, cols, rows);
-                        if let Err(e) = result {
-                            if session_exists {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    cols = cols,
-                                    rows = rows,
-                                    error = %e,
-                                    "bridge: resize I/O error"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    cols = cols,
-                                    rows = rows,
-                                    error = %e,
-                                    "bridge: resize failed, session not in agent SessionManager"
-                                );
-                                bridge::fan_out(
-                                    bridge_senders,
-                                    session_id,
-                                    zremote_core::state::BrowserMessage::Error {
-                                        message: format!("Session not found: {e}"),
-                                    },
-                                ).await;
-                            }
-                        } else {
-                            bridge::record_resize(bridge_scrollback, session_id, cols, rows).await;
-                        }
-                    }
-                }
-            }
-            () = wait_for_shutdown(shutdown.clone()) => {
-                tracing::info!(host_id = %host_id, "shutdown signal received, closing connection");
-                break Ok(());
-            }
-        }
-    };
-
-    // Sessions are NOT cleaned up here — they survive across reconnects.
-    // Final cleanup (detach/close) happens in run_agent() after the reconnect loop exits.
-
-    // Stop the per-connection HooksServer (sender drop also works, but explicit is clearer)
-    let _ = hooks_shutdown_tx.send(true);
-
-    // Wait for sender task to finish and close the WebSocket cleanly
-    match sender_handle.await {
-        Ok(mut sink) => {
-            let _ = sink.send(Message::Close(None)).await;
-            let _ = sink.close().await;
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "sender task panicked");
-        }
-    }
-
-    result
-}
-
 /// Decode PNG bytes, set the image on the system clipboard, and send Ctrl+V to the PTY.
 fn set_clipboard_image_and_send_paste(
     session_manager: &mut SessionManager,
@@ -889,7 +168,7 @@ fn set_clipboard_image_and_send_paste(
 
 /// Handle a server message, dispatching session-related messages to the session manager.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn handle_server_message(
+pub(super) async fn handle_server_message(
     msg: &ServerMessage,
     host_id: &HostId,
     session_manager: &mut SessionManager,
@@ -1018,6 +297,10 @@ async fn handle_server_message(
             project_scanner.mark_scanned();
         }
         ServerMessage::ProjectRegister { path } => {
+            if let Err(e) = validate_path_no_traversal(path) {
+                tracing::warn!(path = %path, error = %e, "rejected ProjectRegister with invalid path");
+                return;
+            }
             tracing::info!(path = %path, "registering project path from server");
             if let Some(info) = ProjectScanner::detect_at(std::path::Path::new(path)) {
                 if outbound_tx
@@ -1040,6 +323,16 @@ async fn handle_server_message(
             tracing::info!(path = %path, "project removal acknowledged");
         }
         ServerMessage::ListDirectory { request_id, path } => {
+            if let Err(e) = validate_path_no_traversal(path) {
+                tracing::warn!(path = %path, error = %e, "rejected ListDirectory with invalid path");
+                let _ = outbound_tx.try_send(AgentMessage::DirectoryListing {
+                    request_id: *request_id,
+                    path: path.clone(),
+                    entries: vec![],
+                    error: Some(format!("invalid path: {e}")),
+                });
+                return;
+            }
             let tx = outbound_tx.clone();
             let path = path.clone();
             let request_id = *request_id;
@@ -1772,25 +1065,23 @@ async fn handle_claude_server_message(
     }
 }
 
-/// Wait until the shutdown signal is received.
-async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
-    // If already shut down, return immediately
-    if *rx.borrow() {
-        return;
-    }
-    // Wait for the value to change to true
-    while rx.changed().await.is_ok() {
-        if *rx.borrow() {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chrono::Utc;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
-    use zremote_protocol::ServerMessage;
+    use zremote_protocol::knowledge::KnowledgeServerMessage;
+    use zremote_protocol::{AgentMessage, AgenticAgentMessage, ServerMessage};
+
+    use super::*;
+    use crate::agentic::manager::AgenticLoopManager;
+    use crate::bridge::{self, BridgeSenders};
+    use crate::hooks::mapper::SessionMapper;
+    use crate::project::ProjectScanner;
+    use crate::session::SessionManager;
 
     /// Helper to create test fixtures for `handle_server_message`.
     #[allow(clippy::type_complexity)]
@@ -1831,46 +1122,6 @@ mod tests {
             bridge_senders,
             bridge_scrollback,
         )
-    }
-
-    #[test]
-    fn connection_error_display_connect() {
-        let err = ConnectionError::RegisterTimeout;
-        assert!(err.to_string().contains("registration timed out"));
-    }
-
-    #[test]
-    fn connection_error_display_receive() {
-        let inner = tokio_tungstenite::tungstenite::Error::ConnectionClosed;
-        let err = ConnectionError::Receive(inner);
-        assert!(err.to_string().contains("receive"));
-    }
-
-    #[test]
-    fn connection_error_display_hostname() {
-        let err = ConnectionError::Hostname(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no hostname",
-        ));
-        assert!(err.to_string().contains("hostname"));
-    }
-
-    #[test]
-    fn connection_error_display_server_error() {
-        let err = ConnectionError::ServerError("bad token".to_string());
-        assert!(err.to_string().contains("bad token"));
-    }
-
-    #[test]
-    fn connection_error_display_unexpected_response() {
-        let err = ConnectionError::UnexpectedRegisterResponse("HeartbeatAck".to_string());
-        assert!(err.to_string().contains("HeartbeatAck"));
-    }
-
-    #[test]
-    fn connection_error_display_closed() {
-        let err = ConnectionError::ConnectionClosed;
-        assert!(err.to_string().contains("closed"));
     }
 
     #[tokio::test]
@@ -2038,44 +1289,5 @@ mod tests {
             guard.get(&session_id).is_none(),
             "scrollback entry should not exist for unknown session"
         );
-    }
-
-    #[tokio::test]
-    async fn wait_for_shutdown_returns_immediately_if_already_true() {
-        let (tx, rx) = tokio::sync::watch::channel(true);
-        tokio::time::timeout(Duration::from_millis(100), wait_for_shutdown(rx))
-            .await
-            .expect("should complete immediately when already shut down");
-        drop(tx);
-    }
-
-    #[tokio::test]
-    async fn wait_for_shutdown_waits_for_signal() {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(async move {
-            wait_for_shutdown(rx).await;
-        });
-
-        tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_millis(100), handle)
-            .await
-            .expect("should complete after signal")
-            .expect("task should not panic");
-    }
-
-    #[tokio::test]
-    async fn connect_to_invalid_url_returns_error() {
-        let config = AgentConfig {
-            server_url: url::Url::parse("ws://127.0.0.1:1").unwrap(),
-            token: "test".to_string(),
-            openviking_enabled: false,
-            openviking_binary: "openviking".to_string(),
-            openviking_port: 1933,
-            openviking_config_dir: std::path::PathBuf::from("/tmp/ov"),
-            openviking_api_key: None,
-        };
-        let result = connect(&config).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConnectionError::Connect(_)));
     }
 }

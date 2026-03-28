@@ -1,366 +1,62 @@
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+//! Message dispatch: `handle_agent_message` and its match arms for different message types.
 
-use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use std::collections::HashSet;
+
+use axum::extract::ws::WebSocket;
 use chrono::Utc;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
-use zremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
+use zremote_protocol::claude::ClaudeTaskStatus;
+use zremote_protocol::status::SessionStatus;
+use zremote_protocol::{AgentMessage, HostId, ServerMessage};
 
-use crate::auth;
-use crate::state::{AgenticLoopState, AppState, HostInfo, LoopInfo, ServerEvent, SessionInfo};
+use crate::state::{AgenticLoopState, AppState, LoopInfo, ServerEvent, SessionInfo};
 
-/// Timeout for the first message (Register) after WebSocket upgrade.
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+use super::send_server_message;
 
-/// Buffer size for the outbound message channel.
-const OUTBOUND_CHANNEL_SIZE: usize = 256;
-
-/// Heartbeat monitor interval.
-const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Maximum time since last heartbeat before marking an agent as stale.
-const HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(90);
-
-// TODO(phase-7): Add rate limiting on WebSocket connections
-/// WebSocket upgrade handler for agent connections.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_agent_connection(socket, state))
+/// DB row for an agentic loop, matching the `agentic_loops` table columns.
+#[derive(sqlx::FromRow)]
+struct LoopRow {
+    id: String,
+    session_id: String,
+    project_path: Option<String>,
+    tool_name: String,
+    status: String,
+    started_at: String,
+    ended_at: Option<String>,
+    end_reason: Option<String>,
+    task_name: Option<String>,
 }
 
-/// Result of a successful agent registration handshake.
-struct RegisteredAgent {
-    host_id: HostId,
-    generation: u64,
-    rx: mpsc::Receiver<ServerMessage>,
-    hostname: String,
-    agent_version: String,
-    os: String,
-    arch: String,
-    supports_persistent_sessions: bool,
-}
+/// Fetch a `LoopInfo` from the DB.
+pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
+    let row: LoopRow = sqlx::query_as(
+        "SELECT id, session_id, project_path, tool_name, status, started_at, \
+         ended_at, end_reason, task_name \
+         FROM agentic_loops WHERE id = ?",
+    )
+    .bind(loop_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()??;
 
-/// Receive a raw `AgentMessage` during registration (before the main loop).
-async fn recv_terminal_message(socket: &mut WebSocket) -> Option<AgentMessage> {
-    loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => match serde_json::from_str::<AgentMessage>(&text) {
-                Ok(msg) => return Some(msg),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to deserialize register message");
-                }
-            },
-            Some(Ok(Message::Close(_))) | None => return None,
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            Some(Ok(Message::Binary(_))) => {
-                tracing::warn!("received unexpected binary message from agent");
-            }
-            Some(Err(e)) => {
-                tracing::warn!(error = %e, "WebSocket receive error");
-                return None;
-            }
-        }
-    }
-}
-
-/// Perform the registration handshake: wait for Register message, validate
-/// token, upsert host, register connection, and send `RegisterAck`.
-/// Returns `None` if any step fails (errors are sent to the agent).
-async fn register_agent(socket: &mut WebSocket, state: &Arc<AppState>) -> Option<RegisteredAgent> {
-    // 1. Wait for Register message with timeout
-    let register_msg =
-        match tokio::time::timeout(REGISTER_TIMEOUT, recv_terminal_message(socket)).await {
-            Ok(Some(msg)) => msg,
-            Ok(None) => {
-                tracing::warn!("agent disconnected before sending Register");
-                return None;
-            }
-            Err(_) => {
-                tracing::warn!("agent did not send Register within timeout");
-                let _ = send_server_message(
-                    socket,
-                    &ServerMessage::Error {
-                        message: "registration timeout".to_string(),
-                    },
-                )
-                .await;
-                return None;
-            }
-        };
-
-    // 2. Validate that first message is Register
-    let AgentMessage::Register {
-        hostname,
-        agent_version,
-        os,
-        arch,
-        token,
-        supports_persistent_sessions,
-    } = register_msg
-    else {
-        tracing::warn!("agent sent non-Register message as first message");
-        let _ = send_server_message(
-            socket,
-            &ServerMessage::Error {
-                message: "expected Register as first message".to_string(),
-            },
-        )
-        .await;
-        return None;
-    };
-
-    // 3. Validate token
-    if !auth::verify_token(&token, &state.agent_token_hash) {
-        tracing::warn!(hostname = %hostname, "agent authentication failed");
-        let _ = send_server_message(
-            socket,
-            &ServerMessage::Error {
-                message: "invalid authentication token".to_string(),
-            },
-        )
-        .await;
-        return None;
-    }
-
-    // 4. Upsert host in DB
-    let host_id = match upsert_host(state, &hostname, &agent_version, &os, &arch, &token).await {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to upsert host in database");
-            let _ = send_server_message(
-                socket,
-                &ServerMessage::Error {
-                    message: "internal server error".to_string(),
-                },
-            )
-            .await;
-            return None;
-        }
-    };
-
-    tracing::info!(host_id = %host_id, hostname = %hostname, "agent registered");
-
-    // 5. Create outbound channel and register connection
-    let (tx, rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_SIZE);
-
-    let (old_sender, generation) = state
-        .connections
-        .register(host_id, hostname.clone(), tx, supports_persistent_sessions)
-        .await;
-    if let Some(old_sender) = old_sender {
-        drop(old_sender);
-        tracing::info!(host_id = %host_id, "replaced existing agent connection");
-    }
-
-    // 6. Send RegisterAck
-    if send_server_message(socket, &ServerMessage::RegisterAck { host_id })
-        .await
-        .is_err()
-    {
-        tracing::error!(host_id = %host_id, "failed to send RegisterAck");
-        state.connections.unregister(&host_id).await;
-        return None;
-    }
-
-    Some(RegisteredAgent {
-        host_id,
-        generation,
-        rx,
-        hostname,
-        agent_version,
-        os,
-        arch,
-        supports_persistent_sessions,
-    })
-}
-
-/// Main agent connection handler. Runs the full lifecycle:
-/// register -> message loop -> cleanup.
-async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
-    let Some(RegisteredAgent {
-        host_id,
-        generation,
-        mut rx,
-        hostname,
-        agent_version,
-        os,
-        arch,
-        supports_persistent_sessions,
-    }) = register_agent(&mut socket, &state).await
-    else {
-        return;
-    };
-
-    // Emit HostConnected event
-    let _ = state.events.send(ServerEvent::HostConnected {
-        host: HostInfo {
-            id: host_id.to_string(),
-            hostname,
-            status: "online".to_string(),
-            agent_version: Some(agent_version),
-            os: Some(os),
-            arch: Some(arch),
-        },
-    });
-
-    if supports_persistent_sessions {
-        tracing::info!(host_id = %host_id, "agent supports persistent sessions");
-    }
-
-    // Bidirectional message loop
-    loop {
-        tokio::select! {
-            // Inbound from agent WebSocket
-            msg = recv_agent_message(&mut socket) => {
-                match msg {
-                    Some(InboundMessage::Terminal(agent_msg)) => {
-                        if let Err(e) = handle_agent_message(&state, host_id, agent_msg, &mut socket).await {
-                            tracing::error!(host_id = %host_id, error = %e, "error handling agent message");
-                            break;
-                        }
-                    }
-                    Some(InboundMessage::Agentic(agentic_msg)) => {
-                        if let Err(e) = handle_agentic_message(&state, host_id, agentic_msg).await {
-                            tracing::error!(host_id = %host_id, error = %e, "error handling agentic message");
-                        }
-                    }
-                    None => {
-                        tracing::info!(host_id = %host_id, "agent disconnected");
-                        break;
-                    }
-                }
-            }
-            // Outbound from server to agent
-            server_msg = rx.recv() => {
-                if let Some(msg) = server_msg {
-                    if send_server_message(&mut socket, &msg).await.is_err() {
-                        tracing::error!(host_id = %host_id, "failed to send message to agent");
-                        break;
-                    }
-                } else {
-                    // Channel closed, server initiated disconnect
-                    tracing::info!(host_id = %host_id, "server closed agent channel");
-                    break;
-                }
-            }
-        }
-    }
-
-    // Cleanup on disconnect
-    cleanup_agent(&state, &host_id, generation).await;
-}
-
-/// Enum representing either a terminal or agentic message from the agent.
-enum InboundMessage {
-    Terminal(AgentMessage),
-    Agentic(AgenticAgentMessage),
-}
-
-/// Known `AgentMessage` type tags.
-const TERMINAL_MSG_TYPES: &[&str] = &[
-    "Register",
-    "Heartbeat",
-    "TerminalOutput",
-    "SessionCreated",
-    "SessionClosed",
-    "Error",
-    "ProjectDiscovered",
-    "ProjectList",
-    "KnowledgeAction",
-    "ClaudeAction",
-    "GitStatusUpdate",
-    "WorktreeCreated",
-    "WorktreeDeleted",
-    "WorktreeError",
-    "SessionsRecovered",
-    "DirectoryListing",
-    "ProjectSettingsResult",
-    "ProjectSettingsSaved",
-    "WorktreeHookResult",
-    "ActionInputsResolved",
-];
-
-/// Known `AgenticAgentMessage` type tags.
-const AGENTIC_MSG_TYPES: &[&str] = &["LoopDetected", "LoopStateUpdate", "LoopEnded"];
-
-/// Receive and deserialize an agent message from the WebSocket.
-/// Parses to `serde_json::Value` first, then dispatches based on the "type" tag.
-async fn recv_agent_message(socket: &mut WebSocket) -> Option<InboundMessage> {
-    loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => {
-                let value: serde_json::Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to parse agent message as JSON");
-                        continue;
-                    }
-                };
-
-                let msg_type = value
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-
-                if TERMINAL_MSG_TYPES.contains(&msg_type.as_str()) {
-                    match serde_json::from_value::<AgentMessage>(value) {
-                        Ok(msg) => return Some(InboundMessage::Terminal(msg)),
-                        Err(e) => {
-                            tracing::warn!(msg_type = %msg_type, error = %e, "failed to deserialize terminal message");
-                        }
-                    }
-                } else if AGENTIC_MSG_TYPES.contains(&msg_type.as_str()) {
-                    match serde_json::from_value::<AgenticAgentMessage>(value) {
-                        Ok(msg) => return Some(InboundMessage::Agentic(msg)),
-                        Err(e) => {
-                            tracing::warn!(msg_type = %msg_type, error = %e, "failed to deserialize agentic message");
-                        }
-                    }
-                } else {
-                    tracing::warn!(msg_type = %msg_type, "unknown agent message type");
-                }
-            }
-            Some(Ok(Message::Close(_))) | None => return None,
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            Some(Ok(Message::Binary(_))) => {
-                tracing::warn!("received unexpected binary message from agent");
-            }
-            Some(Err(e)) => {
-                tracing::warn!(error = %e, "WebSocket receive error");
-                return None;
-            }
-        }
-    }
-}
-
-/// Serialize and send a server message over the WebSocket.
-async fn send_server_message(
-    socket: &mut WebSocket,
-    msg: &ServerMessage,
-) -> Result<(), axum::Error> {
-    let text = serde_json::to_string(msg).map_err(|e| {
-        tracing::error!(error = %e, "failed to serialize server message");
-        axum::Error::new(e)
-    })?;
-    socket.send(Message::Text(text.into())).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to send WebSocket message");
-        axum::Error::new(e)
+    Some(LoopInfo {
+        id: row.id,
+        session_id: row.session_id,
+        project_path: row.project_path,
+        tool_name: row.tool_name,
+        status: zremote_core::queries::loops::parse_status(&row.status),
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        end_reason: row.end_reason,
+        task_name: row.task_name,
     })
 }
 
 /// Handle a single agent message.
 #[allow(clippy::too_many_lines)]
-async fn handle_agent_message(
+pub(super) async fn handle_agent_message(
     state: &AppState,
     host_id: HostId,
     msg: AgentMessage,
@@ -433,7 +129,7 @@ async fn handle_agent_message(
             // Update in-memory state
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
-                session.status = "active".to_string();
+                session.status = SessionStatus::Active;
             }
 
             // Emit SessionCreated event
@@ -442,7 +138,7 @@ async fn handle_agent_message(
                     id: session_id.to_string(),
                     host_id: host_id.to_string(),
                     shell: Some(shell.clone()),
-                    status: "active".to_string(),
+                    status: SessionStatus::Active,
                 },
             });
 
@@ -504,7 +200,7 @@ async fn handle_agent_message(
                 {
                     let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
                         task_id,
-                        status: "error".to_string(),
+                        status: ClaudeTaskStatus::Error,
                         summary: Some("session closed before Claude started".to_string()),
                     });
                 }
@@ -527,7 +223,7 @@ async fn handle_agent_message(
                 {
                     let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
                         task_id,
-                        status: "completed".to_string(),
+                        status: ClaudeTaskStatus::Completed,
                         summary: None,
                     });
                 }
@@ -556,15 +252,13 @@ async fn handle_agent_message(
             let now = chrono::Utc::now().to_rfc3339();
 
             // Get all non-closed sessions for this host from BOTH in-memory
-            // store and DB. This covers suspended sessions (normal reconnect) AND
-            // active sessions (e.g. daemon sessions that weren't suspended due to
-            // server restart or race conditions).
+            // store and DB.
             let host_session_ids: Vec<uuid::Uuid> = {
                 let mut ids: HashSet<uuid::Uuid> = {
                     let sessions_store = state.sessions.read().await;
                     sessions_store
                         .iter()
-                        .filter(|(_, s)| s.host_id == host_id && s.status != "closed")
+                        .filter(|(_, s)| s.host_id == host_id && s.status != SessionStatus::Closed)
                         .map(|(id, _)| *id)
                         .collect()
                 };
@@ -607,7 +301,7 @@ async fn handle_agent_message(
                 // Update in-memory state
                 let mut sessions_store = state.sessions.write().await;
                 if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
-                    session.status = "active".to_string();
+                    session.status = SessionStatus::Active;
                     // Notify connected browsers
                     let resume_msg = crate::state::BrowserMessage::SessionResumed;
                     session.browser_senders.retain(|sender| {
@@ -624,7 +318,7 @@ async fn handle_agent_message(
                         crate::state::SessionState::new(recovered.session_id, host_id),
                     );
                     if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
-                        session.status = "active".to_string();
+                        session.status = SessionStatus::Active;
                     }
                 }
 
@@ -1101,48 +795,9 @@ async fn upsert_worktree_children(
     }
 }
 
-/// DB row for an agentic loop, matching the `agentic_loops` table columns.
-#[derive(sqlx::FromRow)]
-struct LoopRow {
-    id: String,
-    session_id: String,
-    project_path: Option<String>,
-    tool_name: String,
-    status: String,
-    started_at: String,
-    ended_at: Option<String>,
-    end_reason: Option<String>,
-    task_name: Option<String>,
-}
-
-/// Fetch a `LoopInfo` from the DB.
-async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
-    let row: LoopRow = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name \
-         FROM agentic_loops WHERE id = ?",
-    )
-    .bind(loop_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()??;
-
-    Some(LoopInfo {
-        id: row.id,
-        session_id: row.session_id,
-        project_path: row.project_path,
-        tool_name: row.tool_name,
-        status: zremote_core::queries::loops::parse_status(&row.status),
-        started_at: row.started_at,
-        ended_at: row.ended_at,
-        end_reason: row.end_reason,
-        task_name: row.task_name,
-    })
-}
-
 /// Handle an agentic agent message: update DB and in-memory state.
 #[allow(clippy::too_many_lines)]
-async fn handle_agentic_message(
+pub(super) async fn handle_agentic_message(
     state: &AppState,
     host_id: HostId,
     msg: AgenticAgentMessage,
@@ -1256,7 +911,7 @@ async fn handle_agentic_message(
                 });
                 let _ = state.events.send(ServerEvent::ClaudeTaskUpdated {
                     task_id: task_id.clone(),
-                    status: "active".to_string(),
+                    status: ClaudeTaskStatus::Active,
                     loop_id: Some(loop_id_str.clone()),
                 });
             }
@@ -1368,7 +1023,7 @@ async fn handle_agentic_message(
 
                 let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
                     task_id,
-                    status: "completed".to_string(),
+                    status: ClaudeTaskStatus::Completed,
                     summary: None,
                 });
             }
@@ -1437,7 +1092,7 @@ async fn handle_claude_message(
 
             let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
                 task_id: task_id_str,
-                status: "error".to_string(),
+                status: ClaudeTaskStatus::Error,
                 summary: Some(error),
             });
         }
@@ -1582,7 +1237,6 @@ async fn handle_knowledge_message(
             let kb_id = Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
 
-            // Upsert knowledge_bases
             if let Err(e) = sqlx::query(
                 "INSERT INTO knowledge_bases (id, host_id, status, openviking_version, last_error, started_at, updated_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -1640,7 +1294,6 @@ async fn handle_knowledge_message(
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| format!("{status:?}").to_lowercase());
 
-            // Find project_id from path + host
             let project: Option<(String,)> =
                 sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
                     .bind(&host_id_str)
@@ -1653,7 +1306,6 @@ async fn handle_knowledge_message(
                 let indexing_id = Uuid::new_v4().to_string();
                 let now = chrono::Utc::now().to_rfc3339();
 
-                // Upsert indexing status
                 if let Err(e) = sqlx::query(
                     "INSERT INTO knowledge_indexing (id, project_id, status, files_processed, files_total, started_at, error) \
                      VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -1699,7 +1351,6 @@ async fn handle_knowledge_message(
             results,
             duration_ms,
         } => {
-            // Route response to waiting HTTP handler via oneshot
             if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
                 let _ = sender.send(KnowledgeAgentMessage::SearchResults {
                     project_path: String::new(),
@@ -1714,7 +1365,6 @@ async fn handle_knowledge_message(
         KnowledgeAgentMessage::MemoryExtracted { loop_id, memories } => {
             let loop_id_str = loop_id.to_string();
 
-            // Find project from loop's project_path
             let project_path: Option<(String,)> =
                 sqlx::query_as("SELECT project_path FROM agentic_loops WHERE id = ?")
                     .bind(&loop_id_str)
@@ -1741,7 +1391,6 @@ async fn handle_knowledge_message(
                             .and_then(|v| v.as_str().map(String::from))
                             .unwrap_or_else(|| "pattern".to_string());
 
-                        // Check for existing memory with same key (dedup)
                         let existing: Option<(String, f64)> = sqlx::query_as(
                             "SELECT id, confidence FROM knowledge_memories WHERE project_id = ? AND key = ?"
                         )
@@ -1755,7 +1404,6 @@ async fn handle_knowledge_message(
                             Some((existing_id, existing_conf))
                                 if memory.confidence > existing_conf =>
                             {
-                                // Update existing memory with higher confidence
                                 if let Err(e) = sqlx::query(
                                     "UPDATE knowledge_memories SET content = ?, confidence = ?, loop_id = ?, \
                                      category = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?"
@@ -1771,11 +1419,9 @@ async fn handle_knowledge_message(
                                 }
                             }
                             Some(_) => {
-                                // Existing memory has equal or higher confidence, skip
                                 tracing::debug!(key = %memory.key, "skipping memory with lower confidence");
                             }
                             None => {
-                                // Insert new memory
                                 if let Err(e) = sqlx::query(
                                     "INSERT INTO knowledge_memories (id, project_id, loop_id, key, content, category, confidence) \
                                      VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -1803,7 +1449,6 @@ async fn handle_knowledge_message(
                             memory_count,
                         });
 
-                    // Phase 3: Increment memories_since_regen and check auto-regeneration threshold
                     if let Err(e) = sqlx::query(
                         "UPDATE knowledge_bases SET memories_since_regen = memories_since_regen + ? WHERE host_id = ?"
                     )
@@ -1814,7 +1459,6 @@ async fn handle_knowledge_message(
                         tracing::warn!(error = %e, "failed to increment memories_since_regen");
                     }
 
-                    // Check if we should auto-regenerate
                     let threshold: i64 = sqlx::query_as::<_, (String,)>(
                         "SELECT value FROM config_global WHERE key = 'openviking.regenerate_threshold'"
                     )
@@ -1837,8 +1481,6 @@ async fn handle_knowledge_message(
                         && count >= threshold
                         && let Some(sender) = state.connections.get_sender(&host_id).await
                     {
-                        // WriteClaudeMd with empty content triggers the agent to
-                        // generate instructions and write them in section mode.
                         let _ = sender.send(zremote_protocol::ServerMessage::KnowledgeAction(
                             zremote_protocol::knowledge::KnowledgeServerMessage::WriteClaudeMd {
                                 project_path: path.clone(),
@@ -1847,14 +1489,12 @@ async fn handle_knowledge_message(
                             }
                         )).await;
 
-                        // Also trigger skills generation
                         let _ = sender.send(zremote_protocol::ServerMessage::KnowledgeAction(
                             zremote_protocol::knowledge::KnowledgeServerMessage::GenerateSkills {
                                 project_path: path.clone(),
                             }
                         )).await;
 
-                        // Reset counter
                         let _ = sqlx::query(
                             "UPDATE knowledge_bases SET memories_since_regen = 0, \
                              last_regenerated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE host_id = ?"
@@ -1873,7 +1513,6 @@ async fn handle_knowledge_message(
             content,
             memories_used,
         } => {
-            // Generate the same deterministic request_id to find the waiting handler
             let request_id = uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_URL,
                 format!("instructions:{host_id_str}:{project_path}").as_bytes(),
@@ -1956,303 +1595,17 @@ async fn handle_knowledge_message(
     Ok(())
 }
 
-/// Upsert a host record in the database. Look up by hostname only.
-/// If found, update the existing record. Otherwise, create a new host.
-// TODO(phase-3): Validate token matches stored hash before allowing upsert to prevent hostname hijack
-async fn upsert_host(
-    state: &AppState,
-    hostname: &str,
-    agent_version: &str,
-    os: &str,
-    arch: &str,
-    token: &str,
-) -> Result<HostId, String> {
-    let token_hash = auth::hash_token(token);
-    let now = Utc::now().to_rfc3339();
-
-    // Look up existing host by hostname only
-    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE hostname = ?")
-        .bind(hostname)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| format!("database query failed: {e}"))?;
-
-    let host_id = if let Some((id_str,)) = existing {
-        let host_id: HostId = id_str
-            .parse()
-            .map_err(|e| format!("invalid host ID in database: {e}"))?;
-
-        // Update existing host
-        sqlx::query(
-            "UPDATE hosts SET auth_token_hash = ?, agent_version = ?, os = ?, arch = ?, \
-             status = 'online', last_seen_at = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&token_hash)
-        .bind(agent_version)
-        .bind(os)
-        .bind(arch)
-        .bind(&now)
-        .bind(&now)
-        .bind(&id_str)
-        .execute(&state.db)
-        .await
-        .map_err(|e| format!("failed to update host: {e}"))?;
-
-        host_id
-    } else {
-        // Create new host
-        let host_id = Uuid::new_v4();
-        let id_str = host_id.to_string();
-
-        sqlx::query(
-            "INSERT INTO hosts (id, name, hostname, auth_token_hash, agent_version, os, arch, \
-             status, last_seen_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)",
-        )
-        .bind(&id_str)
-        .bind(hostname) // default name = hostname
-        .bind(hostname)
-        .bind(&token_hash)
-        .bind(agent_version)
-        .bind(os)
-        .bind(arch)
-        .bind(&now)
-        .bind(&now)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| format!("failed to insert host: {e}"))?;
-
-        host_id
-    };
-
-    Ok(host_id)
-}
-
-/// Clean up after an agent disconnects: close sessions, clean agentic loops,
-/// remove from connection manager (only if generation matches), and mark as offline.
-async fn cleanup_agent(state: &AppState, host_id: &HostId, generation: u64) {
-    // Read the persistent flag BEFORE unregistering (removal clears it from the map).
-    let supports_persistent = state
-        .connections
-        .supports_persistent_sessions(host_id)
-        .await;
-    let removed = state
-        .connections
-        .unregister_if_generation(host_id, generation)
-        .await;
-
-    if !removed {
-        // A newer connection has already replaced this one. Skip cleanup
-        // to avoid race conditions where we re-suspend sessions that the
-        // new connection has already recovered.
-        tracing::debug!(
-            host_id = %host_id,
-            generation,
-            "skipping stale cleanup (newer connection active)"
-        );
-        return;
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let host_id_str = host_id.to_string();
-
-    if supports_persistent {
-        // Suspend sessions (they may be recovered when the agent reconnects)
-        let suspended_session_ids: Vec<_> = {
-            let mut sessions = state.sessions.write().await;
-            let session_ids: Vec<_> = sessions
-                .iter()
-                .filter(|(_, s)| {
-                    s.host_id == *host_id && s.status != "closed" && s.status != "suspended"
-                })
-                .map(|(id, _)| *id)
-                .collect();
-
-            for &sid in &session_ids {
-                if let Some(session) = sessions.get_mut(&sid) {
-                    session.status = "suspended".to_string();
-                    // Notify connected browsers about suspension
-                    let browser_msg = crate::state::BrowserMessage::SessionSuspended;
-                    session.browser_senders.retain(|sender| {
-                        match sender.try_send(browser_msg.clone()) {
-                            Ok(()) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                        }
-                    });
-                }
-            }
-
-            session_ids
-        };
-
-        // Update DB: mark as suspended
-        if let Err(e) = sqlx::query(
-            "UPDATE sessions SET status = 'suspended', suspended_at = ? WHERE host_id = ? AND status NOT IN ('closed', 'suspended')",
-        )
-        .bind(&now)
-        .bind(&host_id_str)
-        .execute(&state.db)
-        .await
-        {
-            tracing::error!(host_id = %host_id, error = %e, "failed to suspend sessions in database");
-        }
-
-        // Emit SessionSuspended events (not SessionClosed)
-        for sid in &suspended_session_ids {
-            let _ = state.events.send(ServerEvent::SessionSuspended {
-                session_id: sid.to_string(),
-            });
-        }
-
-        if !suspended_session_ids.is_empty() {
-            tracing::info!(host_id = %host_id, count = suspended_session_ids.len(), "suspended sessions for disconnected agent (persistent)");
-        }
-
-        // Do NOT clean agentic loops or close sessions -- agent may reconnect
-    } else {
-        // Standard behavior: close all sessions
-        let closed_session_ids: Vec<_> = {
-            let mut sessions = state.sessions.write().await;
-            let session_ids: Vec<_> = sessions
-                .iter()
-                .filter(|(_, s)| s.host_id == *host_id)
-                .map(|(id, _)| *id)
-                .collect();
-
-            for &sid in &session_ids {
-                if let Some(session) = sessions.remove(&sid) {
-                    let browser_msg =
-                        crate::state::BrowserMessage::SessionClosed { exit_code: None };
-                    for sender in &session.browser_senders {
-                        let _ = sender.try_send(browser_msg.clone());
-                    }
-                }
-            }
-
-            session_ids
-        };
-
-        // Batch update sessions in DB
-        if let Err(e) = sqlx::query(
-            "UPDATE sessions SET status = 'closed', closed_at = ? WHERE host_id = ? AND status != 'closed'",
-        )
-        .bind(&now)
-        .bind(&host_id_str)
-        .execute(&state.db)
-        .await
-        {
-            tracing::error!(host_id = %host_id, error = %e, "failed to close sessions in database");
-        }
-
-        // Clean orphaned agentic loops from DashMap
-        let closed_set: HashSet<_> = closed_session_ids.iter().copied().collect();
-        let orphaned_loop_ids: Vec<AgenticLoopId> = state
-            .agentic_loops
-            .iter()
-            .filter(|entry| closed_set.contains(&entry.value().session_id))
-            .map(|entry| *entry.key())
-            .collect();
-
-        for loop_id in &orphaned_loop_ids {
-            state.agentic_loops.remove(loop_id);
-        }
-
-        if let Err(e) = sqlx::query(
-            "UPDATE agentic_loops SET status = 'completed', ended_at = ?, end_reason = 'agent_disconnected' \
-             WHERE session_id IN (SELECT id FROM sessions WHERE host_id = ?) \
-             AND status != 'completed' AND ended_at IS NULL",
-        )
-        .bind(&now)
-        .bind(&host_id_str)
-        .execute(&state.db)
-        .await
-        {
-            tracing::error!(host_id = %host_id, error = %e, "failed to complete orphaned agentic loops in database");
-        }
-
-        // Emit SessionClosed events
-        for sid in &closed_session_ids {
-            let _ = state.events.send(ServerEvent::SessionClosed {
-                session_id: sid.to_string(),
-                exit_code: None,
-            });
-        }
-
-        if !closed_session_ids.is_empty() {
-            tracing::info!(host_id = %host_id, count = closed_session_ids.len(), "closed sessions for disconnected agent");
-        }
-    }
-
-    // Mark starting/active claude_sessions for this host as error
-    if let Err(e) = sqlx::query(
-        "UPDATE claude_sessions SET status = 'error', ended_at = ? \
-         WHERE host_id = ? AND status IN ('starting', 'active')",
-    )
-    .bind(&now)
-    .bind(&host_id_str)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(host_id = %host_id, error = %e, "failed to mark claude sessions as error on disconnect");
-    }
-
-    // Mark host offline in DB
-    let result = sqlx::query("UPDATE hosts SET status = 'offline', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&host_id_str)
-        .execute(&state.db)
-        .await;
-
-    if let Err(e) = result {
-        tracing::error!(host_id = %host_id, error = %e, "failed to mark host offline in database");
-    }
-
-    if removed {
-        let _ = state.events.send(ServerEvent::HostDisconnected {
-            host_id: host_id_str,
-        });
-    }
-
-    tracing::info!(host_id = %host_id, "agent connection cleaned up");
-}
-
-/// Spawn a background task that periodically checks for stale agent connections
-/// and marks them as offline. Stops when the cancellation token is cancelled.
-pub fn spawn_heartbeat_monitor(state: Arc<AppState>, cancel: CancellationToken) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(HEARTBEAT_CHECK_INTERVAL);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let stale_hosts = state.connections.check_stale(HEARTBEAT_MAX_AGE).await;
-                    for (host_id, generation) in stale_hosts {
-                        tracing::warn!(host_id = %host_id, "agent heartbeat timeout, marking offline");
-                        let _ = state.events.send(ServerEvent::HostStatusChanged {
-                            host_id: host_id.to_string(),
-                            status: "offline".to_string(),
-                        });
-                        cleanup_agent(&state, &host_id, generation).await;
-                    }
-                }
-                () = cancel.cancelled() => {
-                    tracing::info!("heartbeat monitor shutting down");
-                    break;
-                }
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use uuid::Uuid;
     use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
+    use zremote_protocol::status::SessionStatus;
 
     use crate::state::{AppState, ConnectionManager};
+
+    use super::super::lifecycle::{cleanup_agent, upsert_host};
 
     async fn test_state() -> Arc<AppState> {
         let pool = crate::db::init_db("sqlite::memory:").await.unwrap();
@@ -2300,39 +1653,6 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-    }
-
-    // ── TERMINAL_MSG_TYPES / AGENTIC_MSG_TYPES ──
-
-    #[test]
-    fn terminal_msg_types_contains_expected() {
-        assert!(TERMINAL_MSG_TYPES.contains(&"Register"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"Heartbeat"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"TerminalOutput"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"SessionCreated"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"SessionClosed"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"Error"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"ProjectDiscovered"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"ProjectList"));
-        assert!(TERMINAL_MSG_TYPES.contains(&"SessionsRecovered"));
-    }
-
-    #[test]
-    fn agentic_msg_types_contains_expected() {
-        assert!(AGENTIC_MSG_TYPES.contains(&"LoopDetected"));
-        assert!(AGENTIC_MSG_TYPES.contains(&"LoopStateUpdate"));
-        assert!(AGENTIC_MSG_TYPES.contains(&"LoopEnded"));
-        assert_eq!(AGENTIC_MSG_TYPES.len(), 3);
-    }
-
-    #[test]
-    fn msg_types_are_disjoint() {
-        for t in AGENTIC_MSG_TYPES {
-            assert!(
-                !TERMINAL_MSG_TYPES.contains(t),
-                "type {t} appears in both TERMINAL and AGENTIC"
-            );
-        }
     }
 
     // ── upsert_host ──
@@ -2642,7 +1962,7 @@ mod tests {
                 session_id,
                 zremote_core::state::SessionState::new(session_id, host_id),
             );
-            sessions.get_mut(&session_id).unwrap().status = "active".to_string();
+            sessions.get_mut(&session_id).unwrap().status = SessionStatus::Active;
         }
 
         // Register connection (non-persistent)
@@ -2702,7 +2022,7 @@ mod tests {
                 session_id,
                 zremote_core::state::SessionState::new(session_id, host_id),
             );
-            sessions.get_mut(&session_id).unwrap().status = "active".to_string();
+            sessions.get_mut(&session_id).unwrap().status = SessionStatus::Active;
         }
 
         // Register as persistent
@@ -2720,7 +2040,7 @@ mod tests {
             let session = sessions
                 .get(&session_id)
                 .expect("session should still exist in memory");
-            assert_eq!(session.status, "suspended");
+            assert_eq!(session.status, SessionStatus::Suspended);
         }
 
         // DB session should be suspended

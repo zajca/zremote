@@ -2,7 +2,9 @@ use zremote_client::types::{
     AgenticLoop, ClaudeTask, ConfigValue, CreateSessionRequest, Host, KnowledgeBase,
     ListClaudeTasksFilter, ListLoopsFilter, Memory, Project, ServerEvent, Session, TerminalEvent,
 };
-use zremote_client::{AgenticStatus, ClaudeTaskStatus, KnowledgeServiceStatus, MemoryCategory};
+use zremote_client::{
+    AgenticStatus, ClaudeTaskStatus, KnowledgeServiceStatus, MemoryCategory, SessionStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Response type roundtrip tests
@@ -26,7 +28,7 @@ fn host_deserialize() {
     assert_eq!(host.id, "h-1234");
     assert_eq!(host.name, "my-server");
     assert_eq!(host.hostname, "server.example.com");
-    assert_eq!(host.status, "online");
+    assert_eq!(host.status, zremote_client::HostStatus::Online);
     assert_eq!(host.agent_version.as_deref(), Some("0.3.9"));
     assert_eq!(host.os.as_deref(), Some("linux"));
     assert_eq!(host.arch.as_deref(), Some("x86_64"));
@@ -69,7 +71,7 @@ fn session_deserialize() {
     assert_eq!(session.host_id, "h-1234");
     assert_eq!(session.name.as_deref(), Some("dev-session"));
     assert_eq!(session.shell.as_deref(), Some("/bin/zsh"));
-    assert_eq!(session.status, "active");
+    assert_eq!(session.status, SessionStatus::Active);
     assert_eq!(session.pid, Some(12345));
     assert!(session.exit_code.is_none());
 }
@@ -315,7 +317,7 @@ fn server_event_session_created() {
         ServerEvent::SessionCreated { session } => {
             assert_eq!(session.id, "s-abcd");
             assert_eq!(session.host_id, "h-1234");
-            assert_eq!(session.status, "active");
+            assert_eq!(session.status, SessionStatus::Active);
         }
         other => panic!("expected SessionCreated, got {other:?}"),
     }
@@ -418,7 +420,7 @@ fn server_event_host_status_changed() {
     match event {
         ServerEvent::HostStatusChanged { host_id, status } => {
             assert_eq!(host_id, "h-1234");
-            assert_eq!(status, "offline");
+            assert_eq!(status, zremote_client::HostStatus::Offline);
         }
         other => panic!("expected HostStatusChanged, got {other:?}"),
     }
@@ -652,7 +654,7 @@ fn server_event_claude_task_updated() {
             loop_id,
         } => {
             assert_eq!(task_id, "ct-001");
-            assert_eq!(status, "active");
+            assert_eq!(status, ClaudeTaskStatus::Active);
             assert_eq!(loop_id.as_deref(), Some("l-1111"));
         }
         other => panic!("expected ClaudeTaskUpdated, got {other:?}"),
@@ -675,7 +677,7 @@ fn server_event_claude_task_ended() {
             summary,
         } => {
             assert_eq!(task_id, "ct-001");
-            assert_eq!(status, "completed");
+            assert_eq!(status, ClaudeTaskStatus::Completed);
             assert_eq!(summary.as_deref(), Some("Done fixing tests"));
         }
         other => panic!("expected ClaudeTaskEnded, got {other:?}"),
@@ -812,7 +814,7 @@ fn server_event_roundtrip_session_created() {
             id: "s-1".to_string(),
             host_id: "h-1".to_string(),
             shell: Some("/bin/bash".to_string()),
-            status: "active".to_string(),
+            status: SessionStatus::Active,
         },
     };
     let json = serde_json::to_string(&event).unwrap();

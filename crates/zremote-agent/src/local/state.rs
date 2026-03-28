@@ -136,7 +136,7 @@ mod tests {
         let mut rx = state.events.subscribe();
         let event = ServerEvent::HostStatusChanged {
             host_id: "test".to_string(),
-            status: "online".to_string(),
+            status: zremote_protocol::status::HostStatus::Online,
         };
         state.events.send(event.clone()).unwrap();
 
