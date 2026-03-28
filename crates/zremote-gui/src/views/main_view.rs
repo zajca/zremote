@@ -392,9 +392,20 @@ impl MainView {
                 self.open_session_switcher(cx);
                 return;
             }
-            CommandPaletteEvent::ToggleProjectPin { .. }
-            | CommandPaletteEvent::Reconnect
-            | CommandPaletteEvent::Close => {}
+            CommandPaletteEvent::ToggleProjectPin { project_id, pinned } => {
+                let api = self.app_state.api.clone();
+                let project_id = project_id.clone();
+                let pinned = *pinned;
+                self.app_state.tokio_handle.spawn(async move {
+                    let req = zremote_client::UpdateProjectRequest {
+                        pinned: Some(pinned),
+                    };
+                    if let Err(e) = api.update_project(&project_id, &req).await {
+                        tracing::error!("Failed to toggle project pin: {e}");
+                    }
+                });
+            }
+            CommandPaletteEvent::Reconnect | CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);
     }
