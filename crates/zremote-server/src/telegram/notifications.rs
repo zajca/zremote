@@ -180,7 +180,7 @@ mod tests {
                 id: "s1".to_string(),
                 host_id: "h1".to_string(),
                 shell: None,
-                status: "active".to_string(),
+                status: zremote_protocol::status::SessionStatus::Active,
             },
         };
         assert!(format_event(&event).is_none());

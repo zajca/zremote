@@ -1,6 +1,11 @@
 pub mod configure;
 pub mod db;
 pub mod error;
+#[cfg(feature = "axum")]
+pub mod events_ws;
 pub mod processing;
 pub mod queries;
 pub mod state;
+#[cfg(feature = "axum")]
+pub mod terminal_ws;
+pub mod validation;

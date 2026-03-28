@@ -1,7 +1,12 @@
+#[cfg(feature = "axum")]
 use axum::extract::FromRequest;
+#[cfg(feature = "axum")]
 use axum::extract::rejection::JsonRejection;
+#[cfg(feature = "axum")]
 use axum::http::StatusCode;
+#[cfg(feature = "axum")]
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "axum")]
 use serde::de::DeserializeOwned;
 
 /// Application error type for the server.
@@ -36,6 +41,7 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+#[cfg(feature = "axum")]
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
@@ -74,8 +80,10 @@ impl IntoResponse for AppError {
 
 /// Custom JSON extractor that converts parse errors to the standard
 /// `{"error": {"code": "BAD_REQUEST", "message": "..."}}` format.
+#[cfg(feature = "axum")]
 pub struct AppJson<T>(pub T);
 
+#[cfg(feature = "axum")]
 impl<S, T> FromRequest<S> for AppJson<T>
 where
     axum::Json<T>: FromRequest<S, Rejection = JsonRejection>,
@@ -94,6 +102,54 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn from_sqlx_error() {
+        let sqlx_err = sqlx::Error::Configuration("test".into());
+        let app_err = AppError::from(sqlx_err);
+        assert!(matches!(app_err, AppError::Database(_)));
+    }
+
+    #[test]
+    fn display_format() {
+        assert_eq!(
+            AppError::NotFound("x".to_string()).to_string(),
+            "not found: x"
+        );
+        assert_eq!(
+            AppError::Unauthorized("x".to_string()).to_string(),
+            "unauthorized: x"
+        );
+        assert_eq!(
+            AppError::BadRequest("x".to_string()).to_string(),
+            "bad request: x"
+        );
+        assert_eq!(
+            AppError::Internal("x".to_string()).to_string(),
+            "internal error: x"
+        );
+    }
+
+    #[test]
+    fn display_database_error() {
+        let db_err = sqlx::Error::Configuration("conn failed".into());
+        let app_err = AppError::Database(db_err);
+        let msg = app_err.to_string();
+        assert!(msg.starts_with("database error:"), "got: {msg}");
+    }
+
+    #[test]
+    fn display_conflict_error() {
+        assert_eq!(
+            AppError::Conflict("dup".to_string()).to_string(),
+            "conflict: dup"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "axum"))]
+mod axum_tests {
     use super::*;
     use http_body_util::BodyExt;
 
@@ -153,41 +209,6 @@ mod tests {
         assert_eq!(json["error"]["message"], "internal database error");
     }
 
-    #[test]
-    fn from_sqlx_error() {
-        let sqlx_err = sqlx::Error::Configuration("test".into());
-        let app_err = AppError::from(sqlx_err);
-        assert!(matches!(app_err, AppError::Database(_)));
-    }
-
-    #[test]
-    fn display_format() {
-        assert_eq!(
-            AppError::NotFound("x".to_string()).to_string(),
-            "not found: x"
-        );
-        assert_eq!(
-            AppError::Unauthorized("x".to_string()).to_string(),
-            "unauthorized: x"
-        );
-        assert_eq!(
-            AppError::BadRequest("x".to_string()).to_string(),
-            "bad request: x"
-        );
-        assert_eq!(
-            AppError::Internal("x".to_string()).to_string(),
-            "internal error: x"
-        );
-    }
-
-    #[test]
-    fn display_database_error() {
-        let db_err = sqlx::Error::Configuration("conn failed".into());
-        let app_err = AppError::Database(db_err);
-        let msg = app_err.to_string();
-        assert!(msg.starts_with("database error:"), "got: {msg}");
-    }
-
     #[tokio::test]
     async fn conflict_returns_409_with_message() {
         let (status, json) =
@@ -195,13 +216,5 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"]["code"], "CONFLICT");
         assert_eq!(json["error"]["message"], "resource already exists");
-    }
-
-    #[test]
-    fn display_conflict_error() {
-        assert_eq!(
-            AppError::Conflict("dup".to_string()).to_string(),
-            "conflict: dup"
-        );
     }
 }

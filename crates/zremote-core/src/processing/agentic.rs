@@ -7,6 +7,7 @@ use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
 use crate::queries::loops::parse_status;
+use zremote_protocol::claude::ClaudeTaskStatus;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
 
 /// DB row for an agentic loop, matching the `agentic_loops` table columns.
@@ -215,7 +216,7 @@ impl AgenticProcessor {
             });
             let _ = self.events.send(ServerEvent::ClaudeTaskUpdated {
                 task_id: task_id.clone(),
-                status: "active".to_string(),
+                status: ClaudeTaskStatus::Active,
                 loop_id: Some(loop_id_str.clone()),
             });
         }
@@ -344,7 +345,7 @@ impl AgenticProcessor {
 
             let _ = self.events.send(ServerEvent::ClaudeTaskEnded {
                 task_id,
-                status: "completed".to_string(),
+                status: ClaudeTaskStatus::Completed,
                 summary: None,
             });
         }
@@ -872,7 +873,7 @@ mod tests {
         // Verify ClaudeTaskEnded event was emitted
         let mut found_task_ended = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, ServerEvent::ClaudeTaskEnded { ref status, .. } if status == "completed")
+            if matches!(event, ServerEvent::ClaudeTaskEnded { status, .. } if status == ClaudeTaskStatus::Completed)
             {
                 found_task_ended = true;
             }

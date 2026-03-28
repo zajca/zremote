@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
 use zremote_protocol::agentic::AgenticStatus;
+use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgenticLoopId, HostId, SessionId};
 
 pub const MAX_SCROLLBACK_BYTES: usize = 100 * 1024; // 100KB
@@ -14,7 +15,7 @@ pub const MAX_SCROLLBACK_BYTES: usize = 100 * 1024; // 100KB
 pub struct SessionState {
     pub session_id: SessionId,
     pub host_id: HostId,
-    pub status: String,
+    pub status: SessionStatus,
     pub browser_senders: Vec<mpsc::Sender<BrowserMessage>>,
     pub scrollback: VecDeque<Vec<u8>>,
     pub scrollback_size: usize,
@@ -28,7 +29,7 @@ impl SessionState {
         Self {
             session_id,
             host_id,
-            status: "creating".to_string(),
+            status: SessionStatus::Creating,
             browser_senders: Vec::new(),
             scrollback: VecDeque::new(),
             scrollback_size: 0,
@@ -163,12 +164,14 @@ pub struct AgenticLoopState {
 /// Thread-safe store for active agentic loop state.
 pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
 
-pub use zremote_protocol::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
+pub use zremote_protocol::events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use uuid::Uuid;
+    use zremote_protocol::claude::ClaudeTaskStatus;
+    use zremote_protocol::status::HostStatus;
 
     // --- SessionState tests ---
 
@@ -177,7 +180,7 @@ mod tests {
         let state = SessionState::new(Uuid::new_v4(), Uuid::new_v4());
         assert!(state.scrollback.is_empty());
         assert_eq!(state.scrollback_size, 0);
-        assert_eq!(state.status, "creating");
+        assert_eq!(state.status, SessionStatus::Creating);
     }
 
     #[test]
@@ -377,7 +380,7 @@ mod tests {
             host: HostInfo {
                 id: "host-1".to_string(),
                 hostname: "my-host".to_string(),
-                status: "online".to_string(),
+                status: HostStatus::Online,
                 agent_version: Some("0.1.0".to_string()),
                 os: Some("linux".to_string()),
                 arch: Some("x86_64".to_string()),
@@ -403,7 +406,7 @@ mod tests {
     fn server_event_host_status_changed_serialization() {
         let event = ServerEvent::HostStatusChanged {
             host_id: "host-1".to_string(),
-            status: "offline".to_string(),
+            status: HostStatus::Offline,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "host_status_changed");
@@ -418,7 +421,7 @@ mod tests {
                 id: "sess-1".to_string(),
                 host_id: "host-1".to_string(),
                 shell: Some("/bin/bash".to_string()),
-                status: "creating".to_string(),
+                status: SessionStatus::Creating,
             },
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -552,7 +555,7 @@ mod tests {
     fn server_event_claude_task_updated_serialization() {
         let event = ServerEvent::ClaudeTaskUpdated {
             task_id: "task-1".to_string(),
-            status: "active".to_string(),
+            status: ClaudeTaskStatus::Active,
             loop_id: Some("loop-1".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -566,7 +569,7 @@ mod tests {
     fn server_event_claude_task_updated_no_loop_serialization() {
         let event = ServerEvent::ClaudeTaskUpdated {
             task_id: "task-1".to_string(),
-            status: "starting".to_string(),
+            status: ClaudeTaskStatus::Starting,
             loop_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -578,7 +581,7 @@ mod tests {
     fn server_event_claude_task_ended_serialization() {
         let event = ServerEvent::ClaudeTaskEnded {
             task_id: "task-1".to_string(),
-            status: "completed".to_string(),
+            status: ClaudeTaskStatus::Completed,
             summary: Some("Fixed the bug".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -654,7 +657,7 @@ mod tests {
     fn server_event_claude_task_ended_error_serialization() {
         let event = ServerEvent::ClaudeTaskEnded {
             task_id: "task-1".to_string(),
-            status: "error".to_string(),
+            status: ClaudeTaskStatus::Error,
             summary: Some("PTY spawn failed".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -669,7 +672,7 @@ mod tests {
                 host: HostInfo {
                     id: "h1".to_string(),
                     hostname: "host".to_string(),
-                    status: "online".to_string(),
+                    status: HostStatus::Online,
                     agent_version: None,
                     os: None,
                     arch: None,
@@ -680,14 +683,14 @@ mod tests {
             },
             ServerEvent::HostStatusChanged {
                 host_id: "h1".to_string(),
-                status: "offline".to_string(),
+                status: HostStatus::Offline,
             },
             ServerEvent::SessionCreated {
                 session: SessionInfo {
                     id: "s1".to_string(),
                     host_id: "h1".to_string(),
                     shell: None,
-                    status: "creating".to_string(),
+                    status: SessionStatus::Creating,
                 },
             },
             ServerEvent::SessionClosed {
@@ -781,12 +784,12 @@ mod tests {
             },
             ServerEvent::ClaudeTaskUpdated {
                 task_id: "t1".to_string(),
-                status: "active".to_string(),
+                status: ClaudeTaskStatus::Active,
                 loop_id: Some("l1".to_string()),
             },
             ServerEvent::ClaudeTaskEnded {
                 task_id: "t1".to_string(),
-                status: "completed".to_string(),
+                status: ClaudeTaskStatus::Completed,
                 summary: Some("done".to_string()),
             },
         ];

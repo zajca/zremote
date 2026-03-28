@@ -2,6 +2,8 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use zremote_protocol::{HostId, SessionId};
 
+use zremote_protocol::status::SessionStatus;
+
 use crate::state::{ServerEvent, SessionStore};
 
 /// Processor for terminal session messages from agents.
@@ -33,7 +35,7 @@ impl TerminalProcessor {
         // Update in-memory state
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id) {
-            session.status = "active".to_string();
+            session.status = SessionStatus::Active;
         }
 
         // Emit SessionCreated event
@@ -42,7 +44,7 @@ impl TerminalProcessor {
                 id: session_id.to_string(),
                 host_id: self.host_id.to_string(),
                 shell: Some(shell.to_string()),
-                status: "active".to_string(),
+                status: SessionStatus::Active,
             },
         });
     }
@@ -157,7 +159,10 @@ mod tests {
 
         // Verify in-memory status
         let store = sessions.read().await;
-        assert_eq!(store.get(&session_id).unwrap().status, "active");
+        assert_eq!(
+            store.get(&session_id).unwrap().status,
+            SessionStatus::Active
+        );
     }
 
     #[tokio::test]
@@ -181,7 +186,7 @@ mod tests {
                 assert_eq!(session.id, session_id.to_string());
                 assert_eq!(session.host_id, host_id_str);
                 assert_eq!(session.shell, Some("/bin/zsh".to_string()));
-                assert_eq!(session.status, "active");
+                assert_eq!(session.status, SessionStatus::Active);
             }
             other => panic!("expected SessionCreated, got {other:?}"),
         }

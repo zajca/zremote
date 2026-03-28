@@ -12,7 +12,7 @@ local = ["dep:tower-http"]
 
 [dependencies]
 zremote-protocol.workspace = true
-zremote-core.workspace = true
+zremote-core = { workspace = true, features = ["axum"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

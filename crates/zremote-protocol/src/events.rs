@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::AgenticStatus;
+use crate::claude::ClaudeTaskStatus;
+use crate::status::{HostStatus, SessionStatus};
 
 /// Loop information for server events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +24,7 @@ pub struct HostInfo {
     pub id: String,
     pub hostname: String,
     #[serde(default)]
-    pub status: String,
+    pub status: HostStatus,
     pub agent_version: Option<String>,
     pub os: Option<String>,
     pub arch: Option<String>,
@@ -36,7 +38,7 @@ pub struct SessionInfo {
     #[serde(default)]
     pub shell: Option<String>,
     #[serde(default)]
-    pub status: String,
+    pub status: SessionStatus,
 }
 
 /// Real-time events broadcast to WebSocket clients and integrations.
@@ -48,7 +50,10 @@ pub enum ServerEvent {
     #[serde(rename = "host_disconnected")]
     HostDisconnected { host_id: String },
     #[serde(rename = "host_status_changed")]
-    HostStatusChanged { host_id: String, status: String },
+    HostStatusChanged {
+        host_id: String,
+        status: HostStatus,
+    },
     #[serde(rename = "session_created")]
     SessionCreated { session: SessionInfo },
     #[serde(rename = "session_closed")]
@@ -121,13 +126,13 @@ pub enum ServerEvent {
     #[serde(rename = "claude_task_updated")]
     ClaudeTaskUpdated {
         task_id: String,
-        status: String,
+        status: ClaudeTaskStatus,
         loop_id: Option<String>,
     },
     #[serde(rename = "claude_task_ended")]
     ClaudeTaskEnded {
         task_id: String,
-        status: String,
+        status: ClaudeTaskStatus,
         summary: Option<String>,
     },
     #[serde(rename = "claude_session_metrics")]
@@ -171,7 +176,7 @@ mod tests {
                 host: HostInfo {
                     id: "h1".to_string(),
                     hostname: "host".to_string(),
-                    status: "online".to_string(),
+                    status: HostStatus::Online,
                     agent_version: None,
                     os: None,
                     arch: None,
@@ -182,14 +187,14 @@ mod tests {
             },
             ServerEvent::HostStatusChanged {
                 host_id: "h1".to_string(),
-                status: "offline".to_string(),
+                status: HostStatus::Offline,
             },
             ServerEvent::SessionCreated {
                 session: SessionInfo {
                     id: "s1".to_string(),
                     host_id: "h1".to_string(),
                     shell: None,
-                    status: "creating".to_string(),
+                    status: SessionStatus::Creating,
                 },
             },
             ServerEvent::SessionClosed {
@@ -257,12 +262,12 @@ mod tests {
             },
             ServerEvent::ClaudeTaskUpdated {
                 task_id: "t1".to_string(),
-                status: "active".to_string(),
+                status: ClaudeTaskStatus::Active,
                 loop_id: Some("l1".to_string()),
             },
             ServerEvent::ClaudeTaskEnded {
                 task_id: "t1".to_string(),
-                status: "completed".to_string(),
+                status: ClaudeTaskStatus::Completed,
                 summary: Some("done".to_string()),
             },
             ServerEvent::ClaudeSessionMetrics {
@@ -297,7 +302,7 @@ mod tests {
     fn host_info_missing_status_defaults() {
         let json = r#"{"id":"h1","hostname":"host","agent_version":null,"os":null,"arch":null}"#;
         let info: HostInfo = serde_json::from_str(json).unwrap();
-        assert!(info.status.is_empty());
+        assert_eq!(info.status, HostStatus::default());
     }
 
     #[test]
@@ -305,6 +310,6 @@ mod tests {
         let json = r#"{"id":"s1","host_id":"h1"}"#;
         let info: SessionInfo = serde_json::from_str(json).unwrap();
         assert!(info.shell.is_none());
-        assert!(info.status.is_empty());
+        assert_eq!(info.status, SessionStatus::default());
     }
 }

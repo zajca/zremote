@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use tokio::net::TcpListener;
-use zremote_client::{ApiClient, ApiError};
+use zremote_client::{ApiClient, ApiError, HostStatus, SessionStatus};
 
 /// Spin up an axum test server.
 async fn setup_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -132,9 +132,9 @@ async fn list_hosts_parses_response() {
     assert_eq!(hosts.len(), 2);
     assert_eq!(hosts[0].id, "h-1");
     assert_eq!(hosts[0].name, "server-1");
-    assert_eq!(hosts[0].status, "online");
+    assert_eq!(hosts[0].status, HostStatus::Online);
     assert_eq!(hosts[1].id, "h-2");
-    assert_eq!(hosts[1].status, "offline");
+    assert_eq!(hosts[1].status, HostStatus::Offline);
 }
 
 #[tokio::test]
@@ -301,7 +301,7 @@ async fn list_sessions_parses_response() {
 
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "s-1");
-    assert_eq!(sessions[0].status, "active");
+    assert_eq!(sessions[0].status, SessionStatus::Active);
 }
 
 #[tokio::test]
@@ -411,7 +411,7 @@ async fn get_host_parses_response() {
     assert_eq!(host.id, "h-1");
     assert_eq!(host.name, "server-1");
     assert_eq!(host.hostname, "server1.local");
-    assert_eq!(host.status, "online");
+    assert_eq!(host.status, HostStatus::Online);
 }
 
 #[tokio::test]
@@ -482,7 +482,7 @@ async fn create_session_sends_post() {
     let session = client.create_session("h-1", &req).await.unwrap();
 
     assert_eq!(session.id, "s-new");
-    assert_eq!(session.status, "creating");
+    assert_eq!(session.status, SessionStatus::Creating);
 }
 
 #[tokio::test]
@@ -504,7 +504,7 @@ async fn get_session_parses_response() {
     let session = client.get_session("s-1").await.unwrap();
 
     assert_eq!(session.id, "s-1");
-    assert_eq!(session.status, "active");
+    assert_eq!(session.status, SessionStatus::Active);
 }
 
 #[tokio::test]

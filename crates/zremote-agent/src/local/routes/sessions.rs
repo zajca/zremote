@@ -9,6 +9,7 @@ use uuid::Uuid;
 use zremote_core::error::AppError;
 use zremote_core::queries::sessions as q;
 use zremote_core::state::{ServerEvent, SessionInfo, SessionState};
+use zremote_protocol::status::SessionStatus;
 
 use crate::local::state::LocalAppState;
 
@@ -162,7 +163,7 @@ pub async fn create_session(
     {
         let mut sessions = state.sessions.write().await;
         if let Some(session_state) = sessions.get_mut(&session_id) {
-            session_state.status = "active".to_string();
+            session_state.status = zremote_protocol::status::SessionStatus::Active;
         }
     }
 
@@ -172,7 +173,7 @@ pub async fn create_session(
             id: session_id_str.clone(),
             host_id: host_id.clone(),
             shell: Some(effective_shell.to_string()),
-            status: "active".to_string(),
+            status: SessionStatus::Active,
         },
     });
 

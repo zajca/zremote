@@ -14,6 +14,7 @@ pub use zremote_protocol::{
         LinearSettings, ProjectAction, ProjectInfo, ProjectSettings, PromptBody, PromptTemplate,
         WorktreeInfo, WorktreeSettings,
     },
+    status::{HostStatus, SessionStatus},
 };
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ pub struct Host {
     pub id: String,
     pub name: String,
     pub hostname: String,
-    pub status: String,
+    pub status: HostStatus,
     pub last_seen_at: Option<String>,
     pub agent_version: Option<String>,
     pub os: Option<String>,
@@ -52,7 +53,7 @@ pub struct Host {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub id: String,
-    pub status: String,
+    pub status: SessionStatus,
 }
 
 /// Terminal session as returned by the `ZRemote` API.
@@ -62,7 +63,7 @@ pub struct Session {
     pub host_id: String,
     pub name: Option<String>,
     pub shell: Option<String>,
-    pub status: String,
+    pub status: SessionStatus,
     pub working_dir: Option<String>,
     pub project_id: Option<String>,
     pub pid: Option<i64>,

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use tokio_util::sync::CancellationToken;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -27,14 +28,25 @@ mod telegram;
 
 use state::{AppState, ConnectionManager};
 
+/// Maximum number of concurrent WebSocket connections allowed.
+const MAX_WS_CONNECTIONS: usize = 200;
+
 #[allow(clippy::too_many_lines)]
 fn create_router(state: Arc<AppState>) -> Router {
+    // WebSocket routes with concurrency limiting to prevent resource exhaustion
+    let ws_routes = Router::new()
+        .route("/ws/agent", get(routes::agents::ws_handler))
+        .route("/ws/events", get(routes::events::ws_handler))
+        .route(
+            "/ws/terminal/{session_id}",
+            get(routes::terminal::ws_handler),
+        )
+        .layer(ConcurrencyLimitLayer::new(MAX_WS_CONNECTIONS));
+
     // TODO(phase-3): Add authentication middleware for REST API endpoints
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
-        .route("/ws/agent", get(routes::agents::ws_handler))
-        .route("/ws/events", get(routes::events::ws_handler))
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route(
             "/api/hosts/{host_id}",
@@ -56,10 +68,7 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
         )
-        .route(
-            "/ws/terminal/{session_id}",
-            get(routes::terminal::ws_handler),
-        )
+        .merge(ws_routes)
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
         .route(

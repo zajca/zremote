@@ -167,7 +167,7 @@ pub async fn run_local(
 
         let mut sessions = state.sessions.write().await;
         let mut session_state = zremote_core::state::SessionState::new(*session_id, host_id);
-        session_state.status = "active".to_string();
+        session_state.status = zremote_protocol::status::SessionStatus::Active;
         // Pre-populate scrollback with the captured pane content so the browser
         // sees the terminal state immediately, even if it connects before the
         // async output loop processes any FIFO data.
@@ -650,7 +650,7 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                 {
                     let mut sessions = state.sessions.write().await;
                     if let Some(session_state) = sessions.get_mut(&session_id) {
-                        session_state.status = "closed".to_string();
+                        session_state.status = zremote_protocol::status::SessionStatus::Closed;
                         let msg = zremote_core::state::BrowserMessage::SessionClosed { exit_code };
                         session_state
                             .browser_senders

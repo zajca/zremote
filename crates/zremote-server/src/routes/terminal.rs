@@ -1,29 +1,142 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use serde::Deserialize;
 use tokio::sync::mpsc;
-use tokio::time::Instant;
+use zremote_core::state::BrowserMessage;
+use zremote_core::terminal_ws::{
+    BROWSER_CHANNEL_SIZE, RegistrationResult, SessionError, TerminalBackend,
+    handle_terminal_websocket,
+};
 use zremote_protocol::ServerMessage;
+use zremote_protocol::status::SessionStatus;
 
-use crate::state::{AppState, BrowserMessage, encode_binary_output};
+use crate::state::AppState;
 
-/// Buffer size for the browser message channel.
-const BROWSER_CHANNEL_SIZE: usize = 256;
+/// Server-mode terminal backend that forwards input to the remote agent.
+struct ServerTerminalBackend {
+    state: Arc<AppState>,
+    host_id: uuid::Uuid,
+}
 
-/// Messages sent from browser to server via WebSocket.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum BrowserInput {
-    #[serde(rename = "input")]
-    Input { data: String },
-    #[serde(rename = "resize")]
-    Resize { cols: u16, rows: u16 },
-    #[serde(rename = "image_paste")]
-    ImagePaste { data: String },
+impl TerminalBackend for ServerTerminalBackend {
+    async fn register_browser(
+        &self,
+        session_id: &uuid::Uuid,
+    ) -> Result<RegistrationResult, SessionError> {
+        // Phase 1: Check existence with read lock
+        let session_exists = {
+            let sessions = self.state.sessions.read().await;
+            sessions.contains_key(session_id)
+        };
+
+        if !session_exists {
+            let error_message =
+                match sqlx::query_as::<_, (String,)>("SELECT status FROM sessions WHERE id = ?")
+                    .bind(session_id.to_string())
+                    .fetch_optional(&self.state.db)
+                    .await
+                {
+                    Ok(Some((status,))) if status == "active" || status == "creating" => {
+                        "session is stale (agent disconnected or server restarted)".to_string()
+                    }
+                    Ok(Some((status,))) => {
+                        format!("session is {status}")
+                    }
+                    Ok(None) => "session not found".to_string(),
+                    Err(_) => "session not found or not active".to_string(),
+                };
+            return Err(SessionError {
+                message: error_message,
+            });
+        }
+
+        // Phase 2: Take write lock for the happy path
+        let (tx, rx) = mpsc::channel::<BrowserMessage>(BROWSER_CHANNEL_SIZE);
+
+        let scrollback_data;
+        let status;
+        {
+            let mut sessions = self.state.sessions.write().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Err(SessionError {
+                    message: "session was closed while connecting".to_string(),
+                });
+            };
+
+            if session.status != SessionStatus::Active
+                && session.status != SessionStatus::Creating
+                && session.status != SessionStatus::Suspended
+            {
+                return Err(SessionError {
+                    message: format!("session is {}", session.status),
+                });
+            }
+
+            scrollback_data = session.scrollback.iter().cloned().collect::<Vec<_>>();
+            status = session.status;
+            session.browser_senders.push(tx);
+        }
+
+        // Read terminal size
+        let (cols, rows) = {
+            let sessions = self.state.sessions.read().await;
+            sessions
+                .get(session_id)
+                .map_or((0, 0), |s| (s.last_cols, s.last_rows))
+        };
+
+        Ok(RegistrationResult {
+            rx,
+            scrollback: scrollback_data,
+            cols,
+            rows,
+            status,
+        })
+    }
+
+    async fn send_input(&self, session_id: &uuid::Uuid, data: Vec<u8>) {
+        if let Some(sender) = self.state.connections.get_sender(&self.host_id).await {
+            let msg = ServerMessage::TerminalInput {
+                session_id: *session_id,
+                data,
+            };
+            let _ = sender.send(msg).await;
+        }
+    }
+
+    async fn send_resize(&self, session_id: &uuid::Uuid, cols: u16, rows: u16) {
+        // Track terminal size for scrollback replay
+        {
+            let mut sessions = self.state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.last_cols = cols;
+                session.last_rows = rows;
+            }
+        }
+        if let Some(sender) = self.state.connections.get_sender(&self.host_id).await {
+            let msg = ServerMessage::TerminalResize {
+                session_id: *session_id,
+                cols,
+                rows,
+            };
+            let _ = sender.send(msg).await;
+        }
+    }
+
+    async fn send_image_paste(&self, session_id: &uuid::Uuid, data: String) {
+        use base64::Engine;
+        if let Ok(png_bytes) = base64::engine::general_purpose::STANDARD.decode(&data)
+            && let Some(sender) = self.state.connections.get_sender(&self.host_id).await
+        {
+            let msg = ServerMessage::TerminalImagePaste {
+                session_id: *session_id,
+                data: png_bytes,
+            };
+            let _ = sender.send(msg).await;
+        }
+    }
 }
 
 /// WebSocket upgrade handler for browser terminal connections.
@@ -35,365 +148,43 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_terminal_connection(socket, session_id, state))
 }
 
-#[allow(clippy::too_many_lines)]
 async fn handle_terminal_connection(
-    mut socket: WebSocket,
+    socket: axum::extract::ws::WebSocket,
     session_id_str: String,
     state: Arc<AppState>,
 ) {
     let Ok(session_id) = session_id_str.parse() else {
-        let _ = socket.send(Message::Close(None)).await;
+        let mut socket = socket;
+        let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
         return;
     };
 
-    // Validate session exists and is active, send scrollback
-    let (tx, mut rx) = mpsc::channel::<BrowserMessage>(BROWSER_CHANNEL_SIZE);
-    let host_id;
-
-    // Phase 1: Check existence with read lock
-    let session_exists = {
+    // Resolve host_id before entering the shared handler
+    let host_id = {
         let sessions = state.sessions.read().await;
-        sessions.contains_key(&session_id)
+        sessions.get(&session_id).map(|s| s.host_id)
     };
 
-    if !session_exists {
-        // Query DB for diagnostics before returning error
-        let error_message =
-            match sqlx::query_as::<_, (String,)>("SELECT status FROM sessions WHERE id = ?")
-                .bind(session_id.to_string())
-                .fetch_optional(&state.db)
-                .await
-            {
-                Ok(Some((status,))) if status == "active" || status == "creating" => {
-                    "session is stale (agent disconnected or server restarted)".to_string()
-                }
-                Ok(Some((status,))) => {
-                    format!("session is {status}")
-                }
-                Ok(None) => "session not found".to_string(),
-                Err(_) => "session not found or not active".to_string(),
-            };
-
-        let error_msg = serde_json::json!({
-            "type": "error",
-            "message": error_message
-        });
-        let _ = socket
-            .send(Message::Text(error_msg.to_string().into()))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
+    let Some(host_id) = host_id else {
+        // Session not in memory -- let register_browser handle the error with DB lookup
+        let backend = ServerTerminalBackend {
+            state: state.clone(),
+            host_id: uuid::Uuid::nil(),
+        };
+        handle_terminal_websocket(socket, session_id, &backend).await;
         return;
-    }
-
-    // Phase 2: Take write lock for the happy path
-    let scrollback_data;
-    {
-        let mut sessions = state.sessions.write().await;
-        let Some(session) = sessions.get_mut(&session_id) else {
-            // Session was removed between read and write lock
-            let error_msg = serde_json::json!({
-                "type": "error",
-                "message": "session was closed while connecting"
-            });
-            let _ = socket
-                .send(Message::Text(error_msg.to_string().into()))
-                .await;
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        };
-
-        if session.status != "active"
-            && session.status != "creating"
-            && session.status != "suspended"
-        {
-            let error_msg = serde_json::json!({
-                "type": "error",
-                "message": format!("session is {}", session.status)
-            });
-            let _ = socket
-                .send(Message::Text(error_msg.to_string().into()))
-                .await;
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-
-        host_id = session.host_id;
-        scrollback_data = session.scrollback.iter().cloned().collect::<Vec<_>>();
-
-        // Register browser sender
-        session.browser_senders.push(tx);
-    }
-
-    // Read terminal size for scrollback framing
-    let (scrollback_cols, scrollback_rows) = {
-        let sessions = state.sessions.read().await;
-        sessions
-            .get(&session_id)
-            .map_or((0, 0), |s| (s.last_cols, s.last_rows))
     };
 
-    // Send merged scrollback buffer with framing messages
-    if !scrollback_data.is_empty() {
-        // Send scrollback_start so the browser can reset terminal state
-        let start_msg = BrowserMessage::ScrollbackStart {
-            cols: scrollback_cols,
-            rows: scrollback_rows,
-        };
-        if let Ok(json) = serde_json::to_string(&start_msg)
-            && socket.send(Message::Text(json.into())).await.is_err()
-        {
-            return;
-        }
-
-        // Send each scrollback chunk as an individual binary frame (no merge allocation).
-        // The client buffers between ScrollbackStart/End and feeds alacritty once.
-        for chunk in &scrollback_data {
-            let frame = encode_binary_output(None, chunk);
-            if socket.send(Message::Binary(frame.into())).await.is_err() {
-                return;
-            }
-        }
-
-        // Send scrollback_end marker
-        let end_msg = BrowserMessage::ScrollbackEnd;
-        if let Ok(json) = serde_json::to_string(&end_msg)
-            && socket.send(Message::Text(json.into())).await.is_err()
-        {
-            return;
-        }
-    }
-
-    // If session is currently suspended, notify the browser immediately
-    {
-        let sessions = state.sessions.read().await;
-        if let Some(session) = sessions.get(&session_id)
-            && session.status == "suspended"
-        {
-            let suspended_msg = BrowserMessage::SessionSuspended;
-            if let Ok(json) = serde_json::to_string(&suspended_msg)
-                && socket.send(Message::Text(json.into())).await.is_err()
-            {
-                return;
-            }
-        }
-    }
-
-    // Bidirectional relay loop with output coalescing.
-    // Instead of forwarding every PTY chunk individually, we collect output
-    // over a short window (~16ms, one frame) and send as a single combined
-    // message. This reduces WebSocket message count and browser JSON parsing.
-    const COALESCE_WINDOW: Duration = Duration::from_millis(16);
-    let mut output_buf: Vec<u8> = Vec::new();
-    let mut coalesce_deadline: Option<Instant> = None;
-
-    loop {
-        // If we have buffered output, use a timeout so we flush promptly.
-        let flush_sleep = async {
-            match coalesce_deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        tokio::select! {
-            // Browser -> server
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<BrowserInput>(&text) {
-                            Ok(BrowserInput::Input { mut data }) => {
-                                const MAX_INPUT_BYTES: usize = 1_048_576;
-                                if data.len() > MAX_INPUT_BYTES {
-                                    tracing::warn!(len = data.len(), "browser terminal input exceeds 1 MB, truncating");
-                                    data.truncate(MAX_INPUT_BYTES);
-                                }
-                                // Flush any buffered output before forwarding input
-                                // to keep output/input ordering correct.
-                                if !output_buf.is_empty() {
-                                    let frame = encode_binary_output(None, &output_buf);
-                                    output_buf.clear();
-                                    coalesce_deadline = None;
-                                    if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                if let Some(sender) = state.connections.get_sender(&host_id).await {
-                                    let msg = ServerMessage::TerminalInput {
-                                        session_id,
-                                        data: data.into_bytes(),
-                                    };
-                                    let _ = sender.send(msg).await;
-                                }
-                            }
-                            Ok(BrowserInput::Resize { cols, rows }) => {
-                                // Track terminal size for scrollback replay
-                                {
-                                    let mut sessions = state.sessions.write().await;
-                                    if let Some(session) = sessions.get_mut(&session_id) {
-                                        session.last_cols = cols;
-                                        session.last_rows = rows;
-                                    }
-                                }
-                                if let Some(sender) = state.connections.get_sender(&host_id).await {
-                                    let msg = ServerMessage::TerminalResize {
-                                        session_id,
-                                        cols,
-                                        rows,
-                                    };
-                                    let _ = sender.send(msg).await;
-                                }
-                            }
-                            Ok(BrowserInput::ImagePaste { data }) => {
-                                use base64::Engine;
-                                if let Ok(png_bytes) = base64::engine::general_purpose::STANDARD.decode(&data)
-                                    && let Some(sender) = state.connections.get_sender(&host_id).await
-                                {
-                                    let msg = ServerMessage::TerminalImagePaste {
-                                        session_id,
-                                        data: png_bytes,
-                                    };
-                                    let _ = sender.send(msg).await;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "invalid browser terminal message");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    Some(Ok(Message::Binary(_))) => {
-                        tracing::warn!("unexpected binary message from browser terminal");
-                    }
-                    Some(Err(e)) => {
-                        tracing::warn!(error = %e, "browser terminal WebSocket error");
-                        break;
-                    }
-                }
-            }
-            // Server -> browser: receive and buffer output chunks
-            browser_msg = rx.recv() => {
-                match browser_msg {
-                    Some(BrowserMessage::Output { data, .. }) => {
-                        output_buf.extend_from_slice(&data);
-                        if coalesce_deadline.is_none() {
-                            coalesce_deadline = Some(Instant::now() + COALESCE_WINDOW);
-                        }
-                    }
-                    Some(msg) => {
-                        // Non-output messages (session_closed, error) flush buffer first, then send immediately.
-                        if !output_buf.is_empty() {
-                            let frame = encode_binary_output(None, &output_buf);
-                            output_buf.clear();
-                            coalesce_deadline = None;
-                            if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
-            // Flush coalesced output when the window expires
-            () = flush_sleep => {
-                if !output_buf.is_empty() {
-                    let frame = encode_binary_output(None, &output_buf);
-                    output_buf.clear();
-                    coalesce_deadline = None;
-                    if socket.send(Message::Binary(frame.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Cleanup: sender drops automatically when this function returns,
-    // try_send in the relay loop will detect it and remove it.
+    let backend = ServerTerminalBackend { state, host_id };
+    handle_terminal_websocket(socket, session_id, &backend).await;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::state::{
         BINARY_TAG_OUTPUT, BINARY_TAG_PANE_OUTPUT, BrowserMessage, decode_binary_output,
         encode_binary_output,
     };
-
-    // --- BrowserInput deserialization ---
-
-    #[test]
-    fn deserialize_input_variant() {
-        let json = r#"{"type": "input", "data": "hello"}"#;
-        let msg: BrowserInput = serde_json::from_str(json).unwrap();
-        match msg {
-            BrowserInput::Input { data } => assert_eq!(data, "hello"),
-            other => panic!("expected Input, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deserialize_resize_variant() {
-        let json = r#"{"type": "resize", "cols": 120, "rows": 40}"#;
-        let msg: BrowserInput = serde_json::from_str(json).unwrap();
-        match msg {
-            BrowserInput::Resize { cols, rows } => {
-                assert_eq!(cols, 120);
-                assert_eq!(rows, 40);
-            }
-            other => panic!("expected Resize, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deserialize_image_paste_variant() {
-        let json = r#"{"type": "image_paste", "data": "base64data=="}"#;
-        let msg: BrowserInput = serde_json::from_str(json).unwrap();
-        match msg {
-            BrowserInput::ImagePaste { data } => assert_eq!(data, "base64data=="),
-            other => panic!("expected ImagePaste, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deserialize_unknown_type_returns_error() {
-        let json = r#"{"type": "unknown_variant", "data": "x"}"#;
-        let result = serde_json::from_str::<BrowserInput>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn deserialize_missing_type_field_returns_error() {
-        let json = r#"{"data": "hello"}"#;
-        let result = serde_json::from_str::<BrowserInput>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn deserialize_input_missing_data_returns_error() {
-        let json = r#"{"type": "input"}"#;
-        let result = serde_json::from_str::<BrowserInput>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn deserialize_resize_missing_cols_returns_error() {
-        let json = r#"{"type": "resize", "rows": 40}"#;
-        let result = serde_json::from_str::<BrowserInput>(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn deserialize_resize_missing_rows_returns_error() {
-        let json = r#"{"type": "resize", "cols": 120}"#;
-        let result = serde_json::from_str::<BrowserInput>(json);
-        assert!(result.is_err());
-    }
 
     // --- BrowserMessage serialization ---
 
@@ -451,7 +242,6 @@ mod tests {
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "output");
-        // data is base64 encoded
         assert!(json.get("pane_id").is_none());
         assert!(json["data"].is_string());
     }
