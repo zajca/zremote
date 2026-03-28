@@ -24,6 +24,10 @@ pub enum Icon {
     MessageCircle,
     CircleHelp,
     Bot,
+    AlertTriangle,
+    CheckCircle,
+    XCircle,
+    Info,
 }
 
 impl Icon {
@@ -51,6 +55,10 @@ impl Icon {
             Self::MessageCircle => "icons/message-circle.svg",
             Self::CircleHelp => "icons/circle-help.svg",
             Self::Bot => "icons/bot.svg",
+            Self::AlertTriangle => "icons/alert-triangle.svg",
+            Self::CheckCircle => "icons/check-circle.svg",
+            Self::XCircle => "icons/x-circle.svg",
+            Self::Info => "icons/info.svg",
         }
     }
 }

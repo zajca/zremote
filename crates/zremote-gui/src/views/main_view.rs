@@ -20,6 +20,7 @@ use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
+use crate::views::toast::{ToastContainer, ToastLevel};
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -31,6 +32,7 @@ pub struct MainView {
     session_switcher: Option<Entity<SessionSwitcher>>,
     help_modal: Option<Entity<HelpModal>>,
     double_shift: DoubleShiftDetector,
+    toasts: Entity<ToastContainer>,
     /// Whether the event WebSocket is currently connected.
     server_connected: bool,
     /// Whether the event WebSocket has ever successfully connected.
@@ -53,6 +55,11 @@ impl MainView {
         // Start periodic loop reconciliation (fallback for missed WS events)
         Self::start_loop_reconciliation(&sidebar, cx);
 
+        let toasts = cx.new(|_| ToastContainer::new());
+
+        // Start toast tick timer (removes expired toasts every second)
+        Self::start_toast_tick(&toasts, cx);
+
         let focus_handle = cx.focus_handle();
 
         Self {
@@ -64,6 +71,7 @@ impl MainView {
             session_switcher: None,
             help_modal: None,
             double_shift: DoubleShiftDetector::new(),
+            toasts,
             server_connected: true, // Assume connected until first Disconnected event
             ever_connected: false,
             current_host_id: None,
@@ -183,6 +191,37 @@ impl MainView {
         .detach();
     }
 
+    fn start_toast_tick(toasts: &Entity<ToastContainer>, cx: &mut Context<Self>) {
+        let toasts = toasts.clone();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                Timer::after(std::time::Duration::from_secs(1)).await;
+                let result = toasts.update(cx, |container, cx| {
+                    if container.tick() {
+                        cx.notify();
+                    }
+                });
+                if result.is_err() {
+                    break; // Entity dropped
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn show_toast(
+        &self,
+        message: &str,
+        level: ToastLevel,
+        toast_icon: Option<Icon>,
+        cx: &mut Context<Self>,
+    ) {
+        self.toasts.update(cx, |container, cx| {
+            container.push(message, level, toast_icon);
+            cx.notify();
+        });
+    }
+
     fn handle_server_event(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.handle_server_event(event, cx);
@@ -205,6 +244,46 @@ impl MainView {
                     });
                 }
             }
+        }
+
+        // WorktreeError: show error toast
+        if let ServerEvent::WorktreeError {
+            project_path,
+            message,
+            ..
+        } = event
+        {
+            let msg = format!("Worktree error ({project_path}): {message}");
+            self.show_toast(&msg, ToastLevel::Error, Some(Icon::AlertTriangle), cx);
+        }
+
+        // Claude task lifecycle: show toasts
+        match event {
+            ServerEvent::ClaudeTaskStarted { project_path, .. } => {
+                let name = project_path.rsplit('/').next().unwrap_or(project_path);
+                self.show_toast(
+                    &format!("Claude task started: {name}"),
+                    ToastLevel::Info,
+                    Some(Icon::Bot),
+                    cx,
+                );
+            }
+            ServerEvent::ClaudeTaskEnded {
+                status, summary, ..
+            } => {
+                let (level, prefix) = match status {
+                    zremote_client::ClaudeTaskStatus::Completed => {
+                        (ToastLevel::Success, "Task completed")
+                    }
+                    zremote_client::ClaudeTaskStatus::Error => (ToastLevel::Error, "Task failed"),
+                    _ => (ToastLevel::Info, "Task ended"),
+                };
+                let msg = summary
+                    .as_deref()
+                    .map_or_else(|| prefix.to_string(), |s| format!("{prefix}: {s}"));
+                self.show_toast(&msg, level, Some(Icon::Bot), cx);
+            }
+            _ => {}
         }
 
         // Forward CC metrics to terminal panel
@@ -405,7 +484,35 @@ impl MainView {
                     }
                 });
             }
-            CommandPaletteEvent::Reconnect | CommandPaletteEvent::Close => {}
+            CommandPaletteEvent::Reconnect => {
+                if let Some(terminal) = &self.terminal {
+                    let session_id = terminal.read(cx).session_id().to_string();
+                    let host_id = self.current_host_id.clone().unwrap_or_default();
+                    if let Some(handle) =
+                        connect_terminal(&self.app_state, &session_id, &host_id, false)
+                    {
+                        terminal.update(cx, |panel, cx| {
+                            panel.reconnect(handle, &self.app_state.tokio_handle, cx);
+                        });
+                        self.show_toast("Reconnected", ToastLevel::Success, Some(Icon::Wifi), cx);
+                    } else {
+                        self.show_toast(
+                            "Reconnect failed",
+                            ToastLevel::Error,
+                            Some(Icon::WifiOff),
+                            cx,
+                        );
+                    }
+                } else {
+                    self.show_toast(
+                        "No active terminal to reconnect",
+                        ToastLevel::Info,
+                        None,
+                        cx,
+                    );
+                }
+            }
+            CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);
     }
@@ -775,6 +882,9 @@ impl Render for MainView {
                     ),
             );
         }
+
+        // Toast overlay (bottom-right, always on top)
+        root = root.child(self.toasts.clone());
 
         root
     }

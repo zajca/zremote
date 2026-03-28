@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
-    AgenticStatus, CreateSessionRequest, Host, HostStatus, ListLoopsFilter, Project, ServerEvent,
-    Session, SessionStatus,
+    AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter,
+    ListLoopsFilter, Project, ServerEvent, Session, SessionStatus,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -37,6 +37,18 @@ pub struct CcMetrics {
     pub lines_removed: Option<i64>,
     pub rate_limit_5h_pct: Option<u64>,
     pub rate_limit_7d_pct: Option<u64>,
+}
+
+/// Tracks a Claude task lifecycle in the sidebar.
+struct ClaudeTaskInfo {
+    task_id: String,
+    session_id: String,
+    host_id: String,
+    project_path: String,
+    status: ClaudeTaskStatus,
+    summary: Option<String>,
+    started_at: std::time::Instant,
+    ended_at: Option<std::time::Instant>,
 }
 
 /// A project with its associated sessions.
@@ -66,6 +78,8 @@ pub struct SidebarView {
     cc_metrics: HashMap<String, CcMetrics>,
     /// Terminal titles set by OSC escape sequences, per session_id.
     terminal_titles: HashMap<String, String>,
+    /// Claude task lifecycle state, keyed by task_id.
+    claude_tasks: HashMap<String, ClaudeTaskInfo>,
 }
 
 impl SidebarView {
@@ -124,6 +138,7 @@ impl SidebarView {
             cc_states: HashMap::new(),
             cc_metrics: HashMap::new(),
             terminal_titles: HashMap::new(),
+            claude_tasks: HashMap::new(),
         };
         view.load_data(cx);
         view
@@ -147,7 +162,7 @@ impl SidebarView {
                 return;
             }
 
-            let (hosts, all_sessions, all_projects) = handle
+            let (hosts, all_sessions, all_projects, active_tasks) = handle
                 .spawn(async move {
                     let hosts = api.list_hosts().await.unwrap_or_default();
                     let mut all_sessions = Vec::new();
@@ -158,7 +173,22 @@ impl SidebarView {
                         all_sessions.extend(sessions.unwrap_or_default());
                         all_projects.extend(projects.unwrap_or_default());
                     }
-                    (hosts, all_sessions, all_projects)
+                    // Fetch active + starting Claude tasks
+                    let active_filter = ListClaudeTasksFilter {
+                        status: Some("active".to_string()),
+                        ..ListClaudeTasksFilter::default()
+                    };
+                    let starting_filter = ListClaudeTasksFilter {
+                        status: Some("starting".to_string()),
+                        ..ListClaudeTasksFilter::default()
+                    };
+                    let (active, starting) = tokio::join!(
+                        api.list_claude_tasks(&active_filter),
+                        api.list_claude_tasks(&starting_filter),
+                    );
+                    let mut tasks = active.unwrap_or_default();
+                    tasks.extend(starting.unwrap_or_default());
+                    (hosts, all_sessions, all_projects, tasks)
                 })
                 .await
                 .unwrap_or_default();
@@ -173,6 +203,22 @@ impl SidebarView {
                 this.sessions = Rc::new(all_sessions);
                 this.projects = Rc::new(all_projects);
                 this.loading = false;
+
+                // Seed Claude tasks from API (only add tasks we don't already track)
+                for task in active_tasks {
+                    this.claude_tasks
+                        .entry(task.id.clone())
+                        .or_insert_with(|| ClaudeTaskInfo {
+                            task_id: task.id.clone(),
+                            session_id: task.session_id.clone(),
+                            host_id: task.host_id.clone(),
+                            project_path: task.project_path.clone(),
+                            status: task.status,
+                            summary: task.summary.clone(),
+                            started_at: std::time::Instant::now(),
+                            ended_at: None,
+                        });
+                }
 
                 // If a session was restored/selected, keep it unless it's truly gone.
                 if let Some(ref restored_id) = this.selected_session_id {
@@ -318,6 +364,51 @@ impl SidebarView {
                 );
                 cx.notify();
             }
+            ServerEvent::WorktreeError { .. } => {
+                // Handled by MainView toast -- sidebar reloads to clear stale state
+                self.load_data(cx);
+            }
+            ServerEvent::ClaudeTaskStarted {
+                task_id,
+                session_id,
+                host_id,
+                project_path,
+            } => {
+                self.claude_tasks.insert(
+                    task_id.clone(),
+                    ClaudeTaskInfo {
+                        task_id: task_id.clone(),
+                        session_id: session_id.clone(),
+                        host_id: host_id.clone(),
+                        project_path: project_path.clone(),
+                        status: ClaudeTaskStatus::Starting,
+                        summary: None,
+                        started_at: std::time::Instant::now(),
+                        ended_at: None,
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::ClaudeTaskUpdated {
+                task_id, status, ..
+            } => {
+                if let Some(task) = self.claude_tasks.get_mut(task_id) {
+                    task.status = *status;
+                    cx.notify();
+                }
+            }
+            ServerEvent::ClaudeTaskEnded {
+                task_id,
+                status,
+                summary,
+            } => {
+                if let Some(task) = self.claude_tasks.get_mut(task_id) {
+                    task.status = *status;
+                    task.summary.clone_from(summary);
+                    task.ended_at = Some(std::time::Instant::now());
+                    cx.notify();
+                }
+            }
             _ => {}
         }
     }
@@ -402,6 +493,16 @@ impl SidebarView {
                         changed = true;
                     }
                 }
+                // Remove ended Claude tasks older than 30s
+                let tasks_before = this.claude_tasks.len();
+                this.claude_tasks.retain(|_, t| {
+                    t.ended_at
+                        .is_none_or(|ended| ended.elapsed() < Duration::from_secs(30))
+                });
+                if this.claude_tasks.len() != tasks_before {
+                    changed = true;
+                }
+
                 if changed {
                     cx.notify();
                 }
@@ -656,6 +757,34 @@ impl SidebarView {
             );
         }
 
+        // Claude tasks for this host
+        let tasks = self.active_tasks_for_host(&host_id);
+        if !tasks.is_empty() {
+            // Separator before tasks (if we have sessions above)
+            if has_projects || has_orphans {
+                children.push(
+                    div()
+                        .mx(px(12.0))
+                        .my(px(4.0))
+                        .h(px(1.0))
+                        .bg(theme::border())
+                        .into_any_element(),
+                );
+            }
+            children.push(
+                div()
+                    .px(px(16.0))
+                    .py(px(2.0))
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(11.0))
+                    .child("Tasks")
+                    .into_any_element(),
+            );
+            for task in &tasks {
+                children.push(self.render_task_item(task, cx).into_any_element());
+            }
+        }
+
         let mut container = div().flex().flex_col().w_full();
 
         // Host header only in server mode
@@ -667,6 +796,97 @@ impl SidebarView {
         container = container.child(div().flex().flex_col().children(children));
 
         container
+    }
+
+    fn active_tasks_for_host(&self, host_id: &str) -> Vec<&ClaudeTaskInfo> {
+        let mut tasks: Vec<&ClaudeTaskInfo> = self
+            .claude_tasks
+            .values()
+            .filter(|t| t.host_id == host_id)
+            .collect();
+        tasks.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        tasks
+    }
+
+    fn render_task_item(&self, task: &ClaudeTaskInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let (status_icon, status_color) = match task.status {
+            ClaudeTaskStatus::Starting => (Icon::Loader, theme::text_tertiary()),
+            ClaudeTaskStatus::Active => (Icon::Bot, theme::accent()),
+            ClaudeTaskStatus::Completed => (Icon::CheckCircle, theme::success()),
+            ClaudeTaskStatus::Error => (Icon::XCircle, theme::error()),
+        };
+
+        let project_name = task
+            .project_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&task.project_path)
+            .to_string();
+
+        let elapsed = task.started_at.elapsed();
+        let elapsed_text = if elapsed.as_secs() >= 3600 {
+            format!(
+                "{}h{}m",
+                elapsed.as_secs() / 3600,
+                (elapsed.as_secs() % 3600) / 60
+            )
+        } else if elapsed.as_secs() >= 60 {
+            format!("{}m", elapsed.as_secs() / 60)
+        } else {
+            format!("{}s", elapsed.as_secs())
+        };
+
+        let session_id = task.session_id.clone();
+        let host_id = task.host_id.clone();
+        let task_id = task.task_id.clone();
+
+        div()
+            .id(SharedString::from(format!("task-{task_id}")))
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl(px(20.0))
+            .pr(px(12.0))
+            .h(px(22.0))
+            .mx(px(4.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_tertiary()))
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.selected_session_id = Some(session_id.clone());
+                cx.emit(SidebarEvent::SessionSelected {
+                    session_id: session_id.clone(),
+                    host_id: host_id.clone(),
+                });
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        icon(status_icon)
+                            .size(px(12.0))
+                            .flex_shrink_0()
+                            .text_color(status_color),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::text_secondary())
+                            .text_size(px(11.0))
+                            .truncate()
+                            .child(project_name),
+                    ),
+            )
+            .child(
+                div()
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(10.0))
+                    .child(elapsed_text),
+            )
     }
 
     #[allow(clippy::unused_self)]
