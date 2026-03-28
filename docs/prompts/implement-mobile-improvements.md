@@ -18,7 +18,11 @@ The RFC at `docs/rfc/rfc-mobile-app-improvements.md` documents 15 improvements d
 
 ### Step 0: Setup
 
-1. **Enter worktree** -- always work in an isolated worktree, never modify main directly
+1. **Continue in existing worktree** -- this work builds on branch `worktree-rfc-mobile-update` (PR #9). Do NOT create a new worktree or branch. If the worktree at `.claude/worktrees/rfc-mobile-update` exists, work there. If it doesn't exist (e.g. was cleaned up), create a new worktree from the `worktree-rfc-mobile-update` branch:
+   ```bash
+   git worktree add .claude/worktrees/rfc-mobile-update worktree-rfc-mobile-update
+   ```
+   All commands must run from `.claude/worktrees/rfc-mobile-update/`.
 2. **Read the RFC** at `docs/rfc/rfc-mobile-app-improvements.md` -- read the entire document
 3. **Read CLAUDE.md** -- understand the project's development workflow, coding conventions, and mandatory review process
 4. **Explore current Android code** -- read all files under `android/app/src/main/java/com/zremote/` to understand existing patterns, especially `HostListScreen.kt` (it has the correct patterns for empty states, pull-to-refresh, error handling that other screens are missing)
@@ -168,7 +172,7 @@ If you encounter a situation where one of these is needed to complete an in-scop
 
 ## Rules (from CLAUDE.md -- mandatory)
 
-1. **Always work in a worktree** -- `EnterWorktree` before any changes
+1. **Work in the existing worktree** -- branch `worktree-rfc-mobile-update`, path `.claude/worktrees/rfc-mobile-update/`. Do NOT create a new branch or worktree.
 2. **Read before modify** -- always read a file before editing it
 3. **No mocks** -- real implementations only. If blocked by missing server API, add placeholder UI text explaining the dependency
 4. **No skipping** -- every item assigned to a sprint must be fully implemented
@@ -186,4 +190,4 @@ At the end, the worktree should have:
 - All P1 items (#5, #6 partial, #8, #10, #11, #12) implemented
 - P2 item #13 implemented
 - Updated RFC with completion status for each item
-- PR created targeting `main`
+- Commits pushed to `worktree-rfc-mobile-update` branch (PR #9 already exists)
