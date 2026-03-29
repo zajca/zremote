@@ -14,7 +14,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -131,6 +130,11 @@ private fun QuickCommandBar(
 ) {
     var inputText by remember { mutableStateOf("") }
 
+    val sendCommand = {
+        onSendInput(inputText + "\r")
+        inputText = ""
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -139,8 +143,10 @@ private fun QuickCommandBar(
     ) {
         // Quick action buttons
         Row(modifier = Modifier.fillMaxWidth()) {
+            QuickButton("Enter") { sendCommand() }
             QuickButton("Ctrl+C") { onSendControl('c') }
             QuickButton("Tab") { onSendInput("\t") }
+            QuickButton("S+Tab") { onSendInput("\u001B[Z") }
             QuickButton("Esc") { onSendInput("\u001B") }
             QuickButton("Up") { onSendInput("\u001B[A") }
             QuickButton("Down") { onSendInput("\u001B[B") }
@@ -150,13 +156,7 @@ private fun QuickCommandBar(
         BasicTextField(
             value = inputText,
             onValueChange = { inputText = it },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(
-                onSend = {
-                    onSendInput(inputText + "\n")
-                    inputText = ""
-                },
-            ),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
             textStyle = MaterialTheme.typography.bodyMedium.copy(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontFamily = FontFamily.Monospace,
