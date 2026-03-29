@@ -10,6 +10,7 @@ CARGO_FILES=(
     crates/zremote-server/Cargo.toml
     crates/zremote-gui/Cargo.toml
     crates/zremote-client/Cargo.toml
+    crates/zremote-cli/Cargo.toml
     crates/zremote/Cargo.toml
 )
 
