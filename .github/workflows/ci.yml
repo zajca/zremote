@@ -24,7 +24,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features --exclude zremote-gui
+      - run: cargo clippy --workspace --all-targets --all-features --exclude zremote-gui --exclude zremote
 
   test-rust:
     name: Test + Coverage (Rust)
@@ -40,7 +40,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           set +e
-          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --exclude zremote-gui 2>&1)
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --exclude zremote-gui --exclude zremote 2>&1)
           LLVM_COV_EXIT=$?
           set -e
           echo "$COVERAGE_OUTPUT"

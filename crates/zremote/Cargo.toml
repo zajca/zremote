@@ -1,0 +1,19 @@
+[package]
+name = "zremote"
+version = "0.7.12"
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["gui", "agent"]
+gui = ["dep:zremote-gui"]
+agent = ["dep:zremote-agent"]
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zremote-gui = { workspace = true, optional = true }
+zremote-agent = { workspace = true, optional = true }

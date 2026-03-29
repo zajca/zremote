@@ -22,7 +22,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features --exclude zremote-gui
+      - run: cargo clippy --workspace --all-targets --all-features --exclude zremote-gui --exclude zremote
 
   test-rust:
     name: Test + Coverage (Rust)
@@ -38,7 +38,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           set +e
-          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --exclude zremote-gui 2>&1)
+          COVERAGE_OUTPUT=$(cargo llvm-cov --workspace --exclude zremote-gui --exclude zremote 2>&1)
           LLVM_COV_EXIT=$?
           set -e
           echo "$COVERAGE_OUTPUT"
@@ -115,11 +115,20 @@ jobs:
             cargo build --release --target ${{ matrix.target }} -p zremote-agent
           fi
 
+      - name: Build unified binary (headless)
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p zremote --no-default-features --features agent
+          else
+            cargo build --release --target ${{ matrix.target }} -p zremote --no-default-features --features agent
+          fi
+
       - name: Package
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/zremote-server dist/
           cp target/${{ matrix.target }}/release/zremote-agent dist/
+          cp target/${{ matrix.target }}/release/zremote dist/
           cd dist && tar czf ../zremote-${{ matrix.target }}.tar.gz *
 
       - uses: actions/upload-artifact@v4
@@ -174,10 +183,14 @@ jobs:
       - name: Build GPUI client
         run: cargo build --release --target ${{ matrix.target }} -p zremote-gui
 
+      - name: Build unified binary (desktop)
+        run: cargo build --release --target ${{ matrix.target }} -p zremote
+
       - name: Package
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/zremote-gui dist/
+          cp target/${{ matrix.target }}/release/zremote dist/
           cd dist && tar czf ../zremote-gui-${{ matrix.label }}.tar.gz *
 
       - uses: actions/upload-artifact@v4
