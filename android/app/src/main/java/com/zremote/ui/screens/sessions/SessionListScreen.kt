@@ -32,9 +32,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zremote.sdk.FfiClaudeSessionMetrics
+import com.zremote.sdk.FfiClaudeTask
+import com.zremote.sdk.FfiClaudeTaskStatus
 import com.zremote.sdk.FfiSession
 import com.zremote.ui.components.EmptyState
 import com.zremote.ui.components.ErrorState
@@ -44,6 +48,8 @@ import com.zremote.ui.components.StatusDot
 import com.zremote.ui.theme.StatusCompleted
 import com.zremote.ui.theme.StatusOffline
 import com.zremote.ui.theme.StatusOnline
+import com.zremote.ui.theme.StatusWaitingForInput
+import com.zremote.ui.theme.StatusWorking
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +59,8 @@ fun SessionListScreen(
     viewModel: SessionListViewModel = hiltViewModel(),
 ) {
     val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+    val claudeTasks by viewModel.claudeTasks.collectAsStateWithLifecycle()
+    val sessionMetrics by viewModel.sessionMetrics.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val createdSessionId by viewModel.createdSessionId.collectAsStateWithLifecycle()
@@ -80,7 +88,7 @@ fun SessionListScreen(
             )
             sessions.isEmpty() && !isLoading -> EmptyState(
                 icon = Icons.Default.Terminal,
-                message = "No sessions",
+                message = "No active sessions",
                 hint = "Tap + to create a new terminal session",
             )
             else -> RefreshableList(
@@ -90,6 +98,8 @@ fun SessionListScreen(
                 items(sessions, key = { it.id }) { session ->
                     SessionCard(
                         session = session,
+                        claudeTask = claudeTasks[session.id],
+                        metrics = sessionMetrics[session.id],
                         onClick = { onSessionClick(session.id) },
                     )
                 }
@@ -179,11 +189,15 @@ private fun CreateSessionSheet(
 }
 
 @Composable
-private fun SessionCard(session: FfiSession, onClick: () -> Unit) {
+private fun SessionCard(
+    session: FfiSession,
+    claudeTask: FfiClaudeTask?,
+    metrics: FfiClaudeSessionMetrics?,
+    onClick: () -> Unit,
+) {
     val statusColor = when (session.status) {
         "active" -> StatusOnline
-        "closed" -> StatusOffline
-        "suspended" -> StatusCompleted
+        "suspended" -> StatusWaitingForInput
         else -> StatusOffline
     }
 
@@ -194,24 +208,103 @@ private fun SessionCard(session: FfiSession, onClick: () -> Unit) {
             .clickable(onClick = onClick),
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top,
         ) {
             StatusDot(color = statusColor)
 
             Spacer(Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = session.name ?: "Session ${session.id.take(8)}",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    text = "${session.status} | ${session.shell ?: "unknown shell"}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // Line 1: shell + status
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = session.shell ?: session.name ?: "Session ${session.id.take(8)}",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = session.status,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                // Line 2: working directory
+                session.workingDir?.let { dir ->
+                    Text(
+                        text = shortenPath(dir),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // Line 3+: Claude Code info
+                if (claudeTask != null) {
+                    Spacer(Modifier.height(4.dp))
+                    ClaudeTaskInfo(task = claudeTask, metrics = metrics)
+                }
             }
         }
     }
+}
+
+@Composable
+private fun ClaudeTaskInfo(
+    task: FfiClaudeTask,
+    metrics: FfiClaudeSessionMetrics?,
+) {
+    val statusColor = when (task.status) {
+        FfiClaudeTaskStatus.STARTING, FfiClaudeTaskStatus.ACTIVE -> StatusWorking
+        FfiClaudeTaskStatus.COMPLETED -> StatusCompleted
+        FfiClaudeTaskStatus.ERROR -> StatusOffline
+    }
+
+    val parts = buildList {
+        add(task.status.name.lowercase())
+        task.model?.let { add(shortenModelName(it)) }
+        val cost = task.totalCostUsd ?: metrics?.costUsd
+        if (cost != null) add("$${String.format("%.2f", cost)}")
+        metrics?.contextUsedPct?.let { add("ctx ${it.toInt()}%") }
+    }
+
+    Text(
+        text = "CC: ${parts.joinToString(" | ")}",
+        style = MaterialTheme.typography.labelSmall,
+        color = statusColor,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+
+    task.initialPrompt?.let { prompt ->
+        if (prompt.isNotBlank()) {
+            Text(
+                text = "\"${prompt.take(50)}${if (prompt.length > 50) "..." else ""}\"",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private fun shortenPath(path: String): String {
+    val normalized = path.replace(Regex("^/home/[^/]+"), "~")
+    val parts = normalized.split("/")
+    return if (parts.size > 2) {
+        parts.takeLast(2).joinToString("/")
+    } else {
+        normalized
+    }
+}
+
+private fun shortenModelName(model: String): String {
+    // "claude-sonnet-4-5-20250514" -> "sonnet-4.5"
+    val withoutPrefix = model.removePrefix("claude-")
+    val withoutDate = withoutPrefix.replace(Regex("-\\d{8}$"), "")
+    // Convert "sonnet-4-5" -> "sonnet-4.5"
+    return withoutDate.replace(Regex("(\\d+)-(\\d+)$"), "$1.$2")
 }
