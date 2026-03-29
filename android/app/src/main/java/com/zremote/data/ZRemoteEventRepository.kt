@@ -1,5 +1,6 @@
 package com.zremote.data
 
+import android.util.Log
 import com.zremote.sdk.EventListener
 import com.zremote.sdk.FfiClaudeSessionMetrics
 import com.zremote.sdk.FfiHostInfo
@@ -10,7 +11,7 @@ import com.zremote.sdk.ZRemoteEventStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,6 +43,10 @@ class ZRemoteEventRepository @Inject constructor() {
         eventStream = newClient.connectEvents(Listener())
     }
 
+    fun setConnected(connected: Boolean) {
+        _isConnected.value = connected
+    }
+
     fun disconnect() {
         eventStream?.disconnect()
         eventStream = null
@@ -49,24 +54,26 @@ class ZRemoteEventRepository @Inject constructor() {
         _isConnected.value = false
         _loops.value = emptyList()
         _sessionMetrics.value = emptyMap()
-        scope.coroutineContext[Job]?.cancelChildren()
+        scope.coroutineContext.cancel()
     }
 
     private inner class Listener : EventListener {
         override fun onConnected() {
+            Log.i("ZRemote", "EventListener.onConnected()")
             _isConnected.value = true
         }
 
         override fun onDisconnected() {
+            Log.i("ZRemote", "EventListener.onDisconnected()")
             _isConnected.value = false
         }
 
         override fun onHostConnected(host: FfiHostInfo) {
-            refreshAfterEvent()
+            // Host state changed; UI refreshes via pull-to-refresh
         }
 
         override fun onHostDisconnected(hostId: String) {
-            refreshAfterEvent()
+            // Host state changed; UI refreshes via pull-to-refresh
         }
 
         override fun onHostStatusChanged(hostId: String, status: String) {}

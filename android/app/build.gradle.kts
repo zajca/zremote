@@ -74,4 +74,7 @@ dependencies {
 
     // DataStore (for settings persistence)
     implementation(libs.datastore.preferences)
+
+    // JNA (for UniFFI generated native bindings)
+    implementation(libs.jna) { artifact { type = "aar" } }
 }

@@ -35,7 +35,7 @@ dashmap = "6"
 teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
 # Agent-only
-tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 portable-pty = "0.9"
 hostname = "0.4"

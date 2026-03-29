@@ -1,7 +1,8 @@
 package com.zremote.data
 
 import android.content.Context
-import com.zremote.sdk.FfiError
+import android.util.Log
+import com.zremote.sdk.FfiException
 import com.zremote.sdk.ZRemoteClient
 import com.zremote.services.ZRemoteEventService
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -25,15 +26,26 @@ class ConnectionManager @Inject constructor(
 
     @Synchronized
     fun connect(serverUrl: String) {
+        Log.i("ZRemote", "connect() called with url=$serverUrl")
         disconnect()
         try {
+            Log.i("ZRemote", "Creating ZRemoteClient...")
             val newClient = ZRemoteClient(serverUrl)
+            Log.i("ZRemote", "ZRemoteClient created, connecting events...")
             client = newClient
             eventRepository.connect(newClient)
+            // Mark as connected immediately so UI can start loading data.
+            // The WS event stream will update this via onConnected/onDisconnected.
+            eventRepository.setConnected(true)
             _connectionError.value = null
             ZRemoteEventService.start(appContext, serverUrl)
-        } catch (e: FfiError) {
-            _connectionError.value = e.message
+            Log.i("ZRemote", "Connected successfully")
+        } catch (e: Exception) {
+            Log.e("ZRemote", "connect() Exception", e)
+            _connectionError.value = e.message ?: e.toString()
+        } catch (e: Error) {
+            Log.e("ZRemote", "connect() Error", e)
+            _connectionError.value = e.message ?: e.toString()
         }
     }
 

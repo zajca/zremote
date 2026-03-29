@@ -2,7 +2,6 @@ package com.zremote.ui.screens.terminal
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -86,8 +85,8 @@ private fun TerminalLineView(line: TerminalLine) {
     Text(
         text = annotated,
         fontFamily = FontFamily.Monospace,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
+        fontSize = 13.sp,
+        lineHeight = 17.sp,
         modifier = Modifier.horizontalScroll(rememberScrollState()),
     )
 }

@@ -119,16 +119,16 @@ private fun ProjectCard(project: FfiProject, onGitRefresh: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = StatusWorking,
                     )
-                    if (project.gitDirty) {
+                    if (project.gitIsDirty) {
                         Text(
                             text = "dirty",
                             style = MaterialTheme.typography.labelSmall,
                             color = StatusError,
                         )
                     }
-                    project.gitAheadBehind?.let { ab ->
+                    if (project.gitAhead > 0 || project.gitBehind > 0) {
                         Text(
-                            text = ab,
+                            text = "+${project.gitAhead} -${project.gitBehind}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

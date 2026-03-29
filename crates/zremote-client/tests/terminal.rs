@@ -258,6 +258,7 @@ async fn connect_spawned_failure_sends_session_closed() {
     let session =
         TerminalSession::connect_spawned("ws://127.0.0.1:1/ws/terminal/nope".to_string(), &handle);
 
+    // First event should be Error with connection failure message
     let event = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         session.output_rx.recv_async(),
@@ -267,10 +268,29 @@ async fn connect_spawned_failure_sends_session_closed() {
     .unwrap();
 
     match event {
+        TerminalEvent::Error { message } => {
+            assert!(
+                message.contains("WebSocket connection failed"),
+                "error should mention connection failure, got: {message}",
+            );
+        }
+        other => panic!("expected Error on failed connect, got {other:?}"),
+    }
+
+    // Second event should be SessionClosed
+    let event2 = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.output_rx.recv_async(),
+    )
+    .await
+    .expect("should receive SessionClosed within timeout")
+    .unwrap();
+
+    match event2 {
         TerminalEvent::SessionClosed { exit_code } => {
             assert_eq!(exit_code, None, "failed connect should have no exit code");
         }
-        other => panic!("expected SessionClosed on failed connect, got {other:?}"),
+        other => panic!("expected SessionClosed after Error, got {other:?}"),
     }
 }
 

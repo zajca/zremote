@@ -8,6 +8,7 @@ serialization = "1.7.3"
 navigation = "2.8.5"
 lifecycle = "2.8.7"
 datastore = "1.1.4"
+jna = "5.14.0"
 core-ktx = "1.15.0"
 activity-compose = "1.9.3"
 
@@ -42,6 +43,9 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 
 # DataStore
 datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+
+# JNA (for UniFFI generated bindings)
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

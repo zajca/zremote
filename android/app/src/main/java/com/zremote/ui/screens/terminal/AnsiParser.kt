@@ -25,15 +25,20 @@ class AnsiParser {
         while (i < text.length) {
             val c = text[i]
             when {
-                c == '\u001B' && i + 1 < text.length && text[i + 1] == '[' -> {
-                    i = parseEscapeSequence(text, i + 2)
+                c == '\u001B' -> {
+                    i = parseEscape(text, i + 1)
                 }
                 c == '\n' -> {
-                    lines.add(TerminalLine(currentLine.toList()))
+                    lines.add(TerminalLine(trimTrailingSpaces(currentLine)))
                     currentLine = mutableListOf()
                     i++
                 }
                 c == '\r' -> {
+                    // Skip carriage return (we don't track cursor position)
+                    i++
+                }
+                c < ' ' && c != '\t' -> {
+                    // Skip other control characters (BEL, BS, etc.)
                     i++
                 }
                 else -> {
@@ -43,16 +48,40 @@ class AnsiParser {
             }
         }
         if (currentLine.isNotEmpty()) {
-            lines.add(TerminalLine(currentLine.toList()))
+            lines.add(TerminalLine(trimTrailingSpaces(currentLine)))
         }
         return lines
     }
 
-    private fun parseEscapeSequence(text: String, start: Int): Int {
+    private fun parseEscape(text: String, start: Int): Int {
+        if (start >= text.length) return start
+        return when (text[start]) {
+            '[' -> parseCsi(text, start + 1)
+            ']' -> parseOsc(text, start + 1)
+            '(' , ')' , '*' , '+' -> {
+                // Charset designation: ESC ( X -- skip next char
+                if (start + 1 < text.length) start + 2 else start + 1
+            }
+            else -> start + 1 // Single-char escape (ESC =, ESC >, etc.)
+        }
+    }
+
+    // Parse CSI sequence: ESC [ (params) (intermediates) (final byte)
+    // Final byte is 0x40..0x7E (@..~)
+    // Intermediate bytes are 0x20..0x2F (space../)
+    // Parameter bytes are 0x30..0x3F (0..? including digits, semicolons, and ?)
+    private fun parseCsi(text: String, start: Int): Int {
         var i = start
         val params = mutableListOf<Int>()
         var current = 0
         var hasParam = false
+        var isPrivate = false
+
+        // Check for private mode marker (?)
+        if (i < text.length && text[i] == '?') {
+            isPrivate = true
+            i++
+        }
 
         while (i < text.length) {
             val c = text[i]
@@ -62,23 +91,44 @@ class AnsiParser {
                     hasParam = true
                     i++
                 }
-                c == ';' -> {
+                c == ';' || c == ':' -> {
                     params.add(if (hasParam) current else 0)
                     current = 0
                     hasParam = false
                     i++
                 }
-                c == 'm' -> {
-                    params.add(if (hasParam) current else 0)
-                    applySgr(params)
-                    return i + 1
+                c in ' '..'/' -> {
+                    // Intermediate bytes - skip
+                    i++
                 }
-                c.isLetter() -> {
+                c in '@'..'~' -> {
+                    // Final byte - process if SGR, otherwise ignore
+                    if (c == 'm' && !isPrivate) {
+                        params.add(if (hasParam) current else 0)
+                        applySgr(params)
+                    }
                     return i + 1
                 }
                 else -> {
+                    // Malformed sequence, bail out
                     return i + 1
                 }
+            }
+        }
+        return i
+    }
+
+    // Parse OSC sequence: ESC ] ... (ST or BEL)
+    // ST is ESC \ or 0x9C; BEL is 0x07
+    private fun parseOsc(text: String, start: Int): Int {
+        var i = start
+        while (i < text.length) {
+            val c = text[i]
+            when {
+                c == '\u0007' -> return i + 1 // BEL terminates
+                c == '\u001B' && i + 1 < text.length && text[i + 1] == '\\' -> return i + 2 // ST
+                c == '\u009C'.code.toChar() -> return i + 1 // 8-bit ST
+                else -> i++
             }
         }
         return i
@@ -97,32 +147,77 @@ class AnsiParser {
             when (val p = params[i]) {
                 0 -> { currentFg = DEFAULT_FG; currentBg = Color.Transparent; bold = false }
                 1 -> bold = true
+                2 -> {} // dim - ignore
+                3 -> {} // italic - ignore
+                4 -> {} // underline - ignore
+                5, 6 -> {} // blink - ignore
+                7 -> { // reverse video
+                    val tmp = currentFg
+                    currentFg = if (currentBg == Color.Transparent) TERMINAL_BG else currentBg
+                    currentBg = tmp
+                }
+                8 -> {} // hidden - ignore
+                9 -> {} // strikethrough - ignore
                 22 -> bold = false
+                23 -> {} // not italic
+                24 -> {} // not underline
+                25 -> {} // not blink
+                27 -> {} // not reverse
+                28 -> {} // not hidden
+                29 -> {} // not strikethrough
                 in 30..37 -> currentFg = ansi8Color(p - 30, bold)
+                38 -> {
+                    i = parseExtendedColor(params, i) { currentFg = it }
+                }
                 39 -> currentFg = DEFAULT_FG
                 in 40..47 -> currentBg = ansi8Color(p - 40, false)
+                48 -> {
+                    i = parseExtendedColor(params, i) { currentBg = it }
+                }
                 49 -> currentBg = Color.Transparent
                 in 90..97 -> currentFg = ansi8Color(p - 90 + 8, false)
                 in 100..107 -> currentBg = ansi8Color(p - 100 + 8, false)
-                38 -> {
-                    if (i + 1 < params.size && params[i + 1] == 5 && i + 2 < params.size) {
-                        currentFg = ansi256Color(params[i + 2])
-                        i += 2
-                    }
-                }
-                48 -> {
-                    if (i + 1 < params.size && params[i + 1] == 5 && i + 2 < params.size) {
-                        currentBg = ansi256Color(params[i + 2])
-                        i += 2
-                    }
-                }
             }
             i++
         }
     }
 
+    private inline fun parseExtendedColor(
+        params: List<Int>,
+        i: Int,
+        apply: (Color) -> Unit,
+    ): Int {
+        if (i + 1 >= params.size) return i
+        return when (params[i + 1]) {
+            5 -> {
+                // 256-color: 38;5;N
+                if (i + 2 < params.size) {
+                    apply(ansi256Color(params[i + 2]))
+                    i + 2
+                } else i + 1
+            }
+            2 -> {
+                // RGB: 38;2;R;G;B
+                if (i + 4 < params.size) {
+                    apply(Color(params[i + 2], params[i + 3], params[i + 4]))
+                    i + 4
+                } else i + 1
+            }
+            else -> i + 1
+        }
+    }
+
+    private fun trimTrailingSpaces(chars: MutableList<StyledChar>): List<StyledChar> {
+        var end = chars.size
+        while (end > 0 && chars[end - 1].char == ' ' && chars[end - 1].bg == Color.Transparent) {
+            end--
+        }
+        return if (end == chars.size) chars.toList() else chars.subList(0, end).toList()
+    }
+
     companion object {
         val DEFAULT_FG = Color(0xFFE0E0E0)
+        val TERMINAL_BG = Color(0xFF1A1A2E)
 
         private val ANSI_COLORS = arrayOf(
             Color(0xFF000000), // black

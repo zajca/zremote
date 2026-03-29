@@ -109,6 +109,9 @@ impl TerminalSession {
                 }
                 Err(e) => {
                     error!(error = %e, "failed to connect terminal WebSocket");
+                    let _ = output_tx.send(TerminalEvent::Error {
+                        message: format!("WebSocket connection failed: {e}"),
+                    });
                     let _ = output_tx.send(TerminalEvent::SessionClosed { exit_code: None });
                 }
             }
