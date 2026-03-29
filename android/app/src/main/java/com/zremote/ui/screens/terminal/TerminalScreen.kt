@@ -1,7 +1,9 @@
 package com.zremote.ui.screens.terminal
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,11 +23,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -45,6 +49,8 @@ fun TerminalScreen(
 ) {
     val lines by viewModel.lines.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    var fontSize by remember { mutableFloatStateOf(13f) }
+    val horizontalScrollState = rememberScrollState()
 
     LaunchedEffect(sessionId) {
         viewModel.connectToSession(sessionId)
@@ -57,17 +63,29 @@ fun TerminalScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Terminal output area
-        LazyColumn(
-            state = listState,
+        // Terminal output area with pinch-to-zoom and shared horizontal scroll
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(Background)
-                .padding(horizontal = 4.dp),
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        fontSize = (fontSize * zoom).coerceIn(6f, 28f)
+                        horizontalScrollState.dispatchRawDelta(-pan.x)
+                    }
+                },
         ) {
-            items(lines) { line ->
-                TerminalLineView(line)
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(horizontalScrollState)
+                    .padding(horizontal = 4.dp),
+            ) {
+                items(lines) { line ->
+                    TerminalLineView(line, fontSize)
+                }
             }
         }
 
@@ -80,14 +98,13 @@ fun TerminalScreen(
 }
 
 @Composable
-private fun TerminalLineView(line: TerminalLine) {
+private fun TerminalLineView(line: TerminalLine, fontSize: Float) {
     val annotated = remember(line) { lineToAnnotatedString(line) }
     Text(
         text = annotated,
         fontFamily = FontFamily.Monospace,
-        fontSize = 13.sp,
-        lineHeight = 17.sp,
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        fontSize = fontSize.sp,
+        lineHeight = (fontSize * 1.3f).sp,
     )
 }
 
