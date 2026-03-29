@@ -7,6 +7,7 @@ members = [
     "crates/zremote-agent",
     "crates/zremote-gui",
     "crates/zremote-client",
+    "crates/zremote-cli",
     "crates/zremote",
 ]
 
@@ -60,6 +61,7 @@ zremote-client = { path = "crates/zremote-client" }
 zremote-server = { path = "crates/zremote-server" }
 zremote-agent = { path = "crates/zremote-agent" }
 zremote-gui = { path = "crates/zremote-gui" }
+zremote-cli = { path = "crates/zremote-cli" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

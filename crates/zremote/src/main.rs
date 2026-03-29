@@ -43,6 +43,15 @@ enum Commands {
         #[command(subcommand)]
         command: Option<zremote_agent::Commands>,
     },
+
+    /// Command-line interface for managing hosts, sessions, projects, and more
+    #[cfg(feature = "cli")]
+    Cli {
+        #[command(flatten)]
+        global: zremote_cli::GlobalOpts,
+        #[command(subcommand)]
+        command: zremote_cli::Commands,
+    },
 }
 
 fn main() {
@@ -60,6 +69,11 @@ fn main() {
         #[cfg(feature = "agent")]
         Commands::Agent { command } => {
             zremote_agent::run(command);
+        }
+
+        #[cfg(feature = "cli")]
+        Commands::Cli { global, command } => {
+            zremote_cli::run(global, command);
         }
     }
 }

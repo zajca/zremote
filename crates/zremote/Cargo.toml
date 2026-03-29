@@ -7,9 +7,10 @@ edition.workspace = true
 workspace = true
 
 [features]
-default = ["gui", "agent"]
+default = ["gui", "agent", "cli"]
 gui = ["dep:zremote-gui"]
 agent = ["dep:zremote-agent"]
+cli = ["dep:zremote-cli"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -17,3 +18,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zremote-gui = { workspace = true, optional = true }
 zremote-agent = { workspace = true, optional = true }
+zremote-cli = { workspace = true, optional = true }
