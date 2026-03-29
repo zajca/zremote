@@ -1,10 +1,13 @@
 # ZRemote
 
-Remote machine management platform with terminal sessions, agentic loop control, and real-time monitoring. Two modes: **Server mode** (multi-host via central server) and **Local mode** (single-host, serverless).
+Remote machine management platform with terminal sessions, agentic loop control, and real-time monitoring. Three modes: **Standalone** (single command, zero-config), **Server mode** (multi-host via central server), and **Local mode** (single-host, manual agent start).
 
 ## Architecture
 
 ```
+STANDALONE:   zremote gui --local
+              └─ spawns agent child process, then opens GUI
+
 SERVER MODE:  GPUI App <--REST/WS--> Server (Axum) <--WS--> Agent (on remote host)
 
 LOCAL MODE:   GPUI App <--REST/WS--> Agent (Axum HTTP/WS server)
@@ -17,10 +20,12 @@ LOCAL MODE:   GPUI App <--REST/WS--> Agent (Axum HTTP/WS server)
                                      |-- Projects / Knowledge
 ```
 
+- **Unified binary** (`zremote`): Feature-gated facade. Desktop builds include GUI+agent, headless builds include agent-only.
 - **GUI** (`zremote-gui`): Native GPUI desktop client. Terminal rendering via alacritty_terminal with per-character glyph caching and LRU cell run cache.
+- **Agent** (`zremote-agent`): Runs on each machine. Includes local mode, server mode (multi-host), MCP, and configuration subcommands.
+- **Server** (`zremote-server`): Library consumed by agent's `server` subcommand. Axum web server with SQLite for multi-host deployments.
 - **Core** (`zremote-core`): Shared types, DB init, error handling, query functions, message processing. Used by both server and agent.
-- **Server** (`zremote-server`): Axum web server with SQLite for multi-host deployments.
-- **Agent** (`zremote-agent`): Runs on each machine. Server mode: connects via WebSocket. Local mode: serves all APIs directly.
+- **Client** (`zremote-client`): HTTP/WS client SDK used by GUI.
 - **Protocol** (`zremote-protocol`): Shared message types for WebSocket communication.
 
 ## Quick Start
@@ -29,33 +34,33 @@ LOCAL MODE:   GPUI App <--REST/WS--> Agent (Axum HTTP/WS server)
 nix develop                           # Enter dev shell (Rust, system libs, etc.)
 ```
 
-### GPUI Desktop Client
+### Standalone (recommended)
 
 ```bash
-cargo run -p zremote-gui                                    # localhost:3000
-cargo run -p zremote-gui -- --server http://myserver:3000   # specific server
-env $(cat ~/.config/zremote/.env | xargs) cargo run -p zremote-gui  # production
+cargo run -p zremote -- gui --local                           # starts agent + GUI
+cargo run -p zremote -- gui --server http://myserver:3000     # connect to existing server
+env $(cat ~/.config/zremote/.env | xargs) cargo run -p zremote -- gui --server http://myserver:3000  # production
 ```
 
 ### Server Mode
 
 ```bash
-ZREMOTE_TOKEN=secret cargo run -p zremote-server
-ZREMOTE_SERVER_URL=ws://localhost:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent
-cargo run -p zremote-gui -- --server http://localhost:3000
+cargo run -p zremote -- agent server --token secret
+ZREMOTE_SERVER_URL=ws://localhost:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote -- agent run
+cargo run -p zremote -- gui --server http://localhost:3000
 ```
 
-### Local Mode
+### Local Mode (manual)
 
 ```bash
-cargo run -p zremote-agent -- local --port 3000
-cargo run -p zremote-gui -- --server http://localhost:3000
+cargo run -p zremote -- agent local --port 3000
+cargo run -p zremote -- gui --server http://localhost:3000
 ```
 
 ### MCP Server Mode
 
 ```bash
-cargo run -p zremote-agent -- mcp-serve --project /path/to/project
+cargo run -p zremote -- agent mcp-serve --project /path/to/project
 ```
 
 ## Development Rules
@@ -140,9 +145,11 @@ Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (1
 ```bash
 cargo test --workspace                # All tests
 cargo clippy --workspace              # Lint (all=deny, pedantic=warn)
+cargo check -p zremote                # Fast unified binary check
 cargo check -p zremote-gui            # Fast GUI check (no system libs needed)
-cargo build -p zremote-gui            # Requires nix develop for system libs
-cargo build -p zremote-agent --no-default-features  # Server-only agent (no local mode)
+cargo build -p zremote                # Unified binary (GUI + agent, requires nix develop)
+cargo build -p zremote --no-default-features --features agent  # Headless (no GUI deps)
+cargo build -p zremote-agent --no-default-features  # Minimal agent (no local/server)
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.

@@ -37,14 +37,17 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 
 **Pre-built binaries** from [GitHub Releases](../../releases):
 
-| Platform | Target |
-|----------|--------|
-| Linux x86_64 | `zremote-x86_64-unknown-linux-musl.tar.gz` |
-| Linux aarch64 | `zremote-aarch64-unknown-linux-musl.tar.gz` |
-| macOS x86_64 | `zremote-x86_64-apple-darwin.tar.gz` |
-| macOS aarch64 | `zremote-aarch64-apple-darwin.tar.gz` |
+| Platform | Archive | Contents |
+|----------|---------|----------|
+| Linux x86_64 | `zremote-x86_64-unknown-linux-musl.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
+| Linux aarch64 | `zremote-aarch64-unknown-linux-musl.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
+| macOS x86_64 | `zremote-x86_64-apple-darwin.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
+| macOS aarch64 | `zremote-aarch64-apple-darwin.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
+| Linux x86_64 (GUI) | `zremote-gui-x86_64-linux.tar.gz` | `zremote` (unified), `zremote-gui` |
+| macOS x86_64 (GUI) | `zremote-gui-x86_64-apple-darwin.tar.gz` | `zremote` (unified), `zremote-gui` |
+| macOS aarch64 (GUI) | `zremote-gui-aarch64-apple-darwin.tar.gz` | `zremote` (unified), `zremote-gui` |
 
-Each archive contains `zremote-agent`, `zremote-server`, and `zremote-gui` binaries.
+Desktop archives contain the **unified `zremote` binary** with both GUI and agent built in. Headless archives contain `zremote` with agent-only (no GUI dependencies).
 
 **From source** (Nix recommended):
 
@@ -53,45 +56,47 @@ nix develop                           # Provides Rust, system libs, etc.
 cargo build --workspace --release
 ```
 
-Or manually: Rust 1.94+, SQLite, and system libraries (libxcb, libxkbcommon, libfreetype).
+Or manually: Rust 1.94+, SQLite, and system libraries (libxcb, libxkbcommon, libfreetype for GUI).
 
-### GPUI Desktop Client
+### Standalone Mode (recommended for getting started)
+
+Single command -- starts the agent and opens the GUI:
 
 ```bash
-# Connect to a server
-cargo run -p zremote-gui -- --server http://myserver:3000
-
-# Or use env var (same as agent, WS path auto-stripped)
-ZREMOTE_SERVER_URL=ws://myserver:3000/ws/agent cargo run -p zremote-gui
+zremote gui --local
 ```
 
-### Local Mode (recommended for getting started)
+Or separately:
 
 ```bash
-zremote-agent local --port 3000
-cargo run -p zremote-gui -- --server http://localhost:3000
+zremote agent local --port 3000
+zremote gui --server http://localhost:3000
 ```
 
 ### Server Mode (multi-host)
 
 ```bash
 # Server
-ZREMOTE_TOKEN=secret cargo run -p zremote-server
+zremote agent server --token secret
 
 # Agent (on each remote host)
-ZREMOTE_SERVER_URL=ws://server-host:3000/ws/agent ZREMOTE_TOKEN=secret cargo run -p zremote-agent
+ZREMOTE_SERVER_URL=ws://server-host:3000/ws/agent ZREMOTE_TOKEN=secret zremote agent run
 
-# GPUI client
-cargo run -p zremote-gui -- --server http://server-host:3000
+# GUI client
+zremote gui --server http://server-host:3000
 ```
 
 ### MCP Server (Claude Code integration)
 
 ```bash
-zremote-agent mcp-serve --project /path/to/project
+zremote agent mcp-serve --project /path/to/project
 ```
 
 Exposes project knowledge and tools over JSON-RPC stdio transport.
+
+### Legacy binaries
+
+The standalone `zremote-agent`, `zremote-server`, and `zremote-gui` binaries are still included for backwards compatibility. They are thin wrappers around the same library code.
 
 ## Architecture
 
@@ -144,33 +149,72 @@ SERVER MODE:
 
 ## CLI Reference
 
+### Unified binary
+
 ```
-zremote-agent [COMMAND]
+zremote <COMMAND>
+```
+
+| Command | Description |
+|---------|-------------|
+| `gui` | Launch the GPUI desktop client |
+| `agent` | Agent subcommands (local, server, run, mcp, etc.) |
+
+### `zremote gui`
+
+```
+zremote gui [--local] [--server URL] [--port 3000] [--exit-after SECS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--local` | -- | Start a local agent automatically (standalone mode) |
+| `--server` | `http://localhost:3000` | Server URL (http/ws, path auto-stripped) |
+| `--port` | `3000` | Port for the local agent (only with `--local`) |
+| `--exit-after` | -- | Auto-exit after N seconds (headless testing) |
+
+### `zremote agent`
+
+```
+zremote agent <COMMAND>
 ```
 
 | Command | Description |
 |---------|-------------|
 | `run` (default) | Connect to remote server |
 | `local` | Run HTTP/WS server (single-host mode) |
+| `server` | Run multi-host server (absorbs zremote-server) |
 | `mcp-serve` | Run as MCP server over stdio |
 | `configure` | Interactive project configuration with Claude |
 
-### `local`
+### `zremote agent local`
 
 ```
-zremote-agent local [--port 3000] [--db ~/.zremote/local.db] [--bind 127.0.0.1]
+zremote agent local [--port 3000] [--db ~/.zremote/local.db] [--bind 127.0.0.1]
 ```
 
-### `mcp-serve`
+### `zremote agent server`
 
 ```
-zremote-agent mcp-serve --project PATH [--ov-port 8741]
+zremote agent server --token TOKEN [--port 3000] [--database-url sqlite:zremote.db]
 ```
 
-### `configure`
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--token` | `ZREMOTE_TOKEN` | (required) | Shared authentication token |
+| `--port` | `ZREMOTE_PORT` | `3000` | HTTP/WS listen port |
+| `--database-url` | `DATABASE_URL` | `sqlite:zremote.db` | SQLite connection string |
+
+### `zremote agent mcp-serve`
 
 ```
-zremote-agent configure --project PATH [--model sonnet] [--skip-permissions]
+zremote agent mcp-serve --project PATH [--ov-port 8741]
+```
+
+### `zremote agent configure`
+
+```
+zremote agent configure --project PATH [--model sonnet] [--skip-permissions]
 ```
 
 ## Persistent Sessions
@@ -202,10 +246,12 @@ Or manually install: Rust 1.94+, SQLite, libxcb, libxkbcommon, libxkbcommon-x11,
 ### Build
 
 ```bash
-cargo build --workspace                # Full workspace
-cargo build -p zremote-gui             # GPUI desktop client
-cargo build -p zremote-agent           # Agent with local mode (default)
-cargo build -p zremote-agent --no-default-features  # Agent without local mode
+cargo build --workspace                          # Full workspace
+cargo build -p zremote                           # Unified binary (GUI + agent)
+cargo build -p zremote --no-default-features --features agent  # Headless (no GUI)
+cargo build -p zremote-gui                       # Standalone GUI
+cargo build -p zremote-agent                     # Standalone agent (with local + server)
+cargo build -p zremote-agent --no-default-features  # Agent without local/server
 ```
 
 ### Tests
@@ -219,11 +265,13 @@ cargo clippy --workspace               # Lint
 
 ```
 crates/
-  zremote-gui/            # Native GPUI desktop client
+  zremote/                # Unified binary facade (feature-gated GUI + agent)
+  zremote-gui/            # Native GPUI desktop client (library + standalone binary)
+  zremote-agent/          # Agent (library + standalone binary, local/server/MCP modes)
+  zremote-server/         # Server library (consumed by agent's "server" subcommand)
   zremote-protocol/       # Shared WebSocket message types
   zremote-core/           # Shared types, DB, queries, message processing
-  zremote-server/         # Axum server (multi-host mode, Telegram)
-  zremote-agent/          # Agent binary (local/server/MCP/configure modes)
+  zremote-client/         # HTTP/WS client SDK (used by GUI)
 scripts/                  # Dev workflow scripts
 ```
 
