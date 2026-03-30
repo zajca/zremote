@@ -652,7 +652,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("nonexistent.sock");
         let state_path = tmp.path().join("test.json");
-        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let session_id: SessionId = uuid::Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(64);
 
         let start = std::time::Instant::now();
