@@ -146,6 +146,11 @@ pub enum ServerEvent {
         rate_limit_5h_pct: Option<u64>,
         rate_limit_7d_pct: Option<u64>,
     },
+    /// Unknown event type for forward compatibility.
+    /// New event types added in future versions will deserialize as `Unknown`
+    /// instead of failing, allowing older clients to gracefully ignore them.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -308,5 +313,19 @@ mod tests {
         let info: SessionInfo = serde_json::from_str(json).unwrap();
         assert!(info.shell.is_none());
         assert_eq!(info.status, SessionStatus::default());
+    }
+
+    #[test]
+    fn unknown_event_type_deserializes() {
+        let json = r#"{"type":"future_event_v2","some_field":"value"}"#;
+        let event: ServerEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, ServerEvent::Unknown));
+    }
+
+    #[test]
+    fn unknown_event_roundtrip_serializes_as_unknown() {
+        let event = ServerEvent::Unknown;
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("Unknown"));
     }
 }
