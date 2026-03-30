@@ -102,6 +102,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: commands::action::ActionCommand,
     },
+    /// Commander orchestration
+    Commander {
+        #[command(subcommand)]
+        command: commands::commander::CommanderCommand,
+    },
     /// Stream real-time events
     Events {
         /// Filter by event types (comma-separated)
@@ -194,6 +199,9 @@ async fn run_async(global: GlobalOpts, command: Commands) -> i32 {
         }
         Commands::Action { command } => {
             commands::action::run(&client, &resolver, &*fmt, command).await
+        }
+        Commands::Commander { command } => {
+            commands::commander::run(&client, command, &global).await
         }
         Commands::Events { filter } => commands::events::run(&client, filter).await,
         Commands::Status => commands::status::run(&client, &*fmt).await,
