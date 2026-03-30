@@ -13,6 +13,12 @@ use tokio::sync::mpsc;
 
 use protocol::{DaemonRequest, DaemonResponse, RING_BUFFER_CAPACITY, read_request, send_response};
 
+/// Timeout for PTY output writes (high frequency, latency-sensitive).
+const OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Timeout for GetState, Ping, and Exited response writes (less frequent, larger payloads).
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// State file structure written after socket bind.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct DaemonStateFile {
@@ -302,21 +308,7 @@ pub async fn run_pty_daemon(
                 // reconnect and get scrollback via GetState.
                 if let Some(ref mut w) = client_writer {
                     let resp = DaemonResponse::Output { data };
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        send_response(w, &resp),
-                    ).await;
-                    let failed = match result {
-                        Ok(Ok(())) => false,
-                        Ok(Err(e)) => {
-                            tracing::warn!(error = %e, "socket write error, disconnecting client");
-                            true
-                        }
-                        Err(_) => {
-                            tracing::warn!("socket write timed out, disconnecting client");
-                            true
-                        }
-                    };
+                    let failed = send_with_timeout(w, &resp, OUTPUT_TIMEOUT, "Output").await;
                     if failed {
                         client_writer = None;
                         if let Some(handle) = reader_handle.take() {
@@ -330,10 +322,10 @@ pub async fn run_pty_daemon(
             Some(exit_code) = pty_eof_rx.recv() => {
                 tracing::info!(session_id = %session_id, ?exit_code, "shell exited");
 
-                // Notify connected client
+                // Notify connected client (best-effort with timeout)
                 if let Some(ref mut w) = client_writer {
                     let resp = DaemonResponse::Exited { code: exit_code };
-                    let _ = send_response(w, &resp).await;
+                    let _ = send_with_timeout(w, &resp, RESPONSE_TIMEOUT, "Exited").await;
                 }
 
                 // Cleanup
@@ -374,7 +366,13 @@ pub async fn run_pty_daemon(
                                 scrollback,
                                 started_at: started_at.clone(),
                             };
-                            let _ = send_response(w, &resp).await;
+                            let failed = send_with_timeout(w, &resp, RESPONSE_TIMEOUT, "GetState").await;
+                            if failed {
+                                client_writer = None;
+                                if let Some(handle) = reader_handle.take() {
+                                    handle.abort();
+                                }
+                            }
                         }
                     }
                     DaemonRequest::Shutdown => {
@@ -388,7 +386,13 @@ pub async fn run_pty_daemon(
                     }
                     DaemonRequest::Ping => {
                         if let Some(ref mut w) = client_writer {
-                            let _ = send_response(w, &DaemonResponse::Pong).await;
+                            let failed = send_with_timeout(w, &DaemonResponse::Pong, RESPONSE_TIMEOUT, "Ping").await;
+                            if failed {
+                                client_writer = None;
+                                if let Some(handle) = reader_handle.take() {
+                                    handle.abort();
+                                }
+                            }
                         }
                     }
                 }
@@ -400,6 +404,28 @@ pub async fn run_pty_daemon(
                 cleanup(&socket_path, &state_file_path);
                 return;
             }
+        }
+    }
+}
+
+/// Send a daemon response with a timeout. Returns `true` if the write failed
+/// (error or timeout), meaning the client should be disconnected.
+async fn send_with_timeout<W: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    resp: &DaemonResponse,
+    timeout: std::time::Duration,
+    label: &str,
+) -> bool {
+    let result = tokio::time::timeout(timeout, send_response(writer, resp)).await;
+    match result {
+        Ok(Ok(())) => false,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "{label} socket write error, disconnecting client");
+            true
+        }
+        Err(_) => {
+            tracing::warn!("{label} socket write timed out, disconnecting client");
+            true
         }
     }
 }

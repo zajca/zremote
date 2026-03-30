@@ -243,136 +243,7 @@ pub(super) async fn handle_agent_message(
             );
         }
         AgentMessage::SessionsRecovered { sessions } => {
-            tracing::info!(
-                host_id = %host_id,
-                count = sessions.len(),
-                "agent reported recovered sessions"
-            );
-
-            let now = chrono::Utc::now().to_rfc3339();
-
-            // Get all non-closed sessions for this host from BOTH in-memory
-            // store and DB.
-            let host_session_ids: Vec<uuid::Uuid> = {
-                let mut ids: HashSet<uuid::Uuid> = {
-                    let sessions_store = state.sessions.read().await;
-                    sessions_store
-                        .iter()
-                        .filter(|(_, s)| s.host_id == host_id && s.status != SessionStatus::Closed)
-                        .map(|(id, _)| *id)
-                        .collect()
-                };
-                // Also check DB for sessions not yet in memory (server restart case)
-                if let Ok(db_rows) = sqlx::query_scalar::<_, String>(
-                    "SELECT id FROM sessions WHERE host_id = ? AND status != 'closed'",
-                )
-                .bind(host_id.to_string())
-                .fetch_all(&state.db)
-                .await
-                {
-                    for row in db_rows {
-                        if let Ok(id) = row.parse::<uuid::Uuid>() {
-                            ids.insert(id);
-                        }
-                    }
-                }
-                ids.into_iter().collect()
-            };
-
-            let recovered_ids: HashSet<uuid::Uuid> =
-                sessions.iter().map(|s| s.session_id).collect();
-
-            // Resume recovered sessions
-            for recovered in &sessions {
-                // Update DB: suspended -> active
-                if let Err(e) = sqlx::query(
-                    "UPDATE sessions SET status = 'active', suspended_at = NULL, pid = ?, shell = ? WHERE id = ?",
-                )
-                .bind(i64::from(recovered.pid))
-                .bind(&recovered.shell)
-                .bind(recovered.session_id.to_string())
-                .execute(&state.db)
-                .await
-                {
-                    tracing::error!(session_id = %recovered.session_id, error = %e, "failed to resume session in DB");
-                    continue;
-                }
-
-                // Update in-memory state
-                let mut sessions_store = state.sessions.write().await;
-                if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
-                    session.status = SessionStatus::Active;
-                    // Notify connected browsers
-                    let resume_msg = crate::state::BrowserMessage::SessionResumed;
-                    session.browser_senders.retain(|sender| {
-                        match sender.try_send(resume_msg.clone()) {
-                            Ok(()) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-                        }
-                    });
-                } else {
-                    // Session was not in memory (e.g., server restarted too). Create it.
-                    sessions_store.insert(
-                        recovered.session_id,
-                        crate::state::SessionState::new(recovered.session_id, host_id),
-                    );
-                    if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
-                        session.status = SessionStatus::Active;
-                    }
-                }
-
-                // Emit SessionResumed event
-                let _ = state
-                    .events
-                    .send(crate::state::ServerEvent::SessionResumed {
-                        session_id: recovered.session_id.to_string(),
-                    });
-
-                tracing::info!(
-                    session_id = %recovered.session_id,
-                    pid = recovered.pid,
-                    "session resumed after agent reconnection"
-                );
-            }
-
-            // Close sessions that were NOT recovered by the agent
-            for sid in &host_session_ids {
-                if !recovered_ids.contains(sid) {
-                    let sid_str = sid.to_string();
-
-                    // Update DB
-                    if let Err(e) = sqlx::query(
-                        "UPDATE sessions SET status = 'closed', closed_at = ? WHERE id = ?",
-                    )
-                    .bind(&now)
-                    .bind(&sid_str)
-                    .execute(&state.db)
-                    .await
-                    {
-                        tracing::error!(session_id = %sid, error = %e, "failed to close unrecovered session in DB");
-                    }
-
-                    // Remove from memory + notify browsers
-                    let mut sessions_store = state.sessions.write().await;
-                    if let Some(session) = sessions_store.remove(sid) {
-                        let close_msg =
-                            crate::state::BrowserMessage::SessionClosed { exit_code: None };
-                        for sender in &session.browser_senders {
-                            let _ = sender.try_send(close_msg.clone());
-                        }
-                    }
-
-                    // Emit SessionClosed event
-                    let _ = state.events.send(crate::state::ServerEvent::SessionClosed {
-                        session_id: sid_str,
-                        exit_code: None,
-                    });
-
-                    tracing::info!(session_id = %sid, "closed unrecovered session");
-                }
-            }
-
+            handle_sessions_recovered(state, host_id, sessions).await;
             return Ok(());
         }
         AgentMessage::Error {
@@ -708,6 +579,164 @@ pub(super) async fn handle_agent_message(
         }
     }
     Ok(())
+}
+
+/// Handle `SessionsRecovered` message: resume recovered sessions and suspend unrecovered ones.
+///
+/// Extracted from `handle_agent_message` for testability.
+pub(super) async fn handle_sessions_recovered(
+    state: &AppState,
+    host_id: HostId,
+    sessions: Vec<zremote_protocol::RecoveredSession>,
+) {
+    tracing::info!(
+        host_id = %host_id,
+        count = sessions.len(),
+        "agent reported recovered sessions"
+    );
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Get all non-closed sessions for this host from BOTH in-memory store and DB.
+    let host_session_ids: Vec<uuid::Uuid> = {
+        let mut ids: HashSet<uuid::Uuid> = {
+            let sessions_store = state.sessions.read().await;
+            sessions_store
+                .iter()
+                .filter(|(_, s)| s.host_id == host_id && s.status != SessionStatus::Closed)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        // Also check DB for sessions not yet in memory (server restart case)
+        if let Ok(db_rows) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM sessions WHERE host_id = ? AND status != 'closed'",
+        )
+        .bind(host_id.to_string())
+        .fetch_all(&state.db)
+        .await
+        {
+            for row in db_rows {
+                if let Ok(id) = row.parse::<uuid::Uuid>() {
+                    ids.insert(id);
+                }
+            }
+        }
+        ids.into_iter().collect()
+    };
+
+    let recovered_ids: HashSet<uuid::Uuid> = sessions.iter().map(|s| s.session_id).collect();
+
+    // Resume recovered sessions
+    for recovered in &sessions {
+        // Update DB: suspended -> active
+        if let Err(e) = sqlx::query(
+            "UPDATE sessions SET status = 'active', suspended_at = NULL, pid = ?, shell = ? WHERE id = ?",
+        )
+        .bind(i64::from(recovered.pid))
+        .bind(&recovered.shell)
+        .bind(recovered.session_id.to_string())
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(session_id = %recovered.session_id, error = %e, "failed to resume session in DB");
+            continue;
+        }
+
+        // Update in-memory state
+        let mut sessions_store = state.sessions.write().await;
+        if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
+            session.status = SessionStatus::Active;
+            // Notify connected browsers
+            let resume_msg = crate::state::BrowserMessage::SessionResumed;
+            session
+                .browser_senders
+                .retain(|sender| match sender.try_send(resume_msg.clone()) {
+                    Ok(()) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                });
+        } else {
+            // Session was not in memory (e.g., server restarted too). Create it.
+            sessions_store.insert(
+                recovered.session_id,
+                crate::state::SessionState::new(recovered.session_id, host_id),
+            );
+            if let Some(session) = sessions_store.get_mut(&recovered.session_id) {
+                session.status = SessionStatus::Active;
+            }
+        }
+
+        // Emit SessionResumed event
+        let _ = state
+            .events
+            .send(crate::state::ServerEvent::SessionResumed {
+                session_id: recovered.session_id.to_string(),
+            });
+
+        tracing::info!(
+            session_id = %recovered.session_id,
+            pid = recovered.pid,
+            "session resumed after agent reconnection"
+        );
+    }
+
+    // Suspend sessions that were NOT recovered by the agent
+    // (daemon may still be alive, so don't close them permanently)
+    for sid in &host_session_ids {
+        if !recovered_ids.contains(sid) {
+            // Skip sessions already suspended to avoid duplicate browser
+            // notifications and unnecessary suspended_at overwrites.
+            let already_suspended = {
+                let sessions_store = state.sessions.read().await;
+                sessions_store
+                    .get(sid)
+                    .is_some_and(|s| s.status == SessionStatus::Suspended)
+            };
+            if already_suspended {
+                tracing::debug!(session_id = %sid, "session already suspended, skipping");
+                continue;
+            }
+
+            let sid_str = sid.to_string();
+
+            // Update DB: mark as suspended (only if not already suspended)
+            if let Err(e) = sqlx::query(
+                "UPDATE sessions SET status = 'suspended', suspended_at = ? WHERE id = ? AND status != 'suspended'",
+            )
+            .bind(&now)
+            .bind(&sid_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::error!(session_id = %sid, error = %e, "failed to suspend unrecovered session in DB");
+            }
+
+            // Update in-memory status + notify browsers
+            {
+                let mut sessions_store = state.sessions.write().await;
+                if let Some(session) = sessions_store.get_mut(sid) {
+                    session.status = SessionStatus::Suspended;
+                    let suspend_msg = crate::state::BrowserMessage::SessionSuspended;
+                    session.browser_senders.retain(|sender| {
+                        match sender.try_send(suspend_msg.clone()) {
+                            Ok(()) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+                        }
+                    });
+                }
+            }
+
+            // Emit SessionSuspended event
+            let _ = state
+                .events
+                .send(crate::state::ServerEvent::SessionSuspended {
+                    session_id: sid_str,
+                });
+
+            tracing::info!(session_id = %sid, "suspended unrecovered session (daemon may still be alive)");
+        }
+    }
 }
 
 /// Upsert worktree children for a project and clean up stale ones.
@@ -2101,5 +2130,197 @@ mod tests {
             state.connections.get_hostname(&host_id).await.is_some(),
             "newer connection should still be registered"
         );
+    }
+
+    // ── handle_sessions_recovered ──
+
+    #[tokio::test]
+    async fn sessions_recovered_suspends_unrecovered_sessions() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let recovered_sid = Uuid::new_v4();
+        let unrecovered_sid = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "recover-host").await;
+        insert_test_session(
+            &state,
+            &recovered_sid.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+        insert_test_session(
+            &state,
+            &unrecovered_sid.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        // Add both sessions to in-memory store
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut s1 = zremote_core::state::SessionState::new(recovered_sid, host_id);
+            s1.status = SessionStatus::Active;
+            sessions.insert(recovered_sid, s1);
+            let mut s2 = zremote_core::state::SessionState::new(unrecovered_sid, host_id);
+            s2.status = SessionStatus::Active;
+            sessions.insert(unrecovered_sid, s2);
+        }
+
+        // Subscribe to events before calling the handler
+        let mut events_rx = state.events.subscribe();
+
+        // Only recover one session
+        let recovered = vec![zremote_protocol::RecoveredSession {
+            session_id: recovered_sid,
+            shell: "/bin/bash".to_string(),
+            pid: 1234,
+        }];
+
+        super::handle_sessions_recovered(&state, host_id, recovered).await;
+
+        // Unrecovered session should be suspended in DB
+        let row: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(unrecovered_sid.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.0, "suspended",
+            "unrecovered session should be suspended in DB"
+        );
+
+        // Unrecovered session should still be in memory with Suspended status
+        {
+            let sessions = state.sessions.read().await;
+            let session = sessions
+                .get(&unrecovered_sid)
+                .expect("unrecovered session should still exist in memory (not removed)");
+            assert_eq!(session.status, SessionStatus::Suspended);
+        }
+
+        // Recovered session should be active in DB
+        let row: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(recovered_sid.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row.0, "active", "recovered session should be active in DB");
+
+        // Recovered session should be active in memory
+        {
+            let sessions = state.sessions.read().await;
+            let session = sessions
+                .get(&recovered_sid)
+                .expect("recovered session should exist");
+            assert_eq!(session.status, SessionStatus::Active);
+        }
+
+        // Verify events: should see SessionResumed and SessionSuspended, but NOT SessionClosed
+        let mut saw_resumed = false;
+        let mut saw_suspended = false;
+        let mut saw_closed = false;
+        // Drain all available events
+        while let Ok(event) = events_rx.try_recv() {
+            match &event {
+                crate::state::ServerEvent::SessionResumed { session_id }
+                    if *session_id == recovered_sid.to_string() =>
+                {
+                    saw_resumed = true;
+                }
+                crate::state::ServerEvent::SessionSuspended { session_id }
+                    if *session_id == unrecovered_sid.to_string() =>
+                {
+                    saw_suspended = true;
+                }
+                crate::state::ServerEvent::SessionClosed { .. } => {
+                    saw_closed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_resumed,
+            "should emit SessionResumed for recovered session"
+        );
+        assert!(
+            saw_suspended,
+            "should emit SessionSuspended for unrecovered session"
+        );
+        assert!(
+            !saw_closed,
+            "should NOT emit SessionClosed for unrecovered session"
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_recovered_then_resumed_on_second_recovery() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "resume-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        // Add session to in-memory store
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut s = zremote_core::state::SessionState::new(session_id, host_id);
+            s.status = SessionStatus::Active;
+            sessions.insert(session_id, s);
+        }
+
+        // First recovery: session is NOT in the recovered list -> should be suspended
+        super::handle_sessions_recovered(&state, host_id, vec![]).await;
+
+        // Verify suspended state
+        {
+            let sessions = state.sessions.read().await;
+            let session = sessions.get(&session_id).expect("session should exist");
+            assert_eq!(
+                session.status,
+                SessionStatus::Suspended,
+                "session should be suspended after first recovery"
+            );
+        }
+        let row: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row.0, "suspended");
+
+        // Second recovery: session IS in the recovered list -> should be resumed
+        let recovered = vec![zremote_protocol::RecoveredSession {
+            session_id,
+            shell: "/bin/zsh".to_string(),
+            pid: 5678,
+        }];
+
+        super::handle_sessions_recovered(&state, host_id, recovered).await;
+
+        // Verify active state
+        {
+            let sessions = state.sessions.read().await;
+            let session = sessions.get(&session_id).expect("session should exist");
+            assert_eq!(
+                session.status,
+                SessionStatus::Active,
+                "session should be active after second recovery"
+            );
+        }
+        let row: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(row.0, "active");
     }
 }

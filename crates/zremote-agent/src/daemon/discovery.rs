@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use zremote_protocol::SessionId;
@@ -9,6 +10,12 @@ use super::session::DaemonSession;
 use crate::session::PtyOutput;
 
 use super::socket_dir;
+
+/// Maximum number of reconnect attempts per daemon session during discovery.
+const RECONNECT_MAX_ATTEMPTS: u32 = 3;
+
+/// Delay between reconnect retry attempts.
+const RECONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Discover running daemon sessions from a previous agent lifecycle.
 ///
@@ -90,50 +97,70 @@ pub async fn discover_daemon_sessions(
             continue;
         }
 
-        // Try to reconnect
-        match DaemonSession::reconnect(
-            session_id,
-            socket_path,
-            path.clone(),
-            state.daemon_pid,
-            state.shell_pid,
-            output_tx.clone(),
-        )
-        .await
-        {
-            Ok((session, scrollback, daemon_started_at)) => {
-                // PID reuse protection: verify the daemon's reported started_at
-                // matches the state file. If they differ, this is a different process
-                // that reused the PID.
-                if let Some(ref reported) = daemon_started_at
-                    && reported != &state.started_at
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        state_file_started_at = %state.started_at,
-                        daemon_started_at = %reported,
-                        "started_at mismatch: PID reuse detected, skipping"
-                    );
-                    session.detach();
-                    continue;
+        // Try to reconnect with retries
+        let mut reconnect_result = None;
+        for attempt in 1..=RECONNECT_MAX_ATTEMPTS {
+            match DaemonSession::reconnect(
+                session_id,
+                socket_path.clone(),
+                path.clone(),
+                state.daemon_pid,
+                state.shell_pid,
+                output_tx.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    reconnect_result = Some(result);
+                    break;
                 }
-
-                tracing::info!(
-                    session_id = %session_id,
-                    shell_pid = state.shell_pid,
-                    daemon_pid = state.daemon_pid,
-                    "recovered daemon session"
-                );
-                recovered.push((session, scrollback));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "failed to reconnect to daemon"
-                );
+                Err(e) => {
+                    if attempt < RECONNECT_MAX_ATTEMPTS {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            attempt,
+                            error = %e,
+                            "reconnect attempt failed, retrying"
+                        );
+                        tokio::time::sleep(RECONNECT_RETRY_DELAY).await;
+                    } else {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to reconnect to daemon after {RECONNECT_MAX_ATTEMPTS} attempts"
+                        );
+                    }
+                }
             }
         }
+
+        let Some((session, scrollback, daemon_started_at)) = reconnect_result else {
+            continue;
+        };
+
+        // PID reuse protection: verify the daemon's reported started_at
+        // matches the state file. If they differ, this is a different process
+        // that reused the PID.
+        if let Some(ref reported) = daemon_started_at
+            && reported != &state.started_at
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                state_file_started_at = %state.started_at,
+                daemon_started_at = %reported,
+                "started_at mismatch: PID reuse detected, skipping"
+            );
+            session.detach();
+            continue;
+        }
+
+        tracing::info!(
+            session_id = %session_id,
+            shell_pid = state.shell_pid,
+            daemon_pid = state.daemon_pid,
+            "recovered daemon session"
+        );
+        recovered.push((session, scrollback));
     }
 
     recovered
@@ -616,6 +643,53 @@ mod tests {
     fn verify_proc_starttime_nonexistent_pid() {
         let result = super::verify_proc_starttime(99_999_999, "2026-01-01T00:00:00Z");
         assert!(result.is_none(), "nonexistent PID should return None");
+    }
+
+    #[tokio::test]
+    async fn reconnect_retry_with_nonexistent_socket() {
+        // Test that the retry loop runs multiple attempts when reconnect fails.
+        // We use a nonexistent socket path so every attempt fails immediately.
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("nonexistent.sock");
+        let state_path = tmp.path().join("test.json");
+        let session_id: SessionId = uuid::Uuid::new_v4().into();
+        let (tx, _rx) = mpsc::channel(64);
+
+        let start = std::time::Instant::now();
+        let mut last_err = None;
+        for attempt in 1..=RECONNECT_MAX_ATTEMPTS {
+            match DaemonSession::reconnect(
+                session_id,
+                socket_path.clone(),
+                state_path.clone(),
+                99_999_999,
+                99_999_998,
+                tx.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    panic!("reconnect should not succeed with nonexistent socket");
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < RECONNECT_MAX_ATTEMPTS {
+                        tokio::time::sleep(RECONNECT_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+
+        // All attempts should have failed
+        assert!(last_err.is_some(), "should have recorded an error");
+
+        // We should have waited at least (MAX_ATTEMPTS - 1) * RETRY_DELAY
+        let min_expected = RECONNECT_RETRY_DELAY * (RECONNECT_MAX_ATTEMPTS - 1);
+        assert!(
+            elapsed >= min_expected,
+            "elapsed {elapsed:?} should be >= {min_expected:?} (waited between retries)"
+        );
     }
 
     #[tokio::test]
