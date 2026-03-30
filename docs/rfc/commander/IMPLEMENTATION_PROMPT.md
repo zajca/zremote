@@ -95,14 +95,66 @@ Key requirements:
 - Exit code propagation from spawned `claude` process
 - Shell quoting for prompt argument (see `crates/zremote-agent/src/claude/mod.rs` for pattern)
 
+### Workflow: Teams + Worktrees
+
+You are the **team lead**. You plan, delegate, review, and merge. Teammates implement.
+
+#### Setup
+
+1. Create a team: `TeamCreate` with name `commander`
+2. Create tasks for each phase via `TaskCreate` with dependencies:
+   - Prerequisite: ServerEvent Unknown (no dependencies)
+   - Phase 1: LLM Output Format (no dependencies)
+   - Phase 2: Knowledge Extract CLI (no dependencies)
+   - Phase 3: Commander Generate (depends on Phase 1 + Phase 2)
+   - Phase 4: Commander Start (depends on Phase 3)
+
+#### Spawning teammates
+
+For each phase, spawn a teammate agent with:
+- `team_name: "commander"`
+- `isolation: "worktree"` -- each teammate works in an isolated git worktree
+- `mode: "bypassPermissions"` -- no interactive prompts
+- Unique `name` per teammate (e.g., `"phase-1-llm"`, `"phase-2-extract"`)
+
+Phases 1 and 2 have no dependencies -- spawn them **in parallel** (single message, two Agent tool calls).
+
+#### Teammate prompt template
+
+Each teammate prompt must include:
+- Full RFC content for their phase (read the file and include it)
+- Exact files to create/modify
+- Existing code patterns to follow (read relevant source files first, include snippets)
+- Instructions to run `cargo build --workspace && cargo test --workspace && cargo clippy --workspace` before reporting done
+- Instructions to read source files before modifying them
+
+#### After each phase completes
+
+1. **Read the actual worktree diff** (`git diff main...HEAD` in the worktree). Never rely on teammate's summary alone.
+2. **Verify against RFC checklist**: grep for every function, struct, test mentioned in the RFC. Missing = blocking.
+3. **Spawn reviewers**: `rust-reviewer` and `code-reviewer` agents on the worktree diff.
+4. **Fix ALL review findings** -- send teammate back to fix if needed.
+5. **Merge** the worktree branch into main only after all issues are resolved.
+6. **Run full test suite on main** after merge to catch integration issues.
+
+#### Parallel execution
+
+```
+[Prerequisite] ─────────────────────────────────────────┐
+[Phase 1: LLM output] ──────────────┐                   │
+[Phase 2: Knowledge extract] ───────┤ (parallel)        │
+                                     ├──> [Phase 3] ──> [Phase 4]
+```
+
 ### Implementation rules
 
 1. Read the project's `CLAUDE.md` first -- it has detailed coding conventions, testing requirements, and review workflow.
-2. Run `cargo check --workspace` frequently during development.
-3. Write tests for all new code. Use in-memory SQLite for API handler tests, never mock.
-4. After implementing each phase, run `cargo test --workspace` and `cargo clippy --workspace`.
-5. After all implementation is done, spawn `rust-reviewer` and `code-reviewer` agents for review.
-6. Fix ALL review findings before committing.
-7. Commit inside `nix develop`: `nix develop --command bash -c 'git commit -m "message"'`
-8. Do NOT modify code outside the scope of this RFC. Do NOT refactor surrounding code.
-9. Phase 5 (TigerFS) is NOT in scope -- do not implement it.
+2. Always work in worktrees (`isolation: "worktree"`). Never modify the main repo directly.
+3. Run `cargo check --workspace` frequently during development.
+4. Write tests for all new code. Use in-memory SQLite for API handler tests, never mock.
+5. After implementing each phase, run `cargo test --workspace` and `cargo clippy --workspace`.
+6. Spawn `rust-reviewer` and `code-reviewer` agents for review after each phase.
+7. Fix ALL review findings before merging.
+8. Commit inside `nix develop`: `nix develop --command bash -c 'git commit -m "message"'`
+9. Do NOT modify code outside the scope of this RFC. Do NOT refactor surrounding code.
+10. Phase 5 (TigerFS) is NOT in scope -- do not implement it.
