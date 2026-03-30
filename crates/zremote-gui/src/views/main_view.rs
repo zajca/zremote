@@ -33,6 +33,10 @@ pub struct MainView {
     help_modal: Option<Entity<HelpModal>>,
     double_shift: DoubleShiftDetector,
     toasts: Entity<ToastContainer>,
+    /// Whether the OS window is currently focused/active.
+    window_active: bool,
+    /// Subscription to window activation changes (must be stored to stay alive).
+    _activation_sub: Subscription,
     /// Whether the event WebSocket is currently connected.
     server_connected: bool,
     /// Whether the event WebSocket has ever successfully connected.
@@ -43,7 +47,7 @@ pub struct MainView {
 }
 
 impl MainView {
-    pub fn new(app_state: Arc<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| SidebarView::new(app_state.clone(), cx));
 
         // Listen for sidebar session selection events
@@ -62,6 +66,12 @@ impl MainView {
 
         let focus_handle = cx.focus_handle();
 
+        // Track window activation state for native notifications
+        let activation_sub =
+            cx.observe_window_activation(window, |this: &mut Self, window, _cx| {
+                this.window_active = window.is_window_active();
+            });
+
         Self {
             app_state,
             sidebar,
@@ -72,6 +82,8 @@ impl MainView {
             help_modal: None,
             double_shift: DoubleShiftDetector::new(),
             toasts,
+            window_active: window.is_window_active(),
+            _activation_sub: activation_sub,
             server_connected: true, // Assume connected until first Disconnected event
             ever_connected: false,
             current_host_id: None,
@@ -225,6 +237,16 @@ impl MainView {
             container.push(message, level, toast_icon);
             cx.notify();
         });
+
+        // Send native OS notification when the window is not focused
+        if !self.window_active {
+            crate::notifications::send_native(
+                "ZRemote",
+                message,
+                level,
+                &self.app_state.tokio_handle,
+            );
+        }
     }
 
     fn handle_server_event(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {

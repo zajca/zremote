@@ -29,6 +29,7 @@
 mod app_state;
 mod assets;
 mod icons;
+mod notifications;
 mod persistence;
 mod terminal_handle;
 #[allow(dead_code)]
