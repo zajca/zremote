@@ -14,6 +14,8 @@ cli = ["dep:zremote-cli"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+dotenvy = "0.15"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zremote-gui = { workspace = true, optional = true }

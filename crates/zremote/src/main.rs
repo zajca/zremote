@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -7,6 +9,10 @@ use clap::{Parser, Subcommand};
     about = "ZRemote — remote machine management"
 )]
 struct Cli {
+    /// Override config directory (default: ~/.config/zremote)
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -55,6 +61,7 @@ enum Commands {
 }
 
 fn main() {
+    load_dotenv();
     let cli = Cli::parse();
 
     match cli.command {
@@ -64,7 +71,7 @@ fn main() {
             local,
             port,
             exit_after,
-        } => run_gui(server, local, port, exit_after),
+        } => run_gui(&server, local, port, exit_after),
 
         #[cfg(feature = "agent")]
         Commands::Agent { command } => {
@@ -78,8 +85,46 @@ fn main() {
     }
 }
 
+/// Pre-scan argv for `--config-dir` before clap parsing.
+fn parse_config_dir_from_args() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config-dir" {
+            return args.get(i + 1).map(PathBuf::from);
+        }
+        if let Some(val) = args[i].strip_prefix("--config-dir=") {
+            return Some(PathBuf::from(val));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Load environment variables from `<config_dir>/.env` before clap parsing.
+///
+/// Existing process env vars are NOT overwritten (they take precedence).
+/// Silent if .env file does not exist.
+fn load_dotenv() {
+    let config_dir = parse_config_dir_from_args().unwrap_or_else(|| {
+        dirs::config_dir()
+            .expect("could not determine config directory")
+            .join("zremote")
+    });
+
+    let env_path = config_dir.join(".env");
+
+    match dotenvy::from_path(&env_path) {
+        Ok(()) => {}
+        Err(dotenvy::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("warning: failed to load {}: {e}", env_path.display());
+        }
+    }
+}
+
 #[cfg(feature = "gui")]
-fn run_gui(server: String, local: bool, port: u16, exit_after: Option<u64>) {
+fn run_gui(server: &str, local: bool, port: u16, exit_after: Option<u64>) {
     // Initialize tracing (before anything else)
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -96,7 +141,7 @@ fn run_gui(server: String, local: bool, port: u16, exit_after: Option<u64>) {
         }
         url
     } else {
-        zremote_gui::extract_base_url(&server)
+        zremote_gui::extract_base_url(server)
     };
 
     zremote_gui::run(zremote_gui::GuiConfig {
