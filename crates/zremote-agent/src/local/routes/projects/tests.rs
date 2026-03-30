@@ -1519,7 +1519,7 @@ fn create_worktree_request_deserialize_full() {
 
 #[test]
 fn configure_request_deserialize_empty() {
-    let json = r#"{}"#;
+    let json = r"{}";
     let req: ConfigureRequest = serde_json::from_str(json).unwrap();
     assert!(req.model.is_none());
     assert!(req.skip_permissions.is_none());

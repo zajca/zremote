@@ -158,7 +158,7 @@ mod tests {
         let path = dir.path().join("transcript.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
         let large_slug = "a".repeat(10_000);
-        writeln!(f, r#"{{"type":"result","slug":"{}"}}"#, large_slug).unwrap();
+        writeln!(f, r#"{{"type":"result","slug":"{large_slug}"}}"#).unwrap();
 
         let (slug, _) = extract_slug(path.to_str().unwrap(), 0).unwrap();
         assert_eq!(slug.as_deref(), Some(large_slug.as_str()));

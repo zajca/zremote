@@ -420,7 +420,7 @@ mod tests {
                 let boot = super::system_boot_time().unwrap();
                 let clk = super::clock_ticks_per_sec();
                 let secs = boot.saturating_add(ticks / clk);
-                chrono::DateTime::from_timestamp(secs as i64, 0)
+                chrono::DateTime::from_timestamp(secs.cast_signed(), 0)
                     .unwrap()
                     .to_rfc3339()
             }
@@ -456,7 +456,7 @@ mod tests {
         let boot = btime.unwrap();
         let clk = super::clock_ticks_per_sec();
         let actual_start_secs = boot.saturating_add(ticks / clk);
-        let actual_start = chrono::DateTime::from_timestamp(actual_start_secs as i64, 0)
+        let actual_start = chrono::DateTime::from_timestamp(actual_start_secs.cast_signed(), 0)
             .unwrap()
             .to_rfc3339();
 

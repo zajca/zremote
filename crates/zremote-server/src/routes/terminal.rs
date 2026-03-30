@@ -283,7 +283,7 @@ mod tests {
         let pane_id = "my-pane";
         let frame = encode_binary_output(Some(pane_id), data);
         assert_eq!(frame[0], BINARY_TAG_PANE_OUTPUT);
-        assert_eq!(frame[1], pane_id.len() as u8);
+        assert_eq!(frame[1], u8::try_from(pane_id.len()).unwrap());
         assert_eq!(&frame[2..2 + pane_id.len()], pane_id.as_bytes());
         assert_eq!(&frame[2 + pane_id.len()..], data);
     }
