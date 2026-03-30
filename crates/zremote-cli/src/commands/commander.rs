@@ -26,6 +26,33 @@ pub enum CommanderCommand {
         #[arg(long)]
         no_dynamic: bool,
     },
+    /// Start a Commander CC session
+    Start {
+        /// Working directory for CC
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Claude model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Initial prompt for the Commander
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Run CC with --dangerously-skip-permissions
+        #[arg(long)]
+        skip_permissions: bool,
+        /// Don't regenerate CLAUDE.md if it already exists and is < 5 min old
+        #[arg(long)]
+        no_regenerate: bool,
+        /// Path to claude binary
+        #[arg(long, env = "CLAUDE_CODE_PATH")]
+        claude_path: Option<PathBuf>,
+    },
+    /// Show commander state
+    Status {
+        /// Target directory
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalOpts) -> i32 {
@@ -35,6 +62,27 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
             dir,
             no_dynamic,
         } => run_generate(client, global, write, dir, no_dynamic).await,
+        CommanderCommand::Start {
+            dir,
+            model,
+            prompt,
+            skip_permissions,
+            no_regenerate,
+            claude_path,
+        } => {
+            run_start(
+                client,
+                global,
+                dir,
+                model,
+                prompt,
+                skip_permissions,
+                no_regenerate,
+                claude_path,
+            )
+            .await
+        }
+        CommanderCommand::Status { dir } => run_status(dir),
     }
 }
 
@@ -244,6 +292,177 @@ async fn generate_dynamic(client: &ApiClient, server_url: &str) -> Result<String
 }
 
 // ---------------------------------------------------------------------------
+// Commander start & status
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn run_start(
+    client: &ApiClient,
+    global: &GlobalOpts,
+    dir: Option<PathBuf>,
+    model: Option<String>,
+    prompt: Option<String>,
+    skip_permissions: bool,
+    no_regenerate: bool,
+    claude_path: Option<PathBuf>,
+) -> i32 {
+    let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
+    if !work_dir.exists() {
+        eprintln!("Error: directory {} does not exist", work_dir.display());
+        return 1;
+    }
+
+    // Step 1: Generate CLAUDE.md (reuse generate logic)
+    let commander_md = work_dir.join(".claude").join("commander.md");
+
+    let should_generate = if no_regenerate && commander_md.exists() {
+        match commander_md.metadata().and_then(|m| m.modified()) {
+            Ok(modified) => {
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or(Duration::MAX);
+                age >= CACHE_TTL
+            }
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
+
+    if should_generate {
+        let exit = run_generate(client, global, true, Some(work_dir.clone()), false).await;
+        if exit != 0 {
+            return exit;
+        }
+    }
+
+    // Step 2: Locate claude binary
+    let claude_bin = match find_claude_binary(claude_path.as_deref()) {
+        Ok(path) => path,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return 1;
+        }
+    };
+
+    // Step 3: Build and run command
+    let mut cmd = std::process::Command::new(&claude_bin);
+    cmd.current_dir(&work_dir);
+
+    cmd.env("ZREMOTE_OUTPUT", "llm");
+    cmd.env("ZREMOTE_SERVER_URL", &global.server);
+    if let Some(ref host) = global.host {
+        cmd.env("ZREMOTE_HOST_ID", host);
+    }
+
+    if let Some(ref m) = model {
+        cmd.arg("--model").arg(m);
+    }
+    if skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+    if let Some(ref p) = prompt {
+        cmd.arg("-p").arg(p);
+    }
+
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("Error launching claude: {e}");
+            1
+        }
+    }
+}
+
+fn find_claude_binary(explicit: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        if path.exists() {
+            return Ok(path.to_path_buf());
+        }
+        return Err(format!("claude binary not found at {}", path.display()));
+    }
+
+    if let Ok(path) = std::env::var("CLAUDE_CODE_PATH") {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("which").arg("claude").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let common_paths = [
+        format!("{home}/.local/bin/claude"),
+        format!("{home}/.npm/bin/claude"),
+        "/usr/local/bin/claude".to_string(),
+    ];
+    for p in &common_paths {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err("claude binary not found. Install Claude Code (https://docs.anthropic.com/en/docs/claude-code) or use --claude-path".to_string())
+}
+
+fn run_status(dir: Option<PathBuf>) -> i32 {
+    let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
+    let commander_md = work_dir.join(".claude").join("commander.md");
+
+    if commander_md.exists() {
+        println!("Commander CLAUDE.md: {}", commander_md.display());
+        match commander_md.metadata().and_then(|m| m.modified()) {
+            Ok(modified) => {
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or(Duration::MAX);
+                let mins = age.as_secs() / 60;
+                println!("Generated: {mins}m ago");
+                if age < CACHE_TTL {
+                    println!("Status: fresh (< 5m)");
+                } else {
+                    println!("Status: stale (> 5m, will regenerate on next start)");
+                }
+            }
+            Err(e) => {
+                println!("Modified time: unknown ({e})");
+            }
+        }
+    } else {
+        println!("Commander CLAUDE.md: not found");
+        println!(
+            "Run `zremote cli commander generate --write` or `zremote cli commander start` to create it."
+        );
+    }
+
+    match find_claude_binary(None) {
+        Ok(path) => println!("Claude binary: {}", path.display()),
+        Err(_) => println!("Claude binary: not found"),
+    }
+
+    if read_cache().is_some() {
+        println!("Infrastructure cache: fresh (< 5m)");
+    } else {
+        println!("Infrastructure cache: stale or missing");
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Static section generators
 // ---------------------------------------------------------------------------
 
@@ -389,6 +608,23 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(cache_path());
+    }
+
+    #[test]
+    fn find_claude_binary_with_explicit_nonexistent_path() {
+        let result = find_claude_binary(Some(std::path::Path::new("/nonexistent/claude")));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn commander_md_path_is_correct() {
+        let dir = PathBuf::from("/tmp/test-project");
+        let expected = dir.join(".claude").join("commander.md");
+        assert_eq!(
+            expected.to_str().unwrap(),
+            "/tmp/test-project/.claude/commander.md"
+        );
     }
 
     #[test]
