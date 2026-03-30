@@ -26,6 +26,13 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 - Token usage, cost tracking, and session statistics
 - Full-text transcript search (FTS5)
 
+**Commander (AI Orchestration)**
+- Meta-orchestration layer: a Claude Code instance that orchestrates other CC instances across hosts
+- Generates optimized CLAUDE.md with CLI reference, infrastructure state, and workflow recipes
+- LLM-optimized output format (`--output llm`) with compact JSON Lines and short keys
+- Single command to generate instructions and launch Claude Code with correct environment
+- Memory sync: extract learnings from completed tasks, inject context into new ones
+
 **Other**
 - Telegram notifications (host events, session activity, pending approvals)
 - MCP server mode for Claude Code tool integration
@@ -159,6 +166,7 @@ zremote <COMMAND>
 |---------|-------------|
 | `gui` | Launch the GPUI desktop client |
 | `agent` | Agent subcommands (local, server, run, mcp, etc.) |
+| `cli` | CLI for managing hosts, sessions, projects, tasks, and Commander |
 
 ### `zremote gui`
 
@@ -215,6 +223,86 @@ zremote agent mcp-serve --project PATH [--ov-port 8741]
 
 ```
 zremote agent configure --project PATH [--model sonnet] [--skip-permissions]
+```
+
+## Commander
+
+Commander is a meta-orchestration layer -- a Claude Code instance with injected instructions that orchestrates other CC instances across remote machines via `zremote cli`.
+
+### Quick Start
+
+```bash
+# Start a Commander session (generates CLAUDE.md + launches Claude Code)
+zremote cli --server http://myserver:3000 commander start
+
+# With a specific task
+zremote cli commander start --prompt "Deploy the auth fix to staging"
+
+# Autonomous mode
+zremote cli commander start --skip-permissions --prompt "Process LIN-123"
+```
+
+### Commands
+
+```bash
+# Generate Commander CLAUDE.md to stdout
+zremote cli commander generate
+
+# Generate and write to project directory
+zremote cli commander generate --write --dir /path/to/project
+
+# Skip live API queries (offline / static template only)
+zremote cli commander generate --no-dynamic
+
+# Check commander state
+zremote cli commander status
+```
+
+### `commander start` Flags
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--dir` | -- | cwd | Working directory for the CC session |
+| `--model` | -- | CC default | Claude model to use |
+| `--prompt` | -- | (interactive) | Initial prompt for the Commander |
+| `--skip-permissions` | -- | false | Run CC with `--dangerously-skip-permissions` |
+| `--no-regenerate` | -- | false | Skip CLAUDE.md regeneration if file is < 5 min old |
+| `--claude-path` | `CLAUDE_CODE_PATH` | auto-detect | Path to `claude` binary |
+
+### LLM Output Format
+
+The `--output llm` format produces compact JSON Lines optimized for token efficiency:
+
+```bash
+$ zremote cli --output llm host list
+{"_t":"host","id":"a1b2c3d4-...","n":"dev-box","st":"online","v":"0.9.0","hostname":"dev.internal"}
+{"_t":"host","id":"e5f6g7h8-...","n":"staging","st":"offline","v":"0.8.5","hostname":"staging.internal"}
+
+$ zremote cli --output llm status
+{"_t":"status","mode":"server","v":"0.9.0","hosts":3,"online":2}
+```
+
+Short keys (`_t`, `n`, `st`, `v`, etc.) minimize token consumption. Set globally with `ZREMOTE_OUTPUT=llm` (Commander does this automatically).
+
+### How It Works
+
+1. `commander generate` assembles a CLAUDE.md from static CLI reference, context protocol instructions, live infrastructure state (cached 5 min), workflow recipes, and error handling guidance
+2. `commander start` generates the CLAUDE.md, sets environment variables (`ZREMOTE_OUTPUT=llm`, `ZREMOTE_SERVER_URL`), and launches Claude Code
+3. The Commander CC uses `zremote cli` commands to list hosts, create tasks on remote machines, monitor progress, and sync context via memory extraction
+
+### Knowledge Extract
+
+Extract learnings from completed agentic loops:
+
+```bash
+# Extract memories from a specific loop
+zremote cli knowledge extract <project_id> --loop-id <loop_id>
+
+# Extract from the latest loop in a session
+zremote cli knowledge extract <project_id> --session-id <session_id>
+
+# Extract and save to the project
+zremote cli knowledge extract <project_id> --loop-id <loop_id> --save
 ```
 
 ## Persistent Sessions
