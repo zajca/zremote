@@ -17,15 +17,97 @@ pub async fn install_hooks() -> Result<(), InstallError> {
     install_hooks_at(Path::new(&home)).await
 }
 
+/// Check if hooks and statusLine are already correctly installed, avoiding
+/// unnecessary settings.json rewrites that can race with Claude Code reads.
+async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
+    let settings_path = home.join(".claude").join("settings.json");
+    let Ok(content) = tokio::fs::read_to_string(&settings_path).await else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+
+    // Check statusLine points to a valid zremote-agent binary
+    let status_ok = settings
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        .is_some_and(|cmd| {
+            cmd.contains("zremote") && cmd.ends_with(" ccline") && {
+                // Verify the binary in the command actually exists on disk
+                let binary_path = cmd.trim_end_matches(" ccline");
+                Path::new(binary_path).exists()
+            }
+        });
+
+    if !status_ok {
+        return false;
+    }
+
+    // Check hook script exists
+    if !script_path.exists() {
+        return false;
+    }
+
+    // Check all required hook events are present with zremote entries
+    let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+
+    let required_events = [
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "Notification",
+        "Elicitation",
+        "UserPromptSubmit",
+        "SessionStart",
+    ];
+
+    for event in &required_events {
+        let has_zremote_hook = hooks
+            .get(*event)
+            .and_then(|e| e.as_array())
+            .is_some_and(|arr| {
+                arr.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.contains("zremote-hook"))
+                            })
+                        })
+                })
+            });
+        if !has_zremote_hook {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Install hooks at a specific home directory path (testable).
 async fn install_hooks_at(home: &Path) -> Result<(), InstallError> {
+    let script_path = home.join(".zremote").join("hooks").join("zremote-hook.sh");
+
+    // Check if hooks are already correctly installed (skip redundant writes to
+    // avoid race conditions with Claude Code reading settings.json).
+    if is_already_installed(home, &script_path).await {
+        tracing::debug!("hooks already installed, skipping");
+        return Ok(());
+    }
+
     // Create hook script
     let hooks_dir = home.join(".zremote").join("hooks");
     tokio::fs::create_dir_all(&hooks_dir)
         .await
         .map_err(InstallError::Io)?;
 
-    let script_path = hooks_dir.join("zremote-hook.sh");
     let script_content = generate_hook_script();
     tokio::fs::write(&script_path, &script_content)
         .await
@@ -208,12 +290,18 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
     // Set statusLine to use the agent's own ccline subcommand
     install_status_line(&mut settings);
 
-    // Write back
+    // Write back atomically (write to tmp, then rename) to avoid Claude Code
+    // reading a truncated file during the write.
     let formatted =
         serde_json::to_string_pretty(&settings).map_err(|_| InstallError::InvalidSettings)?;
-    tokio::fs::write(&settings_path, formatted)
+    let tmp_path = settings_path.with_extension("json.tmp");
+    tokio::fs::write(&tmp_path, &formatted)
         .await
         .map_err(InstallError::Io)?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &settings_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(InstallError::Io(e));
+    }
 
     tracing::info!(
         path = %settings_path.display(),
@@ -317,9 +405,14 @@ async fn uninstall_hooks_at(home: &Path) -> Result<(), InstallError> {
 
     let formatted =
         serde_json::to_string_pretty(&settings).map_err(|_| InstallError::InvalidSettings)?;
-    tokio::fs::write(&settings_path, formatted)
+    let tmp_path = settings_path.with_extension("json.tmp");
+    tokio::fs::write(&tmp_path, &formatted)
         .await
         .map_err(InstallError::Io)?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &settings_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(InstallError::Io(e));
+    }
 
     // Remove hook script
     let script_path = home.join(".zremote").join("hooks").join("zremote-hook.sh");

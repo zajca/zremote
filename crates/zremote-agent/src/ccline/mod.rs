@@ -31,28 +31,41 @@ fn git_branch(cwd: &str) -> Option<String> {
     }
 }
 
+/// Dimmed fallback shown when no meaningful status data is available.
+const FALLBACK_STATUS: &str = "\x1b[2m[zremote]\x1b[0m";
+
 /// Entry point for the `ccline` subcommand.
 /// Reads Claude Code status line JSON from stdin, formats ANSI output to stdout,
 /// and forwards telemetry to the agent via Unix socket.
+///
+/// Always outputs at least a fallback placeholder so the status line area never
+/// disappears in Claude Code.
 pub fn run_ccline() {
     // Read all of stdin
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
+        println!("{FALLBACK_STATUS}");
         return;
     }
 
-    // Parse JSON (silently produce empty output on parse failure)
+    // Parse JSON (show fallback on parse failure so status line stays visible)
     let status_input: input::StatusInput = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => {
+            println!("{FALLBACK_STATUS}");
+            return;
+        }
     };
 
     // Get git branch from cwd
     let branch = status_input.cwd.as_deref().and_then(git_branch);
 
-    // Format and print status line
+    // Format and print status line (always output something so Claude Code
+    // keeps showing the status line area).
     let status = format::format_status(&status_input, branch.as_deref());
-    if !status.is_empty() {
+    if status.is_empty() {
+        println!("{FALLBACK_STATUS}");
+    } else {
         println!("{status}");
     }
 

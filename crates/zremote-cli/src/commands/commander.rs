@@ -254,9 +254,7 @@ async fn generate_dynamic(client: &ApiClient, server_url: &str) -> Result<String
             Ok(projects) => {
                 for p in &projects {
                     if project_count >= MAX_PROJECTS {
-                        lines.push(format!(
-                            "- ... and more (truncated at {MAX_PROJECTS})"
-                        ));
+                        lines.push(format!("- ... and more (truncated at {MAX_PROJECTS})"));
                         break;
                     }
                     let branch = p.git_branch.as_deref().unwrap_or("-");
@@ -268,10 +266,7 @@ async fn generate_dynamic(client: &ApiClient, server_url: &str) -> Result<String
                 }
             }
             Err(e) => {
-                lines.push(format!(
-                    "- {} projects: error fetching ({e})",
-                    host.name
-                ));
+                lines.push(format!("- {} projects: error fetching ({e})", host.name));
             }
         }
         if project_count >= MAX_PROJECTS {
@@ -493,7 +488,7 @@ fn generate_context_protocol() -> String {
      ```\n\
      zremote cli knowledge extract <project_id> --loop-id <loop_id> --save\n\
      ```"
-        .to_string()
+    .to_string()
 }
 
 fn generate_error_handling() -> String {
