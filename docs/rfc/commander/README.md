@@ -24,29 +24,42 @@ Commander is a CC instance with an injected CLAUDE.md that knows how to use ZRem
                +--------v--+  +---v--------+
                |  Agent A   |  |  Agent B   |
                |  (host-1)  |  |  (host-2)  |
-               +-----+------+  +-----+------+
-                     |                |
-              [TigerFS mount]  [TigerFS mount]   (optional, per-project)
-                     |                |
-              +------v----------------v------+
-              |        PostgreSQL            |
-              |   (shared project context)   |
-              +------------------------------+
+               +------------+  +------------+
 ```
 
+TigerFS integration (optional per-project shared filesystem) is tracked in a separate RFC: [TigerFS Integration](phase-4-tigerfs.md).
+
+## Prerequisites
+
+Before any Commander work, the `ServerEvent` enum in `zremote-protocol/src/events.rs` must be extended with `#[serde(other)] Unknown` variant. Currently it uses `#[serde(tag = "type")]` without a fallback, which means any new event variant breaks deserialization on older clients. This is required by the project's own protocol compatibility rules.
+
 ## Phases
+
+Commander v1 ships Phases 1-4. Phase 5 (TigerFS) is a separate RFC for v2.
 
 | Phase | RFC | Description |
 |-------|-----|-------------|
 | 1 | [LLM Output Format](phase-1-llm-output.md) | Compact `--output llm` format for token-efficient CLI output |
-| 2 | [Commander Generate](phase-2-commander-generate.md) | CLAUDE.md generator with ZRemote instructions and dynamic context |
-| 3 | [Commander Start](phase-3-commander-start.md) | Launch CC with generated Commander context |
-| 4 | [TigerFS Integration](phase-4-tigerfs.md) | Optional per-project shared filesystem via TigerFS |
-| 5 | [CLI Gaps + Workflows](phase-5-cli-workflows.md) | Knowledge extract CLI, Linear workflow recipes |
+| 2 | [Knowledge Extract CLI](phase-2-knowledge-extract.md) | Fill CLI gap: `knowledge extract` command |
+| 3 | [Commander Generate](phase-3-commander-generate.md) | CLAUDE.md generator with ZRemote instructions and dynamic context |
+| 4 | [Commander Start](phase-4-commander-start.md) | Launch CC with generated Commander context |
+| 5 | [TigerFS Integration](phase-5-tigerfs.md) | Optional per-project shared filesystem via TigerFS (separate RFC, v2) |
+
+## Implementation Order
+
+```
+Prerequisite: Add #[serde(other)] Unknown to ServerEvent
+Phase 1 (LLM output)          -- no dependencies
+Phase 2 (knowledge extract)   -- no dependencies, can parallel with Phase 1
+Phase 3 (commander generate)  -- depends on Phase 1 + Phase 2
+Phase 4 (commander start)     -- depends on Phase 3
+Phase 5 (TigerFS)             -- separate RFC, independent of Phases 1-4
+```
 
 ## Key Decisions
 
 - **CLI via Bash** for all orchestration (not MCP). CLI already covers full API surface, new commands automatically available.
-- **TigerFS optional per-project**. ZRemote core stays on SQLite. Projects that need cross-host sharing enable TigerFS.
-- **Memory dual path**. With TigerFS: read/write files. Without: CLI memory commands. Commander CLAUDE.md adapts automatically.
-- **Phases 1-3 ship independently** of Phase 4. Commander works without TigerFS using CLI-based memory sync.
+- **Memory sync via CLI** for v1. Commander reads memories before task dispatch, extracts new memories after completion. All through existing `memory` and `knowledge` CLI commands.
+- **TigerFS deferred to v2.** It is the most complex phase with the most external dependencies (Go binary, PostgreSQL, FUSE privileges). Commander v1 is fully functional without it. If CLI-based memory sync proves insufficient in practice, TigerFS can be added later.
+- **Concurrency: single Commander per project in v1.** Running multiple Commanders simultaneously is unsupported and may cause conflicts (duplicate worktrees, conflicting tasks). Future versions may add advisory locking.
+- **Local mode supported.** Commander works in both server mode (multi-host) and local mode (single-host automation). Workflow recipes adapt based on detected mode.

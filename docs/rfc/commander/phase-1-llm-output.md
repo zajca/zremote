@@ -14,6 +14,8 @@ A Commander CC instance making dozens of CLI calls per orchestration session bur
 
 Add a fourth output format `--output llm` that minimizes token consumption while remaining reliably parseable by an LLM.
 
+Note: `--output llm` is intentionally non-human-readable. Use `--output json` or `--output table` for debugging Commander behavior.
+
 ## Design
 
 ### Format: JSON Lines (NDJL)
@@ -28,6 +30,35 @@ One compact JSON object per line. No pretty-printing. Lists emit one object per 
 4. **Flat structure** -- no nested objects. Inline related data (e.g., host name instead of host_id reference)
 5. **Status as short string** -- `"online"`, `"active"`, `"closed"` (not enum debug format)
 6. **IDs untruncated** -- LLM needs full IDs to reference entities in follow-up commands
+
+### Key Mapping
+
+Short keys are globally unique across all entity types to avoid collisions:
+
+| Short key | Meaning | Used by |
+|-----------|---------|---------|
+| `_t` | entity type | all |
+| `id` | identifier | all |
+| `n` | name | host, session, project |
+| `st` | status | host, session, loop, task |
+| `v` | version | host, status |
+| `hostname` | hostname | host |
+| `shell` | shell binary | session |
+| `dir` | working directory | session |
+| `path` | filesystem path | project, worktree |
+| `type` | project type | project |
+| `branch` | git branch | project, worktree |
+| `dirty` | git dirty | project, worktree |
+| `session` | session ID | loop |
+| `tool` | tool name | loop |
+| `task` | task name | loop |
+| `model` | model name | task |
+| `project` | project path | task |
+| `cost` | cost in USD | task |
+| `key` | memory key | memory |
+| `cat` | category | memory |
+| `content` | content text | memory |
+| `command` | command string | action |
 
 ### Examples
 
@@ -55,6 +86,25 @@ One compact JSON object per line. No pretty-printing. Lists emit one object per 
 {"_t":"loop","id":"...","session":"...","st":"active","tool":"claude","task":"Fix auth bug"}
 ```
 
+### Error Output
+
+When a command fails with `--output llm`, emit a structured error on stdout in addition to the stderr message:
+
+```
+{"_t":"error","code":"not_found","msg":"Host abc123 not found"}
+{"_t":"error","code":"connection","msg":"Server unreachable at http://localhost:3000"}
+```
+
+This allows the Commander to reliably detect and handle failures without parsing stderr strings. Error codes are short, stable identifiers (not HTTP status codes):
+
+| Code | Meaning |
+|------|---------|
+| `not_found` | Resource does not exist |
+| `connection` | Server unreachable |
+| `auth` | Authentication failed |
+| `validation` | Invalid input |
+| `internal` | Unexpected server error |
+
 ### Events
 
 Events use compact single-line JSON, same as the existing `json` formatter's `event()` method. No additional transformation needed.
@@ -70,6 +120,7 @@ The existing `ZREMOTE_OUTPUT` env var (already wired in `GlobalOpts`) works. Com
 - New `LlmFormatter` struct implementing the `Formatter` trait (17 methods)
 - Add `Llm` variant to `OutputFormat` enum
 - Wire in `create_formatter` match
+- Structured error output for LLM format
 
 ### What NOT to build
 
@@ -104,4 +155,5 @@ Each method maps entity fields to short-key compact JSON:
 - Unit tests for each formatter method: verify output is valid JSON, contains expected fields, uses short keys
 - Test that list output produces one JSON per line (split by `\n`, each parses as valid JSON)
 - Test that single entity output produces exactly one JSON line
+- Test structured error output format and error code mapping
 - Integration test: compare LLM format token count vs JSON format for same data (should be 40-60% fewer tokens)
