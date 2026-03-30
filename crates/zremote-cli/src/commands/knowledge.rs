@@ -1,5 +1,7 @@
 use clap::Subcommand;
-use zremote_client::types::{IndexRequest, SearchRequest, ServiceControlRequest};
+use zremote_client::types::{
+    ExtractRequest, IndexRequest, ListLoopsFilter, SearchRequest, ServiceControlRequest,
+};
 use zremote_client::{ApiClient, SearchTier};
 
 use crate::connection::ConnectionResolver;
@@ -64,6 +66,20 @@ pub enum KnowledgeCommand {
     WriteClaudeMd {
         /// Project ID
         project_id: String,
+    },
+    /// Extract memories from an agentic loop transcript
+    Extract {
+        /// Project ID
+        project_id: String,
+        /// Agentic loop ID to extract from
+        #[arg(long)]
+        loop_id: Option<String>,
+        /// Session ID (extracts from latest loop in session)
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Automatically save extracted memories to the project
+        #[arg(long)]
+        save: bool,
     },
 }
 
@@ -196,6 +212,65 @@ pub async fn run(
                     let output = serde_json::to_string_pretty(&resp)
                         .unwrap_or_else(|e| format!("Error: {e}"));
                     println!("{output}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        KnowledgeCommand::Extract {
+            project_id,
+            loop_id,
+            session_id,
+            save,
+        } => {
+            let resolved_loop_id = match (loop_id, session_id) {
+                (Some(lid), _) => lid,
+                (None, Some(sid)) => {
+                    let filter = ListLoopsFilter {
+                        session_id: Some(sid.clone()),
+                        ..ListLoopsFilter::default()
+                    };
+                    match client.list_loops(&filter).await {
+                        Ok(loops) if !loops.is_empty() => loops[0].id.clone(),
+                        Ok(_) => {
+                            eprintln!("Error: no agentic loops found for session {sid}");
+                            return 1;
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            return 1;
+                        }
+                    }
+                }
+                (None, None) => {
+                    eprintln!("Error: either --loop-id or --session-id is required");
+                    return 1;
+                }
+            };
+
+            let req = ExtractRequest {
+                loop_id: resolved_loop_id,
+            };
+            match client.extract_memories(&project_id, &req).await {
+                Ok(memories) => {
+                    if memories.is_empty() {
+                        println!("No memories extracted.");
+                    } else {
+                        for mem in &memories {
+                            let output = serde_json::to_string_pretty(mem)
+                                .unwrap_or_else(|e| format!("Error: {e}"));
+                            println!("{output}");
+                        }
+                        println!("\nExtracted {} memories.", memories.len());
+                    }
+                    if save {
+                        println!(
+                            "Bulk save not yet supported. Use `memory update` to save individual memories."
+                        );
+                    }
                     0
                 }
                 Err(e) => {

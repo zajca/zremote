@@ -1,6 +1,7 @@
 //! Output formatting for CLI commands.
 
 mod json;
+mod llm;
 mod plain;
 mod table;
 
@@ -19,6 +20,7 @@ pub enum OutputFormat {
     Table,
     Json,
     Plain,
+    Llm,
 }
 
 /// Trait for formatting CLI output.
@@ -62,6 +64,7 @@ pub fn create_formatter(opts: &GlobalOpts) -> Box<dyn Formatter> {
         OutputFormat::Table => Box::new(table::TableFormatter),
         OutputFormat::Json => Box::new(json::JsonFormatter),
         OutputFormat::Plain => Box::new(plain::PlainFormatter),
+        OutputFormat::Llm => Box::new(llm::LlmFormatter),
     }
 }
 
