@@ -40,9 +40,6 @@ pub enum CommanderCommand {
         /// Run CC with --dangerously-skip-permissions
         #[arg(long)]
         skip_permissions: bool,
-        /// Don't regenerate CLAUDE.md if it already exists and is < 5 min old
-        #[arg(long)]
-        no_regenerate: bool,
         /// Path to claude binary
         #[arg(long, env = "CLAUDE_CODE_PATH")]
         claude_path: Option<PathBuf>,
@@ -67,7 +64,6 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
             model,
             prompt,
             skip_permissions,
-            no_regenerate,
             claude_path,
         } => {
             run_start(
@@ -77,7 +73,6 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
                 model,
                 prompt,
                 skip_permissions,
-                no_regenerate,
                 claude_path,
             )
             .await
@@ -86,13 +81,11 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
     }
 }
 
-async fn run_generate(
+async fn generate_commander_content(
     client: &ApiClient,
-    global: &GlobalOpts,
-    write: bool,
-    dir: Option<PathBuf>,
+    server_url: &str,
     no_dynamic: bool,
-) -> i32 {
+) -> String {
     let mut sections = Vec::new();
 
     // 1. Identity section (static)
@@ -106,7 +99,7 @@ async fn run_generate(
 
     // 4. Dynamic infrastructure (API calls or cache)
     if !no_dynamic {
-        match generate_dynamic(client, &global.server).await {
+        match generate_dynamic(client, server_url).await {
             Ok(dynamic) => sections.push(dynamic),
             Err(e) => {
                 eprintln!("Warning: could not fetch infrastructure state: {e}");
@@ -124,7 +117,17 @@ async fn run_generate(
     // 7. Limitations (static)
     sections.push(generate_limitations());
 
-    let content = sections.join("\n\n");
+    sections.join("\n\n")
+}
+
+async fn run_generate(
+    client: &ApiClient,
+    global: &GlobalOpts,
+    write: bool,
+    dir: Option<PathBuf>,
+    no_dynamic: bool,
+) -> i32 {
+    let content = generate_commander_content(client, &global.server, no_dynamic).await;
 
     if write {
         let target = dir.unwrap_or_else(|| PathBuf::from("."));
@@ -290,7 +293,6 @@ async fn generate_dynamic(client: &ApiClient, server_url: &str) -> Result<String
 // Commander start & status
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 async fn run_start(
     client: &ApiClient,
     global: &GlobalOpts,
@@ -298,7 +300,6 @@ async fn run_start(
     model: Option<String>,
     prompt: Option<String>,
     skip_permissions: bool,
-    no_regenerate: bool,
     claude_path: Option<PathBuf>,
 ) -> i32 {
     let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
@@ -307,28 +308,14 @@ async fn run_start(
         return 1;
     }
 
-    // Step 1: Generate CLAUDE.md (reuse generate logic)
-    let commander_md = work_dir.join(".claude").join("commander.md");
+    // Step 1: Generate commander content in memory
+    let content = generate_commander_content(client, &global.server, false).await;
 
-    let should_generate = if no_regenerate && commander_md.exists() {
-        match commander_md.metadata().and_then(|m| m.modified()) {
-            Ok(modified) => {
-                let age = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or(Duration::MAX);
-                age >= CACHE_TTL
-            }
-            Err(_) => true,
-        }
-    } else {
-        true
-    };
-
-    if should_generate {
-        let exit = run_generate(client, global, true, Some(work_dir.clone()), false).await;
-        if exit != 0 {
-            return exit;
-        }
+    if content.len() > 100_000 {
+        eprintln!(
+            "Warning: commander prompt is {} bytes, which may exceed OS argument limits",
+            content.len()
+        );
     }
 
     // Step 2: Locate claude binary
@@ -349,6 +336,9 @@ async fn run_start(
     if let Some(ref host) = global.host {
         cmd.env("ZREMOTE_HOST_ID", host);
     }
+
+    // Pass commander instructions via --append-system-prompt
+    cmd.arg("--append-system-prompt").arg(&content);
 
     if let Some(ref m) = model {
         cmd.arg("--model").arg(m);
@@ -413,35 +403,8 @@ fn find_claude_binary(explicit: Option<&std::path::Path>) -> Result<PathBuf, Str
     Err("claude binary not found. Install Claude Code (https://docs.anthropic.com/en/docs/claude-code) or use --claude-path".to_string())
 }
 
-fn run_status(dir: Option<PathBuf>) -> i32 {
-    let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
-    let commander_md = work_dir.join(".claude").join("commander.md");
-
-    if commander_md.exists() {
-        println!("Commander CLAUDE.md: {}", commander_md.display());
-        match commander_md.metadata().and_then(|m| m.modified()) {
-            Ok(modified) => {
-                let age = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or(Duration::MAX);
-                let mins = age.as_secs() / 60;
-                println!("Generated: {mins}m ago");
-                if age < CACHE_TTL {
-                    println!("Status: fresh (< 5m)");
-                } else {
-                    println!("Status: stale (> 5m, will regenerate on next start)");
-                }
-            }
-            Err(e) => {
-                println!("Modified time: unknown ({e})");
-            }
-        }
-    } else {
-        println!("Commander CLAUDE.md: not found");
-        println!(
-            "Run `zremote cli commander generate --write` or `zremote cli commander start` to create it."
-        );
-    }
+fn run_status(_dir: Option<PathBuf>) -> i32 {
+    println!("Delivery: --append-system-prompt (passed at launch)");
 
     match find_claude_binary(None) {
         Ok(path) => println!("Claude binary: {}", path.display()),
