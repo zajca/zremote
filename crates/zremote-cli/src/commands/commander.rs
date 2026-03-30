@@ -86,18 +86,13 @@ async fn generate_commander_content(
     server_url: &str,
     no_dynamic: bool,
 ) -> String {
-    let mut sections = Vec::new();
+    let mut sections = vec![
+        generate_identity(),
+        CLI_REFERENCE.to_string(),
+        generate_context_protocol(),
+    ];
 
-    // 1. Identity section (static)
-    sections.push(generate_identity());
-
-    // 2. CLI reference (static, from include_str!)
-    sections.push(CLI_REFERENCE.to_string());
-
-    // 3. Context protocol (static)
-    sections.push(generate_context_protocol());
-
-    // 4. Dynamic infrastructure (API calls or cache)
+    // Dynamic infrastructure (API calls or cache)
     if !no_dynamic {
         match generate_dynamic(client, server_url).await {
             Ok(dynamic) => sections.push(dynamic),
@@ -108,13 +103,8 @@ async fn generate_commander_content(
         }
     }
 
-    // 5. Error handling (static)
     sections.push(generate_error_handling());
-
-    // 6. Workflow recipes (static)
     sections.push(generate_workflow_recipes());
-
-    // 7. Limitations (static)
     sections.push(generate_limitations());
 
     sections.join("\n\n")
@@ -587,13 +577,14 @@ mod tests {
 
     #[test]
     fn all_sections_under_token_limit() {
-        let mut sections = Vec::new();
-        sections.push(generate_identity());
-        sections.push(CLI_REFERENCE.to_string());
-        sections.push(generate_context_protocol());
-        sections.push(generate_error_handling());
-        sections.push(generate_workflow_recipes());
-        sections.push(generate_limitations());
+        let sections = [
+            generate_identity(),
+            CLI_REFERENCE.to_string(),
+            generate_context_protocol(),
+            generate_error_handling(),
+            generate_workflow_recipes(),
+            generate_limitations(),
+        ];
         let combined = sections.join("\n\n");
         // ~6000 tokens ≈ ~24000 characters
         assert!(

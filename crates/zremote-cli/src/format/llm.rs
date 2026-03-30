@@ -495,22 +495,23 @@ mod tests {
 
     #[test]
     fn status_values_are_lowercase() {
-        let f = LlmFormatter;
-        let h = make_host();
-        let v = parse_json(&f.host(&h));
-        assert_eq!(v["st"], "online");
+        let fmt = LlmFormatter;
 
-        let s = make_session();
-        let v = parse_json(&f.session(&s));
-        assert_eq!(v["st"], "active");
+        let host = make_host();
+        let parsed = parse_json(&fmt.host(&host));
+        assert_eq!(parsed["st"], "online");
 
-        let l = make_loop();
-        let v = parse_json(&f.agentic_loop(&l));
-        assert_eq!(v["st"], "working");
+        let session = make_session();
+        let parsed = parse_json(&fmt.session(&session));
+        assert_eq!(parsed["st"], "active");
 
-        let t = make_task();
-        let v = parse_json(&f.task(&t));
-        assert_eq!(v["st"], "active");
+        let agentic_loop = make_loop();
+        let parsed = parse_json(&fmt.agentic_loop(&agentic_loop));
+        assert_eq!(parsed["st"], "working");
+
+        let task = make_task();
+        let parsed = parse_json(&fmt.task(&task));
+        assert_eq!(parsed["st"], "active");
     }
 
     #[test]
