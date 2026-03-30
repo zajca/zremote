@@ -46,34 +46,13 @@ use assets::Assets;
 use persistence::Persistence;
 use views::main_view::MainView;
 
+// Re-export from client for callers that used `zremote_gui::extract_base_url`.
+pub use zremote_client::extract_base_url;
+
 /// Configuration for launching the GUI application.
 pub struct GuiConfig {
     pub server_url: String,
     pub exit_after: Option<u64>,
-}
-
-/// Extract base HTTP URL from a server URL that may include a WS path.
-/// e.g. "ws://host:3000/ws/agent" -> "http://host:3000"
-///      "wss://host.com/ws/agent" -> "https://host.com"
-///      "http://localhost:3000"    -> "http://localhost:3000"
-pub fn extract_base_url(raw: &str) -> String {
-    let url = raw.trim_end_matches('/');
-    // Parse with url crate to extract scheme + host + port
-    if let Ok(parsed) = url::Url::parse(url) {
-        let scheme = match parsed.scheme() {
-            "ws" => "http",
-            "wss" => "https",
-            other => other,
-        };
-        let host = parsed.host_str().unwrap_or("localhost");
-        if let Some(port) = parsed.port() {
-            format!("{scheme}://{host}:{port}")
-        } else {
-            format!("{scheme}://{host}")
-        }
-    } else {
-        url.to_string()
-    }
 }
 
 /// Launch the GPUI application. This function blocks until the window is closed.

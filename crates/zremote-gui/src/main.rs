@@ -4,8 +4,8 @@ use zremote_gui::{GuiConfig, extract_base_url, run};
 #[derive(Parser)]
 #[command(name = "zremote-gui", version, about = "ZRemote native desktop client")]
 struct Cli {
-    /// Server URL (same ZREMOTE_SERVER_URL as agent uses, e.g. ws://host:3000/ws/agent
-    /// or just http://host:3000). Path is stripped automatically.
+    /// Server URL (same `ZREMOTE_SERVER_URL` as agent uses, e.g. `ws://host:3000/ws/agent`
+    /// or just `http://host:3000`). Path is stripped automatically.
     #[arg(
         long,
         env = "ZREMOTE_SERVER_URL",

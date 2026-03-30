@@ -24,6 +24,33 @@ fn encode_path(segment: &str) -> String {
     utf8_percent_encode(segment, PATH_SEGMENT).to_string()
 }
 
+/// Extract base HTTP URL from a raw URL that may include a WS scheme or path.
+///
+/// Strips any path component and converts `ws`/`wss` schemes to `http`/`https`.
+///
+/// # Examples
+/// - `ws://host:3000/ws/agent` -> `http://host:3000`
+/// - `wss://host.com/ws/agent` -> `https://host.com`
+/// - `http://localhost:3000`    -> `http://localhost:3000`
+pub fn extract_base_url(raw: &str) -> String {
+    let url = raw.trim_end_matches('/');
+    if let Ok(parsed) = url::Url::parse(url) {
+        let scheme = match parsed.scheme() {
+            "ws" => "http",
+            "wss" => "https",
+            other => other,
+        };
+        let host = parsed.host_str().unwrap_or("localhost");
+        if let Some(port) = parsed.port() {
+            format!("{scheme}://{host}:{port}")
+        } else {
+            format!("{scheme}://{host}")
+        }
+    } else {
+        url.to_string()
+    }
+}
+
 /// Default request timeout (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default connect timeout (10 seconds).
@@ -39,18 +66,15 @@ pub struct ApiClient {
 impl ApiClient {
     /// Create a new API client. Returns error if URL is invalid.
     pub fn new(base_url: &str) -> Result<Self, ApiError> {
-        let base_url = base_url.trim_end_matches('/');
+        let base_url = extract_base_url(base_url);
         // Validate with url::Url, but store as String to avoid trailing-slash issues.
-        let _ = url::Url::parse(base_url)?;
+        let _ = url::Url::parse(&base_url)?;
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             .build()
             .map_err(ApiError::Http)?;
-        Ok(Self {
-            base_url: base_url.to_string(),
-            client,
-        })
+        Ok(Self { base_url, client })
     }
 
     /// Create with a custom `reqwest::Client` (for custom TLS, proxy, etc.).
@@ -61,12 +85,9 @@ impl ApiClient {
     /// on the provided client. Do not use `danger_accept_invalid_certs(true)` in
     /// production builds.
     pub fn with_client(base_url: &str, client: reqwest::Client) -> Result<Self, ApiError> {
-        let base_url = base_url.trim_end_matches('/');
-        let _ = url::Url::parse(base_url)?;
-        Ok(Self {
-            base_url: base_url.to_string(),
-            client,
-        })
+        let base_url = extract_base_url(base_url);
+        let _ = url::Url::parse(&base_url)?;
+        Ok(Self { base_url, client })
     }
 
     /// Get the base URL.

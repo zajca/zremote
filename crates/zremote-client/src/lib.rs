@@ -11,7 +11,7 @@ mod events;
 mod terminal;
 pub mod types;
 
-pub use client::ApiClient;
+pub use client::{ApiClient, extract_base_url};
 pub use error::ApiError;
 pub use events::{ClientEvent, EventStream};
 pub use terminal::TerminalSession;

@@ -43,6 +43,40 @@ fn new_invalid_url() {
 }
 
 // ---------------------------------------------------------------------------
+// URL normalization (extract_base_url)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_strips_ws_path() {
+    let client = ApiClient::new("ws://localhost:3000/ws/agent").unwrap();
+    assert_eq!(client.base_url(), "http://localhost:3000");
+}
+
+#[test]
+fn new_strips_wss_path() {
+    let client = ApiClient::new("wss://zremote.zajca.cz/ws/agent").unwrap();
+    assert_eq!(client.base_url(), "https://zremote.zajca.cz");
+}
+
+#[test]
+fn new_preserves_plain_http() {
+    let client = ApiClient::new("http://localhost:3000").unwrap();
+    assert_eq!(client.base_url(), "http://localhost:3000");
+}
+
+#[test]
+fn new_preserves_https() {
+    let client = ApiClient::new("https://server.example.com").unwrap();
+    assert_eq!(client.base_url(), "https://server.example.com");
+}
+
+#[test]
+fn new_strips_arbitrary_path() {
+    let client = ApiClient::new("http://host:8080/some/deep/path").unwrap();
+    assert_eq!(client.base_url(), "http://host:8080");
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket URL generation
 // ---------------------------------------------------------------------------
 
