@@ -99,6 +99,14 @@ impl SidebarView {
         self.selected_session_id.as_deref()
     }
 
+    pub fn set_selected_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.selected_session_id.as_deref() == Some(session_id) {
+            return;
+        }
+        self.selected_session_id = Some(session_id.to_string());
+        cx.notify();
+    }
+
     pub fn cc_states(&self) -> &HashMap<String, CcState> {
         &self.cc_states
     }

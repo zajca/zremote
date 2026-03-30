@@ -123,6 +123,11 @@ impl MainView {
             let _ = p.save_if_changed();
         }
 
+        // Keep sidebar selection in sync (covers command palette, switcher, etc.)
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_selected_session(session_id, cx);
+        });
+
         self.current_host_id = Some(host_id.to_string());
 
         let Some(handle) = connect_terminal(&self.app_state, session_id, host_id, false) else {
