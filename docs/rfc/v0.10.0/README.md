@@ -25,7 +25,7 @@ v0.10.0 transforms ZRemote from a terminal session manager into a **provider-agn
 ## Phases & Detailed RFCs
 
 ```
-Phase 1-2: Output Analyzer ──→ output-analyzer.md    [READY]
+Phase 1-2: Output Analyzer ──→ output-analyzer.md    [DONE ✓]
 Phase 3:   Shell Integration                           [THIS FILE]
 Phase 4:   Project Intelligence                        [THIS FILE]
 Phase 5:   Command Tracking                            [THIS FILE]
@@ -35,7 +35,7 @@ Phase 7:   Channel Bridge ────→ channel-bridge.md     [BLOCKED: CC Cha
 
 | Phase | RFC | Status | Depends on | Complexity |
 |-------|-----|--------|------------|------------|
-| 1-2 | [Output Analyzer](output-analyzer.md) | Ready to implement | - | Medium |
+| 1-2 | [Output Analyzer](output-analyzer.md) | **Done** (2026-03-31) | - | Medium |
 | 3 | Shell Integration (below) | Draft | - | Medium |
 | 4 | Project Intelligence (below) | Draft | - | Low-medium |
 | 5 | Command Tracking (below) | Draft | Phase 1 | Low |
