@@ -10,18 +10,20 @@ pub fn send_native(title: &str, body: &str, level: ToastLevel, handle: &tokio::r
     let title = title.to_string();
     let body = body.to_string();
     handle.spawn_blocking(move || {
-        let urgency = match level {
-            ToastLevel::Error => notify_rust::Urgency::Critical,
-            ToastLevel::Warning => notify_rust::Urgency::Normal,
-            ToastLevel::Info | ToastLevel::Success => notify_rust::Urgency::Low,
-        };
-        let result = notify_rust::Notification::new()
-            .appname("ZRemote")
-            .summary(&title)
-            .body(&body)
-            .urgency(urgency)
-            .show();
-        if let Err(e) = result {
+        let mut notification = notify_rust::Notification::new();
+        notification.appname("ZRemote").summary(&title).body(&body);
+
+        #[cfg(target_os = "linux")]
+        {
+            let urgency = match level {
+                ToastLevel::Error => notify_rust::Urgency::Critical,
+                ToastLevel::Warning => notify_rust::Urgency::Normal,
+                ToastLevel::Info | ToastLevel::Success => notify_rust::Urgency::Low,
+            };
+            notification.urgency(urgency);
+        }
+
+        if let Err(e) = notification.show() {
             tracing::warn!(error = %e, "failed to send native notification");
         }
     });
