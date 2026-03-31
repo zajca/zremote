@@ -27,13 +27,16 @@ struct LoopRow {
     ended_at: Option<String>,
     end_reason: Option<String>,
     task_name: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: Option<f64>,
 }
 
 /// Fetch a `LoopInfo` from the DB.
 pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name \
+         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -51,6 +54,9 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        input_tokens: row.input_tokens as u64,
+        output_tokens: row.output_tokens as u64,
+        cost_usd: row.cost_usd,
     })
 }
 
@@ -865,6 +871,9 @@ pub(super) async fn handle_agentic_message(
                     status: AgenticStatus::Working,
                     task_name: None,
                     last_updated: Instant::now(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: None,
                 },
             );
 
@@ -1077,6 +1086,50 @@ pub(super) async fn handle_agentic_message(
             }
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
+        }
+        AgenticAgentMessage::LoopMetricsUpdate {
+            loop_id,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        } => {
+            let loop_id_str = loop_id.to_string();
+
+            // Update DB
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET input_tokens = ?1, output_tokens = ?2, cost_usd = ?3 WHERE id = ?4",
+            )
+            .bind(input_tokens as i64)
+            .bind(output_tokens as i64)
+            .bind(cost_usd)
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
+            }
+
+            // Update in-memory state
+            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                entry.input_tokens = input_tokens;
+                entry.output_tokens = output_tokens;
+                entry.cost_usd = cost_usd;
+                entry.last_updated = Instant::now();
+            }
+
+            // Broadcast event with full loop info
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
+            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                let _ = state.events.send(ServerEvent::LoopMetricsUpdated {
+                    loop_info,
+                    host_id: host_id.to_string(),
+                    hostname,
+                });
+            }
         }
     }
     Ok(())

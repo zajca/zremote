@@ -16,6 +16,12 @@ pub struct LoopInfo {
     pub ended_at: Option<String>,
     pub end_reason: Option<String>,
     pub task_name: Option<String>,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// Nested host info in server events.
@@ -80,6 +86,13 @@ pub enum ServerEvent {
     },
     #[serde(rename = "agentic_loop_ended")]
     LoopEnded {
+        #[serde(rename = "loop")]
+        loop_info: LoopInfo,
+        host_id: String,
+        hostname: String,
+    },
+    #[serde(rename = "agentic_loop_metrics_update")]
+    LoopMetricsUpdated {
         #[serde(rename = "loop")]
         loop_info: LoopInfo,
         host_id: String,
@@ -168,6 +181,9 @@ mod tests {
             ended_at: None,
             end_reason: None,
             task_name: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: None,
         }
     }
 
@@ -227,6 +243,16 @@ mod tests {
                     ended_at: Some("2026-01-01T01:00:00Z".to_string()),
                     end_reason: Some("completed".to_string()),
                     ..make_loop_info(AgenticStatus::Completed)
+                },
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+            },
+            ServerEvent::LoopMetricsUpdated {
+                loop_info: LoopInfo {
+                    input_tokens: 5000,
+                    output_tokens: 1200,
+                    cost_usd: Some(0.15),
+                    ..make_loop_info(AgenticStatus::Working)
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
@@ -291,6 +317,15 @@ mod tests {
             let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
         }
+    }
+
+    #[test]
+    fn loop_info_backward_compat_missing_metrics() {
+        let json = r#"{"id":"l1","session_id":"s1","project_path":null,"tool_name":"t","status":"working","started_at":"2026-01-01T00:00:00Z","ended_at":null,"end_reason":null,"task_name":null}"#;
+        let info: LoopInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.input_tokens, 0);
+        assert_eq!(info.output_tokens, 0);
+        assert!(info.cost_usd.is_none());
     }
 
     #[test]

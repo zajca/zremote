@@ -151,6 +151,11 @@ impl AgenticLoopManager {
     pub fn has_loop(&self, loop_id: &AgenticLoopId) -> bool {
         self.loops.values().any(|a| &a.loop_id == loop_id)
     }
+
+    /// Get `loop_id` for a session (for analyzer event mapping).
+    pub fn loop_id_for_session(&self, session_id: &SessionId) -> Option<AgenticLoopId> {
+        self.loops.get(session_id).map(|a| a.loop_id)
+    }
 }
 
 /// Translate an internal `AgenticEvent` into a protocol `AgenticAgentMessage`.

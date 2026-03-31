@@ -33,6 +33,13 @@ pub enum AgenticAgentMessage {
         loop_id: AgenticLoopId,
         reason: String,
     },
+    LoopMetricsUpdate {
+        loop_id: AgenticLoopId,
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+    },
 }
 
 #[cfg(test)]
@@ -79,6 +86,22 @@ mod tests {
         roundtrip_agent(&AgenticAgentMessage::LoopEnded {
             loop_id: Uuid::new_v4(),
             reason: "error".to_string(),
+        });
+    }
+
+    #[test]
+    fn loop_metrics_update_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::LoopMetricsUpdate {
+            loop_id: Uuid::new_v4(),
+            input_tokens: 5000,
+            output_tokens: 1200,
+            cost_usd: Some(0.15),
+        });
+        roundtrip_agent(&AgenticAgentMessage::LoopMetricsUpdate {
+            loop_id: Uuid::new_v4(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: None,
         });
     }
 

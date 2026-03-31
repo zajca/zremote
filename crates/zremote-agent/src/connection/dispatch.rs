@@ -6,6 +6,7 @@ use zremote_protocol::knowledge::KnowledgeServerMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, HostId, ServerMessage, SessionId};
 
 use super::registration::default_shell;
+use crate::agentic::analyzer::OutputAnalyzer;
 use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::{self, BridgeSenders};
 use crate::hooks::mapper::SessionMapper;
@@ -180,6 +181,7 @@ pub(super) async fn handle_server_message(
     session_mapper: &SessionMapper,
     bridge_senders: &BridgeSenders,
     bridge_scrollback: &bridge::BridgeScrollbackStore,
+    session_analyzers: &mut std::collections::HashMap<SessionId, OutputAnalyzer>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -206,9 +208,11 @@ pub(super) async fn handle_server_message(
                 initial_command.as_deref(),
             )
             .await;
+            session_analyzers.insert(*session_id, OutputAnalyzer::new());
         }
         ServerMessage::SessionClose { session_id } => {
-            // Clean up agentic loop if any
+            // Clean up analyzer and agentic loop
+            session_analyzers.remove(session_id);
             if let Some(loop_ended) = agentic_manager.on_session_closed(session_id)
                 && agentic_tx.try_send(loop_ended).is_err()
             {
@@ -236,6 +240,9 @@ pub(super) async fn handle_server_message(
         ServerMessage::TerminalInput { session_id, data } => {
             if let Err(e) = session_manager.write_to(session_id, data) {
                 tracing::warn!(session_id = %session_id, error = %e, "failed to write to PTY");
+            }
+            if let Some(analyzer) = session_analyzers.get_mut(session_id) {
+                analyzer.mark_input_sent();
             }
         }
         ServerMessage::TerminalImagePaste { session_id, data } => {
@@ -1097,6 +1104,7 @@ mod tests {
         SessionMapper,
         BridgeSenders,
         bridge::BridgeScrollbackStore,
+        std::collections::HashMap<SessionId, OutputAnalyzer>,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
         let session_manager = SessionManager::new(pty_tx, crate::config::PersistenceBackend::None);
@@ -1109,6 +1117,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let bridge_scrollback: bridge::BridgeScrollbackStore =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let session_analyzers = std::collections::HashMap::new();
         (
             session_manager,
             agentic_manager,
@@ -1121,13 +1130,14 @@ mod tests {
             session_mapper,
             bridge_senders,
             bridge_scrollback,
+            session_analyzers,
         )
     }
 
     #[tokio::test]
     async fn handle_server_message_heartbeat_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let msg = ServerMessage::HeartbeatAck {
             timestamp: Utc::now(),
@@ -1144,6 +1154,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
     }
@@ -1151,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_error() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let msg = ServerMessage::Error {
             message: "test error".to_string(),
@@ -1168,6 +1179,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
     }
@@ -1175,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn handle_server_message_unexpected_register_ack() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let msg = ServerMessage::RegisterAck {
             host_id: Uuid::new_v4(),
@@ -1192,6 +1204,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
     }
@@ -1199,7 +1212,7 @@ mod tests {
     #[tokio::test]
     async fn handle_session_close_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::SessionClose { session_id };
@@ -1215,6 +1228,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
 
@@ -1235,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_input_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let msg = ServerMessage::TerminalInput {
             session_id: Uuid::new_v4(),
@@ -1253,6 +1267,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
     }
@@ -1260,7 +1275,7 @@ mod tests {
     #[tokio::test]
     async fn handle_terminal_resize_nonexistent_session() {
         let host_id = Uuid::new_v4();
-        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb) =
+        let (mut sm, mut am, mut ps, otx, _orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
             make_test_context();
         let session_id = Uuid::new_v4();
         let msg = ServerMessage::TerminalResize {
@@ -1280,6 +1295,7 @@ mod tests {
             &mapper,
             &bs,
             &bsb,
+            &mut sa,
         )
         .await;
 

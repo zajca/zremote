@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tokio::sync::{Notify, RwLock};
 use zremote_protocol::{AgenticLoopId, SessionId};
 
@@ -22,6 +23,9 @@ pub struct SessionMapper {
     claude_task_ids: Arc<RwLock<HashMap<SessionId, uuid::Uuid>>>,
     /// Notified whenever a new loop is registered via `register_loop()`.
     loop_registered: Arc<Notify>,
+    /// Tracks when the last hook event fired for each PTY session.
+    /// Used by the output analyzer to suppress updates when hooks are active.
+    hook_activity: Arc<DashMap<SessionId, Instant>>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +45,7 @@ impl SessionMapper {
             session_to_loop: Arc::new(RwLock::new(HashMap::new())),
             claude_task_ids: Arc::new(RwLock::new(HashMap::new())),
             loop_registered: Arc::new(Notify::new()),
+            hook_activity: Arc::new(DashMap::new()),
         }
     }
 
@@ -51,6 +56,21 @@ impl SessionMapper {
             .await
             .insert(session_id, loop_id);
         self.loop_registered.notify_waiters();
+    }
+
+    /// Record that a hook event fired for a PTY session.
+    /// Called from hook handlers so the output analyzer can suppress
+    /// duplicate phase updates while hooks are actively providing state.
+    pub fn mark_hook_activity(&self, session_id: SessionId) {
+        self.hook_activity.insert(session_id, Instant::now());
+    }
+
+    /// Check if hooks have been active for this session within the last `window`.
+    /// Returns `true` if a hook fired recently (analyzer should defer).
+    pub fn has_recent_hook_activity(&self, session_id: &SessionId, window: Duration) -> bool {
+        self.hook_activity
+            .get(session_id)
+            .is_some_and(|t| t.elapsed() < window)
     }
 
     /// Register a PTY session as a Claude task (started via UI).
@@ -114,10 +134,17 @@ impl SessionMapper {
         if let Some(cc_session_id) = self.loop_to_cc.write().await.remove(loop_id) {
             self.cc_to_loop.write().await.remove(&cc_session_id);
         }
-        self.session_to_loop
-            .write()
-            .await
-            .retain(|_, lid| lid != loop_id);
+        // Clean up session_to_loop and hook_activity for the removed loop
+        let mut s2l = self.session_to_loop.write().await;
+        let session_ids: Vec<SessionId> = s2l
+            .iter()
+            .filter(|(_, lid)| *lid == loop_id)
+            .map(|(sid, _)| *sid)
+            .collect();
+        for sid in &session_ids {
+            s2l.remove(sid);
+            self.hook_activity.remove(sid);
+        }
     }
 
     /// Try to resolve a CC session ID by checking active loops that don't

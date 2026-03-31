@@ -2,6 +2,7 @@ mod dispatch;
 mod heartbeat;
 mod registration;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, SessionId};
 
+use crate::agentic::analyzer::{AnalyzerEvent, AnalyzerPhase, OutputAnalyzer};
 use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::BridgeCommand;
 use crate::bridge::{self, BridgeSenders};
@@ -113,6 +115,52 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     while rx.changed().await.is_ok() {
         if *rx.borrow() {
             return;
+        }
+    }
+}
+
+/// Process an analyzer event, mapping it to agentic protocol messages.
+fn handle_analyzer_event(
+    session_id: SessionId,
+    event: &AnalyzerEvent,
+    agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
+    agentic_manager: &AgenticLoopManager,
+    session_mapper: &SessionMapper,
+) {
+    match event {
+        AnalyzerEvent::AgentDetected { name, .. } => {
+            tracing::info!(session = %session_id, agent = %name,
+                "agent detected from output (loop created by process detector)");
+        }
+        AnalyzerEvent::PhaseChanged(phase) => {
+            // Suppress analyzer phase updates when hooks are actively providing state
+            if session_mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)) {
+                return;
+            }
+            let status = match phase {
+                AnalyzerPhase::Busy => zremote_protocol::AgenticStatus::Working,
+                AnalyzerPhase::Idle | AnalyzerPhase::NeedsInput => {
+                    zremote_protocol::AgenticStatus::WaitingForInput
+                }
+                _ => return,
+            };
+            if let Some(loop_id) = agentic_manager.loop_id_for_session(&session_id) {
+                let _ = agentic_tx.try_send(AgenticAgentMessage::LoopStateUpdate {
+                    loop_id,
+                    status,
+                    task_name: None,
+                });
+            }
+        }
+        AnalyzerEvent::TokenUpdate { .. } => {
+            // Token metrics are sent separately using accumulated totals from the analyzer.
+            // See the call site in the PTY output handler.
+        }
+        AnalyzerEvent::ToolCall { tool, args } => {
+            tracing::debug!(session = %session_id, %tool, %args, "tool call detected");
+        }
+        AnalyzerEvent::CwdChanged(path) => {
+            tracing::debug!(session = %session_id, cwd = %path, "working directory changed");
         }
     }
 }
@@ -311,6 +359,14 @@ pub async fn run_connection(
     // Skip the first immediate tick
     agentic_check_interval.tick().await;
 
+    // Per-session output analyzers — seed with existing sessions (survived reconnect)
+    let mut session_analyzers: HashMap<SessionId, OutputAnalyzer> = session_manager
+        .session_pids()
+        .map(|(sid, _)| (sid, OutputAnalyzer::new()))
+        .collect();
+    let mut silence_check_interval = tokio::time::interval(Duration::from_secs(1));
+    silence_check_interval.tick().await; // skip first immediate tick
+
     // Main message loop
     let result = loop {
         tokio::select! {
@@ -331,6 +387,7 @@ pub async fn run_connection(
                                     session_mapper,
                                     bridge_senders,
                                     bridge_scrollback,
+                                    &mut session_analyzers,
                                 ).await;
                             }
                             Err(e) => {
@@ -398,6 +455,7 @@ pub async fn run_connection(
                     }
 
                     // Session ended (EOF from main PTY reader)
+                    session_analyzers.remove(&session_id);
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()
                     {
@@ -418,6 +476,34 @@ pub async fn run_connection(
                         tracing::warn!("outbound channel full, message dropped");
                     }
                 } else {
+                    // Feed through per-session analyzer
+                    if let Some(analyzer) = session_analyzers.get_mut(&session_id) {
+                        let events = analyzer.process_output(&data);
+                        let has_token_update = events.iter().any(|e| matches!(e, AnalyzerEvent::TokenUpdate { .. }));
+                        for event in &events {
+                            handle_analyzer_event(
+                                session_id, event, &agentic_tx, agentic_manager, session_mapper,
+                            );
+                        }
+                        // Send accumulated token totals (not raw deltas) for DB replacement
+                        if has_token_update
+                            && let Some(loop_id) = agentic_manager.loop_id_for_session(&session_id)
+                        {
+                                let metrics = analyzer.metrics();
+                                let total_input: u64 = metrics.token_usage.values().map(|t| t.input_tokens).sum();
+                                let total_output: u64 = metrics.token_usage.values().map(|t| t.output_tokens).sum();
+                                let total_cost: Option<f64> = {
+                                    let costs: Vec<f64> = metrics.token_usage.values().filter_map(|t| t.cost_usd).collect();
+                                    if costs.is_empty() { None } else { Some(costs.iter().sum()) }
+                                };
+                                let _ = agentic_tx.try_send(AgenticAgentMessage::LoopMetricsUpdate {
+                                    loop_id,
+                                    input_tokens: total_input,
+                                    output_tokens: total_output,
+                                    cost_usd: total_cost,
+                                });
+                        }
+                    }
                     // Forward output to server and direct bridge GUI connections
                     bridge::fan_out(
                         bridge_senders,
@@ -458,6 +544,7 @@ pub async fn run_connection(
                     .map(|(id, _)| id)
                     .collect();
                 for session_id in dead_sessions {
+                    session_analyzers.remove(&session_id);
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()
                     {
@@ -505,6 +592,16 @@ pub async fn run_connection(
                     }
                 }
             }
+            _ = silence_check_interval.tick() => {
+                for (session_id, analyzer) in &mut session_analyzers {
+                    if let Some(last) = analyzer.last_output_at()
+                        && last.elapsed() > Duration::from_secs(3)
+                        && let Some(event) = analyzer.check_silence()
+                    {
+                        handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper);
+                    }
+                }
+            }
             Some(ccline_msg) = ccline_rx.recv() => {
                 if outbound_tx.try_send(ccline_msg).is_err() {
                     tracing::debug!("outbound channel full, ccline metrics dropped");
@@ -515,6 +612,11 @@ pub async fn run_connection(
                     BridgeCommand::Write { session_id, data } => {
                         let session_exists = session_manager.has_session(&session_id);
                         let result = session_manager.write_to(&session_id, &data);
+                        if result.is_ok()
+                            && let Some(analyzer) = session_analyzers.get_mut(&session_id)
+                        {
+                            analyzer.mark_input_sent();
+                        }
                         if let Err(e) = result {
                             if session_exists {
                                 tracing::warn!(

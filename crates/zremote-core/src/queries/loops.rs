@@ -18,6 +18,9 @@ pub struct LoopRow {
     pub ended_at: Option<String>,
     pub end_reason: Option<String>,
     pub task_name: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: Option<f64>,
 }
 
 /// Parse a status string from DB into `AgenticStatus`.
@@ -38,6 +41,9 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        input_tokens: row.input_tokens as u64,
+        output_tokens: row.output_tokens as u64,
+        cost_usd: row.cost_usd,
     }
 }
 
@@ -55,7 +61,7 @@ pub async fn list_loops(
 ) -> Result<Vec<LoopRow>, AppError> {
     let mut sql = String::from(
         "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name \
+         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
          FROM agentic_loops WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
@@ -91,7 +97,7 @@ pub async fn list_loops(
 pub async fn get_loop(pool: &SqlitePool, loop_id: &str) -> Result<LoopRow, AppError> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name \
+         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)

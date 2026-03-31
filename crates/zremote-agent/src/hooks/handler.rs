@@ -182,6 +182,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+    state.mapper.mark_hook_activity(mapped.session_id);
 
     // Emit LoopStateUpdate(Working)
     let msg = AgenticAgentMessage::LoopStateUpdate {
@@ -204,6 +205,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+    state.mapper.mark_hook_activity(mapped.session_id);
 
     // Try to extract slug from transcript for task_name
     let task_name = extract_task_name_from_transcript(payload, &mapped);
@@ -231,6 +233,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     tracing::info!(loop_id = %mapped.loop_id, cc_session = %payload.session_id, "Stop hook: sending LoopEnded");
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+    state.mapper.mark_hook_activity(mapped.session_id);
 
     // Extract task_name from transcript
     let task_name = extract_task_name_from_transcript(payload, &mapped);
@@ -269,6 +272,8 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
         );
         return;
     };
+
+    state.mapper.mark_hook_activity(mapped.session_id);
 
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
