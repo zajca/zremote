@@ -260,6 +260,13 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
         selectable: true,
     });
 
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::AddProject),
+        title: "Add Project".to_string(),
+        subtitle: String::new(),
+        selectable: true,
+    });
+
     if let Some(ref sid) = snapshot.active_session_id {
         items.push(ResultItem {
             item: PaletteItem::Action(PaletteAction::CloseCurrentSession {

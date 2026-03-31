@@ -511,6 +511,24 @@ impl MainView {
                     }
                 });
             }
+            CommandPaletteEvent::AddProject { host_id, path } => {
+                let api = self.app_state.api.clone();
+                let host_id = host_id.clone();
+                let path = path.clone();
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                self.app_state.tokio_handle.spawn(async move {
+                    let req = zremote_client::AddProjectRequest { path };
+                    if let Err(e) = api.add_project(&host_id, &req).await {
+                        tracing::error!("Failed to add project: {e}");
+                    }
+                });
+                self.show_toast(
+                    &format!("Adding project: {name}"),
+                    ToastLevel::Info,
+                    Some(Icon::Folder),
+                    cx,
+                );
+            }
             CommandPaletteEvent::Reconnect => {
                 if let Some(terminal) = &self.terminal {
                     let session_id = terminal.read(cx).session_id().to_string();

@@ -15,9 +15,20 @@ impl CommandPalette {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
-        // Host picker has its own key handling
+        // Special drill-down levels with their own key handling
         if matches!(self.current_level(), Some(DrillDownLevel::HostPicker)) {
             self.handle_host_picker_key(event, cx);
+            return;
+        }
+        if matches!(
+            self.current_level(),
+            Some(DrillDownLevel::HostPickerForProject)
+        ) {
+            self.handle_host_picker_for_project_key(event, cx);
+            return;
+        }
+        if matches!(self.current_level(), Some(DrillDownLevel::PathInput { .. })) {
+            self.handle_path_input_key(event, cx);
             return;
         }
 
@@ -289,6 +300,145 @@ impl CommandPalette {
         if let Some(ch) = &event.keystroke.key_char {
             self.query.push_str(ch);
             self.selected_index = 0;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn handle_host_picker_for_project_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+
+        if key == "escape" {
+            self.dismiss(cx);
+            return;
+        }
+
+        if key == "left" && !mods.control && !mods.alt {
+            self.pop_drill_down();
+            cx.notify();
+            return;
+        }
+
+        if key == "backspace" {
+            if self.query.is_empty() {
+                self.pop_drill_down();
+                cx.notify();
+            } else {
+                self.query.pop();
+                self.selected_index = 0;
+                cx.notify();
+            }
+            return;
+        }
+
+        if key == "enter" {
+            let hosts = self.snapshot.online_hosts();
+            let filtered: Vec<&zremote_client::Host> = if self.query.is_empty() {
+                hosts
+            } else {
+                hosts
+                    .into_iter()
+                    .filter(|h| {
+                        h.hostname
+                            .to_lowercase()
+                            .contains(&self.query.to_lowercase())
+                    })
+                    .collect()
+            };
+            if let Some(host) = filtered.get(self.selected_index) {
+                self.enter_path_input(host.id.clone());
+                cx.notify();
+            }
+            return;
+        }
+
+        if key == "up" {
+            self.move_host_picker_selection(-1);
+            cx.notify();
+            return;
+        }
+
+        if key == "down" {
+            self.move_host_picker_selection(1);
+            cx.notify();
+            return;
+        }
+
+        if mods.control || mods.alt || mods.platform {
+            return;
+        }
+
+        if let Some(ch) = &event.keystroke.key_char {
+            self.query.push_str(ch);
+            self.selected_index = 0;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn handle_path_input_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+
+        if key == "escape" {
+            self.dismiss(cx);
+            return;
+        }
+
+        if key == "left" && !mods.control && !mods.alt {
+            if self.query.is_empty() {
+                self.pop_drill_down();
+                cx.notify();
+            }
+            return;
+        }
+
+        if key == "backspace" {
+            if self.query.is_empty() {
+                self.pop_drill_down();
+                cx.notify();
+            } else {
+                self.query.pop();
+                cx.notify();
+            }
+            return;
+        }
+
+        if key == "enter" {
+            if !self.query.is_empty()
+                && let Some(DrillDownLevel::PathInput { host_id }) = self.current_level()
+            {
+                let host_id = host_id.clone();
+                let path = self.query.clone();
+                cx.emit(CommandPaletteEvent::AddProject { host_id, path });
+                cx.emit(CommandPaletteEvent::Close);
+            }
+            return;
+        }
+
+        // Paste from clipboard
+        if key == "v" && mods.control {
+            if let Some(text) = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .filter(|t| !t.is_empty())
+            {
+                self.query.push_str(&text);
+                cx.notify();
+            }
+            return;
+        }
+
+        if mods.control || mods.alt || mods.platform {
+            return;
+        }
+
+        // Printable characters
+        if let Some(ch) = &event.keystroke.key_char {
+            self.query.push_str(ch);
             cx.notify();
         }
     }

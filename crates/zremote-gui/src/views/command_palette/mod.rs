@@ -127,6 +127,10 @@ pub enum CommandPaletteEvent {
     },
     Reconnect,
     OpenSessionSwitcher,
+    AddProject {
+        host_id: String,
+        path: String,
+    },
     Close,
 }
 
@@ -141,6 +145,8 @@ pub(super) enum DrillDownLevel {
     Project { project_idx: usize },
     Session { session_idx: usize },
     HostPicker,
+    HostPickerForProject,
+    PathInput { host_id: String },
 }
 
 struct SavedLevelState {
@@ -235,7 +241,14 @@ impl CommandPalette {
     /// Look up the `ResultItem` for a given flat index in the current results.
     pub(super) fn resolve_item(&self, index: usize) -> Option<&ResultItem> {
         if self.is_drilled_down()
-            && !matches!(self.current_level(), Some(DrillDownLevel::HostPicker))
+            && !matches!(
+                self.current_level(),
+                Some(
+                    DrillDownLevel::HostPicker
+                        | DrillDownLevel::HostPickerForProject
+                        | DrillDownLevel::PathInput { .. }
+                )
+            )
         {
             return self.resolve_drill_item(index);
         }
@@ -288,6 +301,14 @@ impl CommandPalette {
 
     pub(super) fn enter_host_picker(&mut self) {
         self.push_drill_down(DrillDownLevel::HostPicker);
+    }
+
+    pub(super) fn enter_host_picker_for_project(&mut self) {
+        self.push_drill_down(DrillDownLevel::HostPickerForProject);
+    }
+
+    pub(super) fn enter_path_input(&mut self, host_id: String) {
+        self.push_drill_down(DrillDownLevel::PathInput { host_id });
     }
 
     pub(super) fn dismiss(&mut self, cx: &mut Context<Self>) {
@@ -381,7 +402,11 @@ impl CommandPalette {
                     self.results = self.compute_drill_scored();
                 }
             }
-            Some(DrillDownLevel::HostPicker) => {
+            Some(
+                DrillDownLevel::HostPicker
+                | DrillDownLevel::HostPickerForProject
+                | DrillDownLevel::PathInput { .. },
+            ) => {
                 self.drill_items.clear();
             }
         }
@@ -864,6 +889,7 @@ impl CommandPalette {
                     }
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
+                PaletteAction::AddProject => Icon::Folder,
             },
         };
 
@@ -1309,6 +1335,281 @@ impl CommandPalette {
         container
     }
 
+    fn render_host_picker_for_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hosts = self.snapshot.online_hosts();
+        let filtered: Vec<&Host> = if self.query.is_empty() {
+            hosts
+        } else {
+            hosts
+                .into_iter()
+                .filter(|h| {
+                    h.hostname
+                        .to_lowercase()
+                        .contains(&self.query.to_lowercase())
+                })
+                .collect()
+        };
+
+        let query_display = if self.query.is_empty() {
+            "Filter hosts...".to_string()
+        } else {
+            self.query.clone()
+        };
+        let query_is_empty = self.query.is_empty();
+
+        let mut container = div()
+            .id("command-palette-host-picker-project")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                this.handle_host_picker_for_project_key(event, cx);
+            }));
+
+        // Title
+        container = container.child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(36.0))
+                .px(px(12.0))
+                .border_b_1()
+                .border_color(theme::border())
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::text_primary())
+                .child("Select host for new project"),
+        );
+
+        // Input
+        container = container.child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(40.0))
+                .px(px(12.0))
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(theme::border())
+                .child(
+                    icon(Icon::Server)
+                        .size(px(14.0))
+                        .text_color(theme::text_tertiary()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(4.0))
+                        .bg(theme::bg_primary())
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_size(px(13.0))
+                        .text_color(if query_is_empty {
+                            theme::text_tertiary()
+                        } else {
+                            theme::text_primary()
+                        })
+                        .child(query_display),
+                ),
+        );
+
+        // Host list
+        let mut list = div()
+            .id("host-list-project")
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll();
+        for (i, host) in filtered.iter().enumerate() {
+            let is_selected = i == self.selected_index;
+            let host_id = host.id.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        "host-project-item".into(),
+                        i as u64,
+                    ))
+                    .flex()
+                    .items_center()
+                    .h(px(32.0))
+                    .px(px(12.0))
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .when(is_selected, |s: Stateful<Div>| {
+                        s.bg(theme::bg_tertiary())
+                            .border_l_2()
+                            .border_color(theme::accent())
+                    })
+                    .hover(|s: StyleRefinement| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::Server)
+                            .size(px(16.0))
+                            .text_color(theme::text_secondary()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.0))
+                            .text_color(theme::text_primary())
+                            .child(host.hostname.clone()),
+                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(theme::success()))
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.enter_path_input(host_id.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+
+        if filtered.is_empty() {
+            list = list.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .py(px(32.0))
+                    .child(
+                        icon(Icon::Server)
+                            .size(px(24.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme::text_secondary())
+                            .child("No online hosts"),
+                    ),
+            );
+        }
+
+        container = container.child(list);
+
+        // Footer
+        container = container.child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(28.0))
+                .px(px(12.0))
+                .gap(px(12.0))
+                .border_t_1()
+                .border_color(theme::border())
+                .child(render_footer_hint("Left", "Back"))
+                .child(render_footer_hint("Enter", "Select"))
+                .child(render_footer_hint("Esc", "Close")),
+        );
+
+        container
+    }
+
+    fn render_path_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query_display = if self.query.is_empty() {
+            "/home/user/myproject...".to_string()
+        } else {
+            self.query.clone()
+        };
+        let query_is_empty = self.query.is_empty();
+
+        div()
+            .id("command-palette-path-input")
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                this.handle_path_input_key(event, cx);
+            }))
+            // Title
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(36.0))
+                    .px(px(12.0))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child("Add Project"),
+            )
+            // Input
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .gap(px(8.0))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        icon(Icon::Folder)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .bg(theme::bg_primary())
+                            .border_1()
+                            .border_color(theme::border())
+                            .text_size(px(13.0))
+                            .text_color(if query_is_empty {
+                                theme::text_tertiary()
+                            } else {
+                                theme::text_primary()
+                            })
+                            .child(query_display),
+                    ),
+            )
+            // Help text
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .py(px(32.0))
+                    .child(
+                        icon(Icon::Folder)
+                            .size(px(24.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::text_secondary())
+                            .child("Type the absolute path to the project directory"),
+                    ),
+            )
+            // Footer
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .gap(px(12.0))
+                    .border_t_1()
+                    .border_color(theme::border())
+                    .child(render_footer_hint("Left", "Back"))
+                    .child(render_footer_hint("Enter", "Add"))
+                    .child(render_footer_hint("Esc", "Close")),
+            )
+    }
+
     fn render_breadcrumb_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (parent_label, item_name) = match self.current_level() {
             Some(DrillDownLevel::Project { project_idx }) => (
@@ -1320,6 +1621,12 @@ impl CommandPalette {
                 ("Sessions".to_string(), session_title(session))
             }
             Some(DrillDownLevel::HostPicker) => ("Actions".to_string(), "Select Host".to_string()),
+            Some(DrillDownLevel::HostPickerForProject) => {
+                ("Actions".to_string(), "Select Host".to_string())
+            }
+            Some(DrillDownLevel::PathInput { .. }) => {
+                ("Add Project".to_string(), "Enter Path".to_string())
+            }
             None => return div().into_any_element(),
         };
 
@@ -1589,6 +1896,7 @@ impl CommandPalette {
                     }
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
+                PaletteAction::AddProject => Icon::Folder,
             },
         };
 
@@ -1678,6 +1986,7 @@ impl CommandPalette {
                     }
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
+                PaletteAction::AddProject => Icon::Folder,
             },
         };
 
@@ -1774,9 +2083,18 @@ impl Render for CommandPalette {
             self.focus_handle.focus(window);
         }
 
-        // Host picker has its own full layout
+        // Special drill-down levels with their own full layout
         if matches!(self.current_level(), Some(DrillDownLevel::HostPicker)) {
             return self.render_host_picker(cx).into_any_element();
+        }
+        if matches!(
+            self.current_level(),
+            Some(DrillDownLevel::HostPickerForProject)
+        ) {
+            return self.render_host_picker_for_project(cx).into_any_element();
+        }
+        if matches!(self.current_level(), Some(DrillDownLevel::PathInput { .. })) {
+            return self.render_path_input(cx).into_any_element();
         }
 
         // Drill-down view

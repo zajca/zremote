@@ -32,6 +32,7 @@ pub enum PaletteAction {
         host_id: String,
     },
     SwitchSession,
+    AddProject,
 }
 
 impl CommandPalette {
@@ -116,6 +117,21 @@ impl CommandPalette {
                         session_id: session_id.clone(),
                         host_id: host_id.clone(),
                     });
+                }
+                PaletteAction::AddProject => {
+                    let is_local = self.snapshot.mode == "local";
+                    let online = self.snapshot.online_hosts();
+                    if is_local || online.len() == 1 {
+                        if let Some(host) = online.first() {
+                            self.enter_path_input(host.id.clone());
+                            cx.notify();
+                            return;
+                        }
+                    } else {
+                        self.enter_host_picker_for_project();
+                        cx.notify();
+                        return;
+                    }
                 }
                 PaletteAction::SwitchSession => {
                     cx.emit(CommandPaletteEvent::OpenSessionSwitcher);
