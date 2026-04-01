@@ -16,6 +16,8 @@ pub struct LoopInfo {
     pub ended_at: Option<String>,
     pub end_reason: Option<String>,
     pub task_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_message: Option<String>,
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
@@ -203,6 +205,7 @@ mod tests {
             ended_at: None,
             end_reason: None,
             task_name: None,
+            prompt_message: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,

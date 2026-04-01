@@ -204,6 +204,7 @@ pub async fn handle_hook(
                     loop_id: mapped.loop_id,
                     status: AgenticStatus::Working,
                     task_name,
+                    prompt_message: None,
                 };
                 let _ = state.agentic_tx.try_send(msg);
             }
@@ -302,6 +303,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name: None,
+        prompt_message: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -327,6 +329,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name,
+        prompt_message: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -365,6 +368,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
             loop_id: mapped.loop_id,
             status: AgenticStatus::Completed,
             task_name,
+            prompt_message: None,
         };
         let _ = state.agentic_tx.try_send(update);
     }
@@ -392,6 +396,7 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
         loop_id: mapped.loop_id,
         status: AgenticStatus::WaitingForInput,
         task_name: None,
+        prompt_message: payload.message.clone(),
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, WaitingForInput update dropped");
@@ -471,6 +476,7 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name: None,
+        prompt_message: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -669,6 +675,7 @@ mod tests {
                 loop_id: lid,
                 status,
                 task_name,
+                ..
             } => {
                 assert_eq!(lid, loop_id);
                 assert_eq!(status, AgenticStatus::Working);
@@ -862,6 +869,7 @@ mod tests {
                 loop_id: lid,
                 status,
                 task_name,
+                ..
             } => {
                 assert_eq!(lid, loop_id);
                 assert_eq!(status, AgenticStatus::Completed);
@@ -891,6 +899,7 @@ mod tests {
                 loop_id: lid,
                 status,
                 task_name,
+                ..
             } => {
                 assert_eq!(lid, loop_id);
                 assert_eq!(status, AgenticStatus::WaitingForInput);
@@ -1001,6 +1010,7 @@ mod tests {
                         loop_id: mapped.loop_id,
                         status: AgenticStatus::Working,
                         task_name: None,
+                        prompt_message: None,
                     });
             }
         }
@@ -1565,6 +1575,7 @@ mod tests {
                     loop_id: mapped.loop_id,
                     status: AgenticStatus::Working,
                     task_name: Some("spawning subagent".to_string()),
+                    prompt_message: None,
                 });
         }
 
@@ -1574,6 +1585,7 @@ mod tests {
                 loop_id: lid,
                 status,
                 task_name,
+                ..
             } => {
                 assert_eq!(lid, loop_id);
                 assert_eq!(status, AgenticStatus::Working);

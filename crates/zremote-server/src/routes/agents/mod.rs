@@ -570,6 +570,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::WaitingForInput,
             task_name: Some("Fix the build".to_string()),
+            prompt_message: None,
         };
         handle_agentic_message(&state, host_id, update_msg)
             .await

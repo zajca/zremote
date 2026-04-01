@@ -841,6 +841,7 @@ fn server_event_roundtrip_loop_detected() {
             ended_at: None,
             end_reason: None,
             task_name: None,
+            prompt_message: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,

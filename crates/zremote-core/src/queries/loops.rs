@@ -41,6 +41,7 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        prompt_message: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
