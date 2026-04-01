@@ -1055,7 +1055,8 @@ mod tests {
             analyzer.mark_input_sent();
             // Small sleep to get a measurable latency — use a manual approach
             // by setting last_input_at to a past instant
-            analyzer.last_input_at = Some(Instant::now() - std::time::Duration::from_millis(100));
+            analyzer.last_input_at =
+                Instant::now().checked_sub(std::time::Duration::from_millis(100));
             analyzer.process_output(b"some output\n");
         }
 
@@ -1120,7 +1121,7 @@ mod tests {
 
         // Feed multiple token lines
         for i in 1..=5 {
-            let line = format!("input: {}K tokens | output: {}K tokens\n", i, i);
+            let line = format!("input: {i}K tokens | output: {i}K tokens\n");
             analyzer.process_output(line.as_bytes());
         }
 
@@ -1141,7 +1142,7 @@ mod tests {
         analyzer.process_output(b"Welcome to Claude Code!\n");
 
         for i in 1..=50 {
-            let line = format!("input: {}K tokens | output: {}K tokens\n", i, i);
+            let line = format!("input: {i}K tokens | output: {i}K tokens\n");
             analyzer.process_output(line.as_bytes());
         }
 
@@ -1179,7 +1180,8 @@ mod tests {
         let mut analyzer = make_analyzer();
 
         for _ in 0..80 {
-            analyzer.last_input_at = Some(Instant::now() - std::time::Duration::from_millis(100));
+            analyzer.last_input_at =
+                Instant::now().checked_sub(std::time::Duration::from_millis(100));
             analyzer.process_output(b"output\n");
         }
 
@@ -1263,8 +1265,7 @@ mod tests {
     fn percentile_helper_multiple() {
         let mut samples = VecDeque::new();
         for i in 1..=100 {
-            #[allow(clippy::cast_precision_loss)]
-            samples.push_back(i as f64);
+            samples.push_back(f64::from(i));
         }
         let p50 = percentile(&samples, 50.0).unwrap();
         let p95 = percentile(&samples, 95.0).unwrap();

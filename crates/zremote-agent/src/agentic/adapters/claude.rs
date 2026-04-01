@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn prompt_long_line_rejected() {
-        let long = format!("this is a very long line that exceeds forty characters >");
+        let long = "this is a very long line that exceeds forty characters >".to_string();
         assert!(!adapter().is_prompt(&long));
     }
 
