@@ -544,7 +544,8 @@ impl OutputAnalyzer {
             self.stripped_buffer.push('\n');
             if self.stripped_buffer.len() > STRIPPED_BUFFER_CAP {
                 let drain = self.stripped_buffer.len() - STRIPPED_BUFFER_CAP;
-                // Find a newline boundary to drain cleanly
+                // Snap to a char boundary first, then find a newline to drain cleanly
+                let drain = self.snap_to_char_boundary(drain);
                 let cut = self.stripped_buffer[drain..]
                     .find('\n')
                     .map_or(drain, |pos| drain + pos + 1);
@@ -558,6 +559,15 @@ impl OutputAnalyzer {
         }
 
         events
+    }
+
+    /// Snap a byte index forward to the nearest char boundary in `stripped_buffer`.
+    fn snap_to_char_boundary(&self, index: usize) -> usize {
+        let mut i = index;
+        while i < self.stripped_buffer.len() && !self.stripped_buffer.is_char_boundary(i) {
+            i += 1;
+        }
+        i
     }
 
     /// Mark that user input was sent (for latency tracking).
@@ -1196,6 +1206,24 @@ mod tests {
         let big_line = format!("{}\n", "x".repeat(2000));
         for _ in 0..20 {
             analyzer.process_output(big_line.as_bytes());
+        }
+
+        assert!(analyzer.stripped_buffer.len() <= STRIPPED_BUFFER_CAP + 2048);
+    }
+
+    #[test]
+    fn stripped_buffer_drain_with_multibyte_chars() {
+        let mut analyzer = make_analyzer();
+
+        // Fill buffer close to cap with multi-byte characters (… = 3 bytes each)
+        let line = "…".repeat(200) + "\n"; // 601 bytes per line
+        for _ in 0..30 {
+            analyzer.process_output(line.as_bytes());
+        }
+
+        // Now push over the cap - the drain must not panic on char boundaries
+        for _ in 0..10 {
+            analyzer.process_output(line.as_bytes());
         }
 
         assert!(analyzer.stripped_buffer.len() <= STRIPPED_BUFFER_CAP + 2048);
