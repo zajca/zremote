@@ -91,42 +91,21 @@ pub struct ShellIntegrationState {
 }
 
 impl ShellIntegrationState {
-    /// Clean up temp resources. Called on session close.
+    /// Clean up temp resources (ZDOTDIR, rcfile). Called on session close.
     ///
-    /// Cleanup strategy to avoid race conditions:
-    /// 1. Send SIGHUP to the shell process (graceful termination signal).
-    /// 2. Wait up to 500ms for the process to exit.
-    /// 3. Clean up temp files regardless.
+    /// Shell termination is NOT handled here — it is managed by the PTY
+    /// session lifecycle:
+    /// 1. `portable-pty`'s `child.kill()` sends SIGHUP to the shell PID
+    ///    (safe: the `Child` handle prevents PID recycling).
+    /// 2. Dropping the PTY master fd triggers kernel SIGHUP to the shell's
+    ///    foreground process group (standard POSIX behavior).
+    ///
+    /// We intentionally do NOT send an explicit SIGHUP here because the
+    /// stored `shell_pid` is a bare `u32` without a process handle — any
+    /// edge case (PID recycling, async drop order) could route the signal
+    /// to an unrelated process such as `systemd --user`, destroying the
+    /// desktop session.
     pub fn cleanup(self) {
-        if let Some(pid) = self.shell_pid {
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{Signal, kill};
-                use nix::unistd::Pid;
-
-                // Guard: pid == 0 means kill(0, SIGHUP) which sends SIGHUP to the entire
-                // process group of the caller. This can kill the desktop session if the
-                // agent is in systemd's process group. Should never happen (pty/mod.rs
-                // filters out pid == 0), but defend here too.
-                if pid == 0 {
-                    return;
-                }
-
-                let nix_pid = Pid::from_raw(pid.cast_signed());
-                let _ = kill(nix_pid, Signal::SIGHUP);
-
-                let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_millis(500);
-                while start.elapsed() < timeout {
-                    // Signal 0 probes if the process exists without sending a real signal.
-                    let alive = kill(nix_pid, None).is_ok();
-                    if !alive {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
         drop(self.temp_dir);
     }
 }
@@ -437,6 +416,35 @@ mod tests {
             !temp_path.exists(),
             "temp dir should be removed after cleanup"
         );
+    }
+
+    #[test]
+    fn cleanup_does_not_signal_shell() {
+        // Spawn a long-lived process and verify cleanup() does NOT kill it.
+        // This is the core safety invariant: cleanup() must never send signals
+        // because the stored shell_pid could have been recycled by the kernel.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        let state = ShellIntegrationState {
+            shell_type: ShellType::Zsh,
+            temp_dir: None,
+            shell_pid: Some(pid),
+        };
+
+        state.cleanup();
+
+        // Process must still be alive after cleanup
+        let alive =
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid.cast_signed()), None).is_ok();
+        assert!(alive, "cleanup() must not signal the shell process");
+
+        // Clean up
+        child.kill().ok();
+        child.wait().ok();
     }
 
     #[test]

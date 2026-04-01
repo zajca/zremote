@@ -118,8 +118,20 @@ pub async fn run_pty_daemon(
         }
     };
 
-    let shell_pid = child.process_id().unwrap_or(0);
     let daemon_pid = std::process::id();
+    let shell_pid = match child.process_id() {
+        Some(pid) if pid != 0 => pid,
+        other => {
+            tracing::warn!(
+                raw_pid = ?other,
+                "could not determine shell PID, using daemon PID as fallback"
+            );
+            // Use daemon_pid: it is always valid and never 0, so any code
+            // that does kill(shell_pid, ...) targets the daemon itself
+            // (which ignores SIGHUP) instead of the entire process group.
+            daemon_pid
+        }
+    };
 
     let master = pair.master;
     let mut writer = match master.take_writer() {
