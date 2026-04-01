@@ -50,8 +50,19 @@ impl DaemonSession {
         let socket_path = sock_dir.join(format!("{session_id}.sock"));
         let state_path = sock_dir.join(format!("{session_id}.json"));
 
-        // Build args for the daemon subprocess
-        let mut args = vec![
+        // Build args for the daemon subprocess.
+        // When running as unified binary (`zremote`), pty-daemon is nested under
+        // `agent` subcommand: `zremote agent pty-daemon ...`.
+        // When running as standalone agent binary, it's a direct subcommand.
+        let is_unified_binary = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name == "zremote");
+        let mut args: Vec<String> = Vec::new();
+        if is_unified_binary {
+            args.push("agent".to_string());
+        }
+        args.extend([
             "pty-daemon".to_string(),
             "--session-id".to_string(),
             session_id.to_string(),
@@ -65,7 +76,7 @@ impl DaemonSession {
             cols.to_string(),
             "--rows".to_string(),
             rows.to_string(),
-        ];
+        ]);
         if let Some(dir) = working_dir {
             args.push("--working-dir".to_string());
             args.push(dir.to_string());
