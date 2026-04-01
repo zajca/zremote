@@ -303,6 +303,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_hook_activity_within_window() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+
+        // No activity yet
+        assert!(
+            !mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)),
+            "should return false when no activity has been recorded"
+        );
+
+        // Mark activity
+        mapper.mark_hook_activity(session_id);
+
+        // Within window
+        assert!(
+            mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)),
+            "should return true within the activity window"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_activity_outside_window() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+
+        mapper.mark_hook_activity(session_id);
+
+        // Use a very short window so the activity is already outside it
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            !mapper.has_recent_hook_activity(&session_id, Duration::from_nanos(1)),
+            "should return false when activity is outside the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_loop_cleans_hook_activity() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        // Register loop and mark hook activity
+        mapper.register_loop(session_id, loop_id).await;
+        mapper.mark_hook_activity(session_id);
+
+        assert!(
+            mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)),
+            "hook activity should exist before removal"
+        );
+
+        // Remove the loop
+        mapper.remove_loop(&loop_id).await;
+
+        // Hook activity should be cleaned up
+        assert!(
+            !mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)),
+            "hook activity should be cleaned up after remove_loop"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_retry_succeeds_after_late_registration() {
         let mapper = SessionMapper::new();
         let session_id = Uuid::new_v4();

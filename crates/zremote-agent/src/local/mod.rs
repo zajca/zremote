@@ -311,6 +311,10 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
             delete(routes::sessions::purge_session),
         )
         .route(
+            "/api/sessions/{session_id}/context/push",
+            post(routes::sessions::push_context),
+        )
+        .route(
             "/api/sessions/{session_id}/execution-nodes",
             get(routes::sessions::list_execution_nodes),
         )

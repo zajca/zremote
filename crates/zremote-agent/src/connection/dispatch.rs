@@ -905,6 +905,52 @@ pub(super) async fn handle_server_message(
                     .await;
             });
         }
+        ServerMessage::ContextPush {
+            session_id,
+            memories,
+            conventions,
+        } => {
+            tracing::info!(
+                session = %session_id,
+                memories = memories.len(),
+                conventions = conventions.len(),
+                "received context push from server"
+            );
+            // Context push is handled in the connection loop via the
+            // DeliveryCoordinator. The dispatch layer logs and acknowledges.
+            // Actual delivery happens when the agent transitions to idle.
+            let memory_inputs: Vec<crate::knowledge::context_delivery::ContextMemoryInput> =
+                memories
+                    .iter()
+                    .map(|m| crate::knowledge::context_delivery::ContextMemoryInput {
+                        key: "server-push".to_string(),
+                        content: m.clone(),
+                        category: zremote_protocol::knowledge::MemoryCategory::Convention,
+                        confidence: 1.0,
+                    })
+                    .collect();
+            let context = crate::knowledge::context_delivery::ContextAssembler::assemble(
+                "server-push",
+                "",
+                "unknown",
+                None,
+                &[],
+                &memory_inputs,
+                conventions,
+                crate::knowledge::context_delivery::ContextTrigger::ManualPush,
+            );
+            // Write content directly to the session PTY
+            let content = context.render();
+            if !content.is_empty()
+                && let Err(e) = session_manager.write_to(session_id, content.as_bytes())
+            {
+                tracing::warn!(
+                    session = %session_id,
+                    error = %e,
+                    "failed to deliver context push to PTY"
+                );
+            }
+        }
     }
 }
 

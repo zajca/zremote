@@ -1138,4 +1138,75 @@ mod tests {
         assert_eq!(intel.package_manager, Some("pnpm".to_string()));
         assert!(intel.conventions.iter().any(|c| c.name == "typescript"));
     }
+
+    #[test]
+    fn analyze_multi_marker_project() {
+        let tmp = TempDir::new().unwrap();
+
+        // Rust project with Cargo.toml (framework: Axum)
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"myapp\"\n\n[dependencies]\naxum = \"0.8\"\n\n[lints.clippy]\nall = \"deny\"\n",
+        )
+        .unwrap();
+
+        // ESLint config (convention: linter)
+        fs::write(tmp.path().join(".eslintrc.json"), "{}").unwrap();
+
+        // Dockerfile (convention: build tool)
+        fs::write(tmp.path().join("Dockerfile"), "FROM rust:1.75").unwrap();
+
+        // GitHub Actions (convention: build tool)
+        fs::create_dir_all(tmp.path().join(".github").join("workflows")).unwrap();
+
+        // Editorconfig (convention: formatter)
+        fs::write(tmp.path().join(".editorconfig"), "root = true").unwrap();
+
+        let intel = analyze(tmp.path(), "rust");
+
+        // Framework detection works
+        assert!(intel.frameworks.contains(&"Axum".to_string()));
+        assert_eq!(intel.package_manager, Some("cargo".to_string()));
+
+        // All conventions from different markers are detected
+        assert!(
+            intel.conventions.iter().any(|c| c.name == "clippy"),
+            "should detect clippy from Cargo.toml"
+        );
+        assert!(
+            intel.conventions.iter().any(|c| c.name == "eslint"),
+            "should detect eslint from .eslintrc.json"
+        );
+        assert!(
+            intel.conventions.iter().any(|c| c.name == "docker"),
+            "should detect docker from Dockerfile"
+        );
+        assert!(
+            intel.conventions.iter().any(|c| c.name == "github_actions"),
+            "should detect GitHub Actions"
+        );
+        assert!(
+            intel.conventions.iter().any(|c| c.name == "editorconfig"),
+            "should detect editorconfig"
+        );
+
+        // Conventions should be sorted by name
+        for i in 1..intel.conventions.len() {
+            assert!(
+                intel.conventions[i - 1].name <= intel.conventions[i].name,
+                "conventions should be sorted"
+            );
+        }
+    }
+
+    #[test]
+    fn analyze_empty_directory() {
+        let tmp = TempDir::new().unwrap();
+        let intel = analyze(tmp.path(), "unknown");
+
+        assert!(intel.frameworks.is_empty());
+        assert!(intel.architecture.is_none());
+        assert!(intel.conventions.is_empty());
+        assert!(intel.package_manager.is_none());
+    }
 }

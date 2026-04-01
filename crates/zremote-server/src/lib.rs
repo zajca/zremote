@@ -75,6 +75,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             delete(routes::sessions::purge_session),
         )
         .route(
+            "/api/sessions/{session_id}/context/push",
+            post(routes::sessions::push_context),
+        )
+        .route(
             "/api/sessions/{session_id}/execution-nodes",
             get(routes::sessions::list_execution_nodes),
         )

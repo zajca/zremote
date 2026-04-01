@@ -408,4 +408,84 @@ mod tests {
         // Oldest should have been removed
         assert_eq!(remaining[0].timestamp, 1005);
     }
+
+    #[tokio::test]
+    async fn empty_session_returns_empty_list() {
+        let pool = setup_db().await;
+        let nodes = list_execution_nodes(&pool, "sess1", 10, 0).await.unwrap();
+        assert!(nodes.is_empty());
+        let count = count_execution_nodes(&pool, "sess1").await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn pagination_offset_beyond_total_returns_empty() {
+        let pool = setup_db().await;
+        for i in 0..3 {
+            insert_execution_node(
+                &pool,
+                "sess1",
+                None,
+                1000 + i,
+                "tool_call",
+                None,
+                None,
+                None,
+                "/home",
+                10,
+            )
+            .await
+            .unwrap();
+        }
+
+        let nodes = list_execution_nodes(&pool, "sess1", 10, 100).await.unwrap();
+        assert!(
+            nodes.is_empty(),
+            "offset beyond total count should return empty list"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_zero_days_deletes_all() {
+        let pool = setup_db().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // Insert a node with current timestamp
+        insert_execution_node(
+            &pool,
+            "sess1",
+            None,
+            now_ms,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            10,
+        )
+        .await
+        .unwrap();
+        // Insert a node 1 second ago
+        insert_execution_node(
+            &pool,
+            "sess1",
+            None,
+            now_ms - 1000,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            10,
+        )
+        .await
+        .unwrap();
+
+        // 0 days means cutoff = now, so all nodes with timestamp < now are deleted
+        let deleted = delete_old_execution_nodes(&pool, 0).await.unwrap();
+        assert!(deleted >= 1, "should delete nodes older than now");
+
+        let remaining = list_execution_nodes(&pool, "sess1", 10, 0).await.unwrap();
+        // At most the node inserted at exactly `now_ms` might survive
+        assert!(remaining.len() <= 1);
+    }
 }

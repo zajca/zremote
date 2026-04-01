@@ -19,7 +19,10 @@ use crate::config::AgentConfig;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
-use crate::knowledge::context_delivery::DeliveryCoordinator;
+use crate::knowledge::context_delivery::{
+    ContextAssembler, ContextChangeEvent, ContextTrigger, DeliveryCoordinator, PtyTransport,
+    SessionWriteRequest, SessionWriterHandle,
+};
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 use zremote_protocol::knowledge::KnowledgeServerMessage;
@@ -367,14 +370,32 @@ pub async fn run_connection(
         (None, None)
     };
 
+    // Channel for context change events from KnowledgeManager -> connection loop
+    let (context_change_tx, mut context_change_rx) = mpsc::channel::<ContextChangeEvent>(64);
+
+    // Channel for session write requests from DeliveryCoordinator -> connection loop
+    let (session_write_tx, mut session_write_rx) = mpsc::channel::<SessionWriteRequest>(64);
+    let session_writer_handle = SessionWriterHandle::new(session_write_tx);
+
+    // PTY transport for context delivery (file-based injection)
+    let _pty_transport = match PtyTransport::new(session_writer_handle) {
+        Ok(transport) => Some(transport),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to create PTY transport for context delivery");
+            None
+        }
+    };
+
     let mut knowledge_manager = if config.openviking_enabled {
-        Some(KnowledgeManager::new(
+        let mut mgr = KnowledgeManager::new(
             config.openviking_binary.clone(),
             config.openviking_port,
             config.openviking_config_dir.clone(),
             config.openviking_api_key.clone(),
             outbound_tx.clone(),
-        ))
+        );
+        mgr.set_context_change_tx(context_change_tx);
+        Some(mgr)
     } else {
         None
     };
@@ -639,6 +660,55 @@ pub async fn run_connection(
                     {
                         handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper, &mut delivery_coordinator, session_manager);
                     }
+                }
+            }
+            Some(ctx_event) = context_change_rx.recv() => {
+                match ctx_event {
+                    ContextChangeEvent::MemoriesExtracted { loop_id, memories, project_path } => {
+                        if let Some(session_id) = agentic_manager.session_id_for_loop(&loop_id) {
+                            let project_name = project_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&project_path)
+                                .to_string();
+                            let context = ContextAssembler::assemble(
+                                &project_name,
+                                &project_path,
+                                "unknown",
+                                None,
+                                &[],
+                                &memories,
+                                &[],
+                                ContextTrigger::MemoryExtracted {
+                                    loop_id,
+                                    count: memories.len(),
+                                },
+                            );
+                            delivery_coordinator.on_context_changed(session_id, context);
+                            tracing::info!(
+                                session = %session_id,
+                                loop_id = %loop_id,
+                                memory_count = memories.len(),
+                                "context change queued for delivery"
+                            );
+                        } else {
+                            tracing::debug!(
+                                loop_id = %loop_id,
+                                "context change event for unknown loop, ignoring"
+                            );
+                        }
+                    }
+                }
+            }
+            Some(write_req) = session_write_rx.recv() => {
+                if let Err(e) = session_manager.write_to(&write_req.session_id, &write_req.data) {
+                    tracing::warn!(
+                        session_id = %write_req.session_id,
+                        error = %e,
+                        "failed to write session data from delivery coordinator"
+                    );
+                } else if let Some(analyzer) = session_analyzers.get_mut(&write_req.session_id) {
+                    analyzer.mark_input_sent();
                 }
             }
             Some(ccline_msg) = ccline_rx.recv() => {

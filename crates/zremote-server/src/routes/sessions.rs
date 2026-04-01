@@ -202,6 +202,60 @@ pub async fn purge_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Request body for pushing context to a session.
+#[derive(Debug, Deserialize)]
+pub struct ContextPushRequest {
+    #[serde(default)]
+    pub memories: Vec<String>,
+    #[serde(default)]
+    pub conventions: Vec<String>,
+}
+
+/// `POST /api/sessions/:session_id/context/push` - push context to a running agent session.
+///
+/// In server mode, this forwards a `ServerMessage::ContextPush` to the agent
+/// over the WebSocket connection. The agent-side `DeliveryCoordinator` handles
+/// delivery timing.
+pub async fn push_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ContextPushRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed_session_id: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    // Look up host for this session
+    let (_id, host_id_str) = q::find_session_for_close(&state.db, &session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    // Forward to agent via WebSocket
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline, cannot push context".to_string()))?;
+
+    let msg = ServerMessage::ContextPush {
+        session_id: parsed_session_id,
+        memories: body.memories,
+        conventions: body.conventions,
+    };
+
+    if sender.send(msg).await.is_err() {
+        return Err(AppError::Conflict(
+            "host went offline, cannot push context".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Query parameters for listing execution nodes.
 #[derive(Debug, Deserialize)]
 pub struct ListExecutionNodesQuery {
@@ -571,5 +625,72 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_context_invalid_session_id_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/not-a-uuid/context/push")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": [], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn push_context_session_not_found_returns_404() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": ["test"], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn push_context_agent_offline_returns_conflict() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        // No agent connection registered -> should fail with conflict
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"memories": ["remember this"], "conventions": ["use tabs"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

@@ -207,6 +207,15 @@ pub enum ServerMessage {
         project_path: String,
         action_name: String,
     },
+    /// Push context (memories + conventions) to a running agent session.
+    /// The agent-side `DeliveryCoordinator` handles delivery timing.
+    ContextPush {
+        session_id: SessionId,
+        #[serde(default)]
+        memories: Vec<String>,
+        #[serde(default)]
+        conventions: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -937,6 +946,24 @@ mod tests {
                 output: Some("npm install done".to_string()),
                 duration_ms: 2000,
             }),
+        });
+    }
+
+    #[test]
+    fn context_push_roundtrip() {
+        roundtrip_server(&ServerMessage::ContextPush {
+            session_id: Uuid::new_v4(),
+            memories: vec!["memory one".to_string(), "memory two".to_string()],
+            conventions: vec!["use snake_case".to_string()],
+        });
+    }
+
+    #[test]
+    fn context_push_empty_roundtrip() {
+        roundtrip_server(&ServerMessage::ContextPush {
+            session_id: Uuid::new_v4(),
+            memories: vec![],
+            conventions: vec![],
         });
     }
 }

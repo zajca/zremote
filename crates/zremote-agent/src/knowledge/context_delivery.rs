@@ -703,6 +703,25 @@ impl Default for DeliveryCoordinator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Context change event (for KnowledgeManager -> connection loop integration)
+// ---------------------------------------------------------------------------
+
+/// Event emitted by `KnowledgeManager` when new context is available.
+/// The connection loop (or local mode PTY output loop) listens for these
+/// and feeds them into the `DeliveryCoordinator`.
+#[derive(Debug, Clone)]
+pub enum ContextChangeEvent {
+    /// New memories were extracted for a loop.
+    /// The connection loop resolves `loop_id` to a `session_id` via
+    /// `AgenticLoopManager::session_id_for_loop()`.
+    MemoriesExtracted {
+        loop_id: uuid::Uuid,
+        memories: Vec<ContextMemoryInput>,
+        project_path: String,
+    },
+}
+
 /// Parse a category string into a `MemoryCategory`, falling back to `Convention`.
 pub fn parse_category(s: &str) -> MemoryCategory {
     match s {
@@ -1297,5 +1316,25 @@ mod tests {
     fn parse_category_unknown_falls_back() {
         assert_eq!(parse_category("unknown"), MemoryCategory::Convention);
         assert_eq!(parse_category(""), MemoryCategory::Convention);
+    }
+
+    // -- ContextChangeEvent tests --
+
+    #[test]
+    fn context_change_event_memories_extracted() {
+        let event = ContextChangeEvent::MemoriesExtracted {
+            loop_id: uuid::Uuid::new_v4(),
+            memories: vec![ContextMemoryInput {
+                key: "test".to_string(),
+                content: "test content".to_string(),
+                category: MemoryCategory::Pattern,
+                confidence: 0.9,
+            }],
+            project_path: "/home/user/project".to_string(),
+        };
+        // Verify the event can be cloned and debug-printed
+        let cloned = event.clone();
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("MemoriesExtracted"));
     }
 }

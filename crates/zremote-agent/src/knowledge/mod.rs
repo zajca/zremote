@@ -16,6 +16,8 @@ use zremote_protocol::knowledge::{
 use self::client::OvClient;
 use self::process::OvProcess;
 
+pub use self::context_delivery::ContextChangeEvent;
+
 /// Marker line separating user content from auto-generated content in CLAUDE.md.
 const CLAUDE_MD_MARKER: &str = "<!-- ZRemote Knowledge (auto-generated, do not edit below) -->";
 
@@ -34,6 +36,8 @@ pub struct KnowledgeManager {
     api_key: Option<String>,
     port: u16,
     enabled: bool,
+    /// Optional channel for notifying the connection loop about context changes.
+    context_change_tx: Option<mpsc::Sender<ContextChangeEvent>>,
 }
 
 impl KnowledgeManager {
@@ -57,7 +61,15 @@ impl KnowledgeManager {
             port,
             outbound_tx,
             enabled: false,
+            context_change_tx: None,
         }
+    }
+
+    /// Set the context change notification channel.
+    /// When memories are extracted, a `ContextChangeEvent` is sent through this
+    /// channel so the connection loop can feed it to the `DeliveryCoordinator`.
+    pub fn set_context_change_tx(&mut self, tx: mpsc::Sender<ContextChangeEvent>) {
+        self.context_change_tx = Some(tx);
     }
 
     /// Handle a `KnowledgeServerMessage` from the server.
@@ -294,6 +306,31 @@ impl KnowledgeManager {
             Ok(memories) => {
                 // Sync to local memory cache for MCP server
                 sync_memories_to_cache(project_path, &memories).await;
+
+                // Notify the delivery coordinator about new memories
+                if let Some(ref ctx_tx) = self.context_change_tx
+                    && !memories.is_empty()
+                {
+                    let inputs: Vec<context_delivery::ContextMemoryInput> = memories
+                        .iter()
+                        .map(|m| context_delivery::ContextMemoryInput {
+                            key: m.key.clone(),
+                            content: m.content.clone(),
+                            category: m.category,
+                            confidence: m.confidence,
+                        })
+                        .collect();
+                    if ctx_tx
+                        .try_send(ContextChangeEvent::MemoriesExtracted {
+                            loop_id,
+                            memories: inputs,
+                            project_path: project_path.to_string(),
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!("context change channel full, event dropped");
+                    }
+                }
 
                 self.send_knowledge_msg(KnowledgeAgentMessage::MemoryExtracted {
                     loop_id,
