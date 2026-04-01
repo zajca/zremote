@@ -31,6 +31,7 @@ Phase 4:   Project Intelligence → project-intelligence.md [DONE]
 Phase 5:   Command Tracking ──→ command-tracking.md      [DONE]
 Phase 6:   Context Delivery ──→ context-delivery.md      [DONE]
 Phase 7:   Channel Bridge ───→ channel-bridge.md         [BLOCKED: CC Channels API preview]
+Phase 8:   Hook Intelligence ─→ hook-intelligence.md     [DONE]
 ```
 
 | Phase | RFC | Status | Depends on | Complexity |
@@ -41,8 +42,9 @@ Phase 7:   Channel Bridge ───→ channel-bridge.md         [BLOCKED: CC Ch
 | 5 | [Command Tracking](command-tracking.md) | **Done** (2026-04-01) | Phase 1 | Low |
 | 6 | [Context Delivery](context-delivery.md) | **Done** (2026-04-01) | Phase 1, 4 | Medium-high |
 | 7 | [Channel Bridge](channel-bridge.md) | Blocked | Phase 1, 6 | High |
+| 8 | [Hook Intelligence](hook-intelligence.md) | **Done** (2026-04-01) | Phase 1, 6 | Medium |
 
-Phases 1-4 are independent and parallelizable. Phase 5 extends the analyzer from Phase 1. Phase 6 depends on both Phase 1 (phase detection) and Phase 4 (project data). Phase 7 is a separate RFC blocked on CC Channels API stability.
+Phases 1-4 are independent and parallelizable. Phase 5 extends the analyzer from Phase 1. Phase 6 depends on both Phase 1 (phase detection) and Phase 4 (project data). Phase 7 is a separate RFC blocked on CC Channels API stability. Phase 8 provides CC-native context delivery via hooks as an alternative to Phase 6's PTY injection.
 
 ---
 
@@ -96,3 +98,4 @@ Phases 1-4 are independent and parallelizable. Phase 5 extends the analyzer from
 - [Command Tracking RFC](command-tracking.md) — detailed design for Phase 5
 - [Context Delivery RFC](context-delivery.md) — detailed design for Phase 6
 - [Channel Bridge RFC](channel-bridge.md) — detailed design for Phase 7
+- [Hook Intelligence RFC](hook-intelligence.md) — detailed design for Phase 8

@@ -164,6 +164,16 @@ impl SessionMapper {
         None
     }
 
+    /// Single-attempt resolve without retry. For hot-path hooks
+    /// (`PreToolUse`/`PostToolUse`) where the 5-second retry in
+    /// [`resolve_loop_id`] would block every tool call.
+    pub async fn try_resolve(&self, cc_session_id: &str) -> Option<MappedSession> {
+        if let Some(mapped) = self.lookup_by_cc_session(cc_session_id).await {
+            return Some(mapped);
+        }
+        self.try_resolve_fallback(cc_session_id).await
+    }
+
     /// Try to find a loop_id for a hook event by checking known CC sessions,
     /// or fall back to matching by cwd against known PTY sessions.
     /// If no mapping is found immediately, retries up to 5 times waiting for

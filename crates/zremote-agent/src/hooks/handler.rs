@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -68,18 +68,60 @@ pub struct HookPayload {
     pub requested_schema: Option<serde_json::Value>,
 }
 
-/// Response to hook scripts. Empty for most hooks.
-#[derive(Debug, Serialize)]
+/// Response to hook scripts.
+///
+/// Claude Code inspects `hookSpecificOutput` for structured data like
+/// `additionalContext` (injected into model context), `watchPaths`
+/// (dynamic file monitoring), and `permissionDecision` (auto-approve/deny).
+#[derive(Debug, Serialize, Default)]
 pub struct HookResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
+    #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
+    pub hook_specific_output: Option<HookSpecificOutput>,
+}
+
+/// Structured output per hook event type. The `hookEventName` tag tells
+/// Claude Code which fields to expect.
+#[derive(Debug, Serialize)]
+#[serde(tag = "hookEventName")]
+pub enum HookSpecificOutput {
+    PreToolUse {
+        #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
+        additional_context: Option<String>,
+        #[serde(rename = "permissionDecision", skip_serializing_if = "Option::is_none")]
+        permission_decision: Option<String>,
+        #[serde(
+            rename = "permissionDecisionReason",
+            skip_serializing_if = "Option::is_none"
+        )]
+        permission_decision_reason: Option<String>,
+        #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
+        updated_input: Option<serde_json::Value>,
+    },
+    PostToolUse {
+        #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
+        additional_context: Option<String>,
+    },
+    SessionStart {
+        #[serde(rename = "watchPaths", skip_serializing_if = "Option::is_none")]
+        watch_paths: Option<Vec<String>>,
+        #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
+        additional_context: Option<String>,
+    },
 }
 
 /// POST /hooks - main entry point for all CC hook events.
 pub async fn handle_hook(
     State(state): State<HooksState>,
+    headers: HeaderMap,
     Json(payload): Json<HookPayload>,
 ) -> impl IntoResponse {
+    let env_file = headers
+        .get("x-claude-env-file")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(String::from);
     tracing::debug!(
         hook_event = %payload.hook_event_name,
         cc_session = %payload.session_id,
@@ -99,36 +141,107 @@ pub async fn handle_hook(
             .await;
     }
 
-    match payload.hook_event_name.as_str() {
-        "PreToolUse" => handle_pre_tool_use(&state, &payload).await,
-        "PostToolUse" => handle_post_tool_use(&state, &payload).await,
-        "Stop" => handle_stop(&state, &payload).await,
+    let response = match payload.hook_event_name.as_str() {
+        "PreToolUse" => {
+            handle_pre_tool_use(&state, &payload).await;
+            HookResponse::default()
+        }
+        "PostToolUse" => {
+            handle_post_tool_use(&state, &payload).await;
+            HookResponse::default()
+        }
+        "Stop" => {
+            handle_stop(&state, &payload).await;
+            HookResponse::default()
+        }
         "Notification" => {
             if let Some(ref msg) = payload.message {
                 tracing::info!(cc_session = %payload.session_id, message = %msg, "CC notification");
             }
+            HookResponse::default()
         }
-        "Elicitation" => handle_elicitation(&state, &payload).await,
-        "UserPromptSubmit" => handle_user_prompt_submit(&state, &payload).await,
+        "Elicitation" => {
+            handle_elicitation(&state, &payload).await;
+            HookResponse::default()
+        }
+        "UserPromptSubmit" => {
+            handle_user_prompt_submit(&state, &payload).await;
+            HookResponse::default()
+        }
         "SessionStart" => {
             tracing::info!(
                 cc_session = %payload.session_id,
                 source = ?payload.source,
                 "CC session started"
             );
+            // Write session env vars to CLAUDE_ENV_FILE if provided.
+            // These become available in all subsequent Bash tool calls.
+            if let Some(ref path) = env_file {
+                write_claude_env_file(path, &payload).await;
+            }
+            // Return watchPaths for project files CC should monitor.
+            // FileChanged hook fires when any of these change.
+            let watch_paths = build_watch_paths(payload.cwd.as_deref());
+            HookResponse {
+                hook_specific_output: watch_paths.map(|paths| HookSpecificOutput::SessionStart {
+                    watch_paths: Some(paths),
+                    additional_context: None,
+                }),
+                ..Default::default()
+            }
         }
         "SubagentStart" | "SubagentStop" => {
-            tracing::debug!(
-                hook_event = %payload.hook_event_name,
-                "subagent event (ignored)"
+            let event_name = payload.hook_event_name.as_str();
+            if let Some(mapped) = state.mapper.try_resolve(&payload.session_id).await {
+                let task_name = if event_name == "SubagentStart" {
+                    Some("spawning subagent".to_string())
+                } else {
+                    Some("subagent completed".to_string())
+                };
+                // Both start and stop use Working: the parent agent continues
+                // its work after a subagent returns, so the loop is still active.
+                let msg = AgenticAgentMessage::LoopStateUpdate {
+                    loop_id: mapped.loop_id,
+                    status: AgenticStatus::Working,
+                    task_name,
+                };
+                let _ = state.agentic_tx.try_send(msg);
+            }
+            HookResponse::default()
+        }
+        "FileChanged" => {
+            tracing::info!(
+                cc_session = %payload.session_id,
+                tool_input = ?payload.tool_input,
+                "watched file changed"
             );
+            HookResponse::default()
+        }
+        "CwdChanged" => {
+            tracing::info!(
+                cc_session = %payload.session_id,
+                cwd = ?payload.cwd,
+                "working directory changed"
+            );
+            if let Some(ref path) = env_file {
+                write_claude_env_file(path, &payload).await;
+            }
+            HookResponse::default()
+        }
+        "StopFailure" => {
+            tracing::warn!(
+                cc_session = %payload.session_id,
+                "CC turn ended due to API error"
+            );
+            HookResponse::default()
         }
         other => {
             tracing::debug!(hook_event = %other, "unknown hook event, ignoring");
+            HookResponse::default()
         }
-    }
+    };
 
-    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// If this CC session belongs to a Claude task and we haven't sent its ID yet,
@@ -319,7 +432,7 @@ pub async fn handle_notification_idle(
     Json(payload): Json<HookPayload>,
 ) -> impl IntoResponse {
     handle_notification_typed(&state, &payload, "idle_prompt").await;
-    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
+    (StatusCode::OK, Json(HookResponse::default())).into_response()
 }
 
 /// Route handler for permission_prompt notifications.
@@ -328,7 +441,7 @@ pub async fn handle_notification_permission(
     Json(payload): Json<HookPayload>,
 ) -> impl IntoResponse {
     handle_notification_typed(&state, &payload, "permission_prompt").await;
-    (StatusCode::OK, Json(HookResponse { decision: None })).into_response()
+    (StatusCode::OK, Json(HookResponse::default())).into_response()
 }
 
 async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
@@ -362,6 +475,80 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
     }
+}
+
+/// Build a list of project files to watch via CC's `watchPaths` feature.
+/// Returns `None` if no watchable files exist in `cwd`.
+fn build_watch_paths(cwd: Option<&str>) -> Option<Vec<String>> {
+    let cwd = cwd?;
+    let base = std::path::Path::new(cwd);
+    let candidates = [
+        "Cargo.toml",
+        ".env",
+        "package.json",
+        "pyproject.toml",
+        "CLAUDE.md",
+        "go.mod",
+        "composer.json",
+    ];
+    let paths: Vec<String> = candidates
+        .iter()
+        .filter_map(|f| {
+            let p = base.join(f);
+            p.exists().then(|| p.to_string_lossy().to_string())
+        })
+        .collect();
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+/// Write ZRemote environment variables to the `CLAUDE_ENV_FILE` path.
+///
+/// Claude Code reads this file and exports the variables for all subsequent
+/// Bash tool calls in the session. Only called for events that receive
+/// `CLAUDE_ENV_FILE` (SessionStart, CwdChanged, FileChanged).
+async fn write_claude_env_file(path: &str, payload: &HookPayload) {
+    use std::fmt::Write;
+
+    // CWE-22: Only write to temp directory to prevent arbitrary file overwrite
+    // via crafted X-Claude-Env-File header from local processes.
+    let env_path = std::path::Path::new(path);
+    let temp_dir = std::env::temp_dir();
+    if !env_path.starts_with(&temp_dir) {
+        tracing::warn!(
+            path,
+            temp_dir = %temp_dir.display(),
+            "CLAUDE_ENV_FILE path outside temp dir, refusing write"
+        );
+        return;
+    }
+
+    let mut content = String::new();
+    // CWE-78: Sanitize values before writing to shell file to prevent injection.
+    // CC session_id is normally a UUID but comes from untrusted JSON payload.
+    let safe_session_id = sanitize_shell_value(&payload.session_id);
+    writeln!(
+        &mut content,
+        "export ZREMOTE_SESSION_ID='{safe_session_id}'"
+    )
+    .ok();
+    writeln!(&mut content, "export ZREMOTE_TERMINAL=1").ok();
+    if let Some(ref cwd) = payload.cwd {
+        let safe_cwd = sanitize_shell_value(cwd);
+        writeln!(&mut content, "export ZREMOTE_CWD='{safe_cwd}'").ok();
+    }
+
+    if let Err(e) = tokio::fs::write(path, &content).await {
+        tracing::warn!(path, error = %e, "failed to write CLAUDE_ENV_FILE");
+    } else {
+        tracing::debug!(path, "wrote CLAUDE_ENV_FILE");
+    }
+}
+
+/// Sanitize a value for safe inclusion in single-quoted shell strings.
+/// Single quotes within the value are escaped as `'\''` (end quote, escaped
+/// literal quote, restart quote).
+fn sanitize_shell_value(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 /// Extract `task_name` from the transcript file slug, with path traversal validation.
@@ -802,14 +989,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_hook_subagent_events_are_ignored() {
-        let (_state, mut agentic_rx, _outbound_rx) = test_state();
+    async fn handle_hook_subagent_events_noop_without_mapping() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        // No loop registered — try_resolve returns None, no message sent
         for event in &["SubagentStart", "SubagentStop"] {
-            let p = payload(event, "cc-sub");
-            // These events just log and do nothing
-            match p.hook_event_name.as_str() {
-                "SubagentStart" | "SubagentStop" => {} // expected path
-                _ => panic!("should match subagent events"),
+            let p = payload(event, "cc-sub-unmapped");
+            if let Some(mapped) = state.mapper.try_resolve(&p.session_id).await {
+                let _ = state
+                    .agentic_tx
+                    .try_send(AgenticAgentMessage::LoopStateUpdate {
+                        loop_id: mapped.loop_id,
+                        status: AgenticStatus::Working,
+                        task_name: None,
+                    });
             }
         }
         assert!(agentic_rx.try_recv().is_err());
@@ -1098,7 +1290,7 @@ mod tests {
 
     #[test]
     fn hook_response_serializes_without_decision() {
-        let resp = HookResponse { decision: None };
+        let resp = HookResponse::default();
         let json = serde_json::to_string(&resp).unwrap();
         assert_eq!(json, "{}");
     }
@@ -1107,9 +1299,136 @@ mod tests {
     fn hook_response_serializes_with_decision() {
         let resp = HookResponse {
             decision: Some("allow".to_string()),
+            ..Default::default()
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("allow"));
+    }
+
+    #[test]
+    fn hook_response_serializes_pre_tool_use_output() {
+        let resp = HookResponse {
+            hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+                additional_context: Some("test context".to_string()),
+                permission_decision: None,
+                permission_decision_reason: None,
+                updated_input: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let output = value.get("hookSpecificOutput").unwrap();
+        assert_eq!(output["hookEventName"], "PreToolUse");
+        assert_eq!(output["additionalContext"], "test context");
+        // None fields should be absent
+        assert!(output.get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn hook_response_serializes_session_start_output() {
+        let resp = HookResponse {
+            hook_specific_output: Some(HookSpecificOutput::SessionStart {
+                watch_paths: Some(vec!["/tmp/Cargo.toml".to_string()]),
+                additional_context: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let output = value.get("hookSpecificOutput").unwrap();
+        assert_eq!(output["hookEventName"], "SessionStart");
+        assert_eq!(output["watchPaths"][0], "/tmp/Cargo.toml");
+    }
+
+    #[test]
+    fn hook_response_serializes_post_tool_use_output() {
+        let resp = HookResponse {
+            hook_specific_output: Some(HookSpecificOutput::PostToolUse {
+                additional_context: Some("post context".to_string()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let output = value.get("hookSpecificOutput").unwrap();
+        assert_eq!(output["hookEventName"], "PostToolUse");
+        assert_eq!(output["additionalContext"], "post context");
+    }
+
+    // ---------------------------------------------------------------
+    // write_claude_env_file
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn write_env_file_creates_exports() {
+        // tempfile creates in std::env::temp_dir(), which passes the path validation
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("session-env.sh");
+        let p = HookPayload {
+            session_id: "test-session-123".to_string(),
+            hook_event_name: "SessionStart".to_string(),
+            cwd: Some("/home/user/project".to_string()),
+            ..payload("SessionStart", "test-session-123")
+        };
+
+        write_claude_env_file(env_path.to_str().unwrap(), &p).await;
+
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        assert!(content.contains("export ZREMOTE_SESSION_ID='test-session-123'"));
+        assert!(content.contains("export ZREMOTE_TERMINAL=1"));
+        assert!(content.contains("export ZREMOTE_CWD='/home/user/project'"));
+    }
+
+    #[tokio::test]
+    async fn write_env_file_without_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("session-env.sh");
+        let p = payload("SessionStart", "test-session");
+
+        write_claude_env_file(env_path.to_str().unwrap(), &p).await;
+
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        assert!(content.contains("export ZREMOTE_SESSION_ID="));
+        assert!(content.contains("export ZREMOTE_TERMINAL=1"));
+        assert!(!content.contains("ZREMOTE_CWD"));
+    }
+
+    #[tokio::test]
+    async fn write_env_file_rejects_path_outside_temp_dir() {
+        let p = payload("SessionStart", "test-session");
+        // Path outside temp dir -- should be rejected (CWE-22 protection)
+        write_claude_env_file("/home/user/.bashrc", &p).await;
+        assert!(!std::path::Path::new("/home/user/.bashrc").exists());
+    }
+
+    #[tokio::test]
+    async fn write_env_file_sanitizes_shell_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("session-env.sh");
+        let p = HookPayload {
+            session_id: "abc'; rm -rf /; echo '".to_string(),
+            hook_event_name: "SessionStart".to_string(),
+            cwd: Some("/tmp/proj\"$(evil)\"".to_string()),
+            ..payload("SessionStart", "x")
+        };
+
+        write_claude_env_file(env_path.to_str().unwrap(), &p).await;
+
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        // Single quotes prevent injection; embedded single quotes are escaped.
+        // The value is safely wrapped: 'abc'\''...' so shell interprets literally.
+        assert!(content.contains("ZREMOTE_SESSION_ID='abc'\\''"));
+        // CWD with double quotes and $() is safely single-quoted.
+        // Inside '...' these are literal text, not shell expansions.
+        assert!(content.contains("ZREMOTE_CWD='"));
+    }
+
+    #[test]
+    fn sanitize_shell_value_escapes_single_quotes() {
+        assert_eq!(sanitize_shell_value("hello"), "hello");
+        assert_eq!(sanitize_shell_value("it's"), "it'\\''s");
+        assert_eq!(sanitize_shell_value("a'b'c"), "a'\\''b'\\''c");
     }
 
     #[test]
@@ -1196,5 +1515,71 @@ mod tests {
         let payload: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(payload.hook_event_name, "Stop");
         assert_eq!(payload.stop_hook_active, Some(true));
+    }
+
+    // ---------------------------------------------------------------
+    // build_watch_paths
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn watch_paths_returns_none_without_cwd() {
+        assert!(build_watch_paths(None).is_none());
+    }
+
+    #[test]
+    fn watch_paths_returns_none_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(build_watch_paths(Some(dir.path().to_str().unwrap())).is_none());
+    }
+
+    #[test]
+    fn watch_paths_finds_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "").unwrap();
+
+        let paths = build_watch_paths(Some(dir.path().to_str().unwrap())).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p.ends_with("Cargo.toml")));
+        assert!(paths.iter().any(|p| p.ends_with("CLAUDE.md")));
+    }
+
+    // ---------------------------------------------------------------
+    // SubagentStart/Stop
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn subagent_start_sends_working_status() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        // Auto-register CC session via resolve
+        let _ = state.mapper.resolve_loop_id("cc-sub-test", None).await;
+
+        let p = payload("SubagentStart", "cc-sub-test");
+        // Simulate what handle_hook does for SubagentStart
+        if let Some(mapped) = state.mapper.try_resolve(&p.session_id).await {
+            let _ = state
+                .agentic_tx
+                .try_send(AgenticAgentMessage::LoopStateUpdate {
+                    loop_id: mapped.loop_id,
+                    status: AgenticStatus::Working,
+                    task_name: Some("spawning subagent".to_string()),
+                });
+        }
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                task_name,
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::Working);
+                assert_eq!(task_name.as_deref(), Some("spawning subagent"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 }

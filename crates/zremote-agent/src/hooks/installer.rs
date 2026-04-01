@@ -63,6 +63,11 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
         "Elicitation",
         "UserPromptSubmit",
         "SessionStart",
+        "SubagentStart",
+        "SubagentStop",
+        "StopFailure",
+        "FileChanged",
+        "CwdChanged",
     ];
 
     for event in &required_events {
@@ -142,9 +147,17 @@ case "${1:-hooks}" in
   hooks|hooks/notification/idle|hooks/notification/permission) ENDPOINT="${1:-hooks}" ;;
   *) exit 1 ;;
 esac
-RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
-  -H "Content-Type: application/json" \
-  -d "$INPUT" 2>/dev/null)
+# Forward CLAUDE_ENV_FILE path (set by CC for SessionStart/CwdChanged/FileChanged)
+if [ -n "$CLAUDE_ENV_FILE" ]; then
+  RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -H "X-Claude-Env-File: $CLAUDE_ENV_FILE" \
+    -d "$INPUT" 2>/dev/null)
+else
+  RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -d "$INPUT" 2>/dev/null)
+fi
 if [ -n "$RESPONSE" ]; then
   echo "$RESPONSE"
 fi
@@ -181,13 +194,13 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
             event: "PreToolUse",
             matcher: "",
             command_arg: "hooks",
-            async_hook: true,
+            async_hook: false,
         },
         HookConfig {
             event: "PostToolUse",
             matcher: "",
             command_arg: "hooks",
-            async_hook: true,
+            async_hook: false,
         },
         HookConfig {
             event: "Stop",
@@ -223,7 +236,37 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
             event: "SessionStart",
             matcher: "",
             command_arg: "hooks",
+            async_hook: false,
+        },
+        HookConfig {
+            event: "SubagentStart",
+            matcher: "",
+            command_arg: "hooks",
             async_hook: true,
+        },
+        HookConfig {
+            event: "SubagentStop",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "StopFailure",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "FileChanged",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: true,
+        },
+        HookConfig {
+            event: "CwdChanged",
+            matcher: "",
+            command_arg: "hooks",
+            async_hook: false,
         },
     ];
 
@@ -235,6 +278,31 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
         .or_insert(serde_json::json!({}));
 
     let hooks_obj = hooks.as_object_mut().ok_or(InstallError::InvalidSettings)?;
+
+    // Remove legacy myremote hooks (replaced by zremote hooks)
+    for (_, event_hooks) in hooks_obj.iter_mut() {
+        if let Some(arr) = event_hooks.as_array_mut() {
+            let before = arr.len();
+            arr.retain(|entry| {
+                !entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains("myremote-hook"))
+                        })
+                    })
+            });
+            if arr.len() < before {
+                tracing::info!(
+                    removed = before - arr.len(),
+                    "removed legacy myremote hook entries"
+                );
+            }
+        }
+    }
 
     for config in &hook_configs {
         let event_hooks = hooks_obj
@@ -487,19 +555,35 @@ mod tests {
             "Elicitation",
             "UserPromptSubmit",
             "SessionStart",
+            "SubagentStart",
+            "SubagentStop",
+            "StopFailure",
+            "FileChanged",
+            "CwdChanged",
         ] {
             assert!(hooks.contains_key(*event), "missing hook event: {event}");
         }
 
-        // Verify async flag on PreToolUse
+        // Verify PreToolUse is NOT async (needs sync for additionalContext)
         let pre_tool = hooks["PreToolUse"].as_array().unwrap();
         let pre_tool_hook = &pre_tool[0]["hooks"][0];
-        assert_eq!(pre_tool_hook["async"], true, "PreToolUse should be async");
+        assert!(
+            pre_tool_hook.get("async").is_none(),
+            "PreToolUse should not be async"
+        );
 
         // Verify Stop is NOT async
         let stop = hooks["Stop"].as_array().unwrap();
         let stop_hook = &stop[0]["hooks"][0];
         assert!(stop_hook.get("async").is_none(), "Stop should not be async");
+
+        // Verify SessionStart is NOT async (needs sync for CLAUDE_ENV_FILE)
+        let session_start = hooks["SessionStart"].as_array().unwrap();
+        let session_start_hook = &session_start[0]["hooks"][0];
+        assert!(
+            session_start_hook.get("async").is_none(),
+            "SessionStart should not be async"
+        );
 
         // Verify Notification has separate entries for idle_prompt and permission_prompt
         // (no catch-all -- CC fires ALL matching hooks, catch-all would duplicate)
@@ -685,6 +769,11 @@ mod tests {
             "Elicitation",
             "UserPromptSubmit",
             "SessionStart",
+            "SubagentStart",
+            "SubagentStop",
+            "StopFailure",
+            "FileChanged",
+            "CwdChanged",
         ] {
             let arr = settings["hooks"][event].as_array().unwrap();
             assert!(
@@ -785,6 +874,9 @@ mod tests {
         // Verify it uses ENDPOINT variable with default fallback
         assert!(script.contains("${1:-hooks}"));
         assert!(script.contains("$ENDPOINT"));
+        // Verify CLAUDE_ENV_FILE forwarding
+        assert!(script.contains("CLAUDE_ENV_FILE"));
+        assert!(script.contains("X-Claude-Env-File"));
     }
 
     #[tokio::test]
@@ -802,5 +894,75 @@ mod tests {
         // Should fail since settings root is not an object
         let result = install_hooks_at(home).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn install_removes_legacy_myremote_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create existing settings with legacy myremote hooks
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let existing = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/my-hook.sh"}]},
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/home/user/.myremote/hooks/myremote-hook.sh"}]}
+                ],
+                "Stop": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/home/user/.myremote/hooks/myremote-hook.sh"}]}
+                ]
+            }
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        install_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // myremote hooks should be removed
+        let pre_tool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert!(
+            !pre_tool.iter().any(|e| {
+                e["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|h| h["command"].as_str().unwrap().contains("myremote-hook"))
+            }),
+            "myremote hooks should be removed from PreToolUse"
+        );
+
+        // User's own hook should be preserved
+        assert!(
+            pre_tool.iter().any(|e| e["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h["command"].as_str().unwrap().contains("my-hook.sh"))),
+            "user hook should be preserved"
+        );
+
+        // Stop should have no myremote hooks
+        let stop = settings["hooks"]["Stop"].as_array().unwrap();
+        assert!(
+            !stop.iter().any(|e| {
+                e["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|h| h["command"].as_str().unwrap().contains("myremote-hook"))
+            }),
+            "myremote hooks should be removed from Stop"
+        );
     }
 }
