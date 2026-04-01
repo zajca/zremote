@@ -26,20 +26,20 @@ v0.10.0 transforms ZRemote from a terminal session manager into a **provider-agn
 
 ```
 Phase 1-2: Output Analyzer ──→ output-analyzer.md       [DONE]
-Phase 3:   Shell Integration ─→ shell-integration.md     [Draft, reviewed]
-Phase 4:   Project Intelligence → project-intelligence.md [Draft, reviewed]
-Phase 5:   Command Tracking ──→ command-tracking.md      [Draft, reviewed]
-Phase 6:   Context Delivery ──→ context-delivery.md      [Draft, reviewed]
+Phase 3:   Shell Integration ─→ shell-integration.md     [DONE]
+Phase 4:   Project Intelligence → project-intelligence.md [DONE]
+Phase 5:   Command Tracking ──→ command-tracking.md      [DONE]
+Phase 6:   Context Delivery ──→ context-delivery.md      [DONE]
 Phase 7:   Channel Bridge ───→ channel-bridge.md         [BLOCKED: CC Channels API preview]
 ```
 
 | Phase | RFC | Status | Depends on | Complexity |
 |-------|-----|--------|------------|------------|
 | 1-2 | [Output Analyzer](output-analyzer.md) | **Done** (2026-03-31) | - | Medium |
-| 3 | [Shell Integration](shell-integration.md) | Draft (reviewed) | - | Medium |
-| 4 | [Project Intelligence](project-intelligence.md) | Draft (reviewed) | - | Low-medium |
-| 5 | [Command Tracking](command-tracking.md) | Draft (reviewed) | Phase 1 | Low |
-| 6 | [Context Delivery](context-delivery.md) | Draft (reviewed) | Phase 1, 4 | Medium-high |
+| 3 | [Shell Integration](shell-integration.md) | **Done** (2026-04-01) | - | Medium |
+| 4 | [Project Intelligence](project-intelligence.md) | **Done** (2026-04-01) | - | Low-medium |
+| 5 | [Command Tracking](command-tracking.md) | **Done** (2026-04-01) | Phase 1 | Low |
+| 6 | [Context Delivery](context-delivery.md) | **Done** (2026-04-01) | Phase 1, 4 | Medium-high |
 | 7 | [Channel Bridge](channel-bridge.md) | Blocked | Phase 1, 6 | High |
 
 Phases 1-4 are independent and parallelizable. Phase 5 extends the analyzer from Phase 1. Phase 6 depends on both Phase 1 (phase detection) and Phase 4 (project data). Phase 7 is a separate RFC blocked on CC Channels API stability.

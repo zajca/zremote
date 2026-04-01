@@ -1,6 +1,6 @@
 # RFC: Real-time Context Delivery — Push Knowledge to Running Agents
 
-**Status:** Draft
+**Status:** Implemented (2026-04-01)
 **Date:** 2026-03-31
 **Author:** zajca
 **Parent:** [RFC v0.10.0 Agent Intelligence](README.md) (Phase 6)
