@@ -1,16 +1,18 @@
 #![allow(clippy::wildcard_imports)]
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
 
-use zremote_client::{ClientEvent, ServerEvent};
+use zremote_client::{AgenticStatus, ClientEvent, ServerEvent};
 
 use crate::views::sidebar::CcMetrics;
 
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
+use crate::notifications::NativeUrgency;
 use crate::theme;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
@@ -20,7 +22,7 @@ use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
-use crate::views::toast::{ToastContainer, ToastLevel};
+use crate::views::toast::{ToastAction, ToastContainer, ToastLevel};
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -44,6 +46,8 @@ pub struct MainView {
     ever_connected: bool,
     /// Host ID of the currently open terminal session (for bridge host matching).
     current_host_id: Option<String>,
+    /// Active WaitingForInput toast IDs, keyed by loop_id.
+    waiting_input_toasts: HashMap<String, u64>,
 }
 
 impl MainView {
@@ -87,6 +91,7 @@ impl MainView {
             server_connected: true, // Assume connected until first Disconnected event
             ever_connected: false,
             current_host_id: None,
+            waiting_input_toasts: HashMap::new(),
         }
     }
 
@@ -372,6 +377,115 @@ impl MainView {
             }
             _ => {}
         }
+
+        // Agentic loop notifications
+        self.handle_loop_notifications(event, cx);
+    }
+
+    fn handle_loop_notifications(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
+        match event {
+            ServerEvent::LoopStatusChanged { loop_info, .. } => {
+                match loop_info.status {
+                    AgenticStatus::WaitingForInput => {
+                        let loop_id = loop_info.id.clone();
+
+                        // Dismiss previous toast for this loop (handles rapid re-prompts)
+                        if let Some(old_toast_id) = self.waiting_input_toasts.remove(&loop_id) {
+                            self.toasts.update(cx, |c, cx| {
+                                c.dismiss(old_toast_id);
+                                cx.notify();
+                            });
+                        }
+
+                        let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                        let msg = loop_info
+                            .prompt_message
+                            .as_deref()
+                            .map(|m| format!("{task_label}: {m}"))
+                            .unwrap_or_else(|| format!("{task_label} is waiting for input"));
+
+                        // Build action buttons if terminal matches this session
+                        let actions = self.build_input_actions(&loop_info.session_id, cx);
+
+                        let toast_id = self.toasts.update(cx, |container, cx| {
+                            let id = container.push_actionable(
+                                &msg,
+                                ToastLevel::Warning,
+                                Some(Icon::MessageCircle),
+                                actions,
+                                true, // persistent
+                            );
+                            cx.notify();
+                            id
+                        });
+
+                        self.waiting_input_toasts.insert(loop_id, toast_id);
+
+                        // Native notification with critical urgency
+                        if !self.window_active {
+                            crate::notifications::send_native_with_urgency(
+                                "ZRemote",
+                                &msg,
+                                ToastLevel::Warning,
+                                NativeUrgency::Critical,
+                                &self.app_state.tokio_handle,
+                            );
+                        }
+                    }
+                    AgenticStatus::Working => {
+                        // CC resumed — dismiss any active WaitingForInput toast
+                        if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
+                            self.toasts.update(cx, |c, cx| {
+                                c.dismiss(toast_id);
+                                cx.notify();
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ServerEvent::LoopEnded { loop_info, .. } => {
+                // Dismiss any active WaitingForInput toast
+                if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
+                    self.toasts.update(cx, |c, cx| {
+                        c.dismiss(toast_id);
+                        cx.notify();
+                    });
+                }
+
+                let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                let (level, suffix) = match loop_info.end_reason.as_deref() {
+                    Some("error") => (ToastLevel::Error, "failed"),
+                    _ => (ToastLevel::Success, "finished"),
+                };
+                let msg = format!("{task_label} {suffix}");
+                self.show_toast(&msg, level, Some(Icon::Bot), cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Build Yes/No toast actions that send terminal input for the given session.
+    fn build_input_actions(&self, session_id: &str, cx: &Context<Self>) -> Vec<ToastAction> {
+        let Some(terminal) = &self.terminal else {
+            return vec![];
+        };
+        if terminal.read(cx).session_id() != session_id {
+            return vec![];
+        }
+        let input_tx = terminal.read(cx).input_sender();
+
+        let yes_tx = input_tx.clone();
+        let no_tx = input_tx;
+
+        vec![
+            ToastAction::new("Yes", Some(Icon::CheckCircle), move |_, _| {
+                let _ = yes_tx.send(b"yes\n".to_vec());
+            }),
+            ToastAction::new("No", Some(Icon::XCircle), move |_, _| {
+                let _ = no_tx.send(b"no\n".to_vec());
+            }),
+        ]
     }
 
     // -- Command palette ---------------------------------------------------------
