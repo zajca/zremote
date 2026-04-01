@@ -151,6 +151,19 @@ impl AgenticLoopManager {
     pub fn has_loop(&self, loop_id: &AgenticLoopId) -> bool {
         self.loops.values().any(|a| &a.loop_id == loop_id)
     }
+
+    /// Get `loop_id` for a session (for analyzer event mapping).
+    pub fn loop_id_for_session(&self, session_id: &SessionId) -> Option<AgenticLoopId> {
+        self.loops.get(session_id).map(|a| a.loop_id)
+    }
+
+    /// Get `session_id` for a loop (reverse lookup for context delivery).
+    pub fn session_id_for_loop(&self, loop_id: &AgenticLoopId) -> Option<SessionId> {
+        self.loops
+            .iter()
+            .find(|(_, a)| &a.loop_id == loop_id)
+            .map(|(sid, _)| *sid)
+    }
 }
 
 /// Translate an internal `AgenticEvent` into a protocol `AgenticAgentMessage`.
@@ -187,6 +200,13 @@ mod tests {
         let manager = AgenticLoopManager::new();
         let loop_id = Uuid::new_v4();
         assert!(!manager.has_loop(&loop_id));
+    }
+
+    #[test]
+    fn session_id_for_loop_returns_none_for_unknown() {
+        let manager = AgenticLoopManager::new();
+        let loop_id = Uuid::new_v4();
+        assert!(manager.session_id_for_loop(&loop_id).is_none());
     }
 
     #[test]

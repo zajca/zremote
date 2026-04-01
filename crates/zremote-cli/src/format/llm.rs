@@ -290,6 +290,10 @@ mod tests {
             git_remotes: None,
             git_updated_at: None,
             pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
         }
     }
 

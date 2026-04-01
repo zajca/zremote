@@ -45,10 +45,19 @@ pub async fn trigger_scan(
             .map(|g| serde_json::to_string(&g.remotes).unwrap_or_default());
         let now = chrono::Utc::now().to_rfc3339();
 
+        let frameworks_json = serde_json::to_string(&info.frameworks).unwrap_or_default();
+        let architecture_str = info
+            .architecture
+            .as_ref()
+            .and_then(|a| serde_json::to_value(a).ok())
+            .and_then(|v| v.as_str().map(String::from));
+        let conventions_json = serde_json::to_string(&info.conventions).unwrap_or_default();
+
         sqlx::query(
             "UPDATE projects SET project_type = ?, has_claude_config = ?, has_zremote_config = ?, \
              git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
-             git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
+             git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ?, \
+             frameworks = ?, architecture = ?, conventions = ?, package_manager = ? \
              WHERE id = ?",
         )
         .bind(&info.project_type)
@@ -70,6 +79,10 @@ pub async fn trigger_scan(
         .bind(info.git_info.as_ref().map_or(0, |g| g.behind))
         .bind(&remotes_json)
         .bind(&now)
+        .bind(&frameworks_json)
+        .bind(&architecture_str)
+        .bind(&conventions_json)
+        .bind(&info.package_manager)
         .bind(&pid)
         .execute(&state.db)
         .await

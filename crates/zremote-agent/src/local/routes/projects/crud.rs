@@ -70,29 +70,51 @@ pub async fn add_project(
         ));
     }
 
-    // Update git info if detected
-    if let Some(ref info) = info
-        && let Some(ref git) = info.git_info
-    {
-        let remotes_json = serde_json::to_string(&git.remotes).unwrap_or_default();
+    // Update project info if detected
+    if let Some(ref info) = info {
+        let remotes_json = info
+            .git_info
+            .as_ref()
+            .map(|g| serde_json::to_string(&g.remotes).unwrap_or_default());
         let now = chrono::Utc::now().to_rfc3339();
+        let frameworks_json = serde_json::to_string(&info.frameworks).unwrap_or_default();
+        let architecture_str = info
+            .architecture
+            .as_ref()
+            .and_then(|a| serde_json::to_value(a).ok())
+            .and_then(|v| v.as_str().map(String::from));
+        let conventions_json = serde_json::to_string(&info.conventions).unwrap_or_default();
+
         sqlx::query(
             "UPDATE projects SET project_type = ?, has_claude_config = ?, has_zremote_config = ?, \
              git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
-             git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ? \
+             git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ?, \
+             frameworks = ?, architecture = ?, conventions = ?, package_manager = ? \
              WHERE id = ?",
         )
         .bind(&info.project_type)
         .bind(info.has_claude_config)
         .bind(info.has_zremote_config)
-        .bind(&git.branch)
-        .bind(&git.commit_hash)
-        .bind(&git.commit_message)
-        .bind(git.is_dirty)
-        .bind(git.ahead)
-        .bind(git.behind)
+        .bind(info.git_info.as_ref().and_then(|g| g.branch.as_deref()))
+        .bind(
+            info.git_info
+                .as_ref()
+                .and_then(|g| g.commit_hash.as_deref()),
+        )
+        .bind(
+            info.git_info
+                .as_ref()
+                .and_then(|g| g.commit_message.as_deref()),
+        )
+        .bind(info.git_info.as_ref().is_some_and(|g| g.is_dirty))
+        .bind(info.git_info.as_ref().map_or(0, |g| g.ahead))
+        .bind(info.git_info.as_ref().map_or(0, |g| g.behind))
         .bind(&remotes_json)
         .bind(&now)
+        .bind(&frameworks_json)
+        .bind(&architecture_str)
+        .bind(&conventions_json)
+        .bind(&info.package_manager)
         .bind(&project_id)
         .execute(&state.db)
         .await

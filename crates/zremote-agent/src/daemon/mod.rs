@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 
 use protocol::{DaemonRequest, DaemonResponse, RING_BUFFER_CAPACITY, read_request, send_response};
 
+use crate::pty::shell_integration::ShellIntegrationConfig;
+
 /// Timeout for PTY output writes (high frequency, latency-sensitive).
 const OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -51,6 +53,7 @@ pub async fn run_pty_daemon(
     rows: u16,
     working_dir: Option<PathBuf>,
     extra_env: std::collections::HashMap<String, String>,
+    shell_config: Option<ShellIntegrationConfig>,
 ) {
     // 1. Ignore SIGHUP (safe, no unsafe block)
     let mut sighup = tokio::signal::unix::signal(SignalKind::hangup())
@@ -88,6 +91,24 @@ pub async fn run_pty_daemon(
     if let Some(dir) = &working_dir {
         cmd.cwd(dir);
     }
+
+    // Apply shell integration (env vars, autosuggestion disabling, etc.)
+    // Parse session_id as UUID for the prepare function
+    let _integration_state = if let Some(ref config) = shell_config {
+        if let Ok(sid) = uuid::Uuid::parse_str(&session_id) {
+            match crate::pty::shell_integration::prepare(sid, &shell, config, &mut cmd) {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!(error = %e, "shell integration failed, continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,

@@ -1,7 +1,8 @@
 # RFC: Output Analyzer — Real-time PTY Telemetry
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-03-31
+**Implemented:** 2026-03-31
 **Author:** zajca
 **Parent:** [RFC v0.10.0 Agent Intelligence](README.md) (Phase 1-2)
 **Inspiration:** [Hermes IDE](https://github.com/hermes-hq/hermes-ide) `pty/analyzer.rs`

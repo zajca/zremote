@@ -6,6 +6,7 @@ use zremote_protocol::SessionId;
 use crate::config::PersistenceBackend;
 use crate::daemon::session::DaemonSession;
 use crate::pty::PtySession;
+use crate::pty::shell_integration::{ShellIntegrationConfig, ShellIntegrationState};
 
 /// Terminal output from a PTY or daemon-backed session.
 ///
@@ -26,6 +27,8 @@ pub struct SessionManager {
     sessions: HashMap<SessionId, SessionBackend>,
     /// Shell name cached at creation time (avoids re-deriving via sysinfo on reconnect).
     shell_names: HashMap<SessionId, String>,
+    /// Shell integration state per session (temp dirs, shell type).
+    shell_integrations: HashMap<SessionId, ShellIntegrationState>,
     output_tx: mpsc::Sender<PtyOutput>,
     backend: PersistenceBackend,
 }
@@ -35,6 +38,7 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             shell_names: HashMap::new(),
+            shell_integrations: HashMap::new(),
             output_tx,
             backend,
         }
@@ -44,6 +48,7 @@ impl SessionManager {
     ///
     /// Daemon sessions are async (need to spawn a process and wait for socket),
     /// so this method is now async.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &mut self,
         session_id: SessionId,
@@ -52,6 +57,7 @@ impl SessionManager {
         rows: u16,
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
+        shell_config: Option<&ShellIntegrationConfig>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         // Extract short shell name (e.g., "/bin/zsh" → "zsh") and cache it.
         // This avoids re-deriving via sysinfo on reconnect (which can degrade to "shell").
@@ -69,6 +75,7 @@ impl SessionManager {
                     working_dir,
                     env,
                     self.output_tx.clone(),
+                    shell_config,
                 )
                 .await?;
                 self.sessions
@@ -77,7 +84,7 @@ impl SessionManager {
                 Ok(pid)
             }
             PersistenceBackend::None => {
-                let (session, pid) = PtySession::spawn(
+                let (session, pid, integration_state) = PtySession::spawn(
                     session_id,
                     shell,
                     cols,
@@ -85,10 +92,14 @@ impl SessionManager {
                     working_dir,
                     env,
                     self.output_tx.clone(),
+                    shell_config,
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Pty(session));
                 self.shell_names.insert(session_id, shell_name);
+                if let Some(state) = integration_state {
+                    self.shell_integrations.insert(session_id, state);
+                }
                 Ok(pid)
             }
         }
@@ -136,6 +147,9 @@ impl SessionManager {
     /// Close a session, killing the child process. Returns the exit code if available.
     pub fn close(&mut self, session_id: &SessionId) -> Option<i32> {
         self.shell_names.remove(session_id);
+        if let Some(integration) = self.shell_integrations.remove(session_id) {
+            integration.cleanup();
+        }
         let backend = self.sessions.remove(session_id)?;
         match backend {
             SessionBackend::Pty(mut session) => {
@@ -219,6 +233,9 @@ impl SessionManager {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
             self.shell_names.remove(&id);
+            if let Some(integration) = self.shell_integrations.remove(&id) {
+                integration.cleanup();
+            }
             if let Some(backend) = self.sessions.remove(&id) {
                 match backend {
                     SessionBackend::Pty(mut session) => session.kill(),

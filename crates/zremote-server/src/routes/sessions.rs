@@ -202,6 +202,125 @@ pub async fn purge_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Request body for pushing context to a session.
+#[derive(Debug, Deserialize)]
+pub struct ContextPushRequest {
+    #[serde(default)]
+    pub memories: Vec<String>,
+    #[serde(default)]
+    pub conventions: Vec<String>,
+}
+
+/// `POST /api/sessions/:session_id/context/push` - push context to a running agent session.
+///
+/// In server mode, this forwards a `ServerMessage::ContextPush` to the agent
+/// over the WebSocket connection. The agent-side `DeliveryCoordinator` handles
+/// delivery timing.
+pub async fn push_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ContextPushRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed_session_id: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    // Look up host for this session
+    let (_id, host_id_str) = q::find_session_for_close(&state.db, &session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    // Forward to agent via WebSocket
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("host is offline, cannot push context".to_string()))?;
+
+    let msg = ServerMessage::ContextPush {
+        session_id: parsed_session_id,
+        memories: body.memories,
+        conventions: body.conventions,
+    };
+
+    if sender.send(msg).await.is_err() {
+        return Err(AppError::Conflict(
+            "host went offline, cannot push context".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Query parameters for listing execution nodes.
+#[derive(Debug, Deserialize)]
+pub struct ListExecutionNodesQuery {
+    #[serde(default = "default_execution_node_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    pub loop_id: Option<String>,
+}
+
+fn default_execution_node_limit() -> i64 {
+    50
+}
+
+/// `GET /api/sessions/:session_id/execution-nodes`
+pub async fn list_execution_nodes(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ListExecutionNodesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let limit = query.limit.clamp(1, 200);
+    let offset = query.offset.max(0);
+
+    let nodes = if let Some(ref loop_id) = query.loop_id {
+        zremote_core::queries::execution_nodes::list_execution_nodes_by_loop(
+            &state.db, loop_id, limit, offset,
+        )
+        .await?
+    } else {
+        zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            limit,
+            offset,
+        )
+        .await?
+    };
+
+    Ok(Json(nodes))
+}
+
+/// Query parameters for cleanup endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CleanupQuery {
+    #[serde(default = "default_cleanup_max_age")]
+    pub max_age_days: i64,
+}
+
+fn default_cleanup_max_age() -> i64 {
+    30
+}
+
+/// `DELETE /api/execution-nodes/cleanup` - delete old execution nodes.
+pub async fn cleanup_execution_nodes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<CleanupQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let max_age_days = query.max_age_days.max(1);
+    let deleted =
+        zremote_core::queries::execution_nodes::delete_old_execution_nodes(&state.db, max_age_days)
+            .await?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +625,72 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_context_invalid_session_id_returns_bad_request() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/not-a-uuid/context/push")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": [], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn push_context_session_not_found_returns_404() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": ["test"], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn push_context_agent_offline_returns_conflict() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        // No agent connection registered -> should fail with conflict
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"memories": ["remember this"], "conventions": ["use tabs"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

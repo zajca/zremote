@@ -27,13 +27,16 @@ struct LoopRow {
     ended_at: Option<String>,
     end_reason: Option<String>,
     task_name: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: Option<f64>,
 }
 
 /// Fetch a `LoopInfo` from the DB.
 pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
         "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name \
+         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
          FROM agentic_loops WHERE id = ?",
     )
     .bind(loop_id)
@@ -51,6 +54,9 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        input_tokens: row.input_tokens.cast_unsigned(),
+        output_tokens: row.output_tokens.cast_unsigned(),
+        cost_usd: row.cost_usd,
     })
 }
 
@@ -865,6 +871,9 @@ pub(super) async fn handle_agentic_message(
                     status: AgenticStatus::Working,
                     task_name: None,
                     last_updated: Instant::now(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: None,
                 },
             );
 
@@ -1077,6 +1086,107 @@ pub(super) async fn handle_agentic_message(
             }
 
             tracing::info!(host_id = %host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
+        }
+        AgenticAgentMessage::LoopMetricsUpdate {
+            loop_id,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+        } => {
+            let loop_id_str = loop_id.to_string();
+
+            // Update DB
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET input_tokens = ?1, output_tokens = ?2, cost_usd = ?3 WHERE id = ?4",
+            )
+            .bind(input_tokens.cast_signed())
+            .bind(output_tokens.cast_signed())
+            .bind(cost_usd)
+            .bind(&loop_id_str)
+            .execute(&state.db)
+            .await
+            {
+                tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop metrics in DB");
+            }
+
+            // Update in-memory state
+            if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                entry.input_tokens = input_tokens;
+                entry.output_tokens = output_tokens;
+                entry.cost_usd = cost_usd;
+                entry.last_updated = Instant::now();
+            }
+
+            // Broadcast event with full loop info
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
+            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                let _ = state.events.send(ServerEvent::LoopMetricsUpdated {
+                    loop_info,
+                    host_id: host_id.to_string(),
+                    hostname,
+                });
+            }
+        }
+        AgenticAgentMessage::ExecutionNode {
+            session_id,
+            loop_id,
+            timestamp,
+            kind,
+            input,
+            output_summary,
+            exit_code,
+            working_dir,
+            duration_ms,
+        } => {
+            let session_id_str = session_id.to_string();
+            let loop_id_str = loop_id.map(|id| id.to_string());
+
+            let node_id = match zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id_str,
+                loop_id_str.as_deref(),
+                timestamp,
+                &kind,
+                input.as_deref(),
+                output_summary.as_deref(),
+                exit_code,
+                &working_dir,
+                duration_ms,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to insert execution node");
+                    return Ok(());
+                }
+            };
+
+            // Enforce cap
+            let _ = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+                &state.db,
+                &session_id_str,
+                10_000,
+            )
+            .await;
+
+            let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
+                session_id: session_id_str,
+                host_id: host_id.to_string(),
+                node_id,
+                loop_id: loop_id_str,
+                timestamp,
+                kind,
+                input,
+                output_summary,
+                exit_code,
+                working_dir,
+                duration_ms,
+            });
         }
     }
     Ok(())

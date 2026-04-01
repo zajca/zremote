@@ -30,11 +30,20 @@ pub struct ProjectRow {
     pub git_updated_at: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub frameworks: Option<String>,
+    #[serde(default)]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub conventions: Option<String>,
+    #[serde(default)]
+    pub package_manager: Option<String>,
 }
 
 const PROJECT_COLUMNS: &str = "id, host_id, path, name, has_claude_config, has_zremote_config, project_type, created_at, \
      parent_project_id, git_branch, git_commit_hash, git_commit_message, \
-     git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at, pinned";
+     git_is_dirty, git_ahead, git_behind, git_remotes, git_updated_at, pinned, \
+     frameworks, architecture, conventions, package_manager";
 
 pub async fn list_projects(pool: &SqlitePool, host_id: &str) -> Result<Vec<ProjectRow>, AppError> {
     let projects: Vec<ProjectRow> = sqlx::query_as(&format!(

@@ -12,6 +12,7 @@ use zremote_core::state::{ServerEvent, SessionInfo, SessionState};
 use zremote_protocol::status::SessionStatus;
 
 use crate::local::state::LocalAppState;
+use crate::pty::shell_integration::ShellIntegrationConfig;
 
 /// Resolve the default shell from the passwd database, falling back to $SHELL
 /// and then `/bin/sh`.
@@ -128,6 +129,7 @@ pub async fn create_session(
     }
 
     // Spawn PTY/daemon session directly
+    let manual_config = ShellIntegrationConfig::for_manual_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(
@@ -137,6 +139,7 @@ pub async fn create_session(
             rows,
             effective_working_dir,
             env_vars,
+            Some(&manual_config),
         )
         .await
         .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
@@ -346,6 +349,149 @@ pub async fn purge_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Request body for pushing context to a session.
+#[derive(Debug, Deserialize)]
+pub struct ContextPushRequest {
+    #[serde(default)]
+    pub memories: Vec<String>,
+    #[serde(default)]
+    pub conventions: Vec<String>,
+}
+
+/// `POST /api/sessions/:session_id/context/push` - push context to a running session.
+pub async fn push_context(
+    State(state): State<Arc<LocalAppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ContextPushRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let parsed_session_id: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    // Verify session exists and is active
+    let session_status = q::get_session_status(&state.db, &session_id).await?;
+    match session_status {
+        None => {
+            return Err(AppError::NotFound(format!(
+                "session {session_id} not found"
+            )));
+        }
+        Some(ref s) if s != "active" => {
+            return Err(AppError::Conflict(format!(
+                "session {session_id} is not active (status: {s}), cannot push context"
+            )));
+        }
+        _ => {}
+    }
+
+    // Build context from the push request
+    let memory_inputs: Vec<crate::knowledge::context_delivery::ContextMemoryInput> = body
+        .memories
+        .iter()
+        .map(|m| crate::knowledge::context_delivery::ContextMemoryInput {
+            key: "manual".to_string(),
+            content: m.clone(),
+            category: zremote_protocol::knowledge::MemoryCategory::Convention,
+            confidence: 1.0,
+        })
+        .collect();
+
+    let context = crate::knowledge::context_delivery::ContextAssembler::assemble(
+        "manual-push",
+        "",
+        "unknown",
+        None,
+        &[],
+        &memory_inputs,
+        &body.conventions,
+        crate::knowledge::context_delivery::ContextTrigger::ManualPush,
+    );
+
+    // Store via DeliveryCoordinator (write to session via session_manager)
+    let content = context.render();
+    if !content.is_empty() {
+        let content_bytes = content.into_bytes();
+        let mut mgr = state.session_manager.lock().await;
+        if let Err(e) = mgr.write_to(&parsed_session_id, &content_bytes) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "failed to write context push to PTY"
+            );
+            return Err(AppError::Internal(format!(
+                "failed to deliver context: {e}"
+            )));
+        }
+    }
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Query parameters for listing execution nodes.
+#[derive(Debug, Deserialize)]
+pub struct ListExecutionNodesQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    pub loop_id: Option<String>,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+/// `GET /api/sessions/:session_id/execution-nodes` - list execution nodes for a session.
+pub async fn list_execution_nodes(
+    State(state): State<Arc<LocalAppState>>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ListExecutionNodesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let limit = query.limit.clamp(1, 200);
+    let offset = query.offset.max(0);
+
+    let nodes = if let Some(ref loop_id) = query.loop_id {
+        zremote_core::queries::execution_nodes::list_execution_nodes_by_loop(
+            &state.db, loop_id, limit, offset,
+        )
+        .await?
+    } else {
+        zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            limit,
+            offset,
+        )
+        .await?
+    };
+
+    Ok(Json(nodes))
+}
+
+/// Query parameters for cleanup endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CleanupQuery {
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: i64,
+}
+
+fn default_max_age_days() -> i64 {
+    30
+}
+
+/// `DELETE /api/execution-nodes/cleanup` - delete old execution nodes.
+pub async fn cleanup_execution_nodes(
+    State(state): State<Arc<LocalAppState>>,
+    axum::extract::Query(query): axum::extract::Query<CleanupQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let max_age_days = query.max_age_days.max(1);
+    let deleted =
+        zremote_core::queries::execution_nodes::delete_old_execution_nodes(&state.db, max_age_days)
+            .await?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +531,10 @@ mod tests {
                 get(get_session).patch(update_session).delete(close_session),
             )
             .route("/api/sessions/{session_id}/purge", delete(purge_session))
+            .route(
+                "/api/sessions/{session_id}/context/push",
+                post(push_context),
+            )
             .with_state(state)
     }
 
@@ -1319,6 +1469,77 @@ mod tests {
                     .method("DELETE")
                     .uri(format!("/api/sessions/{session_id}/purge"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn push_context_invalid_session_id() {
+        let state = test_state().await;
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/not-a-uuid/context/push")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": [], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn push_context_session_not_found() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": ["test"], "conventions": []}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn push_context_closed_session_returns_conflict() {
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4().to_string();
+
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')")
+            .bind(&session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/context/push"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"memories": ["test"], "conventions": []}"#))
                     .unwrap(),
             )
             .await

@@ -449,11 +449,20 @@ pub(super) async fn spawn_command_session(
         sessions.insert(session_id, SessionState::new(session_id, parsed_host_id));
     }
 
+    let manual_config = crate::pty::shell_integration::ShellIntegrationConfig::for_manual_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, 80, 24, Some(working_dir), None)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            session_id,
+            shell,
+            80,
+            24,
+            Some(working_dir),
+            None,
+            Some(&manual_config),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")

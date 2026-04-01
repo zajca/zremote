@@ -74,6 +74,18 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
         )
+        .route(
+            "/api/sessions/{session_id}/context/push",
+            post(routes::sessions::push_context),
+        )
+        .route(
+            "/api/sessions/{session_id}/execution-nodes",
+            get(routes::sessions::list_execution_nodes),
+        )
+        .route(
+            "/api/execution-nodes/cleanup",
+            delete(routes::sessions::cleanup_execution_nodes),
+        )
         .merge(ws_routes)
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))
@@ -258,6 +270,17 @@ pub async fn run_server(config: ServerConfig) {
     {
         tracing::error!(error = %e, "failed to mark hosts offline at startup");
     }
+    // Clean up old execution nodes (retain 30 days)
+    match zremote_core::queries::execution_nodes::delete_old_execution_nodes(&pool, 30).await {
+        Ok(deleted) if deleted > 0 => {
+            tracing::info!(deleted, "cleaned up old execution nodes at startup");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to clean up old execution nodes");
+        }
+        _ => {}
+    }
+
     tracing::info!("stale data cleanup completed");
 
     let connections = Arc::new(ConnectionManager::new());

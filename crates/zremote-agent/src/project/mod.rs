@@ -3,6 +3,7 @@ pub mod actions;
 pub mod configure;
 pub mod git;
 pub mod hooks;
+pub mod intelligence;
 pub mod prompts;
 pub mod scanner;
 pub mod settings;

@@ -63,6 +63,7 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::LoopDetected { .. } => "agentic_loop_detected",
         ServerEvent::LoopStatusChanged { .. } => "agentic_loop_state_update",
         ServerEvent::LoopEnded { .. } => "agentic_loop_ended",
+        ServerEvent::LoopMetricsUpdated { .. } => "agentic_loop_metrics_update",
         ServerEvent::ProjectsUpdated { .. } => "projects_updated",
         ServerEvent::KnowledgeStatusChanged { .. } => "knowledge_status_changed",
         ServerEvent::IndexingProgress { .. } => "indexing_progress",
@@ -72,6 +73,7 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::ClaudeTaskUpdated { .. } => "claude_task_updated",
         ServerEvent::ClaudeTaskEnded { .. } => "claude_task_ended",
         ServerEvent::ClaudeSessionMetrics { .. } => "claude_session_metrics",
+        ServerEvent::ExecutionNodeCreated { .. } => "execution_node_created",
         ServerEvent::Unknown => "unknown",
     }
 }
