@@ -104,6 +104,14 @@ impl ShellIntegrationState {
                 use nix::sys::signal::{Signal, kill};
                 use nix::unistd::Pid;
 
+                // Guard: pid == 0 means kill(0, SIGHUP) which sends SIGHUP to the entire
+                // process group of the caller. This can kill the desktop session if the
+                // agent is in systemd's process group. Should never happen (pty/mod.rs
+                // filters out pid == 0), but defend here too.
+                if pid == 0 {
+                    return;
+                }
+
                 let nix_pid = Pid::from_raw(pid.cast_signed());
                 let _ = kill(nix_pid, Signal::SIGHUP);
 

@@ -68,9 +68,11 @@ impl PtySession {
         let child = pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0);
 
-        // Store the shell PID in integration state for cleanup
+        // Store the shell PID in integration state for cleanup.
+        // Only store if pid != 0: pid == 0 would cause kill(0, SIGHUP) in cleanup(),
+        // which sends SIGHUP to the entire process group and can kill the desktop session.
         if let Some(ref mut state) = integration_state {
-            state.shell_pid = Some(pid);
+            state.shell_pid = (pid != 0).then_some(pid);
         }
 
         let mut reader = pair.master.try_clone_reader()?;

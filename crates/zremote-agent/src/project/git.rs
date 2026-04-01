@@ -298,6 +298,7 @@ mod tests {
         run_git(dir, &["init"]).expect("git init");
         run_git(dir, &["config", "user.email", "test@test.com"]).expect("git config email");
         run_git(dir, &["config", "user.name", "Test"]).expect("git config name");
+        run_git(dir, &["config", "commit.gpgsign", "false"]).expect("git config gpgsign");
         fs::write(dir.join("README.md"), "# Test").expect("write README");
         run_git(dir, &["add", "."]).expect("git add");
         // --no-verify prevents the parent repo's pre-commit hook from running

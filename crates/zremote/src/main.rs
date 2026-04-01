@@ -169,12 +169,22 @@ fn ensure_local_agent(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn the agent as a child process using the same binary
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
-        .args(["agent", "local", "--port", &port.to_string()])
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["agent", "local", "--port", &port.to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+
+    // Create a new process group so the agent is isolated from the GUI's
+    // process group. Prevents process-group signals from the agent reaching
+    // the GUI or the desktop session manager.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
+    cmd.spawn()?;
 
     // Wait for the agent to become healthy (up to 5 seconds)
     let deadline = Instant::now() + Duration::from_secs(5);

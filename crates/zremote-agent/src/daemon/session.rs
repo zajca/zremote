@@ -393,6 +393,10 @@ fn spawn_via_systemd(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
+    // Create a new process group for systemd-run immediately so it is not in
+    // the agent's process group. This prevents kill(0, sig) from the daemon
+    // (before setsid() runs) from reaching the agent's process group.
+    cmd.process_group(0);
     cmd.spawn()?;
     Ok(())
 }
@@ -404,6 +408,9 @@ fn spawn_direct(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::process::Command::new(exe)
         .args(args)
+        // Create a new process group immediately so the daemon is isolated from
+        // the agent's process group before it calls setsid() itself.
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
