@@ -419,13 +419,23 @@ impl MainView {
                             id
                         });
 
+                        // Bound the map to avoid unbounded growth (CWE-400).
+                        if self.waiting_input_toasts.len() >= 100
+                            && let Some(stale_key) =
+                                self.waiting_input_toasts.keys().next().cloned()
+                            && let Some(stale_id) = self.waiting_input_toasts.remove(&stale_key)
+                        {
+                            self.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                        }
                         self.waiting_input_toasts.insert(loop_id, toast_id);
 
-                        // Native notification with critical urgency
+                        // Native notification with critical urgency.
+                        // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
                         if !self.window_active {
+                            let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
                             crate::notifications::send_native_with_urgency(
                                 "ZRemote",
-                                &msg,
+                                &sanitized,
                                 ToastLevel::Warning,
                                 NativeUrgency::Critical,
                                 &self.app_state.tokio_handle,
@@ -478,6 +488,9 @@ impl MainView {
         let yes_tx = input_tx.clone();
         let no_tx = input_tx;
 
+        // Fixed terminal responses — never derived from prompt_message.
+        // Prompt text is display-only; injecting user-controlled content
+        // into PTY is explicitly avoided here.
         vec![
             ToastAction::new("Yes", Some(Icon::CheckCircle), move |_, _| {
                 let _ = yes_tx.send(b"yes\n".to_vec());

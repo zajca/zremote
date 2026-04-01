@@ -392,11 +392,23 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
 
     state.mapper.mark_hook_activity(mapped.session_id);
 
+    // Truncate prompt_message to avoid DoS via oversized payloads (CWE-400).
+    const MAX_PROMPT_LEN: usize = 500;
+    let prompt_message = payload.message.as_deref().map(|m| {
+        if m.len() > MAX_PROMPT_LEN {
+            // Find a valid char boundary to avoid splitting a multi-byte char.
+            let end = m.floor_char_boundary(MAX_PROMPT_LEN);
+            format!("{}...", &m[..end])
+        } else {
+            m.to_string()
+        }
+    });
+
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::WaitingForInput,
         task_name: None,
-        prompt_message: payload.message.clone(),
+        prompt_message,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, WaitingForInput update dropped");
@@ -416,8 +428,13 @@ async fn handle_notification_typed(
     tracing::info!(
         cc_session = %payload.session_id,
         notification_type = %notification_type,
-        message = ?payload.message,
         "CC notification (typed)"
+    );
+    // Log message content at debug level to avoid leaking sensitive prompt text (CWE-532).
+    tracing::debug!(
+        cc_session = %payload.session_id,
+        message = ?payload.message,
+        "CC notification message"
     );
 
     // Update transcript path if provided
