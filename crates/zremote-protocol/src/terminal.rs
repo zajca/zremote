@@ -445,6 +445,10 @@ mod tests {
                     project_type: "rust".to_string(),
                     git_info: None,
                     worktrees: vec![],
+                    frameworks: vec![],
+                    architecture: None,
+                    conventions: vec![],
+                    package_manager: None,
                 },
                 ProjectInfo {
                     path: "/home/user/project-b".to_string(),
@@ -454,6 +458,10 @@ mod tests {
                     project_type: "node".to_string(),
                     git_info: None,
                     worktrees: vec![],
+                    frameworks: vec![],
+                    architecture: None,
+                    conventions: vec![],
+                    package_manager: None,
                 },
             ],
         });

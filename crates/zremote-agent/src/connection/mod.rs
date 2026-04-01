@@ -19,6 +19,7 @@ use crate::config::AgentConfig;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
+use crate::knowledge::context_delivery::DeliveryCoordinator;
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 use zremote_protocol::knowledge::KnowledgeServerMessage;
@@ -126,6 +127,8 @@ fn handle_analyzer_event(
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
     agentic_manager: &AgenticLoopManager,
     session_mapper: &SessionMapper,
+    delivery_coordinator: &mut DeliveryCoordinator,
+    session_manager: &mut SessionManager,
 ) {
     match event {
         AnalyzerEvent::AgentDetected { name, .. } => {
@@ -144,6 +147,23 @@ fn handle_analyzer_event(
                 }
                 _ => return,
             };
+            // Check for deferred context nudges on idle transitions
+            if matches!(phase, AnalyzerPhase::Idle | AnalyzerPhase::NeedsInput)
+                && let Some(content) = delivery_coordinator.on_phase_idle(&session_id)
+            {
+                tracing::info!(
+                    session = %session_id,
+                    content_len = content.len(),
+                    "delivering deferred context nudge via PTY write"
+                );
+                if let Err(e) = session_manager.write_to(&session_id, content.as_bytes()) {
+                    tracing::warn!(
+                        session = %session_id,
+                        error = %e,
+                        "failed to deliver context nudge"
+                    );
+                }
+            }
             if let Some(loop_id) = agentic_manager.loop_id_for_session(&session_id) {
                 let _ = agentic_tx.try_send(AgenticAgentMessage::LoopStateUpdate {
                     loop_id,
@@ -161,6 +181,20 @@ fn handle_analyzer_event(
         }
         AnalyzerEvent::CwdChanged(path) => {
             tracing::debug!(session = %session_id, cwd = %path, "working directory changed");
+        }
+        AnalyzerEvent::NodeCompleted(node) => {
+            let loop_id = agentic_manager.loop_id_for_session(&session_id);
+            let _ = agentic_tx.try_send(AgenticAgentMessage::ExecutionNode {
+                session_id,
+                loop_id,
+                timestamp: node.timestamp,
+                kind: node.kind.clone(),
+                input: node.input.clone(),
+                output_summary: node.output_summary.clone(),
+                exit_code: node.exit_code,
+                working_dir: node.working_dir.clone(),
+                duration_ms: node.duration_ms,
+            });
         }
     }
 }
@@ -360,12 +394,16 @@ pub async fn run_connection(
     agentic_check_interval.tick().await;
 
     // Per-session output analyzers — seed with existing sessions (survived reconnect)
+    let default_cwd = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
     let mut session_analyzers: HashMap<SessionId, OutputAnalyzer> = session_manager
         .session_pids()
-        .map(|(sid, _)| (sid, OutputAnalyzer::new()))
+        .map(|(sid, _)| (sid, OutputAnalyzer::with_initial_cwd(default_cwd.clone())))
         .collect();
     let mut silence_check_interval = tokio::time::interval(Duration::from_secs(1));
     silence_check_interval.tick().await; // skip first immediate tick
+
+    // Context delivery coordinator — defers nudges until agent is idle
+    let mut delivery_coordinator = DeliveryCoordinator::new();
 
     // Main message loop
     let result = loop {
@@ -483,6 +521,7 @@ pub async fn run_connection(
                         for event in &events {
                             handle_analyzer_event(
                                 session_id, event, &agentic_tx, agentic_manager, session_mapper,
+                                &mut delivery_coordinator, session_manager,
                             );
                         }
                         // Send accumulated token totals (not raw deltas) for DB replacement
@@ -598,7 +637,7 @@ pub async fn run_connection(
                         && last.elapsed() > Duration::from_secs(3)
                         && let Some(event) = analyzer.check_silence()
                     {
-                        handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper);
+                        handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper, &mut delivery_coordinator, session_manager);
                     }
                 }
             }

@@ -73,6 +73,7 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::ClaudeTaskUpdated { .. } => "claude_task_updated",
         ServerEvent::ClaudeTaskEnded { .. } => "claude_task_ended",
         ServerEvent::ClaudeSessionMetrics { .. } => "claude_session_metrics",
+        ServerEvent::ExecutionNodeCreated { .. } => "execution_node_created",
         ServerEvent::Unknown => "unknown",
     }
 }

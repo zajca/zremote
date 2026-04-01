@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::git::GitInspector;
+use super::intelligence;
 use zremote_protocol::ProjectInfo;
 
 const DEFAULT_MAX_DEPTH: usize = 3;
@@ -29,6 +30,10 @@ const MARKERS: &[(&str, &str)] = &[
     ("Cargo.toml", "rust"),
     ("package.json", "node"),
     ("pyproject.toml", "python"),
+    ("requirements.txt", "python"),
+    ("setup.py", "python"),
+    ("go.mod", "go"),
+    ("composer.json", "php"),
 ];
 
 /// Filesystem scanner that discovers projects by marker files.
@@ -178,14 +183,21 @@ impl ProjectScanner {
             .unwrap_or("unknown")
             .to_string();
 
+        let ptype_str = project_type.unwrap_or("unknown");
+        let intel = intelligence::analyze(dir, ptype_str);
+
         Some(ProjectInfo {
             path: dir.to_string_lossy().to_string(),
             name,
             has_claude_config,
             has_zremote_config,
-            project_type: project_type.unwrap_or("unknown").to_string(),
+            project_type: ptype_str.to_string(),
             git_info,
             worktrees,
+            frameworks: intel.frameworks,
+            architecture: intel.architecture,
+            conventions: intel.conventions,
+            package_manager: intel.package_manager,
         })
     }
 }

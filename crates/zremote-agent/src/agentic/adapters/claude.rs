@@ -165,6 +165,7 @@ impl ProviderAdapter for ClaudeAdapter {
         patterns::is_shell_prompt(line)
     }
 
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "claude"
     }

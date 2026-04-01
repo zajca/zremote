@@ -12,6 +12,7 @@ use crate::bridge::{self, BridgeSenders};
 use crate::hooks::mapper::SessionMapper;
 use crate::project::ProjectScanner;
 use crate::project::git::GitInspector;
+use crate::pty::shell_integration::ShellIntegrationConfig;
 use crate::session::SessionManager;
 use zremote_core::validation::validate_path_no_traversal;
 
@@ -29,8 +30,17 @@ pub(super) async fn handle_session_create(
     initial_command: Option<&str>,
 ) {
     let shell = shell.unwrap_or(default_shell());
+    let manual_config = ShellIntegrationConfig::for_manual_session();
     match session_manager
-        .create(session_id, shell, cols, rows, working_dir, env)
+        .create(
+            session_id,
+            shell,
+            cols,
+            rows,
+            working_dir,
+            env,
+            Some(&manual_config),
+        )
         .await
     {
         Ok(pid) => {
@@ -208,7 +218,10 @@ pub(super) async fn handle_server_message(
                 initial_command.as_deref(),
             )
             .await;
-            session_analyzers.insert(*session_id, OutputAnalyzer::new());
+            session_analyzers.insert(
+                *session_id,
+                OutputAnalyzer::with_initial_cwd(working_dir.clone()),
+            );
         }
         ServerMessage::SessionClose { session_id } => {
             // Clean up analyzer and agentic loop
@@ -972,8 +985,17 @@ async fn handle_claude_server_message(
 
             // Spawn PTY session using default shell
             let shell = default_shell();
+            let ai_config = ShellIntegrationConfig::for_ai_session();
             match session_manager
-                .create(*session_id, shell, 120, 40, Some(working_dir), None)
+                .create(
+                    *session_id,
+                    shell,
+                    120,
+                    40,
+                    Some(working_dir),
+                    None,
+                    Some(&ai_config),
+                )
                 .await
             {
                 Ok(pid) => {

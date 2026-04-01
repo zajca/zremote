@@ -298,6 +298,45 @@ pub struct PromptTemplate {
     pub skip_permissions: Option<bool>,
 }
 
+/// Architecture pattern detected for the project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchitecturePattern {
+    MonorepoPnpm,
+    MonorepoLerna,
+    MonorepoNx,
+    MonorepoTurborepo,
+    MonorepoCargo,
+    Mvc,
+    Microservices,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A detected convention (linter, formatter, test framework, build tool).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Convention {
+    /// Category of convention.
+    pub kind: ConventionKind,
+    /// Name identifier, e.g. "eslint", "clippy", "`github_actions`".
+    pub name: String,
+    /// Config file that triggered detection, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_file: Option<String>,
+}
+
+/// Category of a detected convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConventionKind {
+    Linter,
+    Formatter,
+    TestFramework,
+    BuildTool,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Information about a discovered project on a remote host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectInfo {
@@ -311,6 +350,14 @@ pub struct ProjectInfo {
     pub git_info: Option<GitInfo>,
     #[serde(default)]
     pub worktrees: Vec<WorktreeInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frameworks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<ArchitecturePattern>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conventions: Vec<Convention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_manager: Option<String>,
 }
 
 #[cfg(test)]
@@ -327,6 +374,10 @@ mod tests {
             project_type: "rust".to_string(),
             git_info: None,
             worktrees: vec![],
+            frameworks: vec![],
+            architecture: None,
+            conventions: vec![],
+            package_manager: None,
         };
         let json = serde_json::to_string(&info).expect("serialize");
         let parsed: ProjectInfo = serde_json::from_str(&json).expect("deserialize");
@@ -343,6 +394,10 @@ mod tests {
             project_type: "node".to_string(),
             git_info: None,
             worktrees: vec![],
+            frameworks: vec![],
+            architecture: None,
+            conventions: vec![],
+            package_manager: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["has_claude_config"], false);
@@ -355,6 +410,16 @@ mod tests {
         let parsed: ProjectInfo = serde_json::from_str(json).expect("deserialize");
         assert!(parsed.git_info.is_none());
         assert!(parsed.worktrees.is_empty());
+    }
+
+    #[test]
+    fn project_info_backward_compat_without_intelligence_fields() {
+        let json = r#"{"path":"/p","name":"p","has_claude_config":false,"project_type":"rust"}"#;
+        let parsed: ProjectInfo = serde_json::from_str(json).expect("deserialize");
+        assert!(parsed.frameworks.is_empty());
+        assert!(parsed.architecture.is_none());
+        assert!(parsed.conventions.is_empty());
+        assert!(parsed.package_manager.is_none());
     }
 
     #[test]
@@ -386,6 +451,14 @@ mod tests {
                 is_dirty: false,
                 commit_message: None,
             }],
+            frameworks: vec!["Axum".to_string()],
+            architecture: Some(ArchitecturePattern::MonorepoCargo),
+            conventions: vec![Convention {
+                kind: ConventionKind::Linter,
+                name: "clippy".to_string(),
+                config_file: Some("clippy.toml".to_string()),
+            }],
+            package_manager: Some("cargo".to_string()),
         };
         let json = serde_json::to_string(&info).expect("serialize");
         let parsed: ProjectInfo = serde_json::from_str(&json).expect("deserialize");

@@ -1,3 +1,5 @@
+pub mod shell_integration;
+
 use std::io::Read;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -6,6 +8,7 @@ use tokio::task::JoinHandle;
 use zremote_protocol::SessionId;
 
 use crate::session::PtyOutput;
+use shell_integration::{ShellIntegrationConfig, ShellIntegrationState};
 
 pub struct PtySession {
     writer: Box<dyn std::io::Write + Send>,
@@ -16,11 +19,12 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// Spawn a new PTY process. Returns `(session, pid)`.
+    /// Spawn a new PTY process. Returns `(session, pid, optional shell integration state)`.
     ///
     /// `output_tx` receives terminal output as `(SessionId, Vec<u8>)`.
     /// When the PTY reader encounters EOF or an error, it sends a zero-length
     /// vec to signal that the session has ended.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         session_id: SessionId,
         shell: &str,
@@ -29,7 +33,9 @@ impl PtySession {
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
         output_tx: mpsc::Sender<PtyOutput>,
-    ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
+        shell_config: Option<&ShellIntegrationConfig>,
+    ) -> Result<(Self, u32, Option<ShellIntegrationState>), Box<dyn std::error::Error + Send + Sync>>
+    {
         let pty_system = native_pty_system();
         let size = PtySize {
             rows,
@@ -52,8 +58,20 @@ impl PtySession {
             }
         }
 
+        // Apply shell integration (env vars, autosuggestion disabling, etc.)
+        let mut integration_state = if let Some(config) = shell_config {
+            shell_integration::prepare(session_id, shell, config, &mut cmd)?
+        } else {
+            None
+        };
+
         let child = pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0);
+
+        // Store the shell PID in integration state for cleanup
+        if let Some(ref mut state) = integration_state {
+            state.shell_pid = Some(pid);
+        }
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
@@ -112,7 +130,7 @@ impl PtySession {
             pid,
         };
 
-        Ok((session, pid))
+        Ok((session, pid, integration_state))
     }
 
     /// Return the PID of the child shell process.
@@ -170,8 +188,8 @@ mod tests {
     async fn spawn_and_get_pid() {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, pid) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
+        let (session, pid, _) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
 
         assert!(pid > 0);
         assert_eq!(session.pid(), pid);
@@ -187,7 +205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, pid) = PtySession::spawn(
+        let (session, pid, _) = PtySession::spawn(
             session_id,
             "/bin/sh",
             120,
@@ -195,6 +213,7 @@ mod tests {
             Some(dir.path().to_str().unwrap()),
             None,
             tx,
+            None,
         )
         .unwrap();
 
@@ -206,8 +225,8 @@ mod tests {
     async fn write_and_read_output() {
         let (tx, mut rx) = mpsc::channel(256);
         let session_id = uuid::Uuid::new_v4();
-        let (mut session, _pid) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
+        let (mut session, _pid, _) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
 
         // Write a command to the PTY
         session.write(b"echo hello_from_pty\n").unwrap();
@@ -236,8 +255,8 @@ mod tests {
     async fn resize_session() {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, _pid) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
+        let (session, _pid, _) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
 
         // Resize should succeed
         let result = session.resize(120, 40);
@@ -250,8 +269,8 @@ mod tests {
     async fn kill_and_try_wait() {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (mut session, _pid) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
+        let (mut session, _pid, _) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
 
         session.kill();
 
@@ -270,8 +289,8 @@ mod tests {
     async fn drop_kills_child() {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
-        let (session, pid) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx).unwrap();
+        let (session, pid, _) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
 
         assert!(pid > 0);
 

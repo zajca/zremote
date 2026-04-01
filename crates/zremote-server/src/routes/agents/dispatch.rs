@@ -54,8 +54,8 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
-        input_tokens: row.input_tokens as u64,
-        output_tokens: row.output_tokens as u64,
+        input_tokens: row.input_tokens.cast_unsigned(),
+        output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
     })
 }
@@ -1099,8 +1099,8 @@ pub(super) async fn handle_agentic_message(
             if let Err(e) = sqlx::query(
                 "UPDATE agentic_loops SET input_tokens = ?1, output_tokens = ?2, cost_usd = ?3 WHERE id = ?4",
             )
-            .bind(input_tokens as i64)
-            .bind(output_tokens as i64)
+            .bind(input_tokens.cast_signed())
+            .bind(output_tokens.cast_signed())
             .bind(cost_usd)
             .bind(&loop_id_str)
             .execute(&state.db)
@@ -1130,6 +1130,63 @@ pub(super) async fn handle_agentic_message(
                     hostname,
                 });
             }
+        }
+        AgenticAgentMessage::ExecutionNode {
+            session_id,
+            loop_id,
+            timestamp,
+            kind,
+            input,
+            output_summary,
+            exit_code,
+            working_dir,
+            duration_ms,
+        } => {
+            let session_id_str = session_id.to_string();
+            let loop_id_str = loop_id.map(|id| id.to_string());
+
+            let node_id = match zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id_str,
+                loop_id_str.as_deref(),
+                timestamp,
+                &kind,
+                input.as_deref(),
+                output_summary.as_deref(),
+                exit_code,
+                &working_dir,
+                duration_ms,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to insert execution node");
+                    return Ok(());
+                }
+            };
+
+            // Enforce cap
+            let _ = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+                &state.db,
+                &session_id_str,
+                10_000,
+            )
+            .await;
+
+            let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
+                session_id: session_id_str,
+                host_id: host_id.to_string(),
+                node_id,
+                loop_id: loop_id_str,
+                timestamp,
+                kind,
+                input,
+                output_summary,
+                exit_code,
+                working_dir,
+                duration_ms,
+            });
         }
     }
     Ok(())

@@ -25,231 +25,24 @@ v0.10.0 transforms ZRemote from a terminal session manager into a **provider-agn
 ## Phases & Detailed RFCs
 
 ```
-Phase 1-2: Output Analyzer ──→ output-analyzer.md    [DONE ✓]
-Phase 3:   Shell Integration                           [THIS FILE]
-Phase 4:   Project Intelligence                        [THIS FILE]
-Phase 5:   Command Tracking                            [THIS FILE]
-Phase 6:   Context Delivery                            [THIS FILE]
-Phase 7:   Channel Bridge ────→ channel-bridge.md     [BLOCKED: CC Channels API preview]
+Phase 1-2: Output Analyzer ──→ output-analyzer.md       [DONE]
+Phase 3:   Shell Integration ─→ shell-integration.md     [Draft, reviewed]
+Phase 4:   Project Intelligence → project-intelligence.md [Draft, reviewed]
+Phase 5:   Command Tracking ──→ command-tracking.md      [Draft, reviewed]
+Phase 6:   Context Delivery ──→ context-delivery.md      [Draft, reviewed]
+Phase 7:   Channel Bridge ───→ channel-bridge.md         [BLOCKED: CC Channels API preview]
 ```
 
 | Phase | RFC | Status | Depends on | Complexity |
 |-------|-----|--------|------------|------------|
 | 1-2 | [Output Analyzer](output-analyzer.md) | **Done** (2026-03-31) | - | Medium |
-| 3 | Shell Integration (below) | Draft | - | Medium |
-| 4 | Project Intelligence (below) | Draft | - | Low-medium |
-| 5 | Command Tracking (below) | Draft | Phase 1 | Low |
-| 6 | Context Delivery (below) | Draft | Phase 1, 4 | Medium-high |
+| 3 | [Shell Integration](shell-integration.md) | Draft (reviewed) | - | Medium |
+| 4 | [Project Intelligence](project-intelligence.md) | Draft (reviewed) | - | Low-medium |
+| 5 | [Command Tracking](command-tracking.md) | Draft (reviewed) | Phase 1 | Low |
+| 6 | [Context Delivery](context-delivery.md) | Draft (reviewed) | Phase 1, 4 | Medium-high |
 | 7 | [Channel Bridge](channel-bridge.md) | Blocked | Phase 1, 6 | High |
 
 Phases 1-4 are independent and parallelizable. Phase 5 extends the analyzer from Phase 1. Phase 6 depends on both Phase 1 (phase detection) and Phase 4 (project data). Phase 7 is a separate RFC blocked on CC Channels API stability.
-
----
-
-## Phase 3: Shell Integration
-
-New module: `zremote-agent/src/pty/shell_integration.rs`
-
-### Shell Detection
-
-Detect shell from the spawn command or `$SHELL`:
-
-```rust
-pub enum ShellType {
-    Zsh,
-    Bash,
-    Fish,
-    Unknown(String),
-}
-```
-
-### Integration per Shell
-
-**zsh:**
-- Create temp ZDOTDIR pointing to session-specific directory
-- Source user's original config, then apply overrides:
-  - Disable `zsh-autosuggestions` (nuclear: override `_zsh_autosuggest_suggest` to noop)
-  - Disable `zsh-autocomplete` if loaded
-  - Force `SIGWINCH` on startup (fixes resize race with GPUI)
-  - Preserve `HIST_IGNORE_SPACE` for command hiding
-
-**bash:**
-- Use `--rcfile` with custom init that sources `~/.bashrc` then applies overrides
-- Disable `ble.sh` autosuggestions if detected
-
-**fish:**
-- Use `-C` init command to disable native autosuggestions
-
-**All shells:**
-- Export `ZREMOTE_TERMINAL=1` (session detection)
-- Export `ZREMOTE_SESSION_ID=<uuid>` (for tool integration)
-
-### Configuration
-
-Opt-in per session (default: enabled for AI sessions, disabled for manual terminals):
-
-```rust
-pub struct ShellIntegrationConfig {
-    pub disable_autosuggestions: bool,  // default: true for AI sessions
-    pub export_env_vars: bool,         // default: true
-    pub force_sigwinch: bool,          // default: true
-}
-```
-
-### Cleanup
-
-On session close, remove temp ZDOTDIR/rcfile. Track via `ShellIntegration` enum on session state.
-
-### Files
-
-- **CREATE:** `crates/zremote-agent/src/pty/shell_integration.rs`
-- **MODIFY:** `crates/zremote-agent/src/pty.rs` (spawn flow), `crates/zremote-agent/src/session.rs`
-- **Tests:** Integration tests verifying env vars, shell detection
-
----
-
-## Phase 4: Enhanced Project Intelligence
-
-Extend: `zremote-agent/src/project/` (existing scanner)
-
-### Surface Scan Enhancement
-
-Add framework detection by reading marker file contents:
-
-```rust
-pub struct ProjectScanResult {
-    pub languages: Vec<String>,    // existing
-    pub path: String,              // existing
-    pub frameworks: Vec<String>,           // NEW
-    pub architecture: Option<ArchitecturePattern>,  // NEW
-    pub conventions: Vec<Convention>,       // NEW
-    pub package_manager: Option<String>,   // NEW
-}
-```
-
-### Framework Detection
-
-| Marker | Language | Detection |
-|--------|----------|-----------|
-| `package.json` | JS/TS | Read deps: `next` → Next.js, `react` → React, `vue` → Vue |
-| `Cargo.toml` | Rust | Read deps: `axum` → Axum, `actix-web` → Actix, `gpui` → GPUI |
-| `pyproject.toml` | Python | Read deps: `django` → Django, `fastapi` → FastAPI, `flask` → Flask |
-| `go.mod` | Go | Read deps: `gin-gonic` → Gin, `fiber` → Fiber |
-| `composer.json` | PHP | Read deps: `symfony` → Symfony, `laravel` → Laravel |
-
-### Architecture Detection
-
-- **Monorepo:** `pnpm-workspace.yaml`, `lerna.json`, Cargo workspace members >3
-- **MVC:** `controllers/` + `models/` + `views/` directories
-- **Microservices:** Multiple `Dockerfile`s or `docker-compose.yml` with >3 services
-
-### Storage
-
-```sql
-ALTER TABLE projects ADD COLUMN frameworks TEXT DEFAULT '[]';
-ALTER TABLE projects ADD COLUMN architecture TEXT DEFAULT NULL;
-ALTER TABLE projects ADD COLUMN conventions TEXT DEFAULT '[]';
-ALTER TABLE projects ADD COLUMN package_manager TEXT DEFAULT NULL;
-```
-
-### Files
-
-- **MODIFY:** `crates/zremote-agent/src/project/` (scanner modules)
-- **MODIFY:** `crates/zremote-core/migrations/` (new columns), project REST endpoints
-- **Tests:** Unit tests for framework detection, architecture pattern matching
-
----
-
-## Phase 5: Command Tracking (Execution Nodes)
-
-Integrated into OutputAnalyzer (Phase 1).
-
-### NodeBuilder
-
-Tracks command→output cycles within a terminal session:
-
-```rust
-pub struct CompletedNode {
-    pub timestamp: i64,
-    pub kind: String,             // "shell_command", "tool_call", "agent_response"
-    pub input: Option<String>,
-    pub output_summary: Option<String>,  // max 500 chars
-    pub exit_code: Option<i32>,
-    pub working_dir: String,
-    pub duration_ms: i64,
-    pub session_id: String,
-}
-```
-
-### Storage
-
-```sql
-CREATE TABLE execution_nodes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    input TEXT,
-    output_summary TEXT,
-    exit_code INTEGER,
-    working_dir TEXT NOT NULL,
-    duration_ms INTEGER NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
-CREATE INDEX idx_execution_nodes_session ON execution_nodes(session_id, timestamp);
-```
-
-### API
-
-```
-GET /api/sessions/:id/execution-nodes?limit=50&offset=0
-```
-
-### Files
-
-- **MODIFY:** `crates/zremote-agent/src/agentic/analyzer.rs` (add NodeBuilder)
-- **MODIFY:** `crates/zremote-core/migrations/` (execution_nodes table), REST endpoints
-- **Tests:** Integration test verifying command→output node lifecycle
-
----
-
-## Phase 6: Real-time Context Delivery
-
-New module: `zremote-agent/src/knowledge/context_delivery.rs`
-
-### Context Assembly
-
-```rust
-pub struct SessionContext {
-    pub project: ProjectSummary,
-    pub pinned_files: Vec<PinnedFile>,
-    pub memories: Vec<Memory>,
-    pub conventions: Vec<String>,
-    pub estimated_tokens: usize,
-}
-```
-
-### Token Budget Trimming
-
-Estimate ~4 chars per token. When over budget:
-1. Trim conventions from lower-priority projects
-2. Truncate pinned file contents
-3. Drop oldest memories
-
-### Deferred Nudge
-
-When context changes while agent is busy, store nudge. Deliver when phase transitions to Idle/NeedsInput (detected by Output Analyzer from Phase 1).
-
-### Delivery Mechanism
-
-- **Default:** Write context to temp file, inject `/read <path>` when agent is idle
-- **With Channel Bridge:** Structured MCP notification via `ChannelTransport` (see [channel-bridge.md](channel-bridge.md))
-
-### Files
-
-- **CREATE:** `crates/zremote-agent/src/knowledge/context_delivery.rs`
-- **MODIFY:** `crates/zremote-agent/src/knowledge/mod.rs`, session event handlers
-- **Tests:** Unit tests for assembly, token budgeting, deferred nudge
 
 ---
 
@@ -298,4 +91,8 @@ When context changes while agent is busy, store nudge. Deliver when phase transi
 
 - [Hermes IDE](https://github.com/hermes-hq/hermes-ide) — inspiration for output analyzer and shell integration
 - [Output Analyzer RFC](output-analyzer.md) — detailed design for Phase 1-2
+- [Shell Integration RFC](shell-integration.md) — detailed design for Phase 3
+- [Project Intelligence RFC](project-intelligence.md) — detailed design for Phase 4
+- [Command Tracking RFC](command-tracking.md) — detailed design for Phase 5
+- [Context Delivery RFC](context-delivery.md) — detailed design for Phase 6
 - [Channel Bridge RFC](channel-bridge.md) — detailed design for Phase 7

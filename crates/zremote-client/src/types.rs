@@ -100,6 +100,14 @@ pub struct Project {
     pub git_updated_at: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub frameworks: Option<String>,
+    #[serde(default)]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub conventions: Option<String>,
+    #[serde(default)]
+    pub package_manager: Option<String>,
 }
 
 /// Agentic loop as returned by the `ZRemote` API.

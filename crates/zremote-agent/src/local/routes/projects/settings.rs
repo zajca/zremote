@@ -221,11 +221,20 @@ pub async fn run_action(
         );
     }
 
+    let manual_config = crate::pty::shell_integration::ShellIntegrationConfig::for_manual_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, cols, rows, Some(&working_dir), env_ref)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            session_id,
+            shell,
+            cols,
+            rows,
+            Some(&working_dir),
+            env_ref,
+            Some(&manual_config),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
@@ -385,11 +394,20 @@ pub async fn configure_with_claude(
 
     // Spawn PTY session
     let shell = configure_default_shell();
+    let ai_config = crate::pty::shell_integration::ShellIntegrationConfig::for_ai_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, 120, 40, Some(&project_path), None)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            session_id,
+            shell,
+            120,
+            40,
+            Some(&project_path),
+            None,
+            Some(&ai_config),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     // Update session status in DB

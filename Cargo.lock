@@ -8992,6 +8992,7 @@ dependencies = [
  "glob-match",
  "hostname",
  "indexmap 2.13.0",
+ "libc",
  "nix 0.29.0",
  "png 0.17.16",
  "portable-pty",

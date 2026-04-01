@@ -124,6 +124,15 @@ pub enum Commands {
         /// Extra environment variables as KEY=VALUE pairs
         #[arg(long = "env")]
         env_vars: Vec<String>,
+        /// Disable autosuggestion plugins in the shell
+        #[arg(long)]
+        disable_autosuggestions: bool,
+        /// Export ZREMOTE_TERMINAL and ZREMOTE_SESSION_ID env vars
+        #[arg(long)]
+        export_env_vars: bool,
+        /// Force SIGWINCH on zsh startup
+        #[arg(long)]
+        force_sigwinch: bool,
     },
 }
 
@@ -146,6 +155,9 @@ pub fn run(command: Option<Commands>) {
         rows,
         working_dir,
         env_vars,
+        disable_autosuggestions,
+        export_env_vars,
+        force_sigwinch,
     }) = command
     {
         // Validate session_id as UUID to prevent path traversal (e.g. "../")
@@ -188,6 +200,16 @@ pub fn run(command: Option<Commands>) {
             })
             .collect();
 
+        let shell_config = if disable_autosuggestions || export_env_vars || force_sigwinch {
+            Some(pty::shell_integration::ShellIntegrationConfig {
+                disable_autosuggestions,
+                export_env_vars,
+                force_sigwinch,
+            })
+        } else {
+            None
+        };
+
         rt.block_on(daemon::run_pty_daemon(
             session_id,
             socket,
@@ -197,6 +219,7 @@ pub fn run(command: Option<Commands>) {
             rows,
             working_dir,
             extra_env,
+            shell_config,
         ));
         return;
     }

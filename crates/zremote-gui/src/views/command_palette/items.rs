@@ -667,6 +667,10 @@ mod tests {
                 git_remotes: None,
                 git_updated_at: None,
                 pinned: true,
+                frameworks: None,
+                architecture: None,
+                conventions: None,
+                package_manager: None,
             },
             Project {
                 id: "proj-2".to_string(),
@@ -687,6 +691,10 @@ mod tests {
                 git_remotes: None,
                 git_updated_at: None,
                 pinned: false,
+                frameworks: None,
+                architecture: None,
+                conventions: None,
+                package_manager: None,
             },
         ]);
 
@@ -908,6 +916,10 @@ mod tests {
             git_remotes: None,
             git_updated_at: None,
             pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
         }]);
         let snapshot = PaletteSnapshot::capture(
             hosts,

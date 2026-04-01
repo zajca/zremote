@@ -7,6 +7,7 @@ use zremote_protocol::SessionId;
 
 use super::DaemonStateFile;
 use super::protocol::{DaemonRequest, DaemonResponse, read_response, send_request};
+use crate::pty::shell_integration::ShellIntegrationConfig;
 use crate::session::PtyOutput;
 
 /// Client-side handle to a PTY daemon process.
@@ -41,6 +42,7 @@ impl DaemonSession {
         working_dir: Option<&str>,
         env: Option<&std::collections::HashMap<String, String>>,
         output_tx: mpsc::Sender<PtyOutput>,
+        shell_config: Option<&ShellIntegrationConfig>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         let exe = std::env::current_exe()?;
         let uid = nix::unistd::getuid();
@@ -72,6 +74,19 @@ impl DaemonSession {
             for (key, value) in env_vars {
                 args.push("--env".to_string());
                 args.push(format!("{key}={value}"));
+            }
+        }
+
+        // Pass shell integration flags to daemon subprocess
+        if let Some(config) = shell_config {
+            if config.disable_autosuggestions {
+                args.push("--disable-autosuggestions".to_string());
+            }
+            if config.export_env_vars {
+                args.push("--export-env-vars".to_string());
+            }
+            if config.force_sigwinch {
+                args.push("--force-sigwinch".to_string());
             }
         }
 

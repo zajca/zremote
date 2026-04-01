@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage};
 
+use crate::agentic::analyzer::{AnalyzerEvent, OutputAnalyzer};
 use crate::hooks::server::HooksServer;
 use state::LocalAppState;
 
@@ -201,6 +202,43 @@ pub async fn run_local(
         );
     }
 
+    // Clean up old execution nodes at startup (retain 30 days)
+    match zremote_core::queries::execution_nodes::delete_old_execution_nodes(&pool, 30).await {
+        Ok(deleted) if deleted > 0 => {
+            tracing::info!(deleted, "cleaned up old execution nodes at startup");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to clean up old execution nodes");
+        }
+        _ => {}
+    }
+
+    // Spawn periodic execution node cleanup (every 24h)
+    {
+        let pool_for_cleanup = pool.clone();
+        let shutdown_for_cleanup = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+            interval.tick().await; // skip first immediate tick (cleanup already ran above)
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        match zremote_core::queries::execution_nodes::delete_old_execution_nodes(&pool_for_cleanup, 30).await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::info!(deleted, "periodic execution node cleanup");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "periodic execution node cleanup failed");
+                            }
+                            _ => {}
+                        }
+                    }
+                    () = shutdown_for_cleanup.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // Spawn the PTY output routing loop (includes agentic output processing)
     spawn_pty_output_loop(state.clone());
 
@@ -271,6 +309,14 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
         .route(
             "/api/sessions/{session_id}/purge",
             delete(routes::sessions::purge_session),
+        )
+        .route(
+            "/api/sessions/{session_id}/execution-nodes",
+            get(routes::sessions::list_execution_nodes),
+        )
+        .route(
+            "/api/execution-nodes/cleanup",
+            delete(routes::sessions::cleanup_execution_nodes),
         )
         // Agentic loop endpoints
         .route("/api/loops", get(routes::agentic::list_loops))
@@ -605,12 +651,20 @@ fn spawn_agentic_detection_loop(state: Arc<LocalAppState>) {
 fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
     tokio::spawn(async move {
         let mut pty_output_rx = state.pty_output_rx.lock().await;
+        let mut session_analyzers: std::collections::HashMap<
+            zremote_protocol::SessionId,
+            OutputAnalyzer,
+        > = std::collections::HashMap::new();
+
         while let Some(pty_output) = pty_output_rx.recv().await {
             let session_id = pty_output.session_id;
             let data = pty_output.data;
 
             if data.is_empty() {
                 // EOF from main pane -- session ended
+
+                // Clean up analyzer for this session
+                session_analyzers.remove(&session_id);
 
                 // Notify agentic manager that session closed
                 let loop_ended = {
@@ -676,6 +730,35 @@ fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                         exit_code,
                     });
             } else {
+                // Feed through per-session analyzer
+                let analyzer = session_analyzers.entry(session_id).or_insert_with(|| {
+                    let default_cwd = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
+                    OutputAnalyzer::with_initial_cwd(default_cwd)
+                });
+                let events = analyzer.process_output(&data);
+                for event in events {
+                    if let AnalyzerEvent::NodeCompleted(node) = event {
+                        let loop_id = {
+                            let mgr = state.agentic_manager.lock().await;
+                            mgr.loop_id_for_session(&session_id)
+                        };
+                        let msg = AgenticAgentMessage::ExecutionNode {
+                            session_id,
+                            loop_id,
+                            timestamp: node.timestamp,
+                            kind: node.kind,
+                            input: node.input,
+                            output_summary: node.output_summary,
+                            exit_code: node.exit_code,
+                            working_dir: node.working_dir,
+                            duration_ms: node.duration_ms,
+                        };
+                        if let Err(e) = state.agentic_processor.handle_message(msg).await {
+                            tracing::warn!(error = %e, "failed to process execution node");
+                        }
+                    }
+                }
+
                 // Main pane output -> scrollback + browser senders
                 let mut sessions = state.sessions.write().await;
                 if let Some(session_state) = sessions.get_mut(&session_id) {

@@ -40,6 +40,21 @@ pub enum AgenticAgentMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
     },
+    ExecutionNode {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_id: Option<AgenticLoopId>,
+        timestamp: i64,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        working_dir: String,
+        duration_ms: i64,
+    },
 }
 
 #[cfg(test)]
@@ -102,6 +117,32 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
+        });
+    }
+
+    #[test]
+    fn execution_node_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
+            session_id: Uuid::new_v4(),
+            loop_id: Some(Uuid::new_v4()),
+            timestamp: 1711843200000,
+            kind: "tool_call".to_string(),
+            input: Some("Read src/main.rs".to_string()),
+            output_summary: Some("fn main() {}".to_string()),
+            exit_code: None,
+            working_dir: "/home/user/project".to_string(),
+            duration_ms: 1234,
+        });
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
+            session_id: Uuid::new_v4(),
+            loop_id: None,
+            timestamp: 1711843200000,
+            kind: "shell_command".to_string(),
+            input: None,
+            output_summary: None,
+            exit_code: Some(0),
+            working_dir: "/home/user".to_string(),
+            duration_ms: 50,
         });
     }
 

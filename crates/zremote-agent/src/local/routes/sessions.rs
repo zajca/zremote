@@ -12,6 +12,7 @@ use zremote_core::state::{ServerEvent, SessionInfo, SessionState};
 use zremote_protocol::status::SessionStatus;
 
 use crate::local::state::LocalAppState;
+use crate::pty::shell_integration::ShellIntegrationConfig;
 
 /// Resolve the default shell from the passwd database, falling back to $SHELL
 /// and then `/bin/sh`.
@@ -128,6 +129,7 @@ pub async fn create_session(
     }
 
     // Spawn PTY/daemon session directly
+    let manual_config = ShellIntegrationConfig::for_manual_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(
@@ -137,6 +139,7 @@ pub async fn create_session(
             rows,
             effective_working_dir,
             env_vars,
+            Some(&manual_config),
         )
         .await
         .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
@@ -344,6 +347,71 @@ pub async fn purge_session(
     q::purge_session(&state.db, &session_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query parameters for listing execution nodes.
+#[derive(Debug, Deserialize)]
+pub struct ListExecutionNodesQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    pub loop_id: Option<String>,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+/// `GET /api/sessions/:session_id/execution-nodes` - list execution nodes for a session.
+pub async fn list_execution_nodes(
+    State(state): State<Arc<LocalAppState>>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ListExecutionNodesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let limit = query.limit.clamp(1, 200);
+    let offset = query.offset.max(0);
+
+    let nodes = if let Some(ref loop_id) = query.loop_id {
+        zremote_core::queries::execution_nodes::list_execution_nodes_by_loop(
+            &state.db, loop_id, limit, offset,
+        )
+        .await?
+    } else {
+        zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            limit,
+            offset,
+        )
+        .await?
+    };
+
+    Ok(Json(nodes))
+}
+
+/// Query parameters for cleanup endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CleanupQuery {
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: i64,
+}
+
+fn default_max_age_days() -> i64 {
+    30
+}
+
+/// `DELETE /api/execution-nodes/cleanup` - delete old execution nodes.
+pub async fn cleanup_execution_nodes(
+    State(state): State<Arc<LocalAppState>>,
+    axum::extract::Query(query): axum::extract::Query<CleanupQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let max_age_days = query.max_age_days.max(1);
+    let deleted =
+        zremote_core::queries::execution_nodes::delete_old_execution_nodes(&state.db, max_age_days)
+            .await?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 #[cfg(test)]

@@ -126,11 +126,20 @@ pub async fn create_claude_task(
 
     // Spawn PTY session
     let shell = default_shell();
+    let ai_config = crate::pty::shell_integration::ShellIntegrationConfig::for_ai_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(session_id, shell, 120, 40, Some(&body.project_path), None)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        mgr.create(
+            session_id,
+            shell,
+            120,
+            40,
+            Some(&body.project_path),
+            None,
+            Some(&ai_config),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
     };
 
     // Update session status in DB
@@ -314,6 +323,7 @@ pub async fn resume_claude_task(
 
     // Spawn PTY session
     let shell = default_shell();
+    let ai_config = crate::pty::shell_integration::ShellIntegrationConfig::for_ai_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;
         mgr.create(
@@ -323,6 +333,7 @@ pub async fn resume_claude_task(
             40,
             Some(&original.project_path),
             None,
+            Some(&ai_config),
         )
         .await
         .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?

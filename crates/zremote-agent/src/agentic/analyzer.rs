@@ -47,6 +47,257 @@ pub enum AnalyzerEvent {
         args: String,
     },
     CwdChanged(String),
+    NodeCompleted(CompletedNode),
+}
+
+// ---------------------------------------------------------------------------
+// Command Tracking types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct CompletedNode {
+    pub timestamp: i64,
+    pub kind: String,
+    pub input: Option<String>,
+    pub output_summary: Option<String>,
+    pub exit_code: Option<i32>,
+    pub working_dir: String,
+    pub duration_ms: i64,
+}
+
+/// Extracted prompt boundary metadata, captured before ANSI stripping.
+#[derive(Debug, Clone, Default)]
+pub struct PromptMarkers {
+    pub prompt_starts: Vec<usize>,
+    pub command_starts: Vec<usize>,
+    pub command_ends: Vec<usize>,
+}
+
+const OUTPUT_SUMMARY_CAP: usize = 500;
+
+/// Priority-based output summary builder.
+#[allow(clippy::struct_field_names)]
+pub struct SummaryBuilder {
+    error_lines: Vec<String>,
+    first_lines: Vec<String>,
+    last_lines: VecDeque<String>,
+    total_lines: usize,
+}
+
+impl SummaryBuilder {
+    pub fn new() -> Self {
+        Self {
+            error_lines: Vec::new(),
+            first_lines: Vec::new(),
+            last_lines: VecDeque::new(),
+            total_lines: 0,
+        }
+    }
+
+    pub fn push_line(&mut self, line: &str) {
+        self.total_lines += 1;
+
+        // Classify error lines
+        let lower = line.to_lowercase();
+        if (lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("fail")
+            || lower.contains("panic"))
+            && self.error_lines.len() < 5
+        {
+            self.error_lines.push(line.to_string());
+        }
+
+        // First 2 lines
+        if self.first_lines.len() < 2 {
+            self.first_lines.push(line.to_string());
+        }
+
+        // Last 2 lines (ring buffer)
+        if self.last_lines.len() >= 2 {
+            self.last_lines.pop_front();
+        }
+        self.last_lines.push_back(line.to_string());
+    }
+
+    pub fn build(self) -> Option<String> {
+        if self.total_lines == 0 {
+            return None;
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        let mut remaining = OUTPUT_SUMMARY_CAP;
+
+        // Priority 1: error lines
+        for line in &self.error_lines {
+            if remaining == 0 {
+                break;
+            }
+            let take = line.len().min(remaining);
+            parts.push(line[..take].to_string());
+            remaining = remaining.saturating_sub(take + 1); // +1 for newline
+        }
+
+        // Priority 2: first lines
+        for line in &self.first_lines {
+            if remaining == 0 {
+                break;
+            }
+            // Skip if already included as error line
+            if self.error_lines.contains(line) {
+                continue;
+            }
+            let take = line.len().min(remaining);
+            parts.push(line[..take].to_string());
+            remaining = remaining.saturating_sub(take + 1);
+        }
+
+        // Priority 3: last lines
+        for line in &self.last_lines {
+            if remaining == 0 {
+                break;
+            }
+            if self.error_lines.contains(line) || self.first_lines.contains(line) {
+                continue;
+            }
+            let take = line.len().min(remaining);
+            parts.push(line[..take].to_string());
+            remaining = remaining.saturating_sub(take + 1);
+        }
+
+        let result = parts.join("\n");
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
+enum NodeState {
+    Idle,
+    Building,
+}
+
+/// State machine that tracks command-output cycles and emits `CompletedNode`s.
+pub struct NodeBuilder {
+    state: NodeState,
+    summary_builder: SummaryBuilder,
+    start_time: Option<Instant>,
+    start_timestamp: Option<i64>,
+    current_kind: Option<String>,
+    current_input: Option<String>,
+    current_cwd: String,
+    pending_nodes: Vec<CompletedNode>,
+}
+
+impl NodeBuilder {
+    pub fn new(initial_cwd: String) -> Self {
+        Self {
+            state: NodeState::Idle,
+            summary_builder: SummaryBuilder::new(),
+            start_time: None,
+            start_timestamp: None,
+            current_kind: None,
+            current_input: None,
+            current_cwd: initial_cwd,
+            pending_nodes: Vec::new(),
+        }
+    }
+
+    pub fn on_tool_call(&mut self, tool: &str, args: &str, cwd: &str) {
+        // If building, complete the previous node first
+        self.complete_if_building(cwd);
+
+        self.state = NodeState::Building;
+        self.summary_builder = SummaryBuilder::new();
+        self.start_time = Some(Instant::now());
+        self.start_timestamp = Some(Utc::now().timestamp_millis());
+        self.current_kind = Some("tool_call".to_string());
+        self.current_input = Some(format!("{tool} {args}"));
+        self.current_cwd = cwd.to_string();
+    }
+
+    pub fn on_phase_changed(&mut self, phase: AnalyzerPhase, cwd: &str) {
+        match phase {
+            AnalyzerPhase::Busy => {
+                // If not already building, start an agent_response node
+                if matches!(self.state, NodeState::Idle) {
+                    self.state = NodeState::Building;
+                    self.summary_builder = SummaryBuilder::new();
+                    self.start_time = Some(Instant::now());
+                    self.start_timestamp = Some(Utc::now().timestamp_millis());
+                    self.current_kind = Some("agent_response".to_string());
+                    self.current_input = None;
+                    self.current_cwd = cwd.to_string();
+                }
+            }
+            AnalyzerPhase::Idle | AnalyzerPhase::ShellReady | AnalyzerPhase::NeedsInput => {
+                self.complete_if_building(cwd);
+            }
+            AnalyzerPhase::Unknown => {}
+        }
+    }
+
+    pub fn on_output_line(&mut self, line: &str) {
+        if matches!(self.state, NodeState::Building) {
+            self.summary_builder.push_line(line);
+        }
+    }
+
+    pub fn on_prompt_markers(&mut self, markers: &PromptMarkers, cwd: &str) {
+        // Prompt start (;A) means the previous command finished
+        if !markers.prompt_starts.is_empty() {
+            self.complete_if_building(cwd);
+        }
+        // Command start (;B) means a new shell command is beginning
+        if !markers.command_starts.is_empty() && matches!(self.state, NodeState::Idle) {
+            self.state = NodeState::Building;
+            self.summary_builder = SummaryBuilder::new();
+            self.start_time = Some(Instant::now());
+            self.start_timestamp = Some(Utc::now().timestamp_millis());
+            self.current_kind = Some("shell_command".to_string());
+            self.current_input = None;
+            self.current_cwd = cwd.to_string();
+        }
+    }
+
+    pub fn drain_completed(&mut self) -> Vec<CompletedNode> {
+        std::mem::take(&mut self.pending_nodes)
+    }
+
+    fn complete_if_building(&mut self, cwd: &str) {
+        if !matches!(self.state, NodeState::Building) {
+            return;
+        }
+
+        let duration_ms = self
+            .start_time
+            .map(|t| t.elapsed().as_millis() as i64)
+            .unwrap_or(0);
+
+        let summary_builder = std::mem::replace(&mut self.summary_builder, SummaryBuilder::new());
+        let node = CompletedNode {
+            timestamp: self
+                .start_timestamp
+                .unwrap_or_else(|| Utc::now().timestamp_millis()),
+            kind: self.current_kind.take().unwrap_or_default(),
+            input: self.current_input.take(),
+            output_summary: summary_builder.build(),
+            exit_code: None,
+            working_dir: if cwd.is_empty() {
+                self.current_cwd.clone()
+            } else {
+                cwd.to_string()
+            },
+            duration_ms,
+        };
+
+        self.pending_nodes.push(node);
+        self.state = NodeState::Idle;
+        self.start_time = None;
+        self.start_timestamp = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,11 +370,18 @@ pub struct OutputAnalyzer {
     last_output_at: Option<Instant>,
 
     line_count: u64,
+
+    node_builder: NodeBuilder,
 }
 
 impl OutputAnalyzer {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_initial_cwd(None)
+    }
+
+    #[must_use]
+    pub fn with_initial_cwd(initial_cwd: Option<String>) -> Self {
         let mut registry = ProviderRegistry::new();
         registry.adapters = vec![
             Box::new(ClaudeAdapter),
@@ -132,6 +390,7 @@ impl OutputAnalyzer {
             Box::new(GeminiAdapter),
         ];
 
+        let cwd = initial_cwd.unwrap_or_default();
         Self {
             registry,
             active_adapter_idx: None,
@@ -145,11 +404,16 @@ impl OutputAnalyzer {
             files_touched: IndexSet::new(),
             line_buffer: String::new(),
             stripped_buffer: String::new(),
-            current_cwd: None,
+            current_cwd: if cwd.is_empty() {
+                None
+            } else {
+                Some(cwd.clone())
+            },
             last_input_at: None,
             latency_samples: VecDeque::with_capacity(LATENCY_SAMPLES_CAP),
             last_output_at: None,
             line_count: 0,
+            node_builder: NodeBuilder::new(cwd),
         }
     }
 
@@ -168,8 +432,11 @@ impl OutputAnalyzer {
             }
         }
 
-        // 2. OSC 7 CWD — check raw bytes before stripping ANSI
+        // 2. Pre-strip phase: extract OSC 133 prompt markers and OSC 7 CWD
         let raw_str = String::from_utf8_lossy(raw);
+        let prompt_markers = Self::extract_prompt_markers(raw);
+
+        // OSC 7 CWD
         if let Some(caps) = patterns::OSC7_RE.captures(&raw_str) {
             let path = patterns::percent_decode(&caps[1]);
             if self.current_cwd.as_deref() != Some(&path) {
@@ -177,6 +444,10 @@ impl OutputAnalyzer {
                 events.push(AnalyzerEvent::CwdChanged(path));
             }
         }
+
+        // Pass prompt markers to node builder
+        let cwd = self.current_cwd.clone().unwrap_or_default();
+        self.node_builder.on_prompt_markers(&prompt_markers, &cwd);
 
         // 3. Strip ANSI escapes
         let stripped_bytes = strip_ansi_escapes::strip(raw_str.as_bytes());
@@ -251,6 +522,23 @@ impl OutputAnalyzer {
 
             self.apply_analysis(analysis, &mut events);
 
+            // Feed NodeBuilder from events just emitted
+            let cwd = self.current_cwd.clone().unwrap_or_default();
+            for event in &events {
+                match event {
+                    AnalyzerEvent::ToolCall { tool, args } => {
+                        self.node_builder.on_tool_call(tool, args, &cwd);
+                    }
+                    AnalyzerEvent::PhaseChanged(phase) => {
+                        self.node_builder.on_phase_changed(*phase, &cwd);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Feed output line to NodeBuilder
+            self.node_builder.on_output_line(trimmed);
+
             // Append to stripped_buffer (cap at 16KB)
             self.stripped_buffer.push_str(trimmed);
             self.stripped_buffer.push('\n');
@@ -262,6 +550,11 @@ impl OutputAnalyzer {
                     .map_or(drain, |pos| drain + pos + 1);
                 self.stripped_buffer.drain(..cut);
             }
+        }
+
+        // Drain completed nodes from NodeBuilder
+        for node in self.node_builder.drain_completed() {
+            events.push(AnalyzerEvent::NodeCompleted(node));
         }
 
         events
@@ -336,6 +629,38 @@ impl OutputAnalyzer {
             latency_p50_ms: percentile(&self.latency_samples, 50.0),
             latency_p95_ms: percentile(&self.latency_samples, 95.0),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-strip phase helpers
+    // -----------------------------------------------------------------------
+
+    /// Extract OSC 133 prompt markers from raw PTY bytes BEFORE stripping ANSI.
+    fn extract_prompt_markers(raw: &[u8]) -> PromptMarkers {
+        let mut markers = PromptMarkers::default();
+        let text = String::from_utf8_lossy(raw);
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            // Look for ESC ] 133 ; <letter>
+            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b']' {
+                // Find the end of the OSC sequence (ST = ESC \ or BEL = 0x07)
+                if let Some(rest) = text.get(i + 2..)
+                    && let Some(stripped) = rest.strip_prefix("133;")
+                {
+                    if stripped.starts_with('A') {
+                        markers.prompt_starts.push(i);
+                    } else if stripped.starts_with('B') {
+                        markers.command_starts.push(i);
+                    } else if stripped.starts_with('D') {
+                        markers.command_ends.push(i);
+                    }
+                }
+            }
+            i += 1;
+        }
+        markers
     }
 
     // -----------------------------------------------------------------------
@@ -1003,5 +1328,213 @@ mod tests {
         let analyzer = OutputAnalyzer::default();
         assert_eq!(analyzer.current_phase, AnalyzerPhase::Unknown);
         assert_eq!(analyzer.line_count, 0);
+    }
+
+    // -- NodeBuilder tests --
+
+    #[test]
+    fn node_builder_tool_call_lifecycle() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "src/main.rs", "/home/user");
+        nb.on_output_line("fn main() { }");
+        nb.on_output_line("// done");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home/user");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind, "tool_call");
+        assert_eq!(nodes[0].input.as_deref(), Some("Read src/main.rs"));
+        assert!(nodes[0].output_summary.is_some());
+        assert_eq!(nodes[0].working_dir, "/home/user");
+        assert!(nodes[0].duration_ms >= 0);
+    }
+
+    #[test]
+    fn node_builder_consecutive_tool_calls() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "file1.rs", "/home");
+        nb.on_output_line("content1");
+        nb.on_tool_call("Edit", "file2.rs", "/home");
+        nb.on_output_line("content2");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].input.as_deref(), Some("Read file1.rs"));
+        assert_eq!(nodes[1].input.as_deref(), Some("Edit file2.rs"));
+    }
+
+    #[test]
+    fn node_builder_agent_response() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_phase_changed(AnalyzerPhase::Busy, "/home");
+        nb.on_output_line("I'll help you with that");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind, "agent_response");
+    }
+
+    #[test]
+    fn node_builder_cwd_tracking() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "file.rs", "/project/src");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/project/src");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes[0].working_dir, "/project/src");
+    }
+
+    #[test]
+    fn node_builder_idle_to_idle_no_node() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn node_builder_drain_clears() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "file.rs", "/home");
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let first = nb.drain_completed();
+        assert_eq!(first.len(), 1);
+        let second = nb.drain_completed();
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn node_builder_osc133_prompt_boundaries() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        // OSC 133 ;B = command start
+        let markers_b = PromptMarkers {
+            prompt_starts: vec![],
+            command_starts: vec![0],
+            command_ends: vec![],
+        };
+        nb.on_prompt_markers(&markers_b, "/home");
+        nb.on_output_line("ls output");
+
+        // OSC 133 ;A = next prompt start -> completes the node
+        let markers_a = PromptMarkers {
+            prompt_starts: vec![0],
+            command_starts: vec![],
+            command_ends: vec![],
+        };
+        nb.on_prompt_markers(&markers_a, "/home");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind, "shell_command");
+    }
+
+    #[test]
+    fn analyzer_emits_node_completed() {
+        let mut analyzer = make_analyzer();
+        // Detect Claude
+        analyzer.process_output(b"Welcome to Claude Code!\n");
+        // Tool call
+        let events = analyzer.process_output("● Read src/main.rs\n".as_bytes());
+        // Check for Busy phase
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AnalyzerEvent::PhaseChanged(AnalyzerPhase::Busy)))
+        );
+
+        // Prompt -> completes the node
+        let events = analyzer.process_output(b">\n");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AnalyzerEvent::NodeCompleted(_)))
+        );
+    }
+
+    #[test]
+    fn analyzer_osc7_cwd_extraction() {
+        let mut analyzer = make_analyzer();
+        let osc7 = b"\x1b]7;file://myhost/home/user/project\x07some output\n";
+        let events = analyzer.process_output(osc7);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AnalyzerEvent::CwdChanged(p) if p == "/home/user/project"))
+        );
+    }
+
+    #[test]
+    fn extract_prompt_markers_osc133() {
+        let raw = b"\x1b]133;A\x07user@host$ \x1b]133;B\x07ls\n";
+        let markers = OutputAnalyzer::extract_prompt_markers(raw);
+        assert_eq!(markers.prompt_starts.len(), 1);
+        assert_eq!(markers.command_starts.len(), 1);
+    }
+
+    // -- SummaryBuilder tests --
+
+    #[test]
+    fn summary_builder_error_lines_priority() {
+        let mut sb = SummaryBuilder::new();
+        sb.push_line("line 1");
+        sb.push_line("error: something failed");
+        sb.push_line("line 3");
+        let result = sb.build().unwrap();
+        assert!(result.starts_with("error: something failed"));
+    }
+
+    #[test]
+    fn summary_builder_respects_cap() {
+        let mut sb = SummaryBuilder::new();
+        for i in 0..100 {
+            sb.push_line(&format!("line number {i} with some content to fill space"));
+        }
+        let result = sb.build().unwrap();
+        assert!(result.len() <= OUTPUT_SUMMARY_CAP);
+    }
+
+    #[test]
+    fn summary_builder_first_last_lines() {
+        let mut sb = SummaryBuilder::new();
+        for i in 0..10 {
+            sb.push_line(&format!("line {i}"));
+        }
+        let result = sb.build().unwrap();
+        assert!(result.contains("line 0"));
+        assert!(result.contains("line 1"));
+        assert!(result.contains("line 9"));
+    }
+
+    #[test]
+    fn summary_builder_empty() {
+        let sb = SummaryBuilder::new();
+        assert!(sb.build().is_none());
+    }
+
+    #[test]
+    fn summary_builder_error_patterns() {
+        let patterns = [
+            "error in code",
+            "Error found",
+            "ERROR!",
+            "FAILED test",
+            "FAIL",
+            "panic at",
+        ];
+        for pat in &patterns {
+            let mut sb = SummaryBuilder::new();
+            sb.push_line(pat);
+            sb.push_line("normal line");
+            let result = sb.build().unwrap();
+            assert!(
+                result.starts_with(pat),
+                "pattern {pat} not detected as error"
+            );
+        }
     }
 }

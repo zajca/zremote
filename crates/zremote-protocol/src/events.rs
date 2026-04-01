@@ -159,6 +159,28 @@ pub enum ServerEvent {
         rate_limit_5h_pct: Option<u64>,
         rate_limit_7d_pct: Option<u64>,
     },
+    #[serde(rename = "execution_node_created")]
+    ExecutionNodeCreated {
+        session_id: String,
+        host_id: String,
+        node_id: i64,
+        #[serde(default)]
+        loop_id: Option<String>,
+        #[serde(default)]
+        timestamp: i64,
+        #[serde(default)]
+        kind: String,
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        output_summary: Option<String>,
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        working_dir: String,
+        #[serde(default)]
+        duration_ms: i64,
+    },
     /// Unknown event type for forward compatibility.
     /// New event types added in future versions will deserialize as `Unknown`
     /// instead of failing, allowing older clients to gracefully ignore them.
