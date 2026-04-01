@@ -15,6 +15,32 @@ use super::adapters::{
 use super::patterns;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Snap a byte index down to the nearest char boundary (like `str::floor_char_boundary` on nightly).
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else {
+        let mut i = index;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+}
+
+/// Snap a byte index up to the nearest char boundary.
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    let mut i = index;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -133,7 +159,7 @@ impl SummaryBuilder {
             if remaining == 0 {
                 break;
             }
-            let take = line.len().min(remaining);
+            let take = floor_char_boundary(line, line.len().min(remaining));
             parts.push(line[..take].to_string());
             remaining = remaining.saturating_sub(take + 1); // +1 for newline
         }
@@ -147,7 +173,7 @@ impl SummaryBuilder {
             if self.error_lines.contains(line) {
                 continue;
             }
-            let take = line.len().min(remaining);
+            let take = floor_char_boundary(line, line.len().min(remaining));
             parts.push(line[..take].to_string());
             remaining = remaining.saturating_sub(take + 1);
         }
@@ -160,7 +186,7 @@ impl SummaryBuilder {
             if self.error_lines.contains(line) || self.first_lines.contains(line) {
                 continue;
             }
-            let take = line.len().min(remaining);
+            let take = floor_char_boundary(line, line.len().min(remaining));
             parts.push(line[..take].to_string());
             remaining = remaining.saturating_sub(take + 1);
         }
@@ -545,7 +571,7 @@ impl OutputAnalyzer {
             if self.stripped_buffer.len() > STRIPPED_BUFFER_CAP {
                 let drain = self.stripped_buffer.len() - STRIPPED_BUFFER_CAP;
                 // Snap to a char boundary first, then find a newline to drain cleanly
-                let drain = self.snap_to_char_boundary(drain);
+                let drain = ceil_char_boundary(&self.stripped_buffer, drain);
                 let cut = self.stripped_buffer[drain..]
                     .find('\n')
                     .map_or(drain, |pos| drain + pos + 1);
@@ -559,15 +585,6 @@ impl OutputAnalyzer {
         }
 
         events
-    }
-
-    /// Snap a byte index forward to the nearest char boundary in `stripped_buffer`.
-    fn snap_to_char_boundary(&self, index: usize) -> usize {
-        let mut i = index;
-        while i < self.stripped_buffer.len() && !self.stripped_buffer.is_char_boundary(i) {
-            i += 1;
-        }
-        i
     }
 
     /// Mark that user input was sent (for latency tracking).
@@ -1525,6 +1542,20 @@ mod tests {
         }
         let result = sb.build().unwrap();
         assert!(result.len() <= OUTPUT_SUMMARY_CAP);
+    }
+
+    #[test]
+    fn summary_builder_multibyte_truncation() {
+        let mut sb = SummaryBuilder::new();
+        // Each '─' is 3 bytes. A line of 200 '─' = 600 bytes, exceeds OUTPUT_SUMMARY_CAP (500).
+        // Truncation must not land inside a multi-byte char.
+        let line = "─".repeat(200);
+        sb.push_line(&line);
+        let result = sb.build().unwrap();
+        // Must be valid UTF-8 (would panic on build if not) and within cap
+        assert!(result.len() <= OUTPUT_SUMMARY_CAP);
+        // Must be cleanly truncated at a char boundary
+        assert!(result.is_char_boundary(result.len()));
     }
 
     #[test]
