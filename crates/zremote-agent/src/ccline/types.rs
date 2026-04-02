@@ -14,6 +14,7 @@ pub struct CclineMessage {
     pub cost: Option<CclineCost>,
     pub context_window: Option<CclineContext>,
     pub rate_limits: Option<CclineRateLimits>,
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -55,6 +55,7 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         end_reason: row.end_reason,
         task_name: row.task_name,
         prompt_message: None,
+        permission_mode: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -887,6 +888,7 @@ pub(super) async fn handle_agentic_message(
                     host_id,
                     status: AgenticStatus::Working,
                     task_name: None,
+                    permission_mode: None,
                     last_updated: Instant::now(),
                     input_tokens: 0,
                     output_tokens: 0,
@@ -990,12 +992,16 @@ pub(super) async fn handle_agentic_message(
             status,
             task_name,
             prompt_message,
+            permission_mode,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
                 entry.status = status;
                 if task_name.is_some() {
                     entry.task_name = task_name.clone();
+                }
+                if permission_mode.is_some() {
+                    entry.permission_mode.clone_from(&permission_mode);
                 }
                 entry.last_updated = Instant::now();
             }
@@ -1037,8 +1043,14 @@ pub(super) async fn handle_agentic_message(
                 .await
                 .unwrap_or_default();
             if let Some(mut loop_info) = fetch_loop_info(state, &loop_id_str).await {
-                // Overlay transient prompt_message (not stored in DB)
+                // Overlay transient fields (not stored in DB)
                 loop_info.prompt_message = prompt_message;
+                loop_info.permission_mode = permission_mode.or_else(|| {
+                    state
+                        .agentic_loops
+                        .get(&loop_id)
+                        .and_then(|e| e.permission_mode.clone())
+                });
                 let _ = state.events.send(ServerEvent::LoopStatusChanged {
                     loop_info,
                     host_id: host_id.to_string(),
@@ -1311,6 +1323,7 @@ async fn handle_claude_message(
             lines_added,
             lines_removed,
             cc_version,
+            permission_mode,
         } => {
             tracing::debug!(
                 host_id = %host_id,
@@ -1350,6 +1363,7 @@ async fn handle_claude_message(
                         lines_removed,
                         rate_limit_5h_pct,
                         rate_limit_7d_pct,
+                        permission_mode,
                     });
                 }
                 Ok(false) => {
@@ -2086,6 +2100,7 @@ mod tests {
             status: AgenticStatus::WaitingForInput,
             task_name: Some("Fix the build".to_string()),
             prompt_message: None,
+            permission_mode: None,
         };
         handle_agentic_message(&state, host_id, update_msg)
             .await

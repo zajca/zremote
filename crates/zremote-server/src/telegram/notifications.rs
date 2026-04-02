@@ -126,6 +126,7 @@ mod tests {
             end_reason: None,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,

@@ -22,6 +22,7 @@ pub struct CcState {
     pub loop_id: String,
     pub status: AgenticStatus,
     pub task_name: Option<String>,
+    pub permission_mode: Option<String>,
 }
 
 /// Claude Code session metrics (context, cost, model, rate limits).
@@ -324,17 +325,24 @@ impl SidebarView {
                         loop_id: loop_info.id.clone(),
                         status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
+                        permission_mode: loop_info.permission_mode.clone(),
                     },
                 );
                 cx.notify();
             }
             ServerEvent::LoopStatusChanged { loop_info, .. } => {
+                // Preserve existing permission_mode if the update doesn't carry one
+                let existing_mode = self
+                    .cc_states
+                    .get(&loop_info.session_id)
+                    .and_then(|s| s.permission_mode.clone());
                 self.cc_states.insert(
                     loop_info.session_id.clone(),
                     CcState {
                         loop_id: loop_info.id.clone(),
                         status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
+                        permission_mode: loop_info.permission_mode.clone().or(existing_mode),
                     },
                 );
                 cx.notify();
@@ -345,12 +353,14 @@ impl SidebarView {
                 if let Some(state) = self.cc_states.get(&loop_info.session_id)
                     && state.loop_id == loop_info.id
                 {
+                    let existing_mode = state.permission_mode.clone();
                     self.cc_states.insert(
                         loop_info.session_id.clone(),
                         CcState {
                             loop_id: loop_info.id.clone(),
                             status: loop_info.status,
                             task_name: loop_info.task_name.clone(),
+                            permission_mode: loop_info.permission_mode.clone().or(existing_mode),
                         },
                     );
                 }
@@ -368,6 +378,7 @@ impl SidebarView {
                 lines_removed,
                 rate_limit_5h_pct,
                 rate_limit_7d_pct,
+                permission_mode,
             } => {
                 self.cc_metrics.insert(
                     session_id.clone(),
@@ -384,6 +395,12 @@ impl SidebarView {
                         rate_limit_7d_pct: *rate_limit_7d_pct,
                     },
                 );
+                // Update permission_mode on CcState if provided via ccline metrics
+                if let Some(mode) = permission_mode
+                    && let Some(state) = self.cc_states.get_mut(session_id)
+                {
+                    state.permission_mode = Some(mode.clone());
+                }
                 cx.notify();
             }
             ServerEvent::WorktreeError { .. } => {
@@ -504,6 +521,7 @@ impl SidebarView {
                                 loop_id: loop_info.id.clone(),
                                 status: loop_info.status,
                                 task_name: loop_info.task_name.clone(),
+                                permission_mode: loop_info.permission_mode.clone(),
                             },
                         );
                         changed = true;
@@ -1112,6 +1130,7 @@ impl SidebarView {
                     let tooltip_metrics = cc_metrics.cloned().unwrap_or_default();
                     let tooltip_status = Some(cc.status);
                     let tooltip_task = cc.task_name.clone();
+                    let tooltip_mode = cc.permission_mode.clone();
 
                     row1 = row1.child(
                         div()
@@ -1123,6 +1142,7 @@ impl SidebarView {
                                     metrics: tooltip_metrics.clone(),
                                     status: tooltip_status,
                                     task_name: tooltip_task.clone(),
+                                    permission_mode: tooltip_mode.clone(),
                                 })
                                 .into()
                             }),
@@ -1148,6 +1168,38 @@ impl SidebarView {
                 name_div = name_div.flex_shrink_0();
 
                 row1 = row1.child(name_div.child(display_name));
+
+                // Permission mode badge (plan, auto)
+                if let Some(cc) = cc_state
+                    && let Some(ref mode) = cc.permission_mode
+                    && mode != "default"
+                {
+                    let (badge_bg, badge_text) = match mode.as_str() {
+                        "plan" => {
+                            let c = theme::warning();
+                            (Rgba { a: 0.15, ..c }, c)
+                        }
+                        "auto" => {
+                            let c = theme::accent();
+                            (Rgba { a: 0.15, ..c }, c)
+                        }
+                        _ => {
+                            let c = theme::text_tertiary();
+                            (Rgba { a: 0.15, ..c }, c)
+                        }
+                    };
+                    row1 = row1.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(badge_bg)
+                            .text_color(badge_text)
+                            .text_size(px(10.0))
+                            .child(mode.clone()),
+                    );
+                }
 
                 // Task name suffix (only when session has a custom name)
                 if session.name.is_some()
@@ -1194,11 +1246,17 @@ struct CcTooltipView {
     metrics: CcMetrics,
     status: Option<AgenticStatus>,
     task_name: Option<String>,
+    permission_mode: Option<String>,
 }
 
 impl Render for CcTooltipView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        cc_widgets::render_cc_tooltip(&self.metrics, self.status, self.task_name.as_deref())
+        cc_widgets::render_cc_tooltip(
+            &self.metrics,
+            self.status,
+            self.task_name.as_deref(),
+            self.permission_mode.as_deref(),
+        )
     }
 }
 

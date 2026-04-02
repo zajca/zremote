@@ -68,6 +68,7 @@ fn to_metrics_update(
         lines_added: msg.cost.as_ref().and_then(|c| c.total_lines_added),
         lines_removed: msg.cost.as_ref().and_then(|c| c.total_lines_removed),
         cc_version: msg.version.clone(),
+        permission_mode: msg.permission_mode.clone(),
     }
 }
 
@@ -172,6 +173,7 @@ async fn process_message_local(
                     .as_ref()
                     .and_then(|r| r.seven_day.as_ref())
                     .and_then(|r| r.used_percentage),
+                permission_mode: msg.permission_mode.clone(),
             });
         }
         Ok(false) => {

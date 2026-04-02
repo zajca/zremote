@@ -50,6 +50,7 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
         end_reason: row.end_reason,
         task_name: row.task_name,
         prompt_message: None,
+        permission_mode: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -105,9 +106,16 @@ impl AgenticProcessor {
                 status,
                 task_name,
                 prompt_message,
+                permission_mode,
             } => {
-                self.handle_loop_state_update(loop_id, status, task_name, prompt_message)
-                    .await?;
+                self.handle_loop_state_update(
+                    loop_id,
+                    status,
+                    task_name,
+                    prompt_message,
+                    permission_mode,
+                )
+                .await?;
             }
             AgenticAgentMessage::LoopEnded { loop_id, reason } => {
                 self.handle_loop_ended(loop_id, reason).await?;
@@ -185,6 +193,7 @@ impl AgenticProcessor {
                 host_id: self.host_id,
                 status: AgenticStatus::Working,
                 task_name: None,
+                permission_mode: None,
                 last_updated: Instant::now(),
                 input_tokens: 0,
                 output_tokens: 0,
@@ -281,11 +290,15 @@ impl AgenticProcessor {
         status: AgenticStatus,
         task_name: Option<String>,
         prompt_message: Option<String>,
+        permission_mode: Option<String>,
     ) -> Result<(), AppError> {
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
             entry.status = status;
             if task_name.is_some() {
                 entry.task_name.clone_from(&task_name);
+            }
+            if permission_mode.is_some() {
+                entry.permission_mode.clone_from(&permission_mode);
             }
             entry.last_updated = Instant::now();
         }
@@ -341,8 +354,13 @@ impl AgenticProcessor {
         }
 
         if let Some(mut loop_info) = self.fetch_loop_info(&loop_id_str).await {
-            // Overlay transient prompt_message (not stored in DB)
+            // Overlay transient fields (not stored in DB)
             loop_info.prompt_message = prompt_message;
+            loop_info.permission_mode = permission_mode.or_else(|| {
+                self.agentic_loops
+                    .get(&loop_id)
+                    .and_then(|e| e.permission_mode.clone())
+            });
             let _ = self.events.send(ServerEvent::LoopStatusChanged {
                 loop_info,
                 host_id: self.host_id.to_string(),
@@ -643,6 +661,7 @@ mod tests {
             status: AgenticStatus::WaitingForInput,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -684,6 +703,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("fix-tests".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -769,6 +789,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("refactor-auth".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -818,6 +839,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -864,6 +886,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some(String::new()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -913,6 +936,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("new-task-name".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1105,6 +1129,7 @@ mod tests {
             status: AgenticStatus::Error,
             task_name: Some("debug-issue".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1197,6 +1222,7 @@ mod tests {
             status: AgenticStatus::WaitingForInput,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1286,6 +1312,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("implement-feature-x".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1326,6 +1353,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("first-task".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1336,6 +1364,7 @@ mod tests {
             status: AgenticStatus::WaitingForInput,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();
@@ -1351,6 +1380,7 @@ mod tests {
             status: AgenticStatus::Working,
             task_name: Some("second-task".to_string()),
             prompt_message: None,
+            permission_mode: None,
         })
         .await
         .unwrap();

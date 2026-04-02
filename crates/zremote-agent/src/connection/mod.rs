@@ -174,6 +174,7 @@ async fn handle_analyzer_event(
                     status,
                     task_name: None,
                     prompt_message: None,
+                    permission_mode: None,
                 });
             }
         }

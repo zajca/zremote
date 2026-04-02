@@ -93,6 +93,8 @@ pub enum ClaudeAgentMessage {
         lines_removed: Option<i64>,
         #[serde(default)]
         cc_version: Option<String>,
+        #[serde(default)]
+        permission_mode: Option<String>,
     },
 }
 
@@ -364,6 +366,7 @@ mod tests {
             lines_added: Some(168),
             lines_removed: Some(2),
             cc_version: Some("2.1.83".to_string()),
+            permission_mode: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: ClaudeAgentMessage = serde_json::from_str(&json).expect("deserialize");
@@ -385,6 +388,7 @@ mod tests {
             lines_added: None,
             lines_removed: None,
             cc_version: None,
+            permission_mode: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let parsed: ClaudeAgentMessage = serde_json::from_str(&json).expect("deserialize");

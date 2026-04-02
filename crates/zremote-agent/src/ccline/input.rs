@@ -20,6 +20,7 @@ pub struct StatusInput {
     pub cost: Option<CostInfo>,
     pub context_window: Option<ContextWindow>,
     pub rate_limits: Option<RateLimits>,
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

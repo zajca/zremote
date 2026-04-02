@@ -124,6 +124,8 @@ pub struct AgenticLoop {
     pub task_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 /// Config key-value pair.

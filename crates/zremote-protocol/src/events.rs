@@ -18,6 +18,8 @@ pub struct LoopInfo {
     pub task_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
@@ -160,6 +162,8 @@ pub enum ServerEvent {
         lines_removed: Option<i64>,
         rate_limit_5h_pct: Option<u64>,
         rate_limit_7d_pct: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
     },
     #[serde(rename = "execution_node_created")]
     ExecutionNodeCreated {
@@ -206,6 +210,7 @@ mod tests {
             end_reason: None,
             task_name: None,
             prompt_message: None,
+            permission_mode: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -335,6 +340,7 @@ mod tests {
                 lines_removed: Some(10),
                 rate_limit_5h_pct: Some(11),
                 rate_limit_7d_pct: Some(85),
+                permission_mode: None,
             },
         ];
         for event in &events {

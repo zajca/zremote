@@ -151,6 +151,7 @@ pub fn render_cc_tooltip(
     metrics: &CcMetrics,
     status: Option<AgenticStatus>,
     task_name: Option<&str>,
+    permission_mode: Option<&str>,
 ) -> impl IntoElement {
     let mut content = div()
         .flex()
@@ -179,6 +180,11 @@ pub fn render_cc_tooltip(
             let _ = write!(line, " - {task}");
         }
         content = content.child(div().child(line));
+    }
+
+    // Mode
+    if let Some(mode) = permission_mode.filter(|m| *m != "default") {
+        content = content.child(div().child(format!("Mode: {mode}")));
     }
 
     // Model

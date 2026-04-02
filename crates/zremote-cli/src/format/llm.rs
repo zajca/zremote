@@ -309,6 +309,7 @@ mod tests {
             end_reason: None,
             task_name: Some("Fix auth bug".to_string()),
             prompt_message: None,
+            permission_mode: None,
         }
     }
 

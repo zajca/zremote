@@ -450,6 +450,7 @@ impl MainView {
             lines_removed,
             rate_limit_5h_pct,
             rate_limit_7d_pct,
+            ..
         } = event
             && let Some(terminal) = &self.terminal
             && terminal.read(cx).session_id() == session_id.as_str()

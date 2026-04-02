@@ -205,6 +205,7 @@ pub async fn handle_hook(
                     status: AgenticStatus::Working,
                     task_name,
                     prompt_message: None,
+                    permission_mode: None,
                 };
                 let _ = state.agentic_tx.try_send(msg);
             }
@@ -304,6 +305,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
         status: AgenticStatus::Working,
         task_name: None,
         prompt_message: None,
+        permission_mode: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -347,6 +349,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
         status: AgenticStatus::Working,
         task_name,
         prompt_message: None,
+        permission_mode: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -396,6 +399,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
             status: AgenticStatus::Completed,
             task_name,
             prompt_message: None,
+            permission_mode: None,
         };
         let _ = state.agentic_tx.try_send(update);
     }
@@ -436,6 +440,7 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
         status: AgenticStatus::WaitingForInput,
         task_name: None,
         prompt_message,
+        permission_mode: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, WaitingForInput update dropped");
@@ -504,6 +509,23 @@ async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
     send_waiting_for_input(state, payload, "Elicitation").await;
 }
 
+/// Detect CC permission mode from a user prompt (slash commands like /plan, /auto-accept).
+fn detect_permission_mode(prompt: Option<&str>) -> Option<String> {
+    let text = prompt?.trim();
+    if text.eq_ignore_ascii_case("/plan") {
+        Some("plan".to_string())
+    } else if text.eq_ignore_ascii_case("/auto-accept")
+        || text.eq_ignore_ascii_case("/auto")
+        || text.eq_ignore_ascii_case("/autoaccept")
+    {
+        Some("auto".to_string())
+    } else if text.eq_ignore_ascii_case("/default") {
+        Some("default".to_string())
+    } else {
+        None
+    }
+}
+
 async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
     let Some(mapped) = state
         .mapper
@@ -516,11 +538,14 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
+    let permission_mode = detect_permission_mode(payload.prompt.as_deref());
+
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name: None,
         prompt_message: None,
+        permission_mode,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -1058,6 +1083,7 @@ mod tests {
                         status: AgenticStatus::Working,
                         task_name: None,
                         prompt_message: None,
+                        permission_mode: None,
                     });
             }
         }
@@ -1623,6 +1649,7 @@ mod tests {
                     status: AgenticStatus::Working,
                     task_name: Some("spawning subagent".to_string()),
                     prompt_message: None,
+                    permission_mode: None,
                 });
         }
 
@@ -1640,5 +1667,41 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn detect_permission_mode_slash_commands() {
+        assert_eq!(
+            detect_permission_mode(Some("/plan")),
+            Some("plan".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("/Plan")),
+            Some("plan".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("/auto-accept")),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("/auto")),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("/autoaccept")),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("/default")),
+            Some("default".to_string())
+        );
+        assert_eq!(
+            detect_permission_mode(Some("  /plan  ")),
+            Some("plan".to_string()),
+            "should trim whitespace"
+        );
+        assert_eq!(detect_permission_mode(Some("fix the bug")), None);
+        assert_eq!(detect_permission_mode(Some("/unknown")), None);
+        assert_eq!(detect_permission_mode(None), None);
     }
 }
