@@ -13,9 +13,11 @@ use shell_integration::{ShellIntegrationConfig, ShellIntegrationState};
 pub struct PtySession {
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn MasterPty + Send>,
+    #[allow(dead_code)]
     child: Box<dyn Child + Send + Sync>,
     reader_handle: JoinHandle<()>,
     pid: u32,
+    killed: bool,
 }
 
 impl PtySession {
@@ -129,6 +131,7 @@ impl PtySession {
             child,
             reader_handle,
             pid,
+            killed: false,
         };
 
         Ok((session, pid, integration_state))
@@ -160,9 +163,21 @@ impl PtySession {
         Ok(())
     }
 
-    /// Kill the child process.
+    /// Terminate the child process with SIGTERM.
+    ///
+    /// Uses direct `nix::sys::signal::kill()` instead of portable-pty's
+    /// `child.kill()` because portable-pty sends SIGHUP, which can propagate
+    /// to `systemd --user` and crash the desktop session.
+    ///
+    /// The `killed` flag prevents double-signaling on a potentially recycled PID
+    /// (e.g. `SessionManager::close()` calls `kill()`, then Drop calls it again).
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        if self.killed || self.pid == 0 {
+            return;
+        }
+        self.killed = true;
+        let pid = nix::unistd::Pid::from_raw(self.pid.cast_signed());
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
     }
 
     /// Check if the child has exited. Returns the exit code if so.

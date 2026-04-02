@@ -95,16 +95,17 @@ impl ShellIntegrationState {
     ///
     /// Shell termination is NOT handled here — it is managed by the PTY
     /// session lifecycle:
-    /// 1. `portable-pty`'s `child.kill()` sends SIGHUP to the shell PID
-    ///    (safe: the `Child` handle prevents PID recycling).
+    /// 1. `PtySession::kill()` sends SIGTERM directly via `nix::sys::signal::kill()`
+    ///    (NOT portable-pty's `child.kill()` which sends SIGHUP).
     /// 2. Dropping the PTY master fd triggers kernel SIGHUP to the shell's
-    ///    foreground process group (standard POSIX behavior).
+    ///    foreground process group (standard POSIX behavior, safe because the
+    ///    shell is in its own session via `setsid()`).
     ///
-    /// We intentionally do NOT send an explicit SIGHUP here because the
-    /// stored `shell_pid` is a bare `u32` without a process handle — any
-    /// edge case (PID recycling, async drop order) could route the signal
-    /// to an unrelated process such as `systemd --user`, destroying the
-    /// desktop session.
+    /// We intentionally do NOT send any signal here because the stored
+    /// `shell_pid` is a bare `u32` without a process handle — any edge case
+    /// (PID recycling, async drop order) could route the signal to an
+    /// unrelated process such as `systemd --user`, destroying the desktop
+    /// session.
     pub fn cleanup(self) {
         drop(self.temp_dir);
     }

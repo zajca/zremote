@@ -126,9 +126,9 @@ pub async fn run_pty_daemon(
                 raw_pid = ?other,
                 "could not determine shell PID, using daemon PID as fallback"
             );
-            // Use daemon_pid: it is always valid and never 0, so any code
-            // that does kill(shell_pid, ...) targets the daemon itself
-            // (which ignores SIGHUP) instead of the entire process group.
+            // Use daemon_pid: it is always valid and never 0. The shutdown
+            // handler guards with `shell_pid != daemon_pid` so no signal
+            // is sent in this fallback case.
             daemon_pid
         }
     };
@@ -410,9 +410,11 @@ pub async fn run_pty_daemon(
                     }
                     DaemonRequest::Shutdown => {
                         tracing::info!(session_id = %session_id, "shutdown requested");
-                        // Kill shell
-                        if let Ok(mut c) = child_arc.lock() {
-                            let _ = c.kill();
+                        // Send SIGTERM to shell (not portable-pty's kill() which sends SIGHUP).
+                        // Guard: skip if shell_pid == daemon_pid (fallback for unknown PID).
+                        if shell_pid != daemon_pid {
+                            let pid = nix::unistd::Pid::from_raw(shell_pid.cast_signed());
+                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
                         }
                         cleanup(&socket_path, &state_file_path);
                         return;
