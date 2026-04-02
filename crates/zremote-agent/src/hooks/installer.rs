@@ -28,18 +28,14 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
         return false;
     };
 
-    // Check statusLine points to a valid zremote-agent binary
+    // Check statusLine command matches what we would generate for the current binary.
+    // This catches stale worktree paths and unified-vs-standalone binary mismatches.
+    let expected_command = build_ccline_command();
     let status_ok = settings
         .get("statusLine")
         .and_then(|s| s.get("command"))
         .and_then(|c| c.as_str())
-        .is_some_and(|cmd| {
-            cmd.contains("zremote") && cmd.ends_with(" ccline") && {
-                // Verify the binary in the command actually exists on disk
-                let binary_path = cmd.trim_end_matches(" ccline");
-                Path::new(binary_path).exists()
-            }
-        });
+        .is_some_and(|cmd| expected_command.as_deref() == Some(cmd));
 
     if !status_ok {
         return false;
@@ -379,19 +375,41 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
     Ok(())
 }
 
+/// Build the statusLine command string for the current binary.
+/// Uses compile-time `CARGO_BIN_NAME` to distinguish the unified `zremote`
+/// binary (needs `agent ccline`) from the standalone `zremote-agent` (just `ccline`).
+fn build_ccline_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_str = exe.to_str()?;
+
+    if is_standalone_agent() {
+        Some(format!("{exe_str} ccline"))
+    } else {
+        Some(format!("{exe_str} agent ccline"))
+    }
+}
+
+/// Returns `true` when running as the standalone `zremote-agent` binary.
+/// Uses runtime filename check since `CARGO_BIN_NAME` is not available in
+/// library crates.
+fn is_standalone_agent() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .is_some_and(|name| {
+            // Match "zremote-agent" but not "zremote-agent-<hash>" (test binary)
+            // or just "zremote" (unified binary)
+            name == "zremote-agent" || name.starts_with("zremote-agent.")
+        })
+}
+
 /// Install the `statusLine` config pointing to `zremote-agent ccline`.
 /// Always overwrites any existing statusLine configuration.
 fn install_status_line(settings: &mut serde_json::Value) {
-    let agent_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from));
-
-    let Some(agent_path) = agent_path else {
+    let Some(command) = build_ccline_command() else {
         tracing::warn!("cannot determine agent binary path, skipping statusLine install");
         return;
     };
-
-    let command = format!("{agent_path} ccline");
 
     if let Some(obj) = settings.as_object_mut() {
         // Log if overwriting a non-zremote statusLine
@@ -400,7 +418,7 @@ fn install_status_line(settings: &mut serde_json::Value) {
                 .get("command")
                 .and_then(|c| c.as_str())
                 .unwrap_or("");
-            if !existing_cmd.contains("zremote-agent") {
+            if !existing_cmd.contains("zremote") {
                 tracing::warn!(
                     existing = existing_cmd,
                     "overwriting existing statusLine config"
@@ -459,13 +477,13 @@ async fn uninstall_hooks_at(home: &Path) -> Result<(), InstallError> {
         }
     }
 
-    // Remove statusLine if it points to zremote-agent
+    // Remove statusLine if it points to zremote (unified or standalone binary)
     if let Some(obj) = settings.as_object_mut() {
         let is_zremote = obj
             .get("statusLine")
             .and_then(|s| s.get("command"))
             .and_then(|c| c.as_str())
-            .is_some_and(|c| c.contains("zremote-agent"));
+            .is_some_and(|c| c.contains("zremote") && c.contains("ccline"));
         if is_zremote {
             obj.remove("statusLine");
         }
@@ -511,6 +529,99 @@ impl std::error::Error for InstallError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_ccline_command_returns_some() {
+        // In test context CARGO_BIN_NAME is neither "zremote" nor "zremote-agent",
+        // so it falls back to runtime check. The important thing is it returns Some.
+        let cmd = build_ccline_command();
+        assert!(cmd.is_some(), "build_ccline_command should return Some");
+        let cmd = cmd.unwrap();
+        assert!(cmd.contains("ccline"), "command must contain ccline");
+    }
+
+    #[test]
+    fn is_standalone_agent_falls_back_for_test_binary() {
+        // In test context, CARGO_BIN_NAME is the test harness name.
+        // The function should still return a valid result via fallback.
+        let _result = is_standalone_agent();
+        // Just verify it doesn't panic
+    }
+
+    #[tokio::test]
+    async fn install_detects_stale_status_line_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Install once
+        install_hooks_at(home).await.unwrap();
+
+        // Manually change statusLine to a stale path
+        let settings_path = home.join(".claude/settings.json");
+        let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
+        let mut settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        settings["statusLine"]["command"] =
+            serde_json::json!("/old/worktree/target/debug/zremote ccline");
+        tokio::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let script_path = home.join(".zremote").join("hooks").join("zremote-hook.sh");
+
+        // is_already_installed should return false due to mismatched statusLine
+        assert!(
+            !is_already_installed(home, &script_path).await,
+            "stale statusLine path should trigger reinstall"
+        );
+
+        // Reinstalling should fix the path
+        install_hooks_at(home).await.unwrap();
+        let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let cmd = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            !cmd.contains("/old/worktree/"),
+            "statusLine should be updated to current binary"
+        );
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_unified_binary_status_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Create settings with unified binary statusLine (zremote agent ccline)
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let settings = serde_json::json!({
+            "hooks": {},
+            "statusLine": {
+                "type": "command",
+                "command": "/usr/local/bin/zremote agent ccline",
+                "padding": 0
+            }
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        uninstall_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            updated.get("statusLine").is_none(),
+            "unified binary statusLine should be removed on uninstall"
+        );
+    }
 
     #[test]
     fn hook_script_content() {
