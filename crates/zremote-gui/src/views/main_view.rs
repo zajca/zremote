@@ -442,8 +442,9 @@ impl MainView {
                             );
                         }
                     }
-                    AgenticStatus::Working => {
-                        // CC resumed — dismiss any active WaitingForInput toast
+                    // Any non-WaitingForInput status means CC is no longer blocked —
+                    // dismiss the active toast regardless of which terminal completed.
+                    _ => {
                         if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                             self.toasts.update(cx, |c, cx| {
                                 c.dismiss(toast_id);
@@ -451,7 +452,6 @@ impl MainView {
                             });
                         }
                     }
-                    _ => {}
                 }
             }
             ServerEvent::LoopEnded { loop_info, .. } => {
@@ -476,6 +476,10 @@ impl MainView {
     }
 
     /// Build Yes/No toast actions that send terminal input for the given session.
+    ///
+    /// Captures the `Entity<TerminalPanel>` and session ID so the sender is
+    /// resolved at click time — not at creation time. This avoids sending input
+    /// to a stale PTY after a tab switch or terminal reconnect.
     fn build_input_actions(&self, session_id: &str, cx: &Context<Self>) -> Vec<ToastAction> {
         let Some(terminal) = &self.terminal else {
             return vec![];
@@ -483,20 +487,28 @@ impl MainView {
         if terminal.read(cx).session_id() != session_id {
             return vec![];
         }
-        let input_tx = terminal.read(cx).input_sender();
 
-        let yes_tx = input_tx.clone();
-        let no_tx = input_tx;
+        let term_entity = terminal.clone();
+        let sid = session_id.to_string();
+        let term_entity2 = term_entity.clone();
+        let sid2 = sid.clone();
 
         // Fixed terminal responses — never derived from prompt_message.
         // Prompt text is display-only; injecting user-controlled content
         // into PTY is explicitly avoided here.
         vec![
-            ToastAction::new("Yes", Some(Icon::CheckCircle), move |_, _| {
-                let _ = yes_tx.send(b"yes\n".to_vec());
+            ToastAction::new("Yes", Some(Icon::CheckCircle), move |_, cx| {
+                // Resolve sender at click time to avoid stale PTY after tab switch.
+                let panel = term_entity.read(cx);
+                if panel.session_id() == sid {
+                    let _ = panel.input_sender().send(b"yes\n".to_vec());
+                }
             }),
-            ToastAction::new("No", Some(Icon::XCircle), move |_, _| {
-                let _ = no_tx.send(b"no\n".to_vec());
+            ToastAction::new("No", Some(Icon::XCircle), move |_, cx| {
+                let panel = term_entity2.read(cx);
+                if panel.session_id() == sid2 {
+                    let _ = panel.input_sender().send(b"no\n".to_vec());
+                }
             }),
         ]
     }
