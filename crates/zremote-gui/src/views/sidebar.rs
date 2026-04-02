@@ -340,12 +340,19 @@ impl SidebarView {
                 cx.notify();
             }
             ServerEvent::LoopEnded { loop_info, .. } => {
-                // Only remove if the loop_id matches (avoid stale removal).
+                // Update with final status instead of removing — keeps robot icon
+                // visible so the user can see completed (green) or error (red).
                 if let Some(state) = self.cc_states.get(&loop_info.session_id)
                     && state.loop_id == loop_info.id
                 {
-                    self.cc_states.remove(&loop_info.session_id);
-                    self.cc_metrics.remove(&loop_info.session_id);
+                    self.cc_states.insert(
+                        loop_info.session_id.clone(),
+                        CcState {
+                            loop_id: loop_info.id.clone(),
+                            status: loop_info.status,
+                            task_name: loop_info.task_name.clone(),
+                        },
+                    );
                 }
                 cx.notify();
             }
