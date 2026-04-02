@@ -22,7 +22,9 @@ use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
-use crate::views::toast::{ToastAction, ToastContainer, ToastLevel};
+use crate::views::toast::{
+    ToastAction, ToastContainer, ToastContainerEvent, ToastContext, ToastLevel,
+};
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -48,6 +50,8 @@ pub struct MainView {
     current_host_id: Option<String>,
     /// Active WaitingForInput toast IDs, keyed by loop_id.
     waiting_input_toasts: HashMap<String, u64>,
+    /// Maps claude task_id to (session_id, host_id) for context on ClaudeTaskEnded.
+    claude_task_sessions: HashMap<String, (String, String)>,
 }
 
 impl MainView {
@@ -64,6 +68,17 @@ impl MainView {
         Self::start_loop_reconciliation(&sidebar, cx);
 
         let toasts = cx.new(|_| ToastContainer::new());
+
+        // Navigate to session when a toast with context is clicked
+        cx.subscribe(&toasts, |this, _, event: &ToastContainerEvent, cx| {
+            let ToastContainerEvent::Navigate {
+                session_id,
+                host_id,
+            } = event;
+            this.record_recent_session(session_id);
+            this.open_terminal(session_id, host_id, cx);
+        })
+        .detach();
 
         // Start toast tick timer (removes expired toasts every second)
         Self::start_toast_tick(&toasts, cx);
@@ -92,6 +107,7 @@ impl MainView {
             ever_connected: false,
             current_host_id: None,
             waiting_input_toasts: HashMap::new(),
+            claude_task_sessions: HashMap::new(),
         }
     }
 
@@ -231,26 +247,83 @@ impl MainView {
         .detach();
     }
 
+    /// Build a [`ToastContext`] by resolving human-readable names from IDs.
+    fn resolve_toast_context(
+        &self,
+        session_id: Option<&str>,
+        host_id: Option<&str>,
+        project_path: Option<&str>,
+        task_name: Option<&str>,
+        cx: &Context<Self>,
+    ) -> ToastContext {
+        let sidebar = self.sidebar.read(cx);
+        let hosts = sidebar.hosts_rc();
+        let sessions = sidebar.sessions_rc();
+        let projects = sidebar.projects_rc();
+
+        let host_name =
+            host_id.and_then(|hid| hosts.iter().find(|h| h.id == hid).map(|h| h.name.clone()));
+
+        let session_name = session_id.and_then(|sid| {
+            sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .and_then(|s| s.name.clone())
+        });
+
+        let project_name = if let Some(path) = project_path {
+            projects
+                .iter()
+                .find(|p| p.path == path)
+                .map(|p| p.name.clone())
+                .or_else(|| {
+                    path.rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+        } else {
+            session_id.and_then(|sid| {
+                sessions
+                    .iter()
+                    .find(|s| s.id == sid)
+                    .and_then(|s| s.project_id.as_ref())
+                    .and_then(|pid| projects.iter().find(|p| p.id == *pid))
+                    .map(|p| p.name.clone())
+            })
+        };
+
+        ToastContext {
+            host_name,
+            project_name,
+            session_name,
+            task_name: task_name.map(String::from),
+            session_id: session_id.map(String::from),
+            host_id: host_id.map(String::from),
+        }
+    }
+
     fn show_toast(
         &self,
         message: &str,
         level: ToastLevel,
         toast_icon: Option<Icon>,
+        context: ToastContext,
         cx: &mut Context<Self>,
     ) {
+        let subtitle = context.subtitle();
         self.toasts.update(cx, |container, cx| {
-            container.push(message, level, toast_icon);
+            container.push(message, level, toast_icon, context);
             cx.notify();
         });
 
         // Send native OS notification when the window is not focused
         if !self.window_active {
-            crate::notifications::send_native(
-                "ZRemote",
-                message,
-                level,
-                &self.app_state.tokio_handle,
+            let title = subtitle.as_deref().map_or_else(
+                || "ZRemote".to_string(),
+                |sub| format!("ZRemote \u{2014} {sub}"),
             );
+            crate::notifications::send_native(&title, message, level, &self.app_state.tokio_handle);
         }
     }
 
@@ -280,28 +353,52 @@ impl MainView {
 
         // WorktreeError: show error toast
         if let ServerEvent::WorktreeError {
+            host_id,
             project_path,
             message,
-            ..
         } = event
         {
-            let msg = format!("Worktree error ({project_path}): {message}");
-            self.show_toast(&msg, ToastLevel::Error, Some(Icon::AlertTriangle), cx);
+            let ctx = self.resolve_toast_context(None, Some(host_id), Some(project_path), None, cx);
+            let msg = format!("Worktree error: {message}");
+            self.show_toast(&msg, ToastLevel::Error, Some(Icon::AlertTriangle), ctx, cx);
         }
 
         // Claude task lifecycle: show toasts
         match event {
-            ServerEvent::ClaudeTaskStarted { project_path, .. } => {
+            ServerEvent::ClaudeTaskStarted {
+                task_id,
+                session_id,
+                host_id,
+                project_path,
+            } => {
+                // Bound the map to avoid unbounded growth (CWE-400).
+                if self.claude_task_sessions.len() >= 200
+                    && let Some(stale) = self.claude_task_sessions.keys().next().cloned()
+                {
+                    self.claude_task_sessions.remove(&stale);
+                }
+                self.claude_task_sessions
+                    .insert(task_id.clone(), (session_id.clone(), host_id.clone()));
+                let ctx = self.resolve_toast_context(
+                    Some(session_id),
+                    Some(host_id),
+                    Some(project_path),
+                    None,
+                    cx,
+                );
                 let name = project_path.rsplit('/').next().unwrap_or(project_path);
                 self.show_toast(
                     &format!("Claude task started: {name}"),
                     ToastLevel::Info,
                     Some(Icon::Bot),
+                    ctx,
                     cx,
                 );
             }
             ServerEvent::ClaudeTaskEnded {
-                status, summary, ..
+                task_id,
+                status,
+                summary,
             } => {
                 let (level, prefix) = match status {
                     zremote_client::ClaudeTaskStatus::Completed => {
@@ -313,7 +410,20 @@ impl MainView {
                 let msg = summary
                     .as_deref()
                     .map_or_else(|| prefix.to_string(), |s| format!("{prefix}: {s}"));
-                self.show_toast(&msg, level, Some(Icon::Bot), cx);
+                // Look up session/host from our map, or fall back to sidebar's task tracker
+                // (handles GUI reconnect where ClaudeTaskStarted was missed).
+                let task_ids = self.claude_task_sessions.remove(task_id).or_else(|| {
+                    self.sidebar
+                        .read(cx)
+                        .claude_task_context(task_id)
+                        .map(|(s, h)| (s.to_string(), h.to_string()))
+                });
+                let ctx = if let Some((sid, hid)) = task_ids {
+                    self.resolve_toast_context(Some(&sid), Some(&hid), None, None, cx)
+                } else {
+                    ToastContext::default()
+                };
+                self.show_toast(&msg, level, Some(Icon::Bot), ctx, cx);
             }
             _ => {}
         }
@@ -384,7 +494,9 @@ impl MainView {
 
     fn handle_loop_notifications(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
         match event {
-            ServerEvent::LoopStatusChanged { loop_info, .. } => {
+            ServerEvent::LoopStatusChanged {
+                loop_info, host_id, ..
+            } => {
                 match loop_info.status {
                     AgenticStatus::WaitingForInput => {
                         let loop_id = loop_info.id.clone();
@@ -404,6 +516,14 @@ impl MainView {
                             .map(|m| format!("{task_label}: {m}"))
                             .unwrap_or_else(|| format!("{task_label} is waiting for input"));
 
+                        let ctx = self.resolve_toast_context(
+                            Some(&loop_info.session_id),
+                            Some(host_id),
+                            loop_info.project_path.as_deref(),
+                            loop_info.task_name.as_deref(),
+                            cx,
+                        );
+
                         // Build action buttons if terminal matches this session
                         let actions = self.build_input_actions(&loop_info.session_id, cx);
 
@@ -414,6 +534,7 @@ impl MainView {
                                 Some(Icon::MessageCircle),
                                 actions,
                                 true, // persistent
+                                ctx.clone(),
                             );
                             cx.notify();
                             id
@@ -433,8 +554,12 @@ impl MainView {
                         // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
                         if !self.window_active {
                             let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
+                            let title = ctx.subtitle().map_or_else(
+                                || "ZRemote".to_string(),
+                                |sub| format!("ZRemote \u{2014} {sub}"),
+                            );
                             crate::notifications::send_native_with_urgency(
-                                "ZRemote",
+                                &title,
                                 &sanitized,
                                 ToastLevel::Warning,
                                 NativeUrgency::Critical,
@@ -454,7 +579,9 @@ impl MainView {
                     }
                 }
             }
-            ServerEvent::LoopEnded { loop_info, .. } => {
+            ServerEvent::LoopEnded {
+                loop_info, host_id, ..
+            } => {
                 // Dismiss any active WaitingForInput toast
                 if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                     self.toasts.update(cx, |c, cx| {
@@ -469,7 +596,14 @@ impl MainView {
                     _ => (ToastLevel::Success, "finished"),
                 };
                 let msg = format!("{task_label} {suffix}");
-                self.show_toast(&msg, level, Some(Icon::Bot), cx);
+                let ctx = self.resolve_toast_context(
+                    Some(&loop_info.session_id),
+                    Some(host_id),
+                    loop_info.project_path.as_deref(),
+                    loop_info.task_name.as_deref(),
+                    cx,
+                );
+                self.show_toast(&msg, level, Some(Icon::Bot), ctx, cx);
             }
             _ => {}
         }
@@ -651,6 +785,7 @@ impl MainView {
                 });
             }
             CommandPaletteEvent::AddProject { host_id, path } => {
+                let ctx = self.resolve_toast_context(None, Some(host_id), Some(path), None, cx);
                 let api = self.app_state.api.clone();
                 let host_id = host_id.clone();
                 let path = path.clone();
@@ -665,6 +800,7 @@ impl MainView {
                     &format!("Adding project: {name}"),
                     ToastLevel::Info,
                     Some(Icon::Folder),
+                    ctx,
                     cx,
                 );
             }
@@ -672,18 +808,32 @@ impl MainView {
                 if let Some(terminal) = &self.terminal {
                     let session_id = terminal.read(cx).session_id().to_string();
                     let host_id = self.current_host_id.clone().unwrap_or_default();
+                    let ctx = self.resolve_toast_context(
+                        Some(&session_id),
+                        Some(&host_id),
+                        None,
+                        None,
+                        cx,
+                    );
                     if let Some(handle) =
                         connect_terminal(&self.app_state, &session_id, &host_id, false)
                     {
                         terminal.update(cx, |panel, cx| {
                             panel.reconnect(handle, &self.app_state.tokio_handle, cx);
                         });
-                        self.show_toast("Reconnected", ToastLevel::Success, Some(Icon::Wifi), cx);
+                        self.show_toast(
+                            "Reconnected",
+                            ToastLevel::Success,
+                            Some(Icon::Wifi),
+                            ctx,
+                            cx,
+                        );
                     } else {
                         self.show_toast(
                             "Reconnect failed",
                             ToastLevel::Error,
                             Some(Icon::WifiOff),
+                            ctx,
                             cx,
                         );
                     }
@@ -692,6 +842,7 @@ impl MainView {
                         "No active terminal to reconnect",
                         ToastLevel::Info,
                         None,
+                        ToastContext::default(),
                         cx,
                     );
                 }
