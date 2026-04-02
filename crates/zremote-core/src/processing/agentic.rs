@@ -49,6 +49,7 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        prompt_message: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -103,8 +104,9 @@ impl AgenticProcessor {
                 loop_id,
                 status,
                 task_name,
+                prompt_message,
             } => {
-                self.handle_loop_state_update(loop_id, status, task_name)
+                self.handle_loop_state_update(loop_id, status, task_name, prompt_message)
                     .await?;
             }
             AgenticAgentMessage::LoopEnded { loop_id, reason } => {
@@ -278,6 +280,7 @@ impl AgenticProcessor {
         loop_id: AgenticLoopId,
         status: AgenticStatus,
         task_name: Option<String>,
+        prompt_message: Option<String>,
     ) -> Result<(), AppError> {
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
             entry.status = status;
@@ -337,7 +340,9 @@ impl AgenticProcessor {
             }
         }
 
-        if let Some(loop_info) = self.fetch_loop_info(&loop_id_str).await {
+        if let Some(mut loop_info) = self.fetch_loop_info(&loop_id_str).await {
+            // Overlay transient prompt_message (not stored in DB)
+            loop_info.prompt_message = prompt_message;
             let _ = self.events.send(ServerEvent::LoopStatusChanged {
                 loop_info,
                 host_id: self.host_id.to_string(),
@@ -637,6 +642,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::WaitingForInput,
             task_name: None,
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -677,6 +683,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("fix-tests".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -761,6 +768,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("refactor-auth".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -809,6 +817,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: None,
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -854,6 +863,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some(String::new()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -902,6 +912,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("new-task-name".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1093,6 +1104,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Error,
             task_name: Some("debug-issue".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1184,6 +1196,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::WaitingForInput,
             task_name: None,
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1272,6 +1285,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("implement-feature-x".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1311,6 +1325,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("first-task".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1320,6 +1335,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::WaitingForInput,
             task_name: None,
+            prompt_message: None,
         })
         .await
         .unwrap();
@@ -1334,6 +1350,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::Working,
             task_name: Some("second-task".to_string()),
+            prompt_message: None,
         })
         .await
         .unwrap();

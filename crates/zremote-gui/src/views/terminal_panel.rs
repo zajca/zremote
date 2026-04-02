@@ -346,6 +346,11 @@ impl TerminalPanel {
         &self.session_id
     }
 
+    /// Get a clonable input sender for writing to this terminal's PTY.
+    pub fn input_sender(&self) -> InputSender {
+        self.handle.input_sender()
+    }
+
     /// Whether the terminal WebSocket connection has been lost.
     pub fn is_disconnected(&self) -> bool {
         self.disconnected

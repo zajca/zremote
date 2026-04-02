@@ -173,6 +173,7 @@ async fn handle_analyzer_event(
                     loop_id,
                     status,
                     task_name: None,
+                    prompt_message: None,
                 });
             }
         }

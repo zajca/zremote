@@ -54,6 +54,7 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         ended_at: row.ended_at,
         end_reason: row.end_reason,
         task_name: row.task_name,
+        prompt_message: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -988,6 +989,7 @@ pub(super) async fn handle_agentic_message(
             loop_id,
             status,
             task_name,
+            prompt_message,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
@@ -1034,7 +1036,9 @@ pub(super) async fn handle_agentic_message(
                 .get_hostname(&host_id)
                 .await
                 .unwrap_or_default();
-            if let Some(loop_info) = fetch_loop_info(state, &loop_id_str).await {
+            if let Some(mut loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                // Overlay transient prompt_message (not stored in DB)
+                loop_info.prompt_message = prompt_message;
                 let _ = state.events.send(ServerEvent::LoopStatusChanged {
                     loop_info,
                     host_id: host_id.to_string(),
@@ -2081,6 +2085,7 @@ mod tests {
             loop_id,
             status: AgenticStatus::WaitingForInput,
             task_name: Some("Fix the build".to_string()),
+            prompt_message: None,
         };
         handle_agentic_message(&state, host_id, update_msg)
             .await

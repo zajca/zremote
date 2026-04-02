@@ -1,16 +1,18 @@
 #![allow(clippy::wildcard_imports)]
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
 
-use zremote_client::{ClientEvent, ServerEvent};
+use zremote_client::{AgenticStatus, ClientEvent, ServerEvent};
 
 use crate::views::sidebar::CcMetrics;
 
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
+use crate::notifications::NativeUrgency;
 use crate::theme;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
@@ -20,7 +22,7 @@ use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
-use crate::views::toast::{ToastContainer, ToastLevel};
+use crate::views::toast::{ToastAction, ToastContainer, ToastLevel};
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -44,6 +46,8 @@ pub struct MainView {
     ever_connected: bool,
     /// Host ID of the currently open terminal session (for bridge host matching).
     current_host_id: Option<String>,
+    /// Active WaitingForInput toast IDs, keyed by loop_id.
+    waiting_input_toasts: HashMap<String, u64>,
 }
 
 impl MainView {
@@ -87,6 +91,7 @@ impl MainView {
             server_connected: true, // Assume connected until first Disconnected event
             ever_connected: false,
             current_host_id: None,
+            waiting_input_toasts: HashMap::new(),
         }
     }
 
@@ -372,6 +377,140 @@ impl MainView {
             }
             _ => {}
         }
+
+        // Agentic loop notifications
+        self.handle_loop_notifications(event, cx);
+    }
+
+    fn handle_loop_notifications(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
+        match event {
+            ServerEvent::LoopStatusChanged { loop_info, .. } => {
+                match loop_info.status {
+                    AgenticStatus::WaitingForInput => {
+                        let loop_id = loop_info.id.clone();
+
+                        // Dismiss previous toast for this loop (handles rapid re-prompts)
+                        if let Some(old_toast_id) = self.waiting_input_toasts.remove(&loop_id) {
+                            self.toasts.update(cx, |c, cx| {
+                                c.dismiss(old_toast_id);
+                                cx.notify();
+                            });
+                        }
+
+                        let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                        let msg = loop_info
+                            .prompt_message
+                            .as_deref()
+                            .map(|m| format!("{task_label}: {m}"))
+                            .unwrap_or_else(|| format!("{task_label} is waiting for input"));
+
+                        // Build action buttons if terminal matches this session
+                        let actions = self.build_input_actions(&loop_info.session_id, cx);
+
+                        let toast_id = self.toasts.update(cx, |container, cx| {
+                            let id = container.push_actionable(
+                                &msg,
+                                ToastLevel::Warning,
+                                Some(Icon::MessageCircle),
+                                actions,
+                                true, // persistent
+                            );
+                            cx.notify();
+                            id
+                        });
+
+                        // Bound the map to avoid unbounded growth (CWE-400).
+                        if self.waiting_input_toasts.len() >= 100
+                            && let Some(stale_key) =
+                                self.waiting_input_toasts.keys().next().cloned()
+                            && let Some(stale_id) = self.waiting_input_toasts.remove(&stale_key)
+                        {
+                            self.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                        }
+                        self.waiting_input_toasts.insert(loop_id, toast_id);
+
+                        // Native notification with critical urgency.
+                        // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
+                        if !self.window_active {
+                            let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
+                            crate::notifications::send_native_with_urgency(
+                                "ZRemote",
+                                &sanitized,
+                                ToastLevel::Warning,
+                                NativeUrgency::Critical,
+                                &self.app_state.tokio_handle,
+                            );
+                        }
+                    }
+                    // Any non-WaitingForInput status means CC is no longer blocked —
+                    // dismiss the active toast regardless of which terminal completed.
+                    _ => {
+                        if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
+                            self.toasts.update(cx, |c, cx| {
+                                c.dismiss(toast_id);
+                                cx.notify();
+                            });
+                        }
+                    }
+                }
+            }
+            ServerEvent::LoopEnded { loop_info, .. } => {
+                // Dismiss any active WaitingForInput toast
+                if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
+                    self.toasts.update(cx, |c, cx| {
+                        c.dismiss(toast_id);
+                        cx.notify();
+                    });
+                }
+
+                let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                let (level, suffix) = match loop_info.end_reason.as_deref() {
+                    Some("error") => (ToastLevel::Error, "failed"),
+                    _ => (ToastLevel::Success, "finished"),
+                };
+                let msg = format!("{task_label} {suffix}");
+                self.show_toast(&msg, level, Some(Icon::Bot), cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Build Yes/No toast actions that send terminal input for the given session.
+    ///
+    /// Captures the `Entity<TerminalPanel>` and session ID so the sender is
+    /// resolved at click time — not at creation time. This avoids sending input
+    /// to a stale PTY after a tab switch or terminal reconnect.
+    fn build_input_actions(&self, session_id: &str, cx: &Context<Self>) -> Vec<ToastAction> {
+        let Some(terminal) = &self.terminal else {
+            return vec![];
+        };
+        if terminal.read(cx).session_id() != session_id {
+            return vec![];
+        }
+
+        let term_entity = terminal.clone();
+        let sid = session_id.to_string();
+        let term_entity2 = term_entity.clone();
+        let sid2 = sid.clone();
+
+        // Fixed terminal responses — never derived from prompt_message.
+        // Prompt text is display-only; injecting user-controlled content
+        // into PTY is explicitly avoided here.
+        vec![
+            ToastAction::new("Yes", Some(Icon::CheckCircle), move |_, cx| {
+                // Resolve sender at click time to avoid stale PTY after tab switch.
+                let panel = term_entity.read(cx);
+                if panel.session_id() == sid {
+                    let _ = panel.input_sender().send(b"yes\n".to_vec());
+                }
+            }),
+            ToastAction::new("No", Some(Icon::XCircle), move |_, cx| {
+                let panel = term_entity2.read(cx);
+                if panel.session_id() == sid2 {
+                    let _ = panel.input_sender().send(b"no\n".to_vec());
+                }
+            }),
+        ]
     }
 
     // -- Command palette ---------------------------------------------------------

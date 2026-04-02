@@ -28,6 +28,8 @@ pub enum AgenticAgentMessage {
         loop_id: AgenticLoopId,
         status: AgenticStatus,
         task_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_message: Option<String>,
     },
     LoopEnded {
         loop_id: AgenticLoopId,
@@ -84,11 +86,23 @@ mod tests {
             loop_id: Uuid::new_v4(),
             status: AgenticStatus::Working,
             task_name: Some("fix-tests".to_string()),
+            prompt_message: None,
         });
         roundtrip_agent(&AgenticAgentMessage::LoopStateUpdate {
             loop_id: Uuid::new_v4(),
             status: AgenticStatus::WaitingForInput,
             task_name: None,
+            prompt_message: None,
+        });
+    }
+
+    #[test]
+    fn loop_state_update_with_prompt_message_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::LoopStateUpdate {
+            loop_id: Uuid::new_v4(),
+            status: AgenticStatus::WaitingForInput,
+            task_name: None,
+            prompt_message: Some("Allow Read tool?".into()),
         });
     }
 
