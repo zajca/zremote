@@ -410,6 +410,58 @@ mod tests {
     }
 
     #[test]
+    fn detect_project_with_frameworks() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nextapp");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"next":"13.0.0","react":"18.0.0"}}"#,
+        )
+        .unwrap();
+        // package-lock.json so npm package manager is detected
+        fs::write(dir.join("package-lock.json"), "{}").unwrap();
+
+        let info = ProjectScanner::detect_project(&dir).unwrap();
+        assert_eq!(info.project_type, "node");
+        assert!(!info.frameworks.is_empty(), "should detect frameworks");
+        assert!(
+            info.frameworks.iter().any(|f| f.contains("Next")),
+            "should detect Next.js, got: {:?}",
+            info.frameworks
+        );
+        assert_eq!(info.package_manager.as_deref(), Some("npm"));
+    }
+
+    #[test]
+    fn detect_project_go() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("goapp");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module example.com/myapp\n\ngo 1.21\n").unwrap();
+
+        let info = ProjectScanner::detect_project(&dir).unwrap();
+        assert_eq!(info.project_type, "go");
+        assert_eq!(info.package_manager.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn detect_project_php() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("phpapp");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("composer.json"),
+            r#"{"require":{"laravel/framework":"^10.0"}}"#,
+        )
+        .unwrap();
+
+        let info = ProjectScanner::detect_project(&dir).unwrap();
+        assert_eq!(info.project_type, "php");
+        assert_eq!(info.package_manager.as_deref(), Some("composer"));
+    }
+
+    #[test]
     fn rust_project_with_claude_config() {
         let tmp = TempDir::new().unwrap();
         create_test_tree(&tmp);

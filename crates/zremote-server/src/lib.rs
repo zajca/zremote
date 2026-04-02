@@ -286,6 +286,28 @@ pub async fn run_server(config: ServerConfig) {
     let connections = Arc::new(ConnectionManager::new());
     let shutdown = CancellationToken::new();
 
+    // Periodic 24h execution node cleanup
+    {
+        let pool_for_cleanup = pool.clone();
+        let shutdown_for_cleanup = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            interval.tick().await; // skip first (already ran at startup above)
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        match zremote_core::queries::execution_nodes::delete_old_execution_nodes(&pool_for_cleanup, 30).await {
+                            Ok(deleted) if deleted > 0 => tracing::info!(deleted, "periodic execution node cleanup"),
+                            Err(e) => tracing::warn!(error = %e, "periodic execution node cleanup failed"),
+                            _ => {}
+                        }
+                    }
+                    () = shutdown_for_cleanup.cancelled() => break,
+                }
+            }
+        });
+    }
+
     let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let agentic_loops = std::sync::Arc::new(dashmap::DashMap::new());
 

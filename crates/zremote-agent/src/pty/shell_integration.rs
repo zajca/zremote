@@ -464,4 +464,155 @@ mod tests {
             "unknown shell should not create temp files"
         );
     }
+
+    #[test]
+    fn malformed_zdotdir_path() {
+        let config = ShellIntegrationConfig::for_ai_session();
+        let session_id = uuid::Uuid::new_v4();
+        let mut cmd = CommandBuilder::new("/bin/nu-that-does-not-exist");
+
+        let result = prepare(session_id, "/bin/nu-that-does-not-exist", &config, &mut cmd).unwrap();
+        // Unknown shell returns state with no temp_dir
+        let state = result.expect("should return Some state even for unknown shell");
+        assert!(
+            state.temp_dir.is_none(),
+            "unknown shell should not create temp dir"
+        );
+        assert!(matches!(state.shell_type, ShellType::Unknown(_)));
+    }
+
+    #[test]
+    fn shell_fails_with_custom_config_no_panic() {
+        // Verify that generating integration for all shell types with different configs doesn't panic
+        let session_id = uuid::Uuid::new_v4();
+        let configs = [
+            ShellIntegrationConfig::for_ai_session(),
+            ShellIntegrationConfig::for_manual_session(),
+            ShellIntegrationConfig::disabled(),
+            ShellIntegrationConfig {
+                disable_autosuggestions: true,
+                export_env_vars: false,
+                force_sigwinch: false,
+            },
+            ShellIntegrationConfig {
+                disable_autosuggestions: false,
+                export_env_vars: false,
+                force_sigwinch: true,
+            },
+        ];
+        let shells = [
+            "/bin/zsh",
+            "/bin/bash",
+            "/usr/bin/fish",
+            "/bin/nu",
+            "unknown-shell",
+        ];
+
+        for config in &configs {
+            for shell in &shells {
+                let mut cmd = CommandBuilder::new(shell);
+                // Should never panic, regardless of config/shell combination
+                let _ = prepare(session_id, shell, config, &mut cmd);
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_after_crash() {
+        // Simulate a crash scenario: create state with temp_dir, verify cleanup works
+        let temp_dir = tempfile::Builder::new()
+            .prefix("zremote-crash-test-")
+            .tempdir()
+            .unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+
+        // Write a marker file to simulate shell integration artifacts
+        std::fs::write(temp_path.join(".zshrc"), "# test").unwrap();
+        assert!(temp_path.exists());
+        assert!(temp_path.join(".zshrc").exists());
+
+        let state = ShellIntegrationState {
+            shell_type: ShellType::Zsh,
+            temp_dir: Some(temp_dir),
+            shell_pid: None,
+        };
+
+        state.cleanup();
+        assert!(
+            !temp_path.exists(),
+            "temp dir should be removed after cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_with_invalid_pid_no_panic() {
+        // Create state with shell_pid = u32::MAX (invalid PID), verify cleanup doesn't panic
+        let temp_dir = tempfile::Builder::new()
+            .prefix("zremote-pid-test-")
+            .tempdir()
+            .unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+
+        let state = ShellIntegrationState {
+            shell_type: ShellType::Bash,
+            temp_dir: Some(temp_dir),
+            shell_pid: Some(u32::MAX),
+        };
+
+        // Should not panic even with an invalid PID
+        state.cleanup();
+        assert!(
+            !temp_path.exists(),
+            "temp dir should still be cleaned up even with invalid PID"
+        );
+    }
+
+    #[test]
+    fn stale_temp_dir_sweep() {
+        // Create multiple TempDirs with the zremote prefix, verify independent cleanup
+        let dir1 = tempfile::Builder::new()
+            .prefix("zremote-sweep-0-")
+            .tempdir()
+            .unwrap();
+        let dir2 = tempfile::Builder::new()
+            .prefix("zremote-sweep-1-")
+            .tempdir()
+            .unwrap();
+        let dir3 = tempfile::Builder::new()
+            .prefix("zremote-sweep-2-")
+            .tempdir()
+            .unwrap();
+
+        let path1 = dir1.path().to_path_buf();
+        let path2 = dir2.path().to_path_buf();
+        let path3 = dir3.path().to_path_buf();
+
+        // All should exist initially
+        assert!(path1.exists());
+        assert!(path2.exists());
+        assert!(path3.exists());
+
+        // Clean up only dir1 via ShellIntegrationState, keep dir2 and dir3
+        let state1 = ShellIntegrationState {
+            shell_type: ShellType::Zsh,
+            temp_dir: Some(dir1),
+            shell_pid: None,
+        };
+        state1.cleanup();
+
+        assert!(!path1.exists(), "cleaned-up dir should be gone");
+        assert!(path2.exists(), "other dirs should be unaffected");
+        assert!(path3.exists(), "other dirs should be unaffected");
+
+        // Clean up dir2
+        let state2 = ShellIntegrationState {
+            shell_type: ShellType::Bash,
+            temp_dir: Some(dir2),
+            shell_pid: None,
+        };
+        state2.cleanup();
+
+        assert!(!path2.exists(), "second cleaned-up dir should be gone");
+        assert!(path3.exists(), "third dir should still exist");
+    }
 }

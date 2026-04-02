@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -9,6 +10,37 @@ use zremote_protocol::SessionId;
 use zremote_protocol::knowledge::MemoryCategory;
 
 use crate::agentic::adapters::AgentInfo;
+
+/// Maximum number of concurrent inotify watchers allowed.
+const MAX_ACTIVE_WATCHERS: usize = 100;
+
+/// Default timeout for inotify confirmation.
+const DEFAULT_INOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Global counter of active inotify watchers.
+static ACTIVE_WATCHERS: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII guard that decrements `ACTIVE_WATCHERS` on drop, preventing leaks
+/// when a Future is cancelled between watcher setup and teardown.
+struct WatcherGuard;
+
+impl WatcherGuard {
+    fn acquire() -> Option<Self> {
+        let prev = ACTIVE_WATCHERS.fetch_add(1, Ordering::Relaxed);
+        if prev >= MAX_ACTIVE_WATCHERS {
+            ACTIVE_WATCHERS.fetch_sub(1, Ordering::Relaxed);
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for WatcherGuard {
+    fn drop(&mut self) {
+        ACTIVE_WATCHERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -320,6 +352,8 @@ impl ProviderInjectionStrategy {
 pub enum DeliveryStatus {
     /// Content was delivered and confirmed.
     Delivered,
+    /// Content was delivered and file access was confirmed via inotify.
+    Confirmed,
     /// Content was sent but confirmation could not be verified.
     Unconfirmed,
     /// Delivery failed permanently.
@@ -434,24 +468,55 @@ impl PtyTransport {
     }
 
     /// File-based delivery: write temp file, inject `/read` or `/add` command.
-    /// The temp file lives in the managed `TempDir` and is cleaned up when the
-    /// transport is dropped (i.e. when the session/connection ends).
+    /// Uses inotify to confirm file access by the target process.
     async fn deliver_via_file(
         &self,
         session_id: &SessionId,
         content: &str,
         strategy: ProviderInjectionStrategy,
     ) -> Result<DeliveryStatus, DeliveryError> {
+        self.deliver_via_file_with_timeout(session_id, content, strategy, DEFAULT_INOTIFY_TIMEOUT)
+            .await
+    }
+
+    /// Inner implementation with configurable timeout (for testing).
+    async fn deliver_via_file_with_timeout(
+        &self,
+        session_id: &SessionId,
+        content: &str,
+        strategy: ProviderInjectionStrategy,
+        inotify_timeout: Duration,
+    ) -> Result<DeliveryStatus, DeliveryError> {
         let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
         let filename = format!("zremote-context-{session_id}-{timestamp}.md");
         let file_path = self.temp_path.join(&filename);
 
-        // Write temp file (directory already exists via TempDir)
+        // Write temp file first (directory already exists via TempDir).
+        // The watcher is set up AFTER the write so our own fs::write() does
+        // not trigger a spurious confirmation event.
         tokio::fs::write(&file_path, content)
             .await
             .map_err(DeliveryError::IoError)?;
 
-        // Inject the command
+        // Set up inotify watcher after writing, before sending the PTY command.
+        // Any Access event from here on comes from the agent reading the file.
+        // WatcherGuard ensures ACTIVE_WATCHERS is decremented even if the
+        // Future is cancelled (e.g. by tokio::select! or timeout).
+        let (watcher_rx, _guard) = match WatcherGuard::acquire() {
+            None => {
+                tracing::debug!("inotify watcher limit reached, skipping confirmation");
+                (None, None)
+            }
+            Some(guard) => match setup_file_watcher(&file_path) {
+                Ok(rx) => (Some(rx), Some(guard)),
+                Err(e) => {
+                    tracing::debug!("failed to set up inotify watcher: {e}, continuing without");
+                    (None, None)
+                }
+            },
+        };
+
+        // Inject the command — after watcher is armed so we catch immediate reads.
         let path_str = file_path.to_string_lossy().to_string();
         if let Some(cmd) = strategy.file_command(&path_str) {
             self.session_writer
@@ -459,9 +524,19 @@ impl PtyTransport {
                 .await?;
         }
 
-        // File-based delivery is unconfirmed without inotify verification.
-        // Full inotify confirmation is deferred to avoid complexity in Phase 6.
-        Ok(DeliveryStatus::Unconfirmed)
+        // Wait for inotify confirmation if watcher was set up.
+        let Some(rx) = watcher_rx else {
+            return Ok(DeliveryStatus::Unconfirmed);
+        };
+
+        let status =
+            match tokio::task::spawn_blocking(move || rx.recv_timeout(inotify_timeout)).await {
+                Ok(Ok(())) => DeliveryStatus::Confirmed,
+                _ => DeliveryStatus::Unconfirmed,
+            };
+
+        // _guard is dropped here, decrementing ACTIVE_WATCHERS
+        Ok(status)
     }
 
     /// Direct paste delivery: inject content with delimiters.
@@ -488,6 +563,53 @@ impl ContextTransport for PtyTransport {
         // Use `deliver_with_strategy` for provider-aware delivery.
         self.deliver_direct_paste(session_id, content).await
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inotify helper
+// ---------------------------------------------------------------------------
+
+/// Set up a file watcher that signals when the file is accessed or removed.
+fn setup_file_watcher(
+    path: &std::path::Path,
+) -> Result<std::sync::mpsc::Receiver<()>, notify::Error> {
+    use notify::{RecursiveMode, Watcher};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watched_path = path.to_path_buf();
+
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let matches = event.paths.iter().any(|p| p == &watched_path);
+                if matches {
+                    use notify::EventKind;
+                    // Confirm on any Access (agent opened/read the file) or
+                    // Remove (agent deleted it after reading). The file is
+                    // written before the watcher is armed, so we never see
+                    // the write's own Close(Write) event here.
+                    match event.kind {
+                        EventKind::Access(_) | EventKind::Remove(_) => {
+                            let _ = tx.send(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })?;
+
+    let watch_target = path.parent().unwrap_or(path);
+    watcher.watch(watch_target, RecursiveMode::NonRecursive)?;
+
+    // Keep watcher alive on a background thread for at most the inotify
+    // timeout duration (5s). Previous implementation used 30s which was
+    // wasteful. The thread parks for the timeout then drops the watcher.
+    std::thread::spawn(move || {
+        let _watcher = watcher;
+        std::thread::park_timeout(DEFAULT_INOTIFY_TIMEOUT);
+    });
+
+    Ok(rx)
 }
 
 // ---------------------------------------------------------------------------
@@ -562,34 +684,56 @@ pub struct ContextMemoryInput {
 }
 
 // ---------------------------------------------------------------------------
-// Nudge accumulator (simplified)
+// Nudge accumulator (with 2-second debounce)
 // ---------------------------------------------------------------------------
 
-/// Simplified nudge accumulator: stores the latest trigger per session.
-/// Timer-based debounce is deferred to future work; this just replaces
-/// any existing pending trigger with the newest one.
+/// Debounce duration: triggers must settle for this long before delivery.
+const NUDGE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Nudge accumulator with debounce: stores the latest trigger per session
+/// and requires a 2-second settle period before the trigger is considered ready.
+/// Each new `push()` resets the debounce timer.
 pub struct NudgeAccumulator {
     pending: Option<ContextTrigger>,
+    last_push: Option<Instant>,
 }
 
 impl NudgeAccumulator {
     pub fn new() -> Self {
-        Self { pending: None }
+        Self {
+            pending: None,
+            last_push: None,
+        }
     }
 
-    /// Record a new trigger, replacing any existing pending one.
+    /// Record a new trigger, replacing any existing pending one and resetting
+    /// the debounce timer.
     pub fn push(&mut self, trigger: ContextTrigger) {
         self.pending = Some(trigger);
+        self.last_push = Some(Instant::now());
     }
 
     /// Take the pending trigger, if any.
     pub fn take(&mut self) -> Option<ContextTrigger> {
-        self.pending.take()
+        let trigger = self.pending.take();
+        if trigger.is_some() {
+            self.last_push = None;
+        }
+        trigger
     }
 
     /// Whether there is a pending trigger.
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Whether the pending trigger has settled past the debounce window
+    /// (2 seconds since last push).
+    pub fn is_ready(&self) -> bool {
+        match (&self.pending, &self.last_push) {
+            (Some(_), Some(t)) => t.elapsed() >= NUDGE_DEBOUNCE,
+            _ => false,
+        }
     }
 }
 
@@ -666,8 +810,19 @@ impl DeliveryCoordinator {
 
     /// Called when a session transitions to Idle or `NeedsInput`.
     /// Returns the rendered content string ready for PTY injection,
-    /// or `None` if there is no pending nudge or it has expired.
+    /// or `None` if there is no pending nudge, it has expired, or the
+    /// accumulator debounce has not yet settled.
     pub fn on_phase_idle(&mut self, session_id: &SessionId) -> Option<String> {
+        // Check accumulator debounce: if there is a pending accumulator trigger
+        // that hasn't settled, skip delivery this cycle.
+        if self
+            .accumulators
+            .get(session_id)
+            .is_some_and(|acc| acc.has_pending() && !acc.is_ready())
+        {
+            return None;
+        }
+
         let nudge = self.pending.remove(session_id)?;
         if nudge.is_expired(self.max_nudge_age) {
             tracing::debug!(
@@ -719,6 +874,11 @@ pub enum ContextChangeEvent {
         loop_id: uuid::Uuid,
         memories: Vec<ContextMemoryInput>,
         project_path: String,
+    },
+    /// A watched project file changed on disk (e.g. CLAUDE.md, package.json).
+    ProjectFileChanged {
+        project_path: String,
+        changed_file: String,
     },
 }
 
@@ -1300,6 +1460,83 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // -- inotify confirmation tests --
+
+    #[tokio::test]
+    async fn inotify_confirms_on_file_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test-confirm.md");
+        std::fs::write(&file_path, "initial").unwrap();
+
+        let rx = setup_file_watcher(&file_path).unwrap();
+        ACTIVE_WATCHERS.fetch_add(1, Ordering::Relaxed);
+
+        let path_clone = file_path.clone();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            // Modify the file to trigger an inotify event
+            std::fs::write(&path_clone, "modified").unwrap();
+        });
+
+        let result =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5))).await;
+
+        ACTIVE_WATCHERS.fetch_sub(1, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        assert!(result.is_ok(), "spawn_blocking should not panic");
+        assert!(
+            result.unwrap().is_ok(),
+            "should receive confirmation signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn inotify_unconfirmed_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test-timeout.md");
+        std::fs::write(&file_path, "initial").unwrap();
+
+        let rx = setup_file_watcher(&file_path).unwrap();
+        ACTIVE_WATCHERS.fetch_add(1, Ordering::Relaxed);
+
+        let result =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_millis(100))).await;
+
+        ACTIVE_WATCHERS.fetch_sub(1, Ordering::Relaxed);
+
+        assert!(result.is_ok(), "spawn_blocking should not panic");
+        assert!(
+            result.unwrap().is_err(),
+            "should timeout without file access"
+        );
+    }
+
+    #[tokio::test]
+    async fn inotify_fallback_on_watcher_limit() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let writer = SessionWriterHandle::new(tx);
+        let transport = PtyTransport::new(writer).unwrap();
+        let sid = uuid::Uuid::new_v4();
+
+        let prev = ACTIVE_WATCHERS.swap(MAX_ACTIVE_WATCHERS, Ordering::Relaxed);
+
+        let result = transport
+            .deliver_via_file_with_timeout(
+                &sid,
+                "test",
+                ProviderInjectionStrategy::ClaudeCode,
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap();
+
+        ACTIVE_WATCHERS.store(prev, Ordering::Relaxed);
+
+        assert_eq!(result, DeliveryStatus::Unconfirmed);
+        let _req = rx.recv().await.unwrap();
+    }
+
     // -- parse_category tests --
 
     #[test]
@@ -1336,5 +1573,161 @@ mod tests {
         let cloned = event.clone();
         let debug = format!("{cloned:?}");
         assert!(debug.contains("MemoriesExtracted"));
+    }
+
+    // -- Full delivery flow tests --
+
+    #[test]
+    fn full_delivery_flow() {
+        let memories = vec![
+            ContextMemoryInput {
+                key: "error-handling".to_string(),
+                content: "Always use Result types for fallible operations".to_string(),
+                category: MemoryCategory::Pattern,
+                confidence: 0.9,
+            },
+            ContextMemoryInput {
+                key: "db-conventions".to_string(),
+                content: "Use sqlx for all database queries".to_string(),
+                category: MemoryCategory::Convention,
+                confidence: 0.85,
+            },
+            ContextMemoryInput {
+                key: "low-confidence".to_string(),
+                content: "Maybe use println for debugging".to_string(),
+                category: MemoryCategory::Pitfall,
+                confidence: 0.5,
+            },
+        ];
+
+        let ctx = ContextAssembler::assemble(
+            "zremote",
+            "/home/user/zremote",
+            "rust",
+            Some("main"),
+            &["Axum".to_string(), "Tokio".to_string()],
+            &memories,
+            &[
+                "Use clippy".to_string(),
+                "No unwrap in production".to_string(),
+            ],
+            ContextTrigger::MemoryExtracted {
+                loop_id: uuid::Uuid::new_v4(),
+                count: 2,
+            },
+        );
+
+        // Low confidence memory should be filtered out
+        assert_eq!(ctx.memories.len(), 2);
+        assert!(
+            ctx.memories
+                .iter()
+                .all(|m| m.confidence >= MIN_DELIVERY_CONFIDENCE)
+        );
+
+        // Render should produce valid markdown
+        let rendered = ctx.render();
+        assert!(!rendered.is_empty());
+        assert!(rendered.contains("# ZRemote Context Update"));
+        assert!(rendered.contains("## Project: zremote"));
+        assert!(rendered.contains("error-handling"));
+        assert!(rendered.contains("db-conventions"));
+        assert!(!rendered.contains("low-confidence"));
+        assert!(rendered.contains("## Conventions"));
+        assert!(rendered.contains("Use clippy"));
+        assert!(rendered.contains("Trigger:"));
+
+        // Token estimate should be positive
+        assert!(ctx.estimated_tokens > 0);
+    }
+
+    #[test]
+    fn cleanup_removes_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test-context.md");
+        std::fs::write(&file_path, "test content").unwrap();
+        assert!(file_path.exists());
+
+        let dir_path = dir.path().to_path_buf();
+        drop(dir);
+        assert!(
+            !dir_path.exists(),
+            "TempDir drop should remove directory and its contents"
+        );
+    }
+
+    // -- NudgeAccumulator integration --
+
+    #[test]
+    fn accumulator_debounce_behavior() {
+        let mut acc = NudgeAccumulator::new();
+        assert!(!acc.has_pending());
+        assert!(!acc.is_ready());
+
+        // Push replaces previous trigger and resets debounce timer
+        acc.push(ContextTrigger::ManualPush);
+        assert!(acc.has_pending());
+        assert!(
+            !acc.is_ready(),
+            "should not be ready immediately after push"
+        );
+
+        acc.push(ContextTrigger::ConventionsUpdated {
+            project_path: "/test".to_string(),
+        });
+        assert!(acc.has_pending());
+        assert!(
+            !acc.is_ready(),
+            "should not be ready immediately after second push"
+        );
+
+        // Wait for debounce window to pass (2s + margin)
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(acc.is_ready(), "should be ready after debounce period");
+
+        // Take returns the latest trigger and clears timer
+        let trigger = acc.take().unwrap();
+        assert!(matches!(trigger, ContextTrigger::ConventionsUpdated { .. }));
+        assert!(!acc.has_pending());
+        assert!(!acc.is_ready());
+
+        // Take on empty returns None
+        assert!(acc.take().is_none());
+    }
+
+    // -- DeliveryCoordinator end-to-end --
+
+    #[test]
+    fn delivery_coordinator_full_flow() {
+        let mut coord = DeliveryCoordinator::new();
+        let sid = uuid::Uuid::new_v4();
+
+        // No pending nudge -> no delivery
+        assert!(coord.on_phase_idle(&sid).is_none());
+
+        // Set up context with memories and conventions
+        let ctx = make_context(
+            vec![make_memory("m1", 0.9), make_memory("m2", 0.85)],
+            vec!["Use clippy".to_string()],
+        );
+        coord.on_context_changed(sid, ctx);
+        assert!(coord.has_pending(&sid));
+
+        // on_phase_idle delivers and clears pending
+        let rendered = coord.on_phase_idle(&sid).unwrap();
+        assert!(rendered.contains("m1"));
+        assert!(rendered.contains("m2"));
+        assert!(rendered.contains("Use clippy"));
+        assert!(!coord.has_pending(&sid));
+
+        // Second idle call returns None (already delivered)
+        assert!(coord.on_phase_idle(&sid).is_none());
+
+        // New context replaces previous (even if first was delivered)
+        let ctx2 = make_context(vec![make_memory("m3", 0.92)], Vec::new());
+        coord.on_context_changed(sid, ctx2);
+        let rendered2 = coord.on_phase_idle(&sid).unwrap();
+        assert!(rendered2.contains("m3"));
+        assert!(!rendered2.contains("m1"));
     }
 }

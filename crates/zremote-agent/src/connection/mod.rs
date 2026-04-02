@@ -23,6 +23,7 @@ use crate::knowledge::context_delivery::{
     ContextAssembler, ContextChangeEvent, ContextTrigger, DeliveryCoordinator, PtyTransport,
     SessionWriteRequest, SessionWriterHandle,
 };
+use crate::knowledge::file_watcher::ProjectFileWatcher;
 use crate::project::ProjectScanner;
 use crate::session::SessionManager;
 use zremote_protocol::knowledge::KnowledgeServerMessage;
@@ -124,13 +125,13 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 }
 
 /// Process an analyzer event, mapping it to agentic protocol messages.
-fn handle_analyzer_event(
+async fn handle_analyzer_event(
     session_id: SessionId,
     event: &AnalyzerEvent,
     agentic_tx: &mpsc::Sender<AgenticAgentMessage>,
     agentic_manager: &AgenticLoopManager,
     session_mapper: &SessionMapper,
-    delivery_coordinator: &mut DeliveryCoordinator,
+    delivery_coordinator: &Arc<tokio::sync::Mutex<DeliveryCoordinator>>,
     session_manager: &mut SessionManager,
 ) {
     match event {
@@ -152,7 +153,7 @@ fn handle_analyzer_event(
             };
             // Check for deferred context nudges on idle transitions
             if matches!(phase, AnalyzerPhase::Idle | AnalyzerPhase::NeedsInput)
-                && let Some(content) = delivery_coordinator.on_phase_idle(&session_id)
+                && let Some(content) = delivery_coordinator.lock().await.on_phase_idle(&session_id)
             {
                 tracing::info!(
                     session = %session_id,
@@ -299,7 +300,10 @@ pub async fn run_connection(
     // Project scanner
     let mut project_scanner = ProjectScanner::new();
 
-    // Run initial project scan in background
+    // Run initial project scan in background and set up file watchers
+    // for project directories. We use a oneshot channel to get project
+    // paths back so we can watch them.
+    let (project_paths_tx, project_paths_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
     {
         let tx = outbound_tx.clone();
         let mut scanner = ProjectScanner::new();
@@ -307,6 +311,9 @@ pub async fn run_connection(
             let projects = tokio::task::spawn_blocking(move || scanner.scan())
                 .await
                 .unwrap_or_default();
+            // Send project paths for file watching before forwarding to server
+            let paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
+            let _ = project_paths_tx.send(paths);
             if tx
                 .send(AgentMessage::ProjectList { projects })
                 .await
@@ -338,6 +345,11 @@ pub async fn run_connection(
         }
     }
 
+    // Shared delivery coordinator -- used by both the connection loop and
+    // the hooks sidecar so that nudges queued from ContextChangeEvents are
+    // visible to the HookContextProvider that builds `additionalContext`.
+    let delivery_coordinator = Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new()));
+
     // Hooks sidecar (CC hook integration)
     // Use a per-connection shutdown signal so the HooksServer stops when this
     // connection ends (sender is dropped on function exit -> server stops).
@@ -347,6 +359,7 @@ pub async fn run_connection(
         session_mapper.clone(),
         outbound_tx.clone(),
         sent_cc_session_ids.clone(),
+        delivery_coordinator.clone(),
     );
     match hooks_server.start(hooks_shutdown_rx).await {
         Ok(addr) => {
@@ -372,6 +385,15 @@ pub async fn run_connection(
 
     // Channel for context change events from KnowledgeManager -> connection loop
     let (context_change_tx, mut context_change_rx) = mpsc::channel::<ContextChangeEvent>(64);
+
+    // File watcher for project files (CLAUDE.md, Cargo.toml, etc.)
+    let mut project_file_watcher = match ProjectFileWatcher::new(context_change_tx.clone()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::debug!(error = %e, "project file watcher unavailable (non-fatal)");
+            None
+        }
+    };
 
     // Channel for session write requests from DeliveryCoordinator -> connection loop
     let (session_write_tx, mut session_write_rx) = mpsc::channel::<SessionWriteRequest>(64);
@@ -423,8 +445,24 @@ pub async fn run_connection(
     let mut silence_check_interval = tokio::time::interval(Duration::from_secs(1));
     silence_check_interval.tick().await; // skip first immediate tick
 
-    // Context delivery coordinator — defers nudges until agent is idle
-    let mut delivery_coordinator = DeliveryCoordinator::new();
+    // delivery_coordinator is created above (shared with HooksServer)
+
+    // Set up file watchers for initial project paths (non-blocking)
+    if let Ok(paths) = project_paths_rx.await
+        && let Some(ref mut watcher) = project_file_watcher
+    {
+        for path in &paths {
+            if let Err(e) = watcher.watch_project(std::path::Path::new(path)) {
+                tracing::debug!(path = %path, error = %e, "failed to watch project dir");
+            }
+        }
+        if watcher.watched_count() > 0 {
+            tracing::info!(
+                count = watcher.watched_count(),
+                "watching project files for changes"
+            );
+        }
+    }
 
     // Main message loop
     let result = loop {
@@ -542,8 +580,8 @@ pub async fn run_connection(
                         for event in &events {
                             handle_analyzer_event(
                                 session_id, event, &agentic_tx, agentic_manager, session_mapper,
-                                &mut delivery_coordinator, session_manager,
-                            );
+                                &delivery_coordinator, session_manager,
+                            ).await;
                         }
                         // Send accumulated token totals (not raw deltas) for DB replacement
                         if has_token_update
@@ -658,7 +696,7 @@ pub async fn run_connection(
                         && last.elapsed() > Duration::from_secs(3)
                         && let Some(event) = analyzer.check_silence()
                     {
-                        handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper, &mut delivery_coordinator, session_manager);
+                        handle_analyzer_event(*session_id, &event, &agentic_tx, agentic_manager, session_mapper, &delivery_coordinator, session_manager).await;
                     }
                 }
             }
@@ -684,7 +722,7 @@ pub async fn run_connection(
                                     count: memories.len(),
                                 },
                             );
-                            delivery_coordinator.on_context_changed(session_id, context);
+                            delivery_coordinator.lock().await.on_context_changed(session_id, context);
                             tracing::info!(
                                 session = %session_id,
                                 loop_id = %loop_id,
@@ -696,6 +734,30 @@ pub async fn run_connection(
                                 loop_id = %loop_id,
                                 "context change event for unknown loop, ignoring"
                             );
+                        }
+                    }
+                    ContextChangeEvent::ProjectFileChanged { project_path, changed_file } => {
+                        tracing::info!(
+                            project = %project_path,
+                            file = %changed_file,
+                            "project file changed, triggering conventions update"
+                        );
+                        let detected = ProjectScanner::detect_at(std::path::Path::new(&project_path));
+                        let project_type = detected.as_ref().map_or("unknown", |p| &p.project_type);
+                        for session_id in agentic_manager.session_ids_for_project(&project_path) {
+                            let context = ContextAssembler::assemble(
+                                project_path.rsplit('/').next().unwrap_or(&project_path),
+                                &project_path,
+                                project_type,
+                                None,
+                                &[],
+                                &[],
+                                &[],
+                                ContextTrigger::ConventionsUpdated {
+                                    project_path: project_path.clone(),
+                                },
+                            );
+                            delivery_coordinator.lock().await.on_context_changed(session_id, context);
                         }
                     }
                 }

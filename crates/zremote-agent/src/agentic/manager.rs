@@ -164,6 +164,15 @@ impl AgenticLoopManager {
             .find(|(_, a)| &a.loop_id == loop_id)
             .map(|(sid, _)| *sid)
     }
+
+    /// Get all session IDs that have an active loop in the given project path.
+    pub fn session_ids_for_project(&self, project_path: &str) -> Vec<SessionId> {
+        self.loops
+            .iter()
+            .filter(|(_, a)| a.project_path == project_path)
+            .map(|(sid, _)| *sid)
+            .collect()
+    }
 }
 
 /// Translate an internal `AgenticEvent` into a protocol `AgenticAgentMessage`.

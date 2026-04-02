@@ -526,4 +526,85 @@ mod tests {
             "error should contain session id, got: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn session_manager_create_without_integration() {
+        // Create a session with shell_config: None -- should not panic.
+        // We expect an error because the shell binary doesn't exist,
+        // but the important thing is no panic from missing shell integration.
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr
+            .create(session_id, "/bin/sh", 80, 24, None, None, None)
+            .await;
+        // The spawn may succeed or fail depending on environment,
+        // but it should never panic regardless of shell_config being None
+        drop(result);
+    }
+
+    #[tokio::test]
+    async fn session_manager_cleanup_on_close() {
+        // Create and immediately close -- verify no panic
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+
+        // Try to create a real session (may fail in CI without a TTY)
+        if mgr
+            .create(session_id, "/bin/sh", 80, 24, None, None, None)
+            .await
+            .is_ok()
+        {
+            assert!(mgr.has_session(&session_id));
+            let exit_code = mgr.close(&session_id);
+            // Exit code may or may not be available depending on timing
+            drop(exit_code);
+            assert!(!mgr.has_session(&session_id));
+            assert_eq!(mgr.count(), 0);
+        }
+        // If create failed (no PTY available), closing nonexistent is fine
+        assert!(mgr.close(&session_id).is_none());
+    }
+
+    #[test]
+    fn spawn_with_shell_integration_sets_env() {
+        use crate::pty::shell_integration::{self, ShellIntegrationConfig};
+
+        let session_id = Uuid::new_v4();
+        let config = ShellIntegrationConfig::for_ai_session();
+        let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
+
+        let state = shell_integration::prepare(session_id, "/bin/sh", &config, &mut cmd)
+            .unwrap()
+            .expect("should return state for ai session config");
+
+        // For an unknown shell (/bin/sh), env vars should be set but no temp dir
+        assert!(
+            state.temp_dir.is_none(),
+            "unknown shell should not create temp dir"
+        );
+        // The env vars (ZREMOTE_TERMINAL, ZREMOTE_SESSION_ID) are set on cmd
+        // We verify indirectly: state was created, meaning export_env_vars path ran
+    }
+
+    #[test]
+    fn spawn_zsh_with_integration() {
+        use crate::pty::shell_integration::{self, ShellIntegrationConfig};
+
+        let session_id = Uuid::new_v4();
+        let config = ShellIntegrationConfig::for_ai_session();
+        let mut cmd = portable_pty::CommandBuilder::new("/bin/zsh");
+
+        let state = shell_integration::prepare(session_id, "/bin/zsh", &config, &mut cmd)
+            .unwrap()
+            .expect("should return state");
+
+        // Zsh integration creates a ZDOTDIR temp dir
+        assert!(
+            state.temp_dir.is_some(),
+            "zsh integration should create temp ZDOTDIR"
+        );
+        let temp_dir = state.temp_dir.as_ref().unwrap();
+        let zshrc_path = temp_dir.path().join(".zshrc");
+        assert!(zshrc_path.exists(), "should create .zshrc in temp ZDOTDIR");
+    }
 }

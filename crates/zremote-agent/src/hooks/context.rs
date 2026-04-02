@@ -6,6 +6,7 @@ use crate::knowledge::context_delivery::DeliveryCoordinator;
 ///
 /// Integrates with Phase 6 `DeliveryCoordinator` to deliver pending
 /// context nudges via `additionalContext` instead of PTY injection.
+#[derive(Clone)]
 pub struct HookContextProvider {
     mapper: SessionMapper,
 }

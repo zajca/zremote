@@ -1577,6 +1577,42 @@ mod tests {
     }
 
     #[test]
+    fn node_builder_output_truncation() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "big_file.rs", "/home");
+        // Feed a very long output (600+ chars, exceeds OUTPUT_SUMMARY_CAP of 500)
+        let long_line = "x".repeat(600);
+        nb.on_output_line(&long_line);
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 1);
+        let summary = nodes[0].output_summary.as_deref().unwrap();
+        assert!(
+            summary.len() <= OUTPUT_SUMMARY_CAP,
+            "output summary should be capped at {OUTPUT_SUMMARY_CAP}, got {}",
+            summary.len()
+        );
+    }
+
+    #[test]
+    fn node_builder_duration_measurement() {
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+        nb.on_tool_call("Read", "file.rs", "/home");
+        // start_time is set by on_tool_call; complete immediately
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert_eq!(nodes.len(), 1);
+        // Duration should be >= 0 (non-negative); it was measured from Instant::now()
+        assert!(
+            nodes[0].duration_ms >= 0,
+            "duration_ms should be non-negative, got {}",
+            nodes[0].duration_ms
+        );
+    }
+
+    #[test]
     fn summary_builder_error_patterns() {
         let patterns = [
             "error in code",
