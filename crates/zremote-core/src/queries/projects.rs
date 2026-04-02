@@ -427,6 +427,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_intelligence_columns_default() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let project = get_project(&pool, "p1").await.unwrap();
+        // Default from migration: frameworks = '[]', architecture = NULL, conventions = '[]', package_manager = NULL
+        assert_eq!(project.frameworks.as_deref(), Some("[]"));
+        assert!(project.architecture.is_none());
+        assert_eq!(project.conventions.as_deref(), Some("[]"));
+        assert!(project.package_manager.is_none());
+    }
+
+    #[tokio::test]
+    async fn project_intelligence_columns_persist() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        // Update intelligence columns
+        sqlx::query(
+            "UPDATE projects SET frameworks = ?, architecture = ?, conventions = ?, package_manager = ? WHERE id = ?",
+        )
+        .bind(r#"["nextjs","react"]"#)
+        .bind("mvc")
+        .bind(r#"[{"kind":"testing","value":"jest"}]"#)
+        .bind("npm")
+        .bind("p1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert_eq!(project.frameworks.as_deref(), Some(r#"["nextjs","react"]"#));
+        assert_eq!(project.architecture.as_deref(), Some("mvc"));
+        assert_eq!(
+            project.conventions.as_deref(),
+            Some(r#"[{"kind":"testing","value":"jest"}]"#)
+        );
+        assert_eq!(project.package_manager.as_deref(), Some("npm"));
+    }
+
+    #[tokio::test]
     async fn list_projects_pinned_first() {
         let pool = setup_db().await;
         insert_project(&pool, "p1", "h1", "/home/user/alpha", "alpha").await;

@@ -484,11 +484,21 @@ pub(super) async fn handle_agent_message(
                     .as_ref()
                     .map(|gi| serde_json::to_string(&gi.remotes).unwrap_or_default());
                 let git_updated = project.git_info.as_ref().map(|_| now.clone());
+                let frameworks_json =
+                    serde_json::to_string(&project.frameworks).unwrap_or_default();
+                let architecture_str = project
+                    .architecture
+                    .as_ref()
+                    .and_then(|a| serde_json::to_value(a).ok())
+                    .and_then(|v| v.as_str().map(String::from));
+                let conventions_json =
+                    serde_json::to_string(&project.conventions).unwrap_or_default();
                 if let Err(e) = sqlx::query(
                     "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type, \
                      git_branch, git_commit_hash, git_commit_message, git_is_dirty, \
-                     git_ahead, git_behind, git_remotes, git_updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     git_ahead, git_behind, git_remotes, git_updated_at, \
+                     frameworks, architecture, conventions, package_manager) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(host_id, path) DO UPDATE SET \
                      name = excluded.name, has_claude_config = excluded.has_claude_config, \
                      has_zremote_config = excluded.has_zremote_config, \
@@ -496,7 +506,9 @@ pub(super) async fn handle_agent_message(
                      git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash, \
                      git_commit_message = excluded.git_commit_message, git_is_dirty = excluded.git_is_dirty, \
                      git_ahead = excluded.git_ahead, git_behind = excluded.git_behind, \
-                     git_remotes = excluded.git_remotes, git_updated_at = excluded.git_updated_at",
+                     git_remotes = excluded.git_remotes, git_updated_at = excluded.git_updated_at, \
+                     frameworks = excluded.frameworks, architecture = excluded.architecture, \
+                     conventions = excluded.conventions, package_manager = excluded.package_manager",
                 )
                 .bind(&project_id)
                 .bind(&host_id_str)
@@ -513,6 +525,10 @@ pub(super) async fn handle_agent_message(
                 .bind(project.git_info.as_ref().map_or(0, |gi| gi.behind))
                 .bind(&remotes_json)
                 .bind(&git_updated)
+                .bind(&frameworks_json)
+                .bind(&architecture_str)
+                .bind(&conventions_json)
+                .bind(&project.package_manager)
                 .execute(&state.db)
                 .await
                 {

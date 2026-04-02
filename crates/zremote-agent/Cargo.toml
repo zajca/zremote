@@ -42,6 +42,7 @@ dirs = "6"
 arboard.workspace = true
 png.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
+notify.workspace = true
 tempfile = "3"
 libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process", "user"] }

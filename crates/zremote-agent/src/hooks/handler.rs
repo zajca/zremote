@@ -10,8 +10,10 @@ use tokio::sync::mpsc;
 use zremote_protocol::claude::ClaudeAgentMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticStatus, SessionId};
 
+use super::context::HookContextProvider;
 use super::mapper::SessionMapper;
 use super::transcript::extract_slug;
+use crate::knowledge::context_delivery::DeliveryCoordinator;
 
 /// Shared state for the hooks HTTP handler.
 #[derive(Clone)]
@@ -22,6 +24,10 @@ pub struct HooksState {
     pub outbound_tx: mpsc::Sender<AgentMessage>,
     /// CC session IDs that have already been sent via `SessionIdCaptured` (dedup).
     pub sent_cc_session_ids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    /// Builds `additionalContext` for hook responses.
+    pub context_provider: HookContextProvider,
+    /// Coordinates pending context nudges for delivery via hooks.
+    pub delivery_coordinator: Arc<tokio::sync::Mutex<DeliveryCoordinator>>,
 }
 
 /// The JSON payload received from Claude Code hooks via stdin.
@@ -142,14 +148,8 @@ pub async fn handle_hook(
     }
 
     let response = match payload.hook_event_name.as_str() {
-        "PreToolUse" => {
-            handle_pre_tool_use(&state, &payload).await;
-            HookResponse::default()
-        }
-        "PostToolUse" => {
-            handle_post_tool_use(&state, &payload).await;
-            HookResponse::default()
-        }
+        "PreToolUse" => handle_pre_tool_use(&state, &payload).await,
+        "PostToolUse" => handle_post_tool_use(&state, &payload).await,
         "Stop" => {
             handle_stop(&state, &payload).await;
             HookResponse::default()
@@ -284,14 +284,14 @@ async fn try_capture_cc_session_id(
     }
 }
 
-async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
+async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
         .await
     else {
         tracing::debug!(cc_session = %payload.session_id, "no loop mapping for PreToolUse, ignoring");
-        return;
+        return HookResponse::default();
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
@@ -306,15 +306,32 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) {
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
     }
+
+    // Build additionalContext for the hook response
+    let mut coordinator = state.delivery_coordinator.lock().await;
+    let additional_context = state
+        .context_provider
+        .build_pre_tool_context(payload, &mut coordinator)
+        .await;
+
+    HookResponse {
+        decision: None,
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse {
+            additional_context,
+            permission_decision: None,
+            permission_decision_reason: None,
+            updated_input: None,
+        }),
+    }
 }
 
-async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
+async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
         .await
     else {
-        return;
+        return HookResponse::default();
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
@@ -330,6 +347,16 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) {
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
+    }
+
+    // PostToolUse: Claude Code does not consume `additional_context` on
+    // PostToolUse hooks, so we skip context delivery here. Nudges are
+    // delivered exclusively via PreToolUse where the model can see them.
+    HookResponse {
+        decision: None,
+        hook_specific_output: Some(HookSpecificOutput::PostToolUse {
+            additional_context: None,
+        }),
     }
 }
 
@@ -613,9 +640,12 @@ mod tests {
     ) {
         let (agentic_tx, agentic_rx) = mpsc::channel(64);
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
         let state = HooksState {
             agentic_tx,
-            mapper: SessionMapper::new(),
+            context_provider: HookContextProvider::new(mapper.clone()),
+            delivery_coordinator: Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
+            mapper,
             outbound_tx,
             sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
         };

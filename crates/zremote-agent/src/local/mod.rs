@@ -518,11 +518,15 @@ async fn start_hooks_server(state: Arc<LocalAppState>, shutdown: CancellationTok
     let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(
         std::collections::HashSet::<String>::new(),
     ));
+    let delivery_coordinator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::knowledge::context_delivery::DeliveryCoordinator::new(),
+    ));
     let hooks_server = HooksServer::new(
         agentic_tx,
         state.session_mapper.clone(),
         outbound_tx,
         sent_cc_session_ids,
+        delivery_coordinator,
     );
 
     // Convert CancellationToken to a watch channel for the hooks server

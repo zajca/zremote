@@ -1547,4 +1547,473 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
+
+    // -----------------------------------------------------------------------
+    // Execution node route tests
+    // -----------------------------------------------------------------------
+
+    fn build_execution_node_router(state: Arc<LocalAppState>) -> Router {
+        Router::new()
+            .route(
+                "/api/sessions/{session_id}/execution-nodes",
+                get(list_execution_nodes),
+            )
+            .route(
+                "/api/execution-nodes/cleanup",
+                delete(cleanup_execution_nodes),
+            )
+            .with_state(state)
+    }
+
+    /// Helper to insert a session row directly for execution node tests.
+    async fn insert_test_session(state: &LocalAppState, session_id: &str) {
+        let host_id = state.host_id.to_string();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
+            .bind(session_id)
+            .bind(&host_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_list_execution_nodes_empty() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        let app = build_execution_node_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}/execution-nodes"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_list_execution_nodes_with_data() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        for i in 0..3 {
+            zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id,
+                None,
+                1000 + i,
+                "tool_call",
+                Some(&format!("Read file{i}.rs")),
+                Some("output"),
+                None,
+                "/home",
+                50,
+            )
+            .await
+            .unwrap();
+        }
+
+        let app = build_execution_node_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{session_id}/execution-nodes"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 3);
+        assert_eq!(json[0]["kind"], "tool_call");
+    }
+
+    #[tokio::test]
+    async fn api_list_execution_nodes_by_loop() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        zremote_core::queries::execution_nodes::insert_execution_node(
+            &state.db,
+            &session_id,
+            Some("loop-a"),
+            1000,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            50,
+        )
+        .await
+        .unwrap();
+        zremote_core::queries::execution_nodes::insert_execution_node(
+            &state.db,
+            &session_id,
+            Some("loop-b"),
+            1001,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            50,
+        )
+        .await
+        .unwrap();
+        zremote_core::queries::execution_nodes::insert_execution_node(
+            &state.db,
+            &session_id,
+            Some("loop-a"),
+            1002,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            50,
+        )
+        .await
+        .unwrap();
+
+        let app = build_execution_node_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{session_id}/execution-nodes?loop_id=loop-a"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 2);
+        assert!(json.iter().all(|n| n["loop_id"].as_str() == Some("loop-a")));
+    }
+
+    #[tokio::test]
+    async fn api_cleanup_execution_nodes() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let old_ms = now_ms - 31 * 24 * 60 * 60 * 1000; // 31 days ago
+
+        zremote_core::queries::execution_nodes::insert_execution_node(
+            &state.db,
+            &session_id,
+            None,
+            old_ms,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            50,
+        )
+        .await
+        .unwrap();
+        zremote_core::queries::execution_nodes::insert_execution_node(
+            &state.db,
+            &session_id,
+            None,
+            now_ms,
+            "tool_call",
+            None,
+            None,
+            None,
+            "/home",
+            50,
+        )
+        .await
+        .unwrap();
+
+        let app = build_execution_node_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/execution-nodes/cleanup?max_age_days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["deleted"], 1);
+
+        // Verify only the recent node remains
+        let remaining = zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].timestamp, now_ms);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle integration test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn execution_node_full_lifecycle() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        // Insert nodes
+        for i in 0..5 {
+            zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id,
+                Some("loop-1"),
+                1000 + i,
+                "tool_call",
+                Some(&format!("Read file{i}.rs")),
+                Some("output"),
+                None,
+                "/home",
+                100,
+            )
+            .await
+            .unwrap();
+        }
+
+        // List and verify count
+        let nodes = zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            100,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(nodes.len(), 5);
+
+        let count =
+            zremote_core::queries::execution_nodes::count_execution_nodes(&state.db, &session_id)
+                .await
+                .unwrap();
+        assert_eq!(count, 5);
+
+        // List by loop
+        let by_loop = zremote_core::queries::execution_nodes::list_execution_nodes_by_loop(
+            &state.db, "loop-1", 100, 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_loop.len(), 5);
+
+        // Enforce cap of 3 -- should remove 2 oldest
+        let deleted = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+            &state.db,
+            &session_id,
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            100,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[0].timestamp, 1002);
+    }
+
+    #[tokio::test]
+    async fn api_list_execution_nodes_returns_all_without_filter() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        for i in 0..10 {
+            zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id,
+                None,
+                1000 + i,
+                "tool_call",
+                None,
+                None,
+                None,
+                "/home",
+                50,
+            )
+            .await
+            .unwrap();
+        }
+
+        let app = build_execution_node_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{session_id}/execution-nodes?limit=3&offset=2"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 3);
+        assert_eq!(json[0]["timestamp"], 1002);
+    }
+
+    #[tokio::test]
+    async fn concurrent_node_insertion() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let pool = state.db.clone();
+            let sid = session_id.clone();
+            handles.push(tokio::spawn(async move {
+                zremote_core::queries::execution_nodes::insert_execution_node(
+                    &pool,
+                    &sid,
+                    None,
+                    1000 + i64::from(i),
+                    "tool_call",
+                    Some(&format!("Task {i}")),
+                    None,
+                    None,
+                    "/home",
+                    10,
+                )
+                .await
+                .unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let count =
+            zremote_core::queries::execution_nodes::count_execution_nodes(&state.db, &session_id)
+                .await
+                .unwrap();
+        assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn node_cap_enforcement_under_load() {
+        let state = test_state().await;
+        let session_id = Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id).await;
+
+        for i in 0..50 {
+            zremote_core::queries::execution_nodes::insert_execution_node(
+                &state.db,
+                &session_id,
+                None,
+                1000 + i,
+                "tool_call",
+                None,
+                None,
+                None,
+                "/home",
+                10,
+            )
+            .await
+            .unwrap();
+        }
+
+        let deleted = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+            &state.db,
+            &session_id,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 40);
+
+        let remaining = zremote_core::queries::execution_nodes::list_execution_nodes(
+            &state.db,
+            &session_id,
+            100,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining.len(), 10);
+        assert_eq!(remaining[0].timestamp, 1040);
+    }
+
+    #[test]
+    fn rapid_phase_transitions() {
+        use crate::agentic::analyzer::{AnalyzerPhase, NodeBuilder};
+
+        let mut nb = NodeBuilder::new("/tmp".to_string());
+
+        for i in 0..100 {
+            nb.on_tool_call("Read", &format!("file{i}.rs"), "/home");
+            nb.on_output_line(&format!("content of file{i}"));
+            nb.on_phase_changed(AnalyzerPhase::Busy, "/home");
+            nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+            nb.on_phase_changed(AnalyzerPhase::NeedsInput, "/home");
+            nb.on_phase_changed(AnalyzerPhase::Busy, "/home");
+        }
+
+        nb.on_phase_changed(AnalyzerPhase::Idle, "/home");
+
+        let nodes = nb.drain_completed();
+        assert!(
+            !nodes.is_empty(),
+            "rapid phase transitions should produce completed nodes without panics"
+        );
+        for node in &nodes {
+            assert!(!node.kind.is_empty());
+            assert!(!node.working_dir.is_empty());
+            assert!(node.duration_ms >= 0);
+        }
+    }
 }

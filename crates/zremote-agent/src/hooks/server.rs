@@ -8,8 +8,10 @@ use axum::routing::post;
 use tokio::sync::mpsc;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage};
 
+use super::context::HookContextProvider;
 use super::handler::{self, HooksState};
 use super::mapper::SessionMapper;
+use crate::knowledge::context_delivery::DeliveryCoordinator;
 
 /// The hooks HTTP sidecar server.
 ///
@@ -26,9 +28,12 @@ impl HooksServer {
         mapper: SessionMapper,
         outbound_tx: mpsc::Sender<AgentMessage>,
         sent_cc_session_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+        delivery_coordinator: Arc<tokio::sync::Mutex<DeliveryCoordinator>>,
     ) -> Self {
         Self {
             state: HooksState {
+                context_provider: HookContextProvider::new(mapper.clone()),
+                delivery_coordinator,
                 agentic_tx,
                 mapper,
                 outbound_tx,
@@ -143,6 +148,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -194,6 +200,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -232,6 +239,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -267,6 +275,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -325,6 +334,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -360,6 +370,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -409,6 +420,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
@@ -450,6 +462,7 @@ mod tests {
             mapper,
             outbound_tx,
             Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
         );
         let addr = server.start(shutdown_rx).await.unwrap();
 
