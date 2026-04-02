@@ -9054,7 +9054,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zremote"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "clap",
  "dirs 6.0.0",
@@ -9068,7 +9068,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-agent"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "arboard",
  "axum",
@@ -9111,7 +9111,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-cli"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "chrono",
  "clap",
@@ -9129,7 +9129,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-client"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "axum",
  "chrono",
@@ -9151,7 +9151,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-core"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "axum",
  "base64",
@@ -9170,7 +9170,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-gui"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -9193,7 +9193,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-protocol"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "chrono",
  "serde",
@@ -9203,7 +9203,7 @@ dependencies = [
 
 [[package]]
 name = "zremote-server"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "axum",
  "base64",

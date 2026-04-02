@@ -1,6 +1,6 @@
 [package]
 name = "zremote-server"
-version = "0.10.10"
+version = "0.10.11"
 edition.workspace = true
 
 [lints]
