@@ -1,6 +1,6 @@
 #![allow(clippy::wildcard_imports)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -50,6 +50,12 @@ pub struct MainView {
     current_host_id: Option<String>,
     /// Active WaitingForInput toast IDs, keyed by loop_id.
     waiting_input_toasts: HashMap<String, u64>,
+    /// Loop IDs for which we have already shown a WaitingForInput notification.
+    /// Cleared when the loop leaves WaitingForInput or ends.
+    seen_waiting_loops: HashSet<String>,
+    /// (host_id, session_id) the user most recently had open in the terminal.
+    /// Used to reduce notification urgency for familiar sessions.
+    last_viewed_session: Option<(String, String)>,
     /// Maps claude task_id to (session_id, host_id) for context on ClaudeTaskEnded.
     claude_task_sessions: HashMap<String, (String, String)>,
 }
@@ -107,6 +113,8 @@ impl MainView {
             ever_connected: false,
             current_host_id: None,
             waiting_input_toasts: HashMap::new(),
+            seen_waiting_loops: HashSet::new(),
+            last_viewed_session: None,
             claude_task_sessions: HashMap::new(),
         }
     }
@@ -162,6 +170,7 @@ impl MainView {
         });
 
         self.current_host_id = Some(host_id.to_string());
+        self.last_viewed_session = Some((host_id.to_string(), session_id.to_string()));
 
         let Some(handle) = connect_terminal(&self.app_state, session_id, host_id, false) else {
             return;
@@ -501,6 +510,28 @@ impl MainView {
                     AgenticStatus::WaitingForInput => {
                         let loop_id = loop_info.id.clone();
 
+                        // Guard 1: Skip toast and native notification if user is viewing
+                        // this session's terminal — sidebar icon + prompt are sufficient.
+                        // Still mark as seen so duplicates after a tab switch are suppressed.
+                        if self.window_active
+                            && let Some(terminal) = &self.terminal
+                            && terminal.read(cx).session_id() == loop_info.session_id.as_str()
+                        {
+                            self.seen_waiting_loops.insert(loop_id);
+                            return;
+                        }
+
+                        // Guard 2: Skip if we already notified for this loop's waiting state.
+                        // Cleared when the loop resumes or ends, so a new wait triggers fresh notification.
+                        if !self.seen_waiting_loops.insert(loop_id.clone()) {
+                            return;
+                        }
+                        // Bound the set — pure DoS guard, not a recency policy (CWE-400).
+                        while self.seen_waiting_loops.len() > 200 {
+                            let stale = self.seen_waiting_loops.iter().next().cloned().unwrap();
+                            self.seen_waiting_loops.remove(&stale);
+                        }
+
                         // Dismiss previous toast for this loop (handles rapid re-prompts)
                         if let Some(old_toast_id) = self.waiting_input_toasts.remove(&loop_id) {
                             self.toasts.update(cx, |c, cx| {
@@ -550,7 +581,7 @@ impl MainView {
                         }
                         self.waiting_input_toasts.insert(loop_id, toast_id);
 
-                        // Native notification with critical urgency.
+                        // Native notification — reduce urgency for recently viewed sessions.
                         // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
                         if !self.window_active {
                             let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
@@ -558,11 +589,20 @@ impl MainView {
                                 || "ZRemote".to_string(),
                                 |sub| format!("ZRemote \u{2014} {sub}"),
                             );
+                            let is_recent = self
+                                .last_viewed_session
+                                .as_ref()
+                                .is_some_and(|(h, s)| h == host_id && s == &loop_info.session_id);
+                            let urgency = if is_recent {
+                                NativeUrgency::Auto
+                            } else {
+                                NativeUrgency::Critical
+                            };
                             crate::notifications::send_native_with_urgency(
                                 &title,
                                 &sanitized,
                                 ToastLevel::Warning,
-                                NativeUrgency::Critical,
+                                urgency,
                                 &self.app_state.tokio_handle,
                             );
                         }
@@ -570,6 +610,7 @@ impl MainView {
                     // Any non-WaitingForInput status means CC is no longer blocked —
                     // dismiss the active toast regardless of which terminal completed.
                     _ => {
+                        self.seen_waiting_loops.remove(&loop_info.id);
                         if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                             self.toasts.update(cx, |c, cx| {
                                 c.dismiss(toast_id);
@@ -582,7 +623,8 @@ impl MainView {
             ServerEvent::LoopEnded {
                 loop_info, host_id, ..
             } => {
-                // Dismiss any active WaitingForInput toast
+                // Dismiss any active WaitingForInput toast and clear seen state
+                self.seen_waiting_loops.remove(&loop_info.id);
                 if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                     self.toasts.update(cx, |c, cx| {
                         c.dismiss(toast_id);
