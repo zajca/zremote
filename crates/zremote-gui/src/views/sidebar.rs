@@ -772,34 +772,6 @@ impl SidebarView {
             );
         }
 
-        // Claude tasks for this host
-        let tasks = self.active_tasks_for_host(&host_id);
-        if !tasks.is_empty() {
-            // Separator before tasks (if we have sessions above)
-            if has_projects || has_orphans {
-                children.push(
-                    div()
-                        .mx(px(12.0))
-                        .my(px(4.0))
-                        .h(px(1.0))
-                        .bg(theme::border())
-                        .into_any_element(),
-                );
-            }
-            children.push(
-                div()
-                    .px(px(16.0))
-                    .py(px(2.0))
-                    .text_color(theme::text_tertiary())
-                    .text_size(px(11.0))
-                    .child("Tasks")
-                    .into_any_element(),
-            );
-            for task in &tasks {
-                children.push(self.render_task_item(task, cx).into_any_element());
-            }
-        }
-
         let mut container = div().flex().flex_col().w_full();
 
         // Host header only in server mode
@@ -811,97 +783,6 @@ impl SidebarView {
         container = container.child(div().flex().flex_col().children(children));
 
         container
-    }
-
-    fn active_tasks_for_host(&self, host_id: &str) -> Vec<&ClaudeTaskInfo> {
-        let mut tasks: Vec<&ClaudeTaskInfo> = self
-            .claude_tasks
-            .values()
-            .filter(|t| t.host_id == host_id)
-            .collect();
-        tasks.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        tasks
-    }
-
-    fn render_task_item(&self, task: &ClaudeTaskInfo, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status_icon, status_color) = match task.status {
-            ClaudeTaskStatus::Starting => (Icon::Loader, theme::text_tertiary()),
-            ClaudeTaskStatus::Active => (Icon::Bot, theme::accent()),
-            ClaudeTaskStatus::Completed => (Icon::CheckCircle, theme::success()),
-            ClaudeTaskStatus::Error => (Icon::XCircle, theme::error()),
-        };
-
-        let project_name = task
-            .project_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&task.project_path)
-            .to_string();
-
-        let elapsed = task.started_at.elapsed();
-        let elapsed_text = if elapsed.as_secs() >= 3600 {
-            format!(
-                "{}h{}m",
-                elapsed.as_secs() / 3600,
-                (elapsed.as_secs() % 3600) / 60
-            )
-        } else if elapsed.as_secs() >= 60 {
-            format!("{}m", elapsed.as_secs() / 60)
-        } else {
-            format!("{}s", elapsed.as_secs())
-        };
-
-        let session_id = task.session_id.clone();
-        let host_id = task.host_id.clone();
-        let task_id = task.task_id.clone();
-
-        div()
-            .id(SharedString::from(format!("task-{task_id}")))
-            .flex()
-            .items_center()
-            .justify_between()
-            .pl(px(20.0))
-            .pr(px(12.0))
-            .h(px(22.0))
-            .mx(px(4.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme::bg_tertiary()))
-            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                this.selected_session_id = Some(session_id.clone());
-                cx.emit(SidebarEvent::SessionSelected {
-                    session_id: session_id.clone(),
-                    host_id: host_id.clone(),
-                });
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .child(
-                        icon(status_icon)
-                            .size(px(12.0))
-                            .flex_shrink_0()
-                            .text_color(status_color),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme::text_secondary())
-                            .text_size(px(11.0))
-                            .truncate()
-                            .child(project_name),
-                    ),
-            )
-            .child(
-                div()
-                    .text_color(theme::text_tertiary())
-                    .text_size(px(10.0))
-                    .child(elapsed_text),
-            )
     }
 
     #[allow(clippy::unused_self)]
