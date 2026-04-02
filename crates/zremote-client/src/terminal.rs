@@ -344,6 +344,10 @@ async fn run_terminal_ws(
                                 session_closed = true;
                                 break;
                             }
+                            Ok(TerminalServerMessage::ImagePasteError { message, fallback_path }) => {
+                                warn!(error = %message, "image paste failed on remote");
+                                let _ = output_tx.send(TerminalEvent::ImagePasteError { message, fallback_path });
+                            }
                             Err(e) => {
                                 warn!(error = %e, "failed to parse terminal message");
                             }

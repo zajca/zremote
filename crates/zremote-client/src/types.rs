@@ -237,6 +237,13 @@ pub(crate) enum TerminalServerMessage {
         #[serde(default)]
         message: String,
     },
+    #[serde(rename = "image_paste_error")]
+    ImagePasteError {
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        fallback_path: Option<String>,
+    },
 }
 
 /// Terminal WebSocket message to server (text frames).
@@ -287,6 +294,11 @@ pub enum TerminalEvent {
     SessionResumed,
     /// Server-side error (session not found, stale, etc.)
     Error { message: String },
+    /// Image paste failed on remote agent (clipboard unavailable on headless).
+    ImagePasteError {
+        message: String,
+        fallback_path: Option<String>,
+    },
     /// WebSocket connection lost (session may still be alive on the server).
     Disconnected,
 }

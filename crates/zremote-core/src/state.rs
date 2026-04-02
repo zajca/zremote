@@ -145,6 +145,12 @@ pub enum BrowserMessage {
     },
     #[serde(rename = "scrollback_end")]
     ScrollbackEnd,
+    #[serde(rename = "image_paste_error")]
+    ImagePasteError {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_path: Option<String>,
+    },
 }
 
 /// Thread-safe store for active session state.
@@ -329,6 +335,14 @@ mod tests {
                 rows: 40,
             },
             BrowserMessage::ScrollbackEnd,
+            BrowserMessage::ImagePasteError {
+                message: "clipboard unavailable".to_string(),
+                fallback_path: Some("/tmp/test.png".to_string()),
+            },
+            BrowserMessage::ImagePasteError {
+                message: "no display".to_string(),
+                fallback_path: None,
+            },
         ];
         for msg in &messages {
             let json = serde_json::to_string(msg).unwrap();
@@ -373,6 +387,32 @@ mod tests {
         let msg = BrowserMessage::ScrollbackEnd;
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "scrollback_end");
+    }
+
+    #[test]
+    fn browser_message_image_paste_error_serialization() {
+        let msg = BrowserMessage::ImagePasteError {
+            message: "clipboard unavailable".to_string(),
+            fallback_path: Some("/tmp/zremote-paste-abc12345-20260402.png".to_string()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "image_paste_error");
+        assert_eq!(json["message"], "clipboard unavailable");
+        assert_eq!(
+            json["fallback_path"],
+            "/tmp/zremote-paste-abc12345-20260402.png"
+        );
+    }
+
+    #[test]
+    fn browser_message_image_paste_error_no_path() {
+        let msg = BrowserMessage::ImagePasteError {
+            message: "clipboard failed".to_string(),
+            fallback_path: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "image_paste_error");
+        assert!(json.get("fallback_path").is_none());
     }
 
     // --- ServerEvent serialization tests ---

@@ -124,6 +124,17 @@ pub enum AgentMessage {
     },
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
+    /// Image paste failed on headless (clipboard unavailable). Only sent on failure;
+    /// success is implicit (no message needed — Ctrl+V was sent to PTY).
+    /// Old servers that don't recognize this variant will log a parse error and
+    /// drop the message — this is the accepted protocol degradation path.
+    ImagePasteFailure {
+        session_id: SessionId,
+        #[serde(default)]
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_path: Option<String>,
+    },
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -965,5 +976,43 @@ mod tests {
             memories: vec![],
             conventions: vec![],
         });
+    }
+
+    #[test]
+    fn image_paste_failure_roundtrip() {
+        roundtrip_agent(&AgentMessage::ImagePasteFailure {
+            session_id: Uuid::new_v4(),
+            error: "clipboard init: no display server".to_string(),
+            fallback_path: Some("/tmp/zremote-paste-abc12345-20260402.png".to_string()),
+        });
+    }
+
+    #[test]
+    fn image_paste_failure_no_path_roundtrip() {
+        roundtrip_agent(&AgentMessage::ImagePasteFailure {
+            session_id: Uuid::new_v4(),
+            error: "clipboard unavailable".to_string(),
+            fallback_path: None,
+        });
+    }
+
+    #[test]
+    fn image_paste_failure_backward_compat() {
+        // Old servers that don't know ImagePasteFailure will fail to deserialize
+        // the tagged enum and log a parse error — this is the accepted protocol
+        // degradation path (fire-and-forget notification, no ack expected).
+        let json = r#"{"type":"ImagePasteFailure","payload":{"session_id":"00000000-0000-0000-0000-000000000000"}}"#;
+        let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
+        if let AgentMessage::ImagePasteFailure {
+            error,
+            fallback_path,
+            ..
+        } = msg
+        {
+            assert!(error.is_empty()); // defaults to empty string
+            assert!(fallback_path.is_none());
+        } else {
+            panic!("expected ImagePasteFailure variant");
+        }
     }
 }

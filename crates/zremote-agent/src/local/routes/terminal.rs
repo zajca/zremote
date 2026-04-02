@@ -149,50 +149,50 @@ async fn handle_terminal_connection(
 
 /// Decode a base64-encoded PNG, set it on the system clipboard, and send Ctrl+V
 /// to the PTY so Claude Code detects the paste and reads the clipboard image.
+///
+/// On clipboard failure, sends `BrowserMessage::ImagePasteError` directly to all
+/// browser senders and returns `Ok(())`. The caller does not need to handle errors.
 async fn set_clipboard_image_and_paste(
     b64_png: &str,
     state: &LocalAppState,
     session_id: &uuid::Uuid,
 ) -> Result<(), String> {
+    use crate::clipboard::{ImagePasteOutcome, try_clipboard_paste};
     use base64::Engine;
 
     let png_bytes = base64::engine::general_purpose::STANDARD
         .decode(b64_png)
         .map_err(|e| format!("base64 decode: {e}"))?;
 
-    // Decode PNG to RGBA for arboard
-    let decoder = png::Decoder::new(png_bytes.as_slice());
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("png decode: {e}"))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("png frame: {e}"))?;
-    buf.truncate(info.buffer_size());
+    let sid = *session_id;
+    // Run clipboard operations in a blocking task (arboard may interact with display server)
+    let outcome = tokio::task::spawn_blocking(move || try_clipboard_paste(&png_bytes, sid))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?;
 
-    let img_data = arboard::ImageData {
-        width: info.width as usize,
-        height: info.height as usize,
-        bytes: std::borrow::Cow::Owned(buf),
-    };
-
-    // Set clipboard in a blocking task (arboard may interact with display server)
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
-        clipboard
-            .set_image(img_data)
-            .map_err(|e| format!("clipboard set: {e}"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-
-    // Send Ctrl+V (0x16) to PTY so Claude Code reads the clipboard
-    let mut mgr = state.session_manager.lock().await;
-    mgr.write_to(session_id, &[0x16])
-        .map_err(|e| format!("PTY write: {e}"))?;
-
+    match outcome {
+        ImagePasteOutcome::Success => {
+            // Send Ctrl+V (0x16) to PTY so Claude Code reads the clipboard
+            let mut mgr = state.session_manager.lock().await;
+            mgr.write_to(session_id, &[0x16])
+                .map_err(|e| format!("PTY write: {e}"))?;
+        }
+        ImagePasteOutcome::Fallback { path, error } => {
+            tracing::warn!(session_id = %session_id, error = %error, "image paste fell back to temp file");
+            // Send error with fallback path back to browser
+            let sessions = state.sessions.read().await;
+            if let Some(session) = sessions.get(session_id) {
+                let msg = zremote_core::state::BrowserMessage::ImagePasteError {
+                    message: error,
+                    fallback_path: if path.is_empty() { None } else { Some(path) },
+                };
+                for sender in &session.browser_senders {
+                    if sender.try_send(msg.clone()).is_err() {
+                        tracing::warn!(session_id = %session_id, "failed to send image paste error to browser (channel full/closed)");
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

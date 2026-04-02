@@ -600,6 +600,24 @@ pub(super) async fn handle_agent_message(
                 );
             }
         }
+        AgentMessage::ImagePasteFailure {
+            session_id,
+            error,
+            fallback_path,
+        } => {
+            let sessions = state.sessions.read().await;
+            if let Some(session) = sessions.get(&session_id) {
+                let browser_msg = crate::state::BrowserMessage::ImagePasteError {
+                    message: error,
+                    fallback_path,
+                };
+                for sender in &session.browser_senders {
+                    if sender.try_send(browser_msg.clone()).is_err() {
+                        tracing::warn!(session_id = %session_id, "failed to send image paste error to browser (channel full/closed)");
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

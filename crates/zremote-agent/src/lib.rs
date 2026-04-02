@@ -24,6 +24,7 @@ mod agentic;
 mod bridge;
 mod ccline;
 mod claude;
+mod clipboard;
 mod config;
 mod connection;
 mod daemon;

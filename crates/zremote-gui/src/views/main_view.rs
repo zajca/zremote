@@ -594,6 +594,37 @@ impl MainView {
                     cx.notify();
                 });
             }
+            TerminalPanelEvent::ImagePasteError {
+                message,
+                fallback_path,
+            } => {
+                let mut actions = Vec::new();
+                if let Some(path) = fallback_path {
+                    let path_clone = path.clone();
+                    let input_tx = terminal.read(cx).input_sender();
+                    actions.push(ToastAction::new(
+                        "Paste file path",
+                        None,
+                        move |_window, _cx| {
+                            let _ = input_tx.send(path_clone.as_bytes().to_vec());
+                        },
+                    ));
+                }
+                let toast_msg = if fallback_path.is_some() {
+                    format!("Image saved to temp file: {message}")
+                } else {
+                    format!("Image paste failed: {message}")
+                };
+                self.toasts.update(cx, |container, _cx| {
+                    container.push_actionable(
+                        toast_msg,
+                        ToastLevel::Warning,
+                        Some(Icon::AlertTriangle),
+                        actions,
+                        fallback_path.is_some(), // persistent if there's a file to reference
+                    );
+                });
+            }
         }
     }
 

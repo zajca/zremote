@@ -625,6 +625,17 @@ impl TerminalPanel {
                         // for other errors, the terminal is closed.
                         break;
                     }
+                    Ok(GuiSignal::Event(TerminalEvent::ImagePasteError {
+                        message,
+                        fallback_path,
+                    })) => {
+                        let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                            cx.emit(TerminalPanelEvent::ImagePasteError {
+                                message,
+                                fallback_path,
+                            });
+                        });
+                    }
                     Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
                         let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                             this.disconnected = true;
@@ -871,6 +882,10 @@ pub enum TerminalPanelEvent {
     TitleChanged {
         session_id: String,
         title: Option<String>,
+    },
+    ImagePasteError {
+        message: String,
+        fallback_path: Option<String>,
     },
 }
 

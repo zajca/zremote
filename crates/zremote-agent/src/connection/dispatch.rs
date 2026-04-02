@@ -16,6 +16,8 @@ use crate::pty::shell_integration::ShellIntegrationConfig;
 use crate::session::SessionManager;
 use zremote_core::validation::validate_path_no_traversal;
 
+use crate::clipboard::{ImagePasteOutcome, try_clipboard_paste};
+
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_session_create(
@@ -143,40 +145,6 @@ async fn read_worktree_settings_server(
     settings.worktree
 }
 
-/// Decode PNG bytes, set the image on the system clipboard, and send Ctrl+V to the PTY.
-fn set_clipboard_image_and_send_paste(
-    session_manager: &mut SessionManager,
-    session_id: uuid::Uuid,
-    png_bytes: &[u8],
-) -> Result<(), String> {
-    let decoder = png::Decoder::new(png_bytes);
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("png decode: {e}"))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("png frame: {e}"))?;
-    buf.truncate(info.buffer_size());
-
-    let img_data = arboard::ImageData {
-        width: info.width as usize,
-        height: info.height as usize,
-        bytes: std::borrow::Cow::Owned(buf),
-    };
-
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
-    clipboard
-        .set_image(img_data)
-        .map_err(|e| format!("clipboard set: {e}"))?;
-
-    session_manager
-        .write_to(&session_id, &[0x16])
-        .map_err(|e| format!("PTY write: {e}"))?;
-
-    Ok(())
-}
-
 /// Handle a server message, dispatching session-related messages to the session manager.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn handle_server_message(
@@ -261,8 +229,34 @@ pub(super) async fn handle_server_message(
         ServerMessage::TerminalImagePaste { session_id, data } => {
             let sid = *session_id;
             let png_bytes = data.clone();
-            if let Err(e) = set_clipboard_image_and_send_paste(session_manager, sid, &png_bytes) {
-                tracing::warn!(session_id = %sid, error = %e, "image paste failed");
+            // arboard::Clipboard::new() blocks on X11/Wayland handshake —
+            // must run in spawn_blocking to avoid starving the async executor.
+            let outcome = tokio::task::spawn_blocking(move || try_clipboard_paste(&png_bytes, sid))
+                .await
+                .unwrap_or(ImagePasteOutcome::Fallback {
+                    path: String::new(),
+                    error: "spawn_blocking panicked".to_string(),
+                });
+            match outcome {
+                ImagePasteOutcome::Success => {
+                    if let Err(e) = session_manager.write_to(&sid, &[0x16]) {
+                        tracing::warn!(session_id = %sid, error = %e, "failed to send Ctrl+V after clipboard set");
+                    }
+                }
+                ImagePasteOutcome::Fallback { path, error } => {
+                    tracing::warn!(session_id = %sid, error = %error, fallback_path = %path, "image paste fell back to temp file");
+                    if outbound_tx
+                        .send(AgentMessage::ImagePasteFailure {
+                            session_id: sid,
+                            error,
+                            fallback_path: if path.is_empty() { None } else { Some(path) },
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(session_id = %sid, "failed to send ImagePasteFailure (outbound channel closed)");
+                    }
+                }
             }
         }
         ServerMessage::TerminalResize {
