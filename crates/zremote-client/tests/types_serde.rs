@@ -663,6 +663,7 @@ fn server_event_claude_task_updated() {
 
 #[test]
 fn server_event_claude_task_ended() {
+    // Test backward compat: old JSON without new optional fields
     let json = r#"{
         "type": "claude_task_ended",
         "task_id": "ct-001",
@@ -675,10 +676,50 @@ fn server_event_claude_task_ended() {
             task_id,
             status,
             summary,
+            session_id,
+            host_id,
+            project_path,
+            task_name,
         } => {
             assert_eq!(task_id, "ct-001");
             assert_eq!(status, ClaudeTaskStatus::Completed);
             assert_eq!(summary.as_deref(), Some("Done fixing tests"));
+            assert!(session_id.is_none());
+            assert!(host_id.is_none());
+            assert!(project_path.is_none());
+            assert!(task_name.is_none());
+        }
+        other => panic!("expected ClaudeTaskEnded, got {other:?}"),
+    }
+}
+
+#[test]
+fn server_event_claude_task_ended_with_context() {
+    let json = r#"{
+        "type": "claude_task_ended",
+        "task_id": "ct-002",
+        "status": "completed",
+        "summary": "Fixed it",
+        "session_id": "s-1",
+        "host_id": "h-1",
+        "project_path": "/home/user/project",
+        "task_name": "fix tests"
+    }"#;
+    let event: ServerEvent = serde_json::from_str(json).unwrap();
+    match event {
+        ServerEvent::ClaudeTaskEnded {
+            task_id,
+            session_id,
+            host_id,
+            project_path,
+            task_name,
+            ..
+        } => {
+            assert_eq!(task_id, "ct-002");
+            assert_eq!(session_id.as_deref(), Some("s-1"));
+            assert_eq!(host_id.as_deref(), Some("h-1"));
+            assert_eq!(project_path.as_deref(), Some("/home/user/project"));
+            assert_eq!(task_name.as_deref(), Some("fix tests"));
         }
         other => panic!("expected ClaudeTaskEnded, got {other:?}"),
     }

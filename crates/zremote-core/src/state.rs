@@ -587,12 +587,20 @@ mod tests {
             task_id: "task-1".to_string(),
             status: ClaudeTaskStatus::Completed,
             summary: Some("Fixed the bug".to_string()),
+            session_id: Some("s-1".to_string()),
+            host_id: Some("h-1".to_string()),
+            project_path: Some("/home/user/project".to_string()),
+            task_name: Some("fix tests".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "claude_task_ended");
         assert_eq!(json["task_id"], "task-1");
         assert_eq!(json["status"], "completed");
         assert_eq!(json["summary"], "Fixed the bug");
+        assert_eq!(json["session_id"], "s-1");
+        assert_eq!(json["host_id"], "h-1");
+        assert_eq!(json["project_path"], "/home/user/project");
+        assert_eq!(json["task_name"], "fix tests");
     }
 
     // --- Binary frame encoding/decoding tests ---
@@ -663,6 +671,10 @@ mod tests {
             task_id: "task-1".to_string(),
             status: ClaudeTaskStatus::Error,
             summary: Some("PTY spawn failed".to_string()),
+            session_id: None,
+            host_id: None,
+            project_path: None,
+            task_name: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "claude_task_ended");
@@ -810,6 +822,10 @@ mod tests {
                 task_id: "t1".to_string(),
                 status: ClaudeTaskStatus::Completed,
                 summary: Some("done".to_string()),
+                session_id: Some("s1".to_string()),
+                host_id: Some("h1".to_string()),
+                project_path: Some("/home/user/project".to_string()),
+                task_name: Some("fix bug".to_string()),
             },
         ];
         for event in &events {

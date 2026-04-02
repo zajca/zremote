@@ -257,12 +257,16 @@ impl MainView {
     }
 
     /// Build a [`ToastContext`] by resolving human-readable names from IDs.
+    ///
+    /// `hostname` is a direct fallback for `host_name` when the sidebar hasn't
+    /// loaded hosts yet (e.g. first event after connect).
     fn resolve_toast_context(
         &self,
         session_id: Option<&str>,
         host_id: Option<&str>,
         project_path: Option<&str>,
         task_name: Option<&str>,
+        hostname: Option<&str>,
         cx: &Context<Self>,
     ) -> ToastContext {
         let sidebar = self.sidebar.read(cx);
@@ -270,8 +274,9 @@ impl MainView {
         let sessions = sidebar.sessions_rc();
         let projects = sidebar.projects_rc();
 
-        let host_name =
-            host_id.and_then(|hid| hosts.iter().find(|h| h.id == hid).map(|h| h.name.clone()));
+        let host_name = host_id
+            .and_then(|hid| hosts.iter().find(|h| h.id == hid).map(|h| h.name.clone()))
+            .or_else(|| hostname.map(String::from));
 
         let session_name = session_id.and_then(|sid| {
             sessions
@@ -332,7 +337,10 @@ impl MainView {
                 || "ZRemote".to_string(),
                 |sub| format!("ZRemote \u{2014} {sub}"),
             );
-            crate::notifications::send_native(&title, message, level, &self.app_state.tokio_handle);
+            let body = subtitle
+                .as_deref()
+                .map_or_else(|| message.to_string(), |sub| format!("{message}\n{sub}"));
+            crate::notifications::send_native(&title, &body, level, &self.app_state.tokio_handle);
         }
     }
 
@@ -367,7 +375,8 @@ impl MainView {
             message,
         } = event
         {
-            let ctx = self.resolve_toast_context(None, Some(host_id), Some(project_path), None, cx);
+            let ctx =
+                self.resolve_toast_context(None, Some(host_id), Some(project_path), None, None, cx);
             let msg = format!("Worktree error: {message}");
             self.show_toast(&msg, ToastLevel::Error, Some(Icon::AlertTriangle), ctx, cx);
         }
@@ -393,6 +402,7 @@ impl MainView {
                     Some(host_id),
                     Some(project_path),
                     None,
+                    None,
                     cx,
                 );
                 let name = project_path.rsplit('/').next().unwrap_or(project_path);
@@ -408,6 +418,10 @@ impl MainView {
                 task_id,
                 status,
                 summary,
+                session_id: ev_sid,
+                host_id: ev_hid,
+                project_path: ev_pp,
+                task_name: ev_tn,
             } => {
                 let (level, prefix) = match status {
                     zremote_client::ClaudeTaskStatus::Completed => {
@@ -419,19 +433,37 @@ impl MainView {
                 let msg = summary
                     .as_deref()
                     .map_or_else(|| prefix.to_string(), |s| format!("{prefix}: {s}"));
-                // Look up session/host from our map, or fall back to sidebar's task tracker
-                // (handles GUI reconnect where ClaudeTaskStarted was missed).
-                let task_ids = self.claude_task_sessions.remove(task_id).or_else(|| {
-                    self.sidebar
-                        .read(cx)
-                        .claude_task_context(task_id)
-                        .map(|(s, h)| (s.to_string(), h.to_string()))
-                });
-                let ctx = if let Some((sid, hid)) = task_ids {
-                    self.resolve_toast_context(Some(&sid), Some(&hid), None, None, cx)
+                // Tier 1: use enriched event fields
+                // Tier 2: local map (ClaudeTaskStarted cache)
+                // Tier 3: sidebar task tracker (handles GUI reconnect)
+                let (sid, hid, ppath, tname) = if ev_sid.is_some() || ev_hid.is_some() {
+                    (
+                        ev_sid.as_deref().map(String::from),
+                        ev_hid.as_deref().map(String::from),
+                        ev_pp.as_deref().map(String::from),
+                        ev_tn.as_deref().map(String::from),
+                    )
+                } else if let Some((s, h)) = self.claude_task_sessions.remove(task_id) {
+                    (Some(s), Some(h), None, None)
+                } else if let Some((s, h, pp)) = self.sidebar.read(cx).claude_task_context(task_id)
+                {
+                    (
+                        Some(s.to_string()),
+                        Some(h.to_string()),
+                        Some(pp.to_string()),
+                        None,
+                    )
                 } else {
-                    ToastContext::default()
+                    (None, None, None, None)
                 };
+                let ctx = self.resolve_toast_context(
+                    sid.as_deref(),
+                    hid.as_deref(),
+                    ppath.as_deref(),
+                    tname.as_deref(),
+                    None,
+                    cx,
+                );
                 self.show_toast(&msg, level, Some(Icon::Bot), ctx, cx);
             }
             _ => {}
@@ -505,7 +537,9 @@ impl MainView {
     fn handle_loop_notifications(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
         match event {
             ServerEvent::LoopStatusChanged {
-                loop_info, host_id, ..
+                loop_info,
+                host_id,
+                hostname,
             } => {
                 match loop_info.status {
                     AgenticStatus::WaitingForInput => {
@@ -553,6 +587,7 @@ impl MainView {
                             Some(host_id),
                             loop_info.project_path.as_deref(),
                             loop_info.task_name.as_deref(),
+                            Some(hostname),
                             cx,
                         );
 
@@ -586,9 +621,14 @@ impl MainView {
                         // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
                         if !self.window_active {
                             let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
-                            let title = ctx.subtitle().map_or_else(
+                            let subtitle = ctx.subtitle();
+                            let title = subtitle.as_deref().map_or_else(
                                 || "ZRemote".to_string(),
                                 |sub| format!("ZRemote \u{2014} {sub}"),
+                            );
+                            let body = subtitle.as_deref().map_or_else(
+                                || sanitized.clone(),
+                                |sub| format!("{sanitized}\n{sub}"),
                             );
                             let is_recent = self
                                 .last_viewed_session
@@ -601,7 +641,7 @@ impl MainView {
                             };
                             crate::notifications::send_native_with_urgency(
                                 &title,
-                                &sanitized,
+                                &body,
                                 ToastLevel::Warning,
                                 urgency,
                                 &self.app_state.tokio_handle,
@@ -622,7 +662,9 @@ impl MainView {
                 }
             }
             ServerEvent::LoopEnded {
-                loop_info, host_id, ..
+                loop_info,
+                host_id,
+                hostname,
             } => {
                 // Dismiss any active WaitingForInput toast and clear seen state
                 self.seen_waiting_loops.remove(&loop_info.id);
@@ -644,6 +686,7 @@ impl MainView {
                     Some(host_id),
                     loop_info.project_path.as_deref(),
                     loop_info.task_name.as_deref(),
+                    Some(hostname),
                     cx,
                 );
                 self.show_toast(&msg, level, Some(Icon::Bot), ctx, cx);
@@ -828,7 +871,8 @@ impl MainView {
                 });
             }
             CommandPaletteEvent::AddProject { host_id, path } => {
-                let ctx = self.resolve_toast_context(None, Some(host_id), Some(path), None, cx);
+                let ctx =
+                    self.resolve_toast_context(None, Some(host_id), Some(path), None, None, cx);
                 let api = self.app_state.api.clone();
                 let host_id = host_id.clone();
                 let path = path.clone();
@@ -854,6 +898,7 @@ impl MainView {
                     let ctx = self.resolve_toast_context(
                         Some(&session_id),
                         Some(&host_id),
+                        None,
                         None,
                         None,
                         cx,

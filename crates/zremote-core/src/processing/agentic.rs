@@ -393,11 +393,15 @@ impl AgenticProcessor {
         }
 
         // Update linked claude_session if any
-        if let Ok(Some((task_id,))) =
-            sqlx::query_as::<_, (String,)>("SELECT id FROM claude_sessions WHERE loop_id = ?")
-                .bind(&loop_id_str)
-                .fetch_optional(&self.db)
-                .await
+        if let Ok(Some((task_id, cs_session_id, cs_project_path, cs_task_name))) = sqlx::query_as::<
+            _,
+            (String, String, Option<String>, Option<String>),
+        >(
+            "SELECT id, session_id, project_path, task_name FROM claude_sessions WHERE loop_id = ?",
+        )
+        .bind(&loop_id_str)
+        .fetch_optional(&self.db)
+        .await
         {
             let now_str = chrono::Utc::now().to_rfc3339();
             let _ = sqlx::query(
@@ -412,6 +416,10 @@ impl AgenticProcessor {
                 task_id,
                 status: ClaudeTaskStatus::Completed,
                 summary: None,
+                session_id: Some(cs_session_id),
+                host_id: Some(self.host_id.to_string()),
+                project_path: cs_project_path,
+                task_name: cs_task_name,
             });
         }
 

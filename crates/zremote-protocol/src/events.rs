@@ -148,6 +148,14 @@ pub enum ServerEvent {
         task_id: String,
         status: ClaudeTaskStatus,
         summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_name: Option<String>,
     },
     #[serde(rename = "claude_session_metrics")]
     ClaudeSessionMetrics {
@@ -327,6 +335,10 @@ mod tests {
                 task_id: "t1".to_string(),
                 status: ClaudeTaskStatus::Completed,
                 summary: Some("done".to_string()),
+                session_id: Some("s1".to_string()),
+                host_id: Some("h1".to_string()),
+                project_path: Some("/home/user/project".to_string()),
+                task_name: Some("fix bug".to_string()),
             },
             ServerEvent::ClaudeSessionMetrics {
                 session_id: "cs1".to_string(),

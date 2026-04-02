@@ -116,11 +116,15 @@ impl SidebarView {
         &self.cc_metrics
     }
 
-    /// Look up a Claude task's session and host IDs by task ID.
-    pub fn claude_task_context(&self, task_id: &str) -> Option<(&str, &str)> {
-        self.claude_tasks
-            .get(task_id)
-            .map(|t| (t.session_id.as_str(), t.host_id.as_str()))
+    /// Look up a Claude task's session, host, and project path by task ID.
+    pub fn claude_task_context(&self, task_id: &str) -> Option<(&str, &str, &str)> {
+        self.claude_tasks.get(task_id).map(|t| {
+            (
+                t.session_id.as_str(),
+                t.host_id.as_str(),
+                t.project_path.as_str(),
+            )
+        })
     }
 
     /// Set or clear the OSC terminal title for a session.
@@ -440,6 +444,7 @@ impl SidebarView {
                 task_id,
                 status,
                 summary,
+                ..
             } => {
                 if let Some(task) = self.claude_tasks.get_mut(task_id) {
                     task.status = *status;

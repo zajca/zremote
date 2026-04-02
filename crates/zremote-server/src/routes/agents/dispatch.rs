@@ -199,8 +199,8 @@ pub(super) async fn handle_agent_message(
                 .execute(&state.db)
                 .await
                     && result.rows_affected() > 0
-                    && let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
-                        "SELECT id FROM claude_sessions WHERE session_id = ? AND status = 'error'",
+                    && let Ok(Some((task_id, cs_pp, cs_tn))) = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                        "SELECT id, project_path, task_name FROM claude_sessions WHERE session_id = ? AND status = 'error'",
                     )
                     .bind(&session_id_str)
                     .fetch_optional(&state.db)
@@ -210,6 +210,10 @@ pub(super) async fn handle_agent_message(
                         task_id,
                         status: ClaudeTaskStatus::Error,
                         summary: Some("session closed before Claude started".to_string()),
+                        session_id: Some(session_id_str.clone()),
+                        host_id: Some(host_id.to_string()),
+                        project_path: cs_pp,
+                        task_name: cs_tn,
                     });
                 }
                 // active -> completed (normal exit)
@@ -222,8 +226,8 @@ pub(super) async fn handle_agent_message(
                 .execute(&state.db)
                 .await
                     && result.rows_affected() > 0
-                    && let Ok(Some((task_id,))) = sqlx::query_as::<_, (String,)>(
-                        "SELECT id FROM claude_sessions WHERE session_id = ?",
+                    && let Ok(Some((task_id, cs_pp, cs_tn))) = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                        "SELECT id, project_path, task_name FROM claude_sessions WHERE session_id = ?",
                     )
                     .bind(&session_id_str)
                     .fetch_optional(&state.db)
@@ -233,6 +237,10 @@ pub(super) async fn handle_agent_message(
                         task_id,
                         status: ClaudeTaskStatus::Completed,
                         summary: None,
+                        session_id: Some(session_id_str.clone()),
+                        host_id: Some(host_id.to_string()),
+                        project_path: cs_pp,
+                        task_name: cs_tn,
                     });
                 }
             }
@@ -1076,11 +1084,13 @@ pub(super) async fn handle_agentic_message(
             }
 
             // Update linked claude_session if any
-            if let Ok(Some((task_id,))) =
-                sqlx::query_as::<_, (String,)>("SELECT id FROM claude_sessions WHERE loop_id = ?")
-                    .bind(&loop_id_str)
-                    .fetch_optional(&state.db)
-                    .await
+            if let Ok(Some((task_id, cs_sid, cs_pp, cs_tn))) =
+                sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+                    "SELECT id, session_id, project_path, task_name FROM claude_sessions WHERE loop_id = ?",
+                )
+                .bind(&loop_id_str)
+                .fetch_optional(&state.db)
+                .await
             {
                 let now_str = chrono::Utc::now().to_rfc3339();
                 let _ = sqlx::query(
@@ -1095,6 +1105,10 @@ pub(super) async fn handle_agentic_message(
                     task_id,
                     status: ClaudeTaskStatus::Completed,
                     summary: None,
+                    session_id: Some(cs_sid),
+                    host_id: Some(host_id.to_string()),
+                    project_path: cs_pp,
+                    task_name: cs_tn,
                 });
             }
 
@@ -1250,6 +1264,16 @@ async fn handle_claude_message(
             let now = chrono::Utc::now().to_rfc3339();
             tracing::warn!(host_id = %host_id, task_id = %task_id_str, error = %error, "claude session start failed");
 
+            // Fetch context before marking as error.
+            let ctx: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT session_id, project_path, task_name FROM claude_sessions WHERE id = ?",
+            )
+            .bind(&task_id_str)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
             if let Err(e) = sqlx::query(
                 "UPDATE claude_sessions SET status = 'error', ended_at = ? WHERE id = ?",
             )
@@ -1261,10 +1285,16 @@ async fn handle_claude_message(
                 tracing::error!(task_id = %task_id_str, error = %e, "failed to update claude task status");
             }
 
+            let (cs_sid, cs_pp, cs_tn) =
+                ctx.map_or((None, None, None), |(s, p, t)| (Some(s), p, t));
             let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
                 task_id: task_id_str,
                 status: ClaudeTaskStatus::Error,
                 summary: Some(error),
+                session_id: cs_sid,
+                host_id: Some(host_id.to_string()),
+                project_path: cs_pp,
+                task_name: cs_tn,
             });
         }
         ClaudeAgentMessage::SessionsDiscovered {
