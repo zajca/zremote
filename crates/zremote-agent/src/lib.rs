@@ -167,9 +167,16 @@ pub fn run(command: Option<Commands>) {
         }
 
         // setsid() must be called before tokio runtime starts
-        if let Err(e) = nix::unistd::setsid() {
-            eprintln!("setsid failed: {e}");
-            std::process::exit(1);
+        match nix::unistd::setsid() {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EPERM) => {
+                // Already a process group leader (e.g. spawned via systemd-run --scope).
+                // This is fine — we already have the isolation setsid() would provide.
+            }
+            Err(e) => {
+                eprintln!("setsid failed: {e}");
+                std::process::exit(1);
+            }
         }
 
         tracing_subscriber::fmt()
