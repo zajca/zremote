@@ -99,22 +99,6 @@ jobs:
         with:
           tool: cross
 
-      - name: Build server
-        run: |
-          if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p zremote-server
-          else
-            cargo build --release --target ${{ matrix.target }} -p zremote-server
-          fi
-
-      - name: Build agent
-        run: |
-          if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p zremote-agent
-          else
-            cargo build --release --target ${{ matrix.target }} -p zremote-agent
-          fi
-
       - name: Build unified binary (headless)
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
@@ -126,8 +110,6 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/zremote-server dist/
-          cp target/${{ matrix.target }}/release/zremote-agent dist/
           cp target/${{ matrix.target }}/release/zremote dist/
           cd dist && tar czf ../zremote-${{ matrix.target }}.tar.gz *
 
@@ -180,16 +162,12 @@ jobs:
             libasound2-dev \
             cmake
 
-      - name: Build GPUI client
-        run: cargo build --release --target ${{ matrix.target }} -p zremote-gui
-
       - name: Build unified binary (desktop)
         run: cargo build --release --target ${{ matrix.target }} -p zremote
 
       - name: Package
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/zremote-gui dist/
           cp target/${{ matrix.target }}/release/zremote dist/
           cd dist && tar czf ../zremote-gui-${{ matrix.label }}.tar.gz *
 

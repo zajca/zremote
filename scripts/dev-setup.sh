@@ -14,4 +14,4 @@ cargo build --workspace
 echo ""
 echo "Dev environment ready!"
 echo "  Backend only:      ./scripts/dev-backend.sh"
-echo "  GPUI client:       cargo run -p zremote-gui"
+echo "  GPUI client:       cargo run -p zremote -- gui"

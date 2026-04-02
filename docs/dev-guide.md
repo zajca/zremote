@@ -19,10 +19,10 @@ The setup script is idempotent -- safe to re-run anytime.
 
 ```bash
 # Run the GPUI desktop client (connects to localhost:3000 by default)
-cargo run -p zremote-gui
+cargo run -p zremote -- gui
 
 # Run the agent in local mode
-cargo run -p zremote-agent -- local --port 3000
+cargo run -p zremote -- agent local --port 3000
 ```
 
 ## Running Tests
@@ -80,12 +80,12 @@ crates/
   zremote-protocol/     # Shared message types (agent <-> server)
   zremote-core/         # Shared DB, queries, processing
   zremote-server/       # Multi-host server (Axum)
-  zremote-agent/        # Agent binary (local + server + MCP modes)
+  zremote-agent/        # Agent library (local + server + MCP modes)
 ```
 
 ## Useful Commands
 
 ```bash
 # Run agent with verbose logging
-RUST_LOG=debug cargo run -p zremote-agent -- local --port 3000
+RUST_LOG=debug cargo run -p zremote -- agent local --port 3000
 ```

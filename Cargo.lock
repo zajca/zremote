@@ -9176,7 +9176,6 @@ dependencies = [
  "arboard",
  "base64",
  "chrono",
- "clap",
  "dirs 6.0.0",
  "flume",
  "gpui",
@@ -9188,7 +9187,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "zremote-client",
 ]
@@ -9224,7 +9222,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "zremote-core",
  "zremote-protocol",

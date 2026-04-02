@@ -149,7 +149,6 @@ cargo check -p zremote                # Fast unified binary check
 cargo check -p zremote-gui            # Fast GUI check (no system libs needed)
 cargo build -p zremote                # Unified binary (GUI + agent, requires nix develop)
 cargo build -p zremote --no-default-features --features agent  # Headless (no GUI deps)
-cargo build -p zremote-agent --no-default-features  # Minimal agent (no local/server)
 ```
 
 Tests use in-memory SQLite (`sqlite::memory:`) for fast isolation.

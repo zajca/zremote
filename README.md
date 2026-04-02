@@ -46,15 +46,15 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 
 | Platform | Archive | Contents |
 |----------|---------|----------|
-| Linux x86_64 | `zremote-x86_64-unknown-linux-musl.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
-| Linux aarch64 | `zremote-aarch64-unknown-linux-musl.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
-| macOS x86_64 | `zremote-x86_64-apple-darwin.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
-| macOS aarch64 | `zremote-aarch64-apple-darwin.tar.gz` | `zremote`, `zremote-agent`, `zremote-server` |
-| Linux x86_64 (GUI) | `zremote-gui-x86_64-linux.tar.gz` | `zremote` (unified), `zremote-gui` |
-| macOS x86_64 (GUI) | `zremote-gui-x86_64-apple-darwin.tar.gz` | `zremote` (unified), `zremote-gui` |
-| macOS aarch64 (GUI) | `zremote-gui-aarch64-apple-darwin.tar.gz` | `zremote` (unified), `zremote-gui` |
+| Linux x86_64 | `zremote-x86_64-unknown-linux-musl.tar.gz` | `zremote` (headless) |
+| Linux aarch64 | `zremote-aarch64-unknown-linux-musl.tar.gz` | `zremote` (headless) |
+| macOS x86_64 | `zremote-x86_64-apple-darwin.tar.gz` | `zremote` (headless) |
+| macOS aarch64 | `zremote-aarch64-apple-darwin.tar.gz` | `zremote` (headless) |
+| Linux x86_64 (GUI) | `zremote-gui-x86_64-linux.tar.gz` | `zremote` (desktop) |
+| macOS x86_64 (GUI) | `zremote-gui-x86_64-apple-darwin.tar.gz` | `zremote` (desktop) |
+| macOS aarch64 (GUI) | `zremote-gui-aarch64-apple-darwin.tar.gz` | `zremote` (desktop) |
 
-Desktop archives contain the **unified `zremote` binary** with both GUI and agent built in. Headless archives contain `zremote` with agent-only (no GUI dependencies).
+Desktop archives contain `zremote` with both GUI and agent built in. Headless archives contain `zremote` with agent-only (no GUI dependencies).
 
 **From source** (Nix recommended):
 
@@ -100,10 +100,6 @@ zremote agent mcp-serve --project /path/to/project
 ```
 
 Exposes project knowledge and tools over JSON-RPC stdio transport.
-
-### Legacy binaries
-
-The standalone `zremote-agent`, `zremote-server`, and `zremote-gui` binaries are still included for backwards compatibility. They are thin wrappers around the same library code.
 
 ## Architecture
 
@@ -337,9 +333,6 @@ Or manually install: Rust 1.94+, SQLite, libxcb, libxkbcommon, libxkbcommon-x11,
 cargo build --workspace                          # Full workspace
 cargo build -p zremote                           # Unified binary (GUI + agent)
 cargo build -p zremote --no-default-features --features agent  # Headless (no GUI)
-cargo build -p zremote-gui                       # Standalone GUI
-cargo build -p zremote-agent                     # Standalone agent (with local + server)
-cargo build -p zremote-agent --no-default-features  # Agent without local/server
 ```
 
 ### Tests
@@ -354,8 +347,8 @@ cargo clippy --workspace               # Lint
 ```
 crates/
   zremote/                # Unified binary facade (feature-gated GUI + agent)
-  zremote-gui/            # Native GPUI desktop client (library + standalone binary)
-  zremote-agent/          # Agent (library + standalone binary, local/server/MCP modes)
+  zremote-gui/            # Native GPUI desktop client library
+  zremote-agent/          # Agent library (local/server/MCP modes)
   zremote-server/         # Server library (consumed by agent's "server" subcommand)
   zremote-protocol/       # Shared WebSocket message types
   zremote-core/           # Shared types, DB, queries, message processing

@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-COMMAND="${1:-./target/debug/zremote-gui --exit-after 5}"
+COMMAND="${1:-./target/debug/zremote gui --exit-after 5}"
 OUTPUT="${2:-/tmp/zremote-gpui-screenshot.png}"
 DELAY="${3:-3}"
 
