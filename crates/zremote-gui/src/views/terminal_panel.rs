@@ -499,8 +499,7 @@ impl TerminalPanel {
                     event = output_rx.recv_async() => {
                         match event {
                             Ok(TerminalEvent::Output(bytes)) => {
-                                let no_dsr = strip_dsr_queries(&bytes);
-                                let clean = strip_cpr_responses(&no_dsr);
+                                let clean = strip_cpr_responses(&bytes);
                                 if let Ok(mut t) = term.lock() {
                                     processor.advance(&mut *t, &clean);
                                 }
@@ -1772,66 +1771,6 @@ fn strip_cpr_responses(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
-/// Strip Device Status Report queries (`ESC [ 6 n` and `ESC [ ? 6 n`) from output bytes.
-///
-/// In a remote terminal, the shell's DSR query is meant for its local PTY, not the
-/// GUI-side terminal emulator. Alacritty would respond with its own cursor position
-/// which is meaningless to the remote shell, and the round-trip latency means the
-/// response often arrives after the shell has moved on — causing garbage text.
-fn strip_dsr_queries(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    use std::borrow::Cow;
-
-    if !data.contains(&0x1b) {
-        return Cow::Borrowed(data);
-    }
-
-    let mut result: Vec<u8> = Vec::new();
-    let mut i = 0;
-    let mut last_copy = 0;
-
-    while i < data.len() {
-        if data[i] == 0x1b {
-            // Check for ESC [ 6 n (4 bytes)
-            if i + 3 < data.len()
-                && data[i + 1] == b'['
-                && data[i + 2] == b'6'
-                && data[i + 3] == b'n'
-            {
-                if result.is_empty() && last_copy == 0 {
-                    result.reserve(data.len());
-                }
-                result.extend_from_slice(&data[last_copy..i]);
-                i += 4;
-                last_copy = i;
-                continue;
-            }
-            // Check for ESC [ ? 6 n (5 bytes)
-            if i + 4 < data.len()
-                && data[i + 1] == b'['
-                && data[i + 2] == b'?'
-                && data[i + 3] == b'6'
-                && data[i + 4] == b'n'
-            {
-                if result.is_empty() && last_copy == 0 {
-                    result.reserve(data.len());
-                }
-                result.extend_from_slice(&data[last_copy..i]);
-                i += 5;
-                last_copy = i;
-                continue;
-            }
-        }
-        i += 1;
-    }
-
-    if last_copy > 0 {
-        result.extend_from_slice(&data[last_copy..]);
-        Cow::Owned(result)
-    } else {
-        Cow::Borrowed(data)
-    }
-}
-
 #[cfg(test)]
 mod strip_cpr_tests {
     use super::strip_cpr_responses;
@@ -1927,78 +1866,5 @@ mod strip_cpr_tests {
         let data = b"\x1b[4;1R\x1b[1;32mtext";
         let result = strip_cpr_responses(data);
         assert_eq!(&*result, b"\x1b[1;32mtext");
-    }
-}
-
-#[cfg(test)]
-mod strip_dsr_tests {
-    use super::strip_dsr_queries;
-
-    #[test]
-    fn no_esc_returns_borrowed() {
-        let data = b"hello world";
-        let result = strip_dsr_queries(data);
-        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(&*result, b"hello world");
-    }
-
-    #[test]
-    fn single_dsr_stripped() {
-        let data = b"\x1b[6n";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"");
-    }
-
-    #[test]
-    fn dsr_with_surrounding_text() {
-        let data = b"before\x1b[6nafter";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"beforeafter");
-    }
-
-    #[test]
-    fn extended_dsr_stripped() {
-        let data = b"\x1b[?6n";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"");
-    }
-
-    #[test]
-    fn multiple_dsrs_stripped() {
-        let data = b"\x1b[6ntext\x1b[6n";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"text");
-    }
-
-    #[test]
-    fn non_dsr_sequences_preserved() {
-        // ESC[6m is SGR (not DSR), ESC[5n is DSR status (not cursor pos) — preserve both
-        let data = b"\x1b[6m\x1b[5n";
-        let result = strip_dsr_queries(data);
-        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(&*result, b"\x1b[6m\x1b[5n");
-    }
-
-    #[test]
-    fn mixed_dsr_and_sgr() {
-        let data = b"\x1b[1m\x1b[6nhello\x1b[0m";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"\x1b[1mhello\x1b[0m");
-    }
-
-    #[test]
-    fn both_dsr_variants_in_one_buffer() {
-        let data = b"\x1b[6n\x1b[?6n";
-        let result = strip_dsr_queries(data);
-        assert_eq!(&*result, b"");
-    }
-
-    #[test]
-    fn truncated_dsr_at_end_preserved() {
-        // Incomplete DSR at buffer end — must not be stripped
-        let data = b"text\x1b[6";
-        let result = strip_dsr_queries(data);
-        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(&*result, b"text\x1b[6");
     }
 }
