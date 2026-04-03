@@ -201,7 +201,8 @@ pub(super) fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem>
                 .as_deref()
                 .and_then(|pid| snapshot.project_name(pid));
 
-            let title = session_title(s);
+            let cc = snapshot.cc_states.get(&s.id);
+            let title = session_title(s, cc);
             let subtitle = session_subtitle(s, &host_name, project_name.as_deref(), &snapshot.mode);
 
             ResultItem {
@@ -482,19 +483,19 @@ pub(super) fn build_session_drill_items_from(
 // Free functions
 // ---------------------------------------------------------------------------
 
-pub(super) fn session_title(session: &Session) -> String {
-    let base = session
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("Session {}", &session.id[..8.min(session.id.len())]));
-
-    if session.name.is_some()
-        && let Some(ref shell) = session.shell
-    {
-        return format!("{base} ({shell})");
+/// Build a display title: session name > task name > "Session {id8}"
+pub(super) fn session_title(session: &Session, cc: Option<&CcState>) -> String {
+    if let Some(ref name) = session.name {
+        return if let Some(ref shell) = session.shell {
+            format!("{name} ({shell})")
+        } else {
+            name.clone()
+        };
     }
-
-    base
+    if let Some(task) = cc.and_then(|c| c.task_name.as_ref()) {
+        return task.clone();
+    }
+    format!("Session {}", &session.id[..8.min(session.id.len())])
 }
 
 fn session_subtitle(

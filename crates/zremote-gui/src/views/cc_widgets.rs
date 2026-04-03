@@ -233,6 +233,32 @@ pub fn render_cc_tooltip(
     content
 }
 
+/// Returns (background, foreground, label) for a permission mode badge.
+pub fn permission_mode_badge_style(mode: &str) -> (Rgba, Rgba, &'static str) {
+    match mode {
+        "plan" => {
+            let c = theme::warning();
+            (Rgba { a: 0.15, ..c }, c, "plan")
+        }
+        "auto" => {
+            let c = theme::accent();
+            (Rgba { a: 0.15, ..c }, c, "auto")
+        }
+        "acceptEdits" => {
+            let c = theme::success();
+            (Rgba { a: 0.15, ..c }, c, "accept")
+        }
+        "bypassPermissions" | "dontAsk" => {
+            let c = theme::error();
+            (Rgba { a: 0.15, ..c }, c, "bypass")
+        }
+        _ => {
+            let c = theme::text_tertiary();
+            (Rgba { a: 0.15, ..c }, c, "other")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{context_usage_200k, extract_version, format_cost, short_model_name};

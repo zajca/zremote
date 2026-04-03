@@ -1179,28 +1179,8 @@ impl SidebarView {
                     && let Some(ref mode) = cc.permission_mode
                     && mode != "default"
                 {
-                    let (badge_bg, badge_text, label) = match mode.as_str() {
-                        "plan" => {
-                            let c = theme::warning();
-                            (Rgba { a: 0.15, ..c }, c, "plan")
-                        }
-                        "auto" => {
-                            let c = theme::accent();
-                            (Rgba { a: 0.15, ..c }, c, "auto")
-                        }
-                        "acceptEdits" => {
-                            let c = theme::success();
-                            (Rgba { a: 0.15, ..c }, c, "accept")
-                        }
-                        "bypassPermissions" | "dontAsk" => {
-                            let c = theme::error();
-                            (Rgba { a: 0.15, ..c }, c, "bypass")
-                        }
-                        _ => {
-                            let c = theme::text_tertiary();
-                            (Rgba { a: 0.15, ..c }, c, mode.as_str())
-                        }
-                    };
+                    let (badge_bg, badge_text, label) =
+                        cc_widgets::permission_mode_badge_style(mode);
                     row1 = row1.child(
                         div()
                             .flex_shrink_0()

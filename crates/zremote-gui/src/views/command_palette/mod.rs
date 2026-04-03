@@ -984,6 +984,25 @@ impl CommandPalette {
 
         let mut row = div().flex().items_center().gap(px(6.0)).flex_shrink_0();
 
+        // Permission mode badge
+        if let Some(cc) = cc_state
+            && let Some(ref mode) = cc.permission_mode
+            && mode != "default"
+        {
+            let (bg, fg, label) = cc_widgets::permission_mode_badge_style(mode);
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .bg(bg)
+                    .text_color(fg)
+                    .text_size(px(10.0))
+                    .child(label.to_string()),
+            );
+        }
+
         // Agentic state indicator
         if let Some(cc) = cc_state {
             row = row.child(cc_widgets::cc_bot_icon(cc.status, 12.0).flex_shrink_0());
@@ -1618,7 +1637,8 @@ impl CommandPalette {
             ),
             Some(DrillDownLevel::Session { session_idx }) => {
                 let session = &self.snapshot.sessions[*session_idx];
-                ("Sessions".to_string(), session_title(session))
+                let cc = self.snapshot.cc_states.get(&session.id);
+                ("Sessions".to_string(), session_title(session, cc))
             }
             Some(DrillDownLevel::HostPicker) => ("Actions".to_string(), "Select Host".to_string()),
             Some(DrillDownLevel::HostPickerForProject) => {

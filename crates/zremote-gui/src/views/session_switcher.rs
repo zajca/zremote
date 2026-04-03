@@ -41,6 +41,8 @@ struct SwitcherEntry {
     cc_state: Option<(AgenticStatus, Option<String>)>,
     /// Claude Code session metrics (context, cost, model).
     cc_metrics: Option<CcMetrics>,
+    /// CC permission mode (plan, auto, acceptEdits, etc.)
+    permission_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +269,28 @@ impl Render for SessionSwitcher {
                                         )
                                     }),
                             )
+                            // Permission mode badge
+                            .when_some(
+                                entry
+                                    .permission_mode
+                                    .as_ref()
+                                    .filter(|m| m.as_str() != "default"),
+                                |d: Stateful<Div>, mode| {
+                                    let (bg, fg, label) =
+                                        cc_widgets::permission_mode_badge_style(mode);
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .px(px(4.0))
+                                            .py(px(1.0))
+                                            .rounded(px(3.0))
+                                            .bg(bg)
+                                            .text_color(fg)
+                                            .text_size(px(10.0))
+                                            .child(label.to_string()),
+                                    )
+                                },
+                            )
                             // Agentic state indicator
                             .when_some(
                                 entry.cc_state.as_ref(),
@@ -394,12 +418,11 @@ fn build_entries(
                 .as_deref()
                 .and_then(|pid| project_names.get(pid).copied());
 
-            let title = session_title(s);
+            let cc = cc_states.get(&s.id);
+            let title = session_title_with_task(s, cc);
             let subtitle = session_subtitle(host_name, project_name, mode);
 
-            let cc_state = cc_states
-                .get(&s.id)
-                .map(|cc| (cc.status, cc.task_name.clone()));
+            let cc_state = cc.map(|cc| (cc.status, cc.task_name.clone()));
 
             SwitcherEntry {
                 session_id: s.id.clone(),
@@ -409,6 +432,7 @@ fn build_entries(
                 is_current: current_session_id == Some(s.id.as_str()),
                 cc_state,
                 cc_metrics: cc_metrics.get(&s.id).cloned(),
+                permission_mode: cc.and_then(|c| c.permission_mode.clone()),
             }
         })
         .collect()
@@ -422,19 +446,19 @@ fn cc_sort_priority(cc: Option<&CcState>) -> u8 {
     }
 }
 
-fn session_title(session: &Session) -> String {
-    let base = session
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("Session {}", &session.id[..8.min(session.id.len())]));
-
-    if session.name.is_some()
-        && let Some(ref shell) = session.shell
-    {
-        return format!("{base} ({shell})");
+/// Build a display title: session name > task name > "Session {id8}"
+fn session_title_with_task(session: &Session, cc: Option<&CcState>) -> String {
+    if let Some(ref name) = session.name {
+        return if let Some(ref shell) = session.shell {
+            format!("{name} ({shell})")
+        } else {
+            name.clone()
+        };
     }
-
-    base
+    if let Some(task) = cc.and_then(|c| c.task_name.as_ref()) {
+        return task.clone();
+    }
+    format!("Session {}", &session.id[..8.min(session.id.len())])
 }
 
 fn session_subtitle(host_name: &str, project_name: Option<&str>, mode: &str) -> String {
