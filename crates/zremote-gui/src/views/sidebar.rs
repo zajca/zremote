@@ -1174,23 +1174,31 @@ impl SidebarView {
 
                 row1 = row1.child(name_div.child(display_name));
 
-                // Permission mode badge (plan, auto)
+                // Permission mode badge
                 if let Some(cc) = cc_state
                     && let Some(ref mode) = cc.permission_mode
                     && mode != "default"
                 {
-                    let (badge_bg, badge_text) = match mode.as_str() {
+                    let (badge_bg, badge_text, label) = match mode.as_str() {
                         "plan" => {
                             let c = theme::warning();
-                            (Rgba { a: 0.15, ..c }, c)
+                            (Rgba { a: 0.15, ..c }, c, "plan")
                         }
                         "auto" => {
                             let c = theme::accent();
-                            (Rgba { a: 0.15, ..c }, c)
+                            (Rgba { a: 0.15, ..c }, c, "auto")
+                        }
+                        "acceptEdits" => {
+                            let c = theme::success();
+                            (Rgba { a: 0.15, ..c }, c, "accept")
+                        }
+                        "bypassPermissions" | "dontAsk" => {
+                            let c = theme::error();
+                            (Rgba { a: 0.15, ..c }, c, "bypass")
                         }
                         _ => {
                             let c = theme::text_tertiary();
-                            (Rgba { a: 0.15, ..c }, c)
+                            (Rgba { a: 0.15, ..c }, c, mode.as_str())
                         }
                     };
                     row1 = row1.child(
@@ -1202,7 +1210,7 @@ impl SidebarView {
                             .bg(badge_bg)
                             .text_color(badge_text)
                             .text_size(px(10.0))
-                            .child(mode.clone()),
+                            .child(label.to_string()),
                     );
                 }
 

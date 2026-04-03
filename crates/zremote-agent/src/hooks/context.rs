@@ -72,6 +72,7 @@ mod tests {
             mode: None,
             elicitation_id: None,
             requested_schema: None,
+            permission_mode: None,
         }
     }
 

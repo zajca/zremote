@@ -72,6 +72,9 @@ pub struct HookPayload {
     pub elicitation_id: Option<String>,
     #[serde(default)]
     pub requested_schema: Option<serde_json::Value>,
+    // Base field: CC permission mode (present in all hook events)
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 /// Response to hook scripts.
@@ -305,7 +308,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
         status: AgenticStatus::Working,
         task_name: None,
         prompt_message: None,
-        permission_mode: None,
+        permission_mode: payload.permission_mode.clone(),
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -349,7 +352,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
         status: AgenticStatus::Working,
         task_name,
         prompt_message: None,
-        permission_mode: None,
+        permission_mode: payload.permission_mode.clone(),
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -509,23 +512,6 @@ async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
     send_waiting_for_input(state, payload, "Elicitation").await;
 }
 
-/// Detect CC permission mode from a user prompt (slash commands like /plan, /auto-accept).
-fn detect_permission_mode(prompt: Option<&str>) -> Option<String> {
-    let text = prompt?.trim();
-    if text.eq_ignore_ascii_case("/plan") {
-        Some("plan".to_string())
-    } else if text.eq_ignore_ascii_case("/auto-accept")
-        || text.eq_ignore_ascii_case("/auto")
-        || text.eq_ignore_ascii_case("/autoaccept")
-    {
-        Some("auto".to_string())
-    } else if text.eq_ignore_ascii_case("/default") {
-        Some("default".to_string())
-    } else {
-        None
-    }
-}
-
 async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
     let Some(mapped) = state
         .mapper
@@ -538,14 +524,12 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
 
-    let permission_mode = detect_permission_mode(payload.prompt.as_deref());
-
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name: None,
         prompt_message: None,
-        permission_mode,
+        permission_mode: payload.permission_mode.clone(),
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -726,6 +710,7 @@ mod tests {
             mode: None,
             elicitation_id: None,
             requested_schema: None,
+            permission_mode: None,
         }
     }
 
@@ -1670,38 +1655,25 @@ mod tests {
     }
 
     #[test]
-    fn detect_permission_mode_slash_commands() {
-        assert_eq!(
-            detect_permission_mode(Some("/plan")),
-            Some("plan".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("/Plan")),
-            Some("plan".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("/auto-accept")),
-            Some("auto".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("/auto")),
-            Some("auto".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("/autoaccept")),
-            Some("auto".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("/default")),
-            Some("default".to_string())
-        );
-        assert_eq!(
-            detect_permission_mode(Some("  /plan  ")),
-            Some("plan".to_string()),
-            "should trim whitespace"
-        );
-        assert_eq!(detect_permission_mode(Some("fix the bug")), None);
-        assert_eq!(detect_permission_mode(Some("/unknown")), None);
-        assert_eq!(detect_permission_mode(None), None);
+    fn deserialize_permission_mode_field() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "permission_mode": "plan"
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.permission_mode.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn deserialize_permission_mode_absent() {
+        let json = r#"{
+            "session_id": "abc123",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read"
+        }"#;
+        let payload: HookPayload = serde_json::from_str(json).unwrap();
+        assert!(payload.permission_mode.is_none());
     }
 }
