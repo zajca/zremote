@@ -1,8 +1,9 @@
 #![allow(clippy::wildcard_imports)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::*;
 
@@ -25,6 +26,11 @@ use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use crate::views::toast::{
     ToastAction, ToastContainer, ToastContainerEvent, ToastContext, ToastLevel,
 };
+
+/// How long to wait before showing a WaitingForInput notification.
+/// Suppresses noise from brief pauses between tool calls — a genuine wait
+/// (permission prompt, end-of-turn) persists well beyond this window.
+const WAITING_DEBOUNCE: Duration = Duration::from_secs(3);
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -50,9 +56,9 @@ pub struct MainView {
     current_host_id: Option<String>,
     /// Active WaitingForInput toast IDs, keyed by loop_id.
     waiting_input_toasts: HashMap<String, u64>,
-    /// Loop IDs for which we have already shown a WaitingForInput notification.
-    /// Cleared when the loop leaves WaitingForInput or ends.
-    seen_waiting_loops: HashSet<String>,
+    /// Pending debounce tasks for WaitingForInput notifications, keyed by loop_id.
+    /// Dropping the `Task` cancels the pending notification.
+    pending_waiting_notifications: HashMap<String, Task<()>>,
     /// (host_id, session_id) the user most recently had open in the terminal.
     /// Used to reduce notification urgency for familiar sessions.
     last_viewed_session: Option<(String, String)>,
@@ -113,7 +119,7 @@ impl MainView {
             ever_connected: false,
             current_host_id: None,
             waiting_input_toasts: HashMap::new(),
-            seen_waiting_loops: HashSet::new(),
+            pending_waiting_notifications: HashMap::new(),
             last_viewed_session: None,
             claude_task_sessions: HashMap::new(),
         }
@@ -545,113 +551,146 @@ impl MainView {
                     AgenticStatus::WaitingForInput => {
                         let loop_id = loop_info.id.clone();
 
-                        // Guard 1: Skip toast and native notification if user is viewing
-                        // this session's terminal — sidebar icon + prompt are sufficient.
-                        // Still mark as seen so duplicates after a tab switch are suppressed.
+                        // Guard: Skip if user is viewing this session's terminal —
+                        // sidebar icon + prompt are sufficient.
                         if self.window_active
                             && let Some(terminal) = &self.terminal
                             && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                         {
-                            self.seen_waiting_loops.insert(loop_id);
+                            self.pending_waiting_notifications.remove(&loop_id);
                             return;
                         }
 
-                        // Guard 2: Skip if we already notified for this loop's waiting state.
-                        // Cleared when the loop resumes or ends, so a new wait triggers fresh notification.
-                        if !self.seen_waiting_loops.insert(loop_id.clone()) {
-                            return;
-                        }
-                        // Bound the set — pure DoS guard, not a recency policy (CWE-400).
-                        while self.seen_waiting_loops.len() > 200 {
-                            let stale = self.seen_waiting_loops.iter().next().cloned().unwrap();
-                            self.seen_waiting_loops.remove(&stale);
-                        }
-
-                        // Dismiss previous toast for this loop (handles rapid re-prompts)
-                        if let Some(old_toast_id) = self.waiting_input_toasts.remove(&loop_id) {
-                            self.toasts.update(cx, |c, cx| {
-                                c.dismiss(old_toast_id);
-                                cx.notify();
-                            });
-                        }
-
-                        let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                        // Debounce: schedule notification after WAITING_DEBOUNCE.
+                        // If Working/LoopEnded arrives before the timer fires, the
+                        // task is dropped (cancelled) — no notification for brief pauses.
+                        let session_id = loop_info.session_id.clone();
+                        let host_id = host_id.clone();
+                        let hostname = hostname.clone();
+                        let task_label = loop_info
+                            .task_name
+                            .as_deref()
+                            .unwrap_or("Claude Code")
+                            .to_string();
                         let msg = loop_info
                             .prompt_message
                             .as_deref()
                             .map(|m| format!("{task_label}: {m}"))
                             .unwrap_or_else(|| format!("{task_label} is waiting for input"));
-
                         let ctx = self.resolve_toast_context(
-                            Some(&loop_info.session_id),
-                            Some(host_id),
+                            Some(&session_id),
+                            Some(&host_id),
                             loop_info.project_path.as_deref(),
                             loop_info.task_name.as_deref(),
-                            Some(hostname),
+                            Some(&hostname),
                             cx,
                         );
 
-                        // Build action buttons if terminal matches this session
-                        let actions = self.build_input_actions(&loop_info.session_id, cx);
+                        let task =
+                            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                                Timer::after(WAITING_DEBOUNCE).await;
 
-                        let toast_id = self.toasts.update(cx, |container, cx| {
-                            let id = container.push_actionable(
-                                &msg,
-                                ToastLevel::Warning,
-                                Some(Icon::MessageCircle),
-                                actions,
-                                true, // persistent
-                                ctx.clone(),
-                            );
-                            cx.notify();
-                            id
-                        });
+                                this.update(cx, |this, cx| {
+                                    // Re-check: skip if user navigated to this session
+                                    // during the debounce window.
+                                    if this.window_active
+                                        && let Some(terminal) = &this.terminal
+                                        && terminal.read(cx).session_id() == session_id.as_str()
+                                    {
+                                        this.pending_waiting_notifications.remove(&loop_id);
+                                        return;
+                                    }
+
+                                    // Dismiss previous toast for this loop
+                                    if let Some(old_toast_id) =
+                                        this.waiting_input_toasts.remove(&loop_id)
+                                    {
+                                        this.toasts.update(cx, |c, cx| {
+                                            c.dismiss(old_toast_id);
+                                            cx.notify();
+                                        });
+                                    }
+
+                                    // Build actions at fire time so they reflect current
+                                    // terminal state, not the state at event-dispatch time.
+                                    let actions = this.build_input_actions(&session_id, cx);
+
+                                    let toast_id = this.toasts.update(cx, |container, cx| {
+                                        let id = container.push_actionable(
+                                            &msg,
+                                            ToastLevel::Warning,
+                                            Some(Icon::MessageCircle),
+                                            actions,
+                                            true, // persistent
+                                            ctx.clone(),
+                                        );
+                                        cx.notify();
+                                        id
+                                    });
+
+                                    // Bound the map to avoid unbounded growth (CWE-400).
+                                    if this.waiting_input_toasts.len() >= 100
+                                        && let Some(stale_key) =
+                                            this.waiting_input_toasts.keys().next().cloned()
+                                        && let Some(stale_id) =
+                                            this.waiting_input_toasts.remove(&stale_key)
+                                    {
+                                        this.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                                    }
+                                    this.waiting_input_toasts.insert(loop_id.clone(), toast_id);
+
+                                    // Native notification — read live state for window_active
+                                    // and is_recent (CWE-116: sanitize markup tags).
+                                    if !this.window_active {
+                                        let sanitized =
+                                            msg.replace('<', "&lt;").replace('>', "&gt;");
+                                        let subtitle = ctx.subtitle();
+                                        let title = subtitle.as_deref().map_or_else(
+                                            || "ZRemote".to_string(),
+                                            |sub| format!("ZRemote \u{2014} {sub}"),
+                                        );
+                                        let body = subtitle.as_deref().map_or_else(
+                                            || sanitized.clone(),
+                                            |sub| format!("{sanitized}\n{sub}"),
+                                        );
+                                        let is_recent =
+                                            this.last_viewed_session.as_ref().is_some_and(
+                                                |(h, s)| h == &host_id && s == &session_id,
+                                            );
+                                        let urgency = if is_recent {
+                                            NativeUrgency::Auto
+                                        } else {
+                                            NativeUrgency::Critical
+                                        };
+                                        crate::notifications::send_native_with_urgency(
+                                            &title,
+                                            &body,
+                                            ToastLevel::Warning,
+                                            urgency,
+                                            &this.app_state.tokio_handle,
+                                        );
+                                    }
+
+                                    // Clean up the pending entry now that we've fired.
+                                    this.pending_waiting_notifications.remove(&loop_id);
+                                })
+                                .ok();
+                            });
 
                         // Bound the map to avoid unbounded growth (CWE-400).
-                        if self.waiting_input_toasts.len() >= 100
+                        if self.pending_waiting_notifications.len() >= 100
                             && let Some(stale_key) =
-                                self.waiting_input_toasts.keys().next().cloned()
-                            && let Some(stale_id) = self.waiting_input_toasts.remove(&stale_key)
+                                self.pending_waiting_notifications.keys().next().cloned()
                         {
-                            self.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                            self.pending_waiting_notifications.remove(&stale_key);
                         }
-                        self.waiting_input_toasts.insert(loop_id, toast_id);
-
-                        // Native notification — reduce urgency for recently viewed sessions.
-                        // Sanitize to strip markup tags (CWE-116: Pango/HTML injection).
-                        if !self.window_active {
-                            let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
-                            let subtitle = ctx.subtitle();
-                            let title = subtitle.as_deref().map_or_else(
-                                || "ZRemote".to_string(),
-                                |sub| format!("ZRemote \u{2014} {sub}"),
-                            );
-                            let body = subtitle.as_deref().map_or_else(
-                                || sanitized.clone(),
-                                |sub| format!("{sanitized}\n{sub}"),
-                            );
-                            let is_recent = self
-                                .last_viewed_session
-                                .as_ref()
-                                .is_some_and(|(h, s)| h == host_id && s == &loop_info.session_id);
-                            let urgency = if is_recent {
-                                NativeUrgency::Auto
-                            } else {
-                                NativeUrgency::Critical
-                            };
-                            crate::notifications::send_native_with_urgency(
-                                &title,
-                                &body,
-                                ToastLevel::Warning,
-                                urgency,
-                                &self.app_state.tokio_handle,
-                            );
-                        }
+                        self.pending_waiting_notifications
+                            .insert(loop_info.id.clone(), task);
                     }
                     // Any non-WaitingForInput status means CC is no longer blocked —
-                    // dismiss the active toast regardless of which terminal completed.
+                    // cancel pending debounce and dismiss active toast.
                     _ => {
-                        self.seen_waiting_loops.remove(&loop_info.id);
+                        self.pending_waiting_notifications.remove(&loop_info.id);
                         if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                             self.toasts.update(cx, |c, cx| {
                                 c.dismiss(toast_id);
@@ -666,8 +705,8 @@ impl MainView {
                 host_id,
                 hostname,
             } => {
-                // Dismiss any active WaitingForInput toast and clear seen state
-                self.seen_waiting_loops.remove(&loop_info.id);
+                // Cancel pending debounce and dismiss any active WaitingForInput toast
+                self.pending_waiting_notifications.remove(&loop_info.id);
                 if let Some(toast_id) = self.waiting_input_toasts.remove(&loop_info.id) {
                     self.toasts.update(cx, |c, cx| {
                         c.dismiss(toast_id);
@@ -675,21 +714,20 @@ impl MainView {
                     });
                 }
 
-                let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
-                let (level, suffix) = match loop_info.end_reason.as_deref() {
-                    Some("error") => (ToastLevel::Error, "failed"),
-                    _ => (ToastLevel::Success, "finished"),
-                };
-                let msg = format!("{task_label} {suffix}");
-                let ctx = self.resolve_toast_context(
-                    Some(&loop_info.session_id),
-                    Some(host_id),
-                    loop_info.project_path.as_deref(),
-                    loop_info.task_name.as_deref(),
-                    Some(hostname),
-                    cx,
-                );
-                self.show_toast(&msg, level, Some(Icon::Bot), ctx, cx);
+                // Only show a toast for errors — successful completions are silent.
+                if loop_info.end_reason.as_deref() == Some("error") {
+                    let task_label = loop_info.task_name.as_deref().unwrap_or("Claude Code");
+                    let msg = format!("{task_label} failed");
+                    let ctx = self.resolve_toast_context(
+                        Some(&loop_info.session_id),
+                        Some(host_id),
+                        loop_info.project_path.as_deref(),
+                        loop_info.task_name.as_deref(),
+                        Some(hostname),
+                        cx,
+                    );
+                    self.show_toast(&msg, ToastLevel::Error, Some(Icon::Bot), ctx, cx);
+                }
             }
             _ => {}
         }
