@@ -118,6 +118,7 @@ pub struct PaletteSnapshot {
     pub active_session_id: Option<String>,
     pub(super) host_names: HashMap<String, String>,
     pub(super) project_names: HashMap<String, String>,
+    pub(super) project_names_by_path: HashMap<(String, String), String>,
     pub(super) recent_set: HashSet<String>,
     pub(super) cc_states: HashMap<String, CcState>,
     pub(super) cc_metrics: HashMap<String, CcMetrics>,
@@ -143,6 +144,10 @@ impl PaletteSnapshot {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
+        let project_names_by_path: HashMap<(String, String), String> = projects
+            .iter()
+            .map(|p| ((p.host_id.clone(), p.path.clone()), p.name.clone()))
+            .collect();
         let recent_set: HashSet<String> = recent_sessions
             .iter()
             .map(|r| r.session_id.clone())
@@ -155,6 +160,7 @@ impl PaletteSnapshot {
             active_session_id,
             host_names,
             project_names,
+            project_names_by_path,
             recent_set,
             cc_states,
             cc_metrics,
@@ -170,6 +176,13 @@ impl PaletteSnapshot {
 
     pub(super) fn project_name(&self, project_id: &str) -> Option<String> {
         self.project_names.get(project_id).cloned()
+    }
+
+    /// Resolve project name from working_dir when project_id is missing.
+    pub(super) fn project_name_by_path(&self, host_id: &str, path: &str) -> Option<String> {
+        self.project_names_by_path
+            .get(&(host_id.to_string(), path.to_string()))
+            .cloned()
     }
 
     pub(super) fn is_recent(&self, session_id: &str) -> bool {
@@ -199,7 +212,12 @@ pub(super) fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem>
             let project_name = s
                 .project_id
                 .as_deref()
-                .and_then(|pid| snapshot.project_name(pid));
+                .and_then(|pid| snapshot.project_name(pid))
+                .or_else(|| {
+                    s.working_dir
+                        .as_deref()
+                        .and_then(|wd| snapshot.project_name_by_path(&s.host_id, wd))
+                });
 
             let cc = snapshot.cc_states.get(&s.id);
             let title = session_title(s, cc);
@@ -358,7 +376,11 @@ pub(super) fn build_project_drill_items_from(
     for sess_item in session_items {
         if let PaletteItem::Session { session_idx } = &sess_item.item {
             let session = &snapshot.sessions[*session_idx];
-            if session.project_id.as_deref() == Some(&project.id) {
+            if session.project_id.as_deref() == Some(&project.id)
+                || (session.project_id.is_none()
+                    && session.host_id == project.host_id
+                    && session.working_dir.as_deref() == Some(project.path.as_str()))
+            {
                 session_indices.push(items.len());
                 items.push(ResultItem {
                     item: sess_item.item.clone(),
@@ -1007,5 +1029,152 @@ mod tests {
         );
         assert_eq!(selectable[0].title, "Close Session");
         assert_eq!(results.selectable_count(), 1);
+    }
+
+    /// Session with no project_id but matching working_dir should resolve project name.
+    #[test]
+    fn test_session_subtitle_falls_back_to_working_dir() {
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            name: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }]);
+        let sessions = Rc::new(vec![Session {
+            id: "sess-no-pid".to_string(),
+            host_id: "host-1".to_string(),
+            name: Some("shell".to_string()),
+            shell: Some("zsh".to_string()),
+            status: SessionStatus::Active,
+            pid: Some(999),
+            exit_code: None,
+            created_at: String::new(),
+            closed_at: None,
+            project_id: None,
+            working_dir: Some("/home/user/myproject".to_string()),
+        }]);
+        let projects = Rc::new(vec![Project {
+            id: "proj-1".to_string(),
+            host_id: "host-1".to_string(),
+            path: "/home/user/myproject".to_string(),
+            name: "myproject".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "rust".to_string(),
+            created_at: String::new(),
+            parent_project_id: None,
+            git_branch: None,
+            git_commit_hash: None,
+            git_commit_message: None,
+            git_is_dirty: false,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
+        }]);
+        let snapshot = PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "server".to_string(),
+            None,
+            &[],
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let items = build_session_items(&snapshot);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0].subtitle.contains("myproject"),
+            "subtitle should contain project name from working_dir fallback, got: {}",
+            items[0].subtitle
+        );
+    }
+
+    /// Session matched via working_dir should appear in project drill-down.
+    #[test]
+    fn test_project_drill_includes_working_dir_sessions() {
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            name: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }]);
+        let sessions = Rc::new(vec![Session {
+            id: "sess-wd".to_string(),
+            host_id: "host-1".to_string(),
+            name: Some("dev".to_string()),
+            shell: None,
+            status: SessionStatus::Active,
+            pid: Some(111),
+            exit_code: None,
+            created_at: String::new(),
+            closed_at: None,
+            project_id: None,
+            working_dir: Some("/home/user/proj".to_string()),
+        }]);
+        let projects = Rc::new(vec![Project {
+            id: "proj-1".to_string(),
+            host_id: "host-1".to_string(),
+            path: "/home/user/proj".to_string(),
+            name: "proj".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "rust".to_string(),
+            created_at: String::new(),
+            parent_project_id: None,
+            git_branch: None,
+            git_commit_hash: None,
+            git_commit_message: None,
+            git_is_dirty: false,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
+        }]);
+        let snapshot = PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "server".to_string(),
+            None,
+            &[],
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+        let session_count = items
+            .iter()
+            .filter(|i| matches!(i.item, PaletteItem::Session { .. }))
+            .count();
+        assert_eq!(
+            session_count, 1,
+            "session with matching working_dir should appear in project drill-down"
+        );
     }
 }

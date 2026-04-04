@@ -372,6 +372,12 @@ fn build_entries(
         .map(|p| (p.id.as_str(), p.name.as_str()))
         .collect();
 
+    // Fallback: resolve project name from working_dir when project_id is missing.
+    let project_by_path: HashMap<(&str, &str), &str> = projects
+        .iter()
+        .map(|p| ((p.host_id.as_str(), p.path.as_str()), p.name.as_str()))
+        .collect();
+
     // MRU timestamps (higher = more recent)
     let mru_map: HashMap<&str, i64> = recent_sessions
         .iter()
@@ -416,7 +422,12 @@ fn build_entries(
             let project_name = s
                 .project_id
                 .as_deref()
-                .and_then(|pid| project_names.get(pid).copied());
+                .and_then(|pid| project_names.get(pid).copied())
+                .or_else(|| {
+                    s.working_dir
+                        .as_deref()
+                        .and_then(|wd| project_by_path.get(&(s.host_id.as_str(), wd)).copied())
+                });
 
             let cc = cc_states.get(&s.id);
             let title = session_title_with_task(s, cc);
