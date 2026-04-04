@@ -62,8 +62,8 @@ pub struct MainView {
     /// (host_id, session_id) the user most recently had open in the terminal.
     /// Used to reduce notification urgency for familiar sessions.
     last_viewed_session: Option<(String, String)>,
-    /// Maps claude task_id to (session_id, host_id) for context on ClaudeTaskEnded.
-    claude_task_sessions: HashMap<String, (String, String)>,
+    /// Maps claude task_id to (session_id, host_id, project_path) for context on ClaudeTaskEnded.
+    claude_task_sessions: HashMap<String, (String, String, String)>,
 }
 
 impl MainView {
@@ -401,23 +401,9 @@ impl MainView {
                 {
                     self.claude_task_sessions.remove(&stale);
                 }
-                self.claude_task_sessions
-                    .insert(task_id.clone(), (session_id.clone(), host_id.clone()));
-                let ctx = self.resolve_toast_context(
-                    Some(session_id),
-                    Some(host_id),
-                    Some(project_path),
-                    None,
-                    None,
-                    cx,
-                );
-                let name = project_path.rsplit('/').next().unwrap_or(project_path);
-                self.show_toast(
-                    &format!("Claude task started: {name}"),
-                    ToastLevel::Info,
-                    Some(Icon::Bot),
-                    ctx,
-                    cx,
+                self.claude_task_sessions.insert(
+                    task_id.clone(),
+                    (session_id.clone(), host_id.clone(), project_path.clone()),
                 );
             }
             ServerEvent::ClaudeTaskEnded {
@@ -449,8 +435,8 @@ impl MainView {
                         ev_pp.as_deref().map(String::from),
                         ev_tn.as_deref().map(String::from),
                     )
-                } else if let Some((s, h)) = self.claude_task_sessions.remove(task_id) {
-                    (Some(s), Some(h), None, None)
+                } else if let Some((s, h, pp)) = self.claude_task_sessions.remove(task_id) {
+                    (Some(s), Some(h), Some(pp), None)
                 } else if let Some((s, h, pp)) = self.sidebar.read(cx).claude_task_context(task_id)
                 {
                     (
