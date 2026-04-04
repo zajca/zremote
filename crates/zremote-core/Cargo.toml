@@ -1,6 +1,6 @@
 [package]
 name = "zremote-core"
-version = "0.10.17"
+version = "0.10.18"
 edition.workspace = true
 
 [lints]
