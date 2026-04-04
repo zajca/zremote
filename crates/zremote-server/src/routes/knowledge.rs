@@ -140,7 +140,9 @@ pub async fn search(
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.knowledge_requests.insert(request_id, tx);
+    state
+        .knowledge_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     let msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::Search {
         project_path: path,
@@ -259,7 +261,9 @@ pub async fn generate_instructions(
     state.knowledge_requests.remove(&request_id);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.knowledge_requests.insert(request_id, tx);
+    state
+        .knowledge_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     let msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::GenerateInstructions {
         project_path: path,
@@ -386,7 +390,9 @@ pub async fn write_claude_md(
     );
     state.knowledge_requests.remove(&gen_request_id);
     let (gen_tx, gen_rx) = tokio::sync::oneshot::channel();
-    state.knowledge_requests.insert(gen_request_id, gen_tx);
+    state
+        .knowledge_requests
+        .insert(gen_request_id, crate::state::PendingRequest::new(gen_tx));
 
     let gen_msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::GenerateInstructions {
         project_path: path.clone(),
@@ -414,7 +420,10 @@ pub async fn write_claude_md(
     );
     state.knowledge_requests.remove(&write_request_id);
     let (write_tx, write_rx) = tokio::sync::oneshot::channel();
-    state.knowledge_requests.insert(write_request_id, write_tx);
+    state.knowledge_requests.insert(
+        write_request_id,
+        crate::state::PendingRequest::new(write_tx),
+    );
 
     let write_msg = ServerMessage::KnowledgeAction(KnowledgeServerMessage::WriteClaudeMd {
         project_path: path,
