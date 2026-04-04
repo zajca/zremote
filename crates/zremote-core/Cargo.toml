@@ -27,3 +27,6 @@ vte = "0.14.1"
 
 [dev-dependencies]
 http-body-util = "0.1"
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"

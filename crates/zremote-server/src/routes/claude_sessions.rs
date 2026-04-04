@@ -318,7 +318,7 @@ pub async fn discover_claude_sessions(
     let request_key = format!("{host_id}:{}", params.project_path);
     state
         .claude_discover_requests
-        .insert(request_key.clone(), tx);
+        .insert(request_key.clone(), crate::state::PendingRequest::new(tx));
 
     let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::DiscoverSessions {
         project_path: params.project_path,

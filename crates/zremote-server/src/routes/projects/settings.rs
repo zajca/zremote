@@ -41,7 +41,9 @@ pub async fn get_settings(
 
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_get_requests.insert(request_id, tx);
+    state
+        .settings_get_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectGetSettings {
@@ -96,7 +98,9 @@ pub async fn save_settings(
 
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_save_requests.insert(request_id, tx);
+    state
+        .settings_save_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectSaveSettings {
@@ -168,7 +172,9 @@ pub async fn list_actions(
 
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_get_requests.insert(request_id, tx);
+    state
+        .settings_get_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectGetSettings {
@@ -245,7 +251,9 @@ pub async fn resolve_prompt(
     // Fetch settings from agent
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_get_requests.insert(request_id, tx);
+    state
+        .settings_get_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectGetSettings {
@@ -343,7 +351,9 @@ pub async fn resolve_action_inputs(
 
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.action_inputs_requests.insert(request_id, tx);
+    state
+        .action_inputs_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ResolveActionInputs {
@@ -408,7 +418,9 @@ pub async fn run_action(
     // Fetch settings from agent
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_get_requests.insert(request_id, tx);
+    state
+        .settings_get_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectGetSettings {
@@ -602,7 +614,9 @@ pub async fn browse_directory(
 
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.directory_requests.insert(request_id, tx);
+    state
+        .directory_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ListDirectory {
@@ -672,7 +686,9 @@ pub async fn configure_with_claude(
     // Fetch current settings from agent
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    state.settings_get_requests.insert(request_id, tx);
+    state
+        .settings_get_requests
+        .insert(request_id, crate::state::PendingRequest::new(tx));
 
     sender
         .send(ServerMessage::ProjectGetSettings {
