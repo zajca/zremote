@@ -345,6 +345,21 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Close all suspended (zombie) sessions for a host.
+    pub async fn cleanup_sessions(&self, host_id: &str) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/hosts/{}/sessions/cleanup",
+                self.base_url,
+                encode_path(host_id)
+            ))
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
     /// Purge a closed session (remove from DB).
     pub async fn purge_session(&self, session_id: &str) -> Result<(), ApiError> {
         let resp = self

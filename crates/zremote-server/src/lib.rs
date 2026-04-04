@@ -65,6 +65,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::sessions::create_session).get(routes::sessions::list_sessions),
         )
         .route(
+            "/api/hosts/{host_id}/sessions/cleanup",
+            delete(routes::sessions::cleanup_sessions),
+        )
+        .route(
             "/api/sessions/{session_id}",
             get(routes::sessions::get_session)
                 .patch(routes::sessions::update_session)

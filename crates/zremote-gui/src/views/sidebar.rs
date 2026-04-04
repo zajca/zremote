@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::app_state::AppState;
@@ -556,6 +557,35 @@ impl SidebarView {
         .detach();
     }
 
+    pub fn cleanup_sessions(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        let api = self.app_state.api.clone();
+        let host_id = host_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = handle
+                .spawn({
+                    let host_id = host_id.clone();
+                    async move { api.cleanup_sessions(&host_id).await }
+                })
+                .await;
+            let Ok(result) = result else {
+                tracing::error!("cleanup_sessions task panicked or was cancelled");
+                return;
+            };
+            if let Err(e) = result {
+                tracing::error!(error = %e, "failed to cleanup sessions");
+                return;
+            }
+            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                // Remove suspended sessions from local state
+                Rc::make_mut(&mut this.sessions)
+                    .retain(|s| !(s.host_id == host_id && s.status == SessionStatus::Suspended));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn create_session(
         &mut self,
         host_id: &str,
@@ -854,29 +884,66 @@ impl SidebarView {
                             .child(host.hostname.clone()),
                     ),
             )
-            .child(
+            .child({
+                let has_suspended = self
+                    .sessions
+                    .iter()
+                    .any(|s| s.host_id == host_id && s.status == SessionStatus::Suspended);
+
+                let cleanup_host_id = host_id.clone();
+                let new_session_host_id = host_id.clone();
+
                 div()
-                    .id(SharedString::from(format!("new-session-{host_id}")))
-                    .p(px(2.0))
-                    .rounded(px(3.0))
-                    .cursor_pointer()
-                    .invisible()
-                    .group_hover("host-header", |mut s| {
-                        s.visibility = Some(gpui::Visibility::Visible);
-                        s
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .when(has_suspended, |el: Div| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("cleanup-{cleanup_host_id}")))
+                                .p(px(2.0))
+                                .rounded(px(3.0))
+                                .cursor_pointer()
+                                .invisible()
+                                .group_hover("host-header", |mut s| {
+                                    s.visibility = Some(gpui::Visibility::Visible);
+                                    s
+                                })
+                                .hover(|s| s.bg(theme::bg_tertiary()))
+                                .child(icon(Icon::X).size(px(14.0)).text_color(theme::error()))
+                                .on_click(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.cleanup_sessions(&cleanup_host_id, cx);
+                                    },
+                                )),
+                        )
                     })
-                    .hover(|s| s.bg(theme::bg_tertiary()))
                     .child(
-                        icon(Icon::Plus)
-                            .size(px(14.0))
-                            .text_color(theme::text_tertiary()),
+                        div()
+                            .id(SharedString::from(format!(
+                                "new-session-{new_session_host_id}"
+                            )))
+                            .p(px(2.0))
+                            .rounded(px(3.0))
+                            .cursor_pointer()
+                            .invisible()
+                            .group_hover("host-header", |mut s| {
+                                s.visibility = Some(gpui::Visibility::Visible);
+                                s
+                            })
+                            .hover(|s| s.bg(theme::bg_tertiary()))
+                            .child(
+                                icon(Icon::Plus)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_tertiary()),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    this.create_session(&new_session_host_id, None, cx);
+                                },
+                            )),
                     )
-                    .on_click({
-                        cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.create_session(&host_id, None, cx);
-                        })
-                    }),
-            )
+            })
     }
 
     #[allow(clippy::unused_self)]
@@ -1029,7 +1096,7 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_selected = self.selected_session_id.as_deref() == Some(&session.id);
-        let is_active = session.status == SessionStatus::Active;
+        let is_not_closed = session.status != SessionStatus::Closed;
         let session_id = session.id.clone();
         let host_id = host_id.to_string();
 
@@ -1068,7 +1135,7 @@ impl SidebarView {
             _ => theme::text_tertiary(),
         };
 
-        let close_button: AnyElement = if is_active {
+        let close_button: AnyElement = if is_not_closed {
             div()
                 .id(SharedString::from(format!("close-{session_id}")))
                 .cursor_pointer()
@@ -1363,13 +1430,21 @@ impl Render for SidebarView {
 
         // Local mode: "New Session" button at bottom of sidebar
         if is_local && let Some(host) = self.hosts.first() {
-            let host_id = host.id.clone();
+            let new_host_id = host.id.clone();
+            let has_suspended = self
+                .sessions
+                .iter()
+                .any(|s| s.host_id == host.id && s.status == SessionStatus::Suspended);
+
             sidebar = sidebar.child(
                 div()
                     .border_t_1()
                     .border_color(theme::border())
                     .px(px(8.0))
                     .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .id("new-session-local")
@@ -1385,12 +1460,37 @@ impl Render for SidebarView {
                             .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
                             .child(icon(Icon::Plus).size(px(14.0)))
                             .child("New Session")
-                            .on_click(cx.listener(
-                                move |this, _event: &ClickEvent, _window, cx| {
+                            .on_click({
+                                let host_id = new_host_id.clone();
+                                cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                                     this.create_session(&host_id, None, cx);
-                                },
-                            )),
-                    ),
+                                })
+                            }),
+                    )
+                    .when(has_suspended, |el: Div| {
+                        let cleanup_host_id = new_host_id.clone();
+                        el.child(
+                            div()
+                                .id("cleanup-sessions-local")
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .text_color(theme::text_tertiary())
+                                .text_size(px(12.0))
+                                .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::error()))
+                                .child(icon(Icon::X).size(px(14.0)))
+                                .child("Clean up")
+                                .on_click(cx.listener(
+                                    move |this, _event: &ClickEvent, _window, cx| {
+                                        this.cleanup_sessions(&cleanup_host_id, cx);
+                                    },
+                                )),
+                        )
+                    }),
             );
         }
 

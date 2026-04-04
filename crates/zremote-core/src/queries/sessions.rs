@@ -67,7 +67,7 @@ pub async fn insert_session(
 pub async fn list_sessions(pool: &SqlitePool, host_id: &str) -> Result<Vec<SessionRow>, AppError> {
     let sessions: Vec<SessionRow> = sqlx::query_as(
         "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
-         FROM sessions WHERE host_id = ? ORDER BY created_at DESC",
+         FROM sessions WHERE host_id = ? AND status != 'closed' ORDER BY created_at DESC",
     )
     .bind(host_id)
     .fetch_all(pool)
@@ -136,6 +136,28 @@ pub async fn purge_session(pool: &SqlitePool, session_id: &str) -> Result<(), Ap
         .execute(pool)
         .await?;
 
+    Ok(())
+}
+
+pub async fn list_suspended_session_ids(
+    pool: &SqlitePool,
+    host_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM sessions WHERE host_id = ? AND status = 'suspended'")
+            .bind(host_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
+pub async fn force_close_session(pool: &SqlitePool, session_id: &str) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE sessions SET status = 'closed', closed_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

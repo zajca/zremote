@@ -10,7 +10,7 @@ use zremote_core::queries::sessions as q;
 use zremote_protocol::ServerMessage;
 
 use crate::error::AppError;
-use crate::state::{AppState, SessionState};
+use crate::state::{AppState, BrowserMessage, ServerEvent, SessionState};
 
 // Re-export the core row type so other modules (projects.rs) can use it.
 pub type SessionResponse = q::SessionRow;
@@ -162,12 +162,20 @@ pub async fn close_session(
         .parse()
         .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
 
-    // Send SessionClose to agent if connected
     if let Some(sender) = state.connections.get_sender(&host_id).await {
+        // Agent online — send SessionClose, agent will respond with SessionClosed
         let msg = ServerMessage::SessionClose {
             session_id: parsed_session_id,
         };
         let _ = sender.send(msg).await;
+    } else {
+        // Agent offline — check session status
+        let status = q::get_session_status(&state.db, &session_id).await?;
+        if status.as_deref() == Some("suspended") {
+            // Suspended + offline = zombie — force-close in DB
+            do_force_close(&state, &session_id, parsed_session_id).await?;
+        }
+        // Active + offline = agent may reconnect, don't force-close
     }
 
     Ok(StatusCode::ACCEPTED)
@@ -198,6 +206,62 @@ pub async fn purge_session(
     }
 
     q::purge_session(&state.db, &session_id).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Force-close a session in DB, clean up in-memory state, and emit events.
+async fn do_force_close(
+    state: &AppState,
+    session_id: &str,
+    parsed_id: Uuid,
+) -> Result<(), AppError> {
+    q::force_close_session(&state.db, session_id).await?;
+
+    let mut sessions = state.sessions.write().await;
+    if let Some(session) = sessions.remove(&parsed_id) {
+        let browser_msg = BrowserMessage::SessionClosed { exit_code: None };
+        for sender in &session.browser_senders {
+            let _ = sender.try_send(browser_msg.clone());
+        }
+    }
+    drop(sessions);
+
+    let _ = state.events.send(ServerEvent::SessionClosed {
+        session_id: session_id.to_string(),
+        exit_code: None,
+    });
+
+    Ok(())
+}
+
+/// `DELETE /api/hosts/:host_id/sessions/cleanup` - close all suspended (zombie) sessions for a host.
+pub async fn cleanup_sessions(
+    State(state): State<Arc<AppState>>,
+    Path(host_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let _parsed: Uuid = host_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
+
+    if !q::host_exists(&state.db, &host_id).await? {
+        return Err(AppError::NotFound(format!("host {host_id} not found")));
+    }
+
+    let suspended_ids = q::list_suspended_session_ids(&state.db, &host_id).await?;
+
+    for session_id in &suspended_ids {
+        let parsed_id: Uuid = session_id
+            .parse()
+            .map_err(|_| AppError::Internal("invalid session_id in database".to_string()))?;
+        do_force_close(&state, session_id, parsed_id).await?;
+    }
+
+    tracing::info!(
+        host_id = %host_id,
+        count = suspended_ids.len(),
+        "cleaned up suspended sessions"
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -692,5 +756,150 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn close_suspended_session_when_agent_offline_force_closes_in_db() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "suspended").await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Verify session is now closed in DB
+        let status: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "closed");
+    }
+
+    #[tokio::test]
+    async fn close_active_session_when_agent_offline_does_not_force_close() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Session should still be active (agent may reconnect)
+        let status: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "active");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_excludes_closed() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let active_id = uuid::Uuid::new_v4().to_string();
+        let closed_id = uuid::Uuid::new_v4().to_string();
+        let suspended_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &active_id, &host_id, "active").await;
+        insert_test_session(&state, &closed_id, &host_id, "closed").await;
+        insert_test_session(&state, &suspended_id, &host_id, "suspended").await;
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get(format!("/api/hosts/{host_id}/sessions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let sessions: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sessions.len(), 2);
+        let statuses: Vec<&str> = sessions
+            .iter()
+            .map(|s| s["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"active"));
+        assert!(statuses.contains(&"suspended"));
+        assert!(!statuses.contains(&"closed"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_sessions_closes_suspended_only() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let active_id = uuid::Uuid::new_v4().to_string();
+        let suspended_1 = uuid::Uuid::new_v4().to_string();
+        let suspended_2 = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &active_id, &host_id, "active").await;
+        insert_test_session(&state, &suspended_1, &host_id, "suspended").await;
+        insert_test_session(&state, &suspended_2, &host_id, "suspended").await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::delete(format!("/api/hosts/{host_id}/sessions/cleanup"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Active session should remain active
+        let status: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&active_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "active");
+
+        // Suspended sessions should be closed
+        let status: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&suspended_1)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "closed");
+
+        let status: (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(&suspended_2)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status.0, "closed");
     }
 }
