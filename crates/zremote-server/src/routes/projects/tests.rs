@@ -872,9 +872,9 @@ async fn configure_success() {
             if !settings_requests.is_empty() {
                 let key = settings_requests.iter().next().map(|e| *e.key());
                 if let Some(request_id) = key
-                    && let Some((_, tx)) = settings_requests.remove(&request_id)
+                    && let Some((_, pending)) = settings_requests.remove(&request_id)
                 {
-                    let _ = tx.send(crate::state::SettingsGetResponse {
+                    let _ = pending.sender.send(crate::state::SettingsGetResponse {
                         settings: None,
                         error: None,
                     });
