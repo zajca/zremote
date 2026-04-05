@@ -140,8 +140,8 @@ async fn handle_analyzer_event(
                 "agent detected from output (loop created by process detector)");
         }
         AnalyzerEvent::PhaseChanged(phase) => {
-            // Suppress analyzer phase updates when hooks are actively providing state
-            if session_mapper.has_recent_hook_activity(&session_id, Duration::from_secs(5)) {
+            // Suppress analyzer phase updates when hooks are the authoritative state source
+            if session_mapper.is_hook_mode(&session_id) {
                 return;
             }
             let status = match phase {
@@ -175,6 +175,8 @@ async fn handle_analyzer_event(
                     task_name: None,
                     prompt_message: None,
                     permission_mode: None,
+                    action_tool_name: None,
+                    action_description: None,
                 });
             }
         }

@@ -8,6 +8,7 @@ use crate::{AgenticLoopId, SessionId};
 pub enum AgenticStatus {
     Working,
     WaitingForInput,
+    RequiresAction,
     Error,
     Completed,
     #[serde(other)]
@@ -32,6 +33,10 @@ pub enum AgenticAgentMessage {
         prompt_message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_description: Option<String>,
     },
     LoopEnded {
         loop_id: AgenticLoopId,
@@ -90,6 +95,8 @@ mod tests {
             task_name: Some("fix-tests".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         });
         roundtrip_agent(&AgenticAgentMessage::LoopStateUpdate {
             loop_id: Uuid::new_v4(),
@@ -97,6 +104,8 @@ mod tests {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         });
     }
 
@@ -108,6 +117,8 @@ mod tests {
             task_name: None,
             prompt_message: Some("Allow Read tool?".into()),
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         });
     }
 
@@ -174,6 +185,57 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AgenticStatus::Working).unwrap(),
             r#""working""#
+        );
+    }
+
+    #[test]
+    fn requires_action_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::LoopStateUpdate {
+            loop_id: Uuid::new_v4(),
+            status: AgenticStatus::RequiresAction,
+            task_name: Some("deploy".to_string()),
+            prompt_message: None,
+            permission_mode: None,
+            action_tool_name: Some("Bash".to_string()),
+            action_description: Some("Run deploy script".to_string()),
+        });
+    }
+
+    #[test]
+    fn loop_state_update_with_action_fields_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::LoopStateUpdate {
+            loop_id: Uuid::new_v4(),
+            status: AgenticStatus::WaitingForInput,
+            task_name: None,
+            prompt_message: Some("Allow Bash?".into()),
+            permission_mode: Some("plan".into()),
+            action_tool_name: Some("Bash".to_string()),
+            action_description: Some("rm -rf /tmp/build".to_string()),
+        });
+    }
+
+    #[test]
+    fn loop_state_update_backward_compat_missing_action_fields() {
+        let json = r#"{"type":"LoopStateUpdate","payload":{"loop_id":"00000000-0000-0000-0000-000000000001","status":"working","task_name":null,"prompt_message":null,"permission_mode":null}}"#;
+        let parsed: AgenticAgentMessage = serde_json::from_str(json).expect("deserialize");
+        match parsed {
+            AgenticAgentMessage::LoopStateUpdate {
+                action_tool_name,
+                action_description,
+                ..
+            } => {
+                assert!(action_tool_name.is_none());
+                assert!(action_description.is_none());
+            }
+            other => panic!("expected LoopStateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requires_action_serialization() {
+        assert_eq!(
+            serde_json::to_string(&AgenticStatus::RequiresAction).unwrap(),
+            r#""requires_action""#
         );
     }
 

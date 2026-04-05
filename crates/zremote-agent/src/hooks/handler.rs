@@ -161,6 +161,15 @@ pub async fn handle_hook(
             if let Some(ref msg) = payload.message {
                 tracing::info!(cc_session = %payload.session_id, message = %msg, "CC notification");
             }
+            send_input_status(
+                &state,
+                &payload,
+                "Notification",
+                AgenticStatus::WaitingForInput,
+                None,
+                None,
+            )
+            .await;
             HookResponse::default()
         }
         "Elicitation" => {
@@ -209,6 +218,8 @@ pub async fn handle_hook(
                     task_name,
                     prompt_message: None,
                     permission_mode: None,
+                    action_tool_name: None,
+                    action_description: None,
                 };
                 let _ = state.agentic_tx.try_send(msg);
             }
@@ -301,6 +312,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
     state.mapper.mark_hook_activity(mapped.session_id);
+    state.mapper.set_hook_mode(mapped.session_id);
 
     // Emit LoopStateUpdate(Working)
     let msg = AgenticAgentMessage::LoopStateUpdate {
@@ -309,6 +321,8 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
         task_name: None,
         prompt_message: None,
         permission_mode: payload.permission_mode.clone(),
+        action_tool_name: None,
+        action_description: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -343,6 +357,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
     state.mapper.mark_hook_activity(mapped.session_id);
+    state.mapper.set_hook_mode(mapped.session_id);
 
     // Try to extract slug from transcript for task_name
     let task_name = extract_task_name_from_transcript(payload, &mapped);
@@ -353,6 +368,8 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
         task_name,
         prompt_message: None,
         permission_mode: payload.permission_mode.clone(),
+        action_tool_name: None,
+        action_description: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -383,6 +400,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
     state.mapper.mark_hook_activity(mapped.session_id);
+    state.mapper.set_hook_mode(mapped.session_id);
 
     // Extract task_name from transcript
     let task_name = extract_task_name_from_transcript(payload, &mapped);
@@ -403,14 +421,23 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
             task_name,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         };
         let _ = state.agentic_tx.try_send(update);
     }
 }
 
-/// Send `WaitingForInput` status for a resolved loop. Shared by notification
+/// Send a status update for a resolved loop. Shared by notification
 /// and elicitation handlers to avoid duplicated resolve+send logic.
-async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event: &str) {
+async fn send_input_status(
+    state: &HooksState,
+    payload: &HookPayload,
+    event: &str,
+    status: AgenticStatus,
+    action_tool_name: Option<String>,
+    action_description: Option<String>,
+) {
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
@@ -425,6 +452,7 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
     };
 
     state.mapper.mark_hook_activity(mapped.session_id);
+    state.mapper.set_hook_mode(mapped.session_id);
 
     // Truncate prompt_message to avoid DoS via oversized payloads (CWE-400).
     const MAX_PROMPT_LEN: usize = 500;
@@ -438,15 +466,27 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
         }
     });
 
+    // Truncate action_description with the same guard (CWE-400).
+    let action_description = action_description.map(|d| {
+        if d.len() > MAX_PROMPT_LEN {
+            let end = d.floor_char_boundary(MAX_PROMPT_LEN);
+            format!("{}...", &d[..end])
+        } else {
+            d
+        }
+    });
+
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
-        status: AgenticStatus::WaitingForInput,
+        status,
         task_name: None,
         prompt_message,
         permission_mode: None,
+        action_tool_name,
+        action_description,
     };
     if state.agentic_tx.try_send(msg).is_err() {
-        tracing::warn!("agentic channel full, WaitingForInput update dropped");
+        tracing::warn!("agentic channel full, status update dropped");
     }
 }
 
@@ -454,7 +494,8 @@ async fn send_waiting_for_input(state: &HooksState, payload: &HookPayload, event
 ///
 /// Called from dedicated routes `/hooks/notification/idle` and
 /// `/hooks/notification/permission` which are registered with specific
-/// matchers in settings.json. Sets `WaitingForInput` immediately.
+/// matchers in settings.json. `idle_prompt` sets `WaitingForInput`;
+/// `permission_prompt` sets `RequiresAction` with action details.
 async fn handle_notification_typed(
     state: &HooksState,
     payload: &HookPayload,
@@ -480,7 +521,30 @@ async fn handle_notification_typed(
             .await;
     }
 
-    send_waiting_for_input(state, payload, notification_type).await;
+    match notification_type {
+        "permission_prompt" => {
+            send_input_status(
+                state,
+                payload,
+                notification_type,
+                AgenticStatus::RequiresAction,
+                payload.tool_name.clone(),
+                payload.message.clone(),
+            )
+            .await;
+        }
+        _ => {
+            send_input_status(
+                state,
+                payload,
+                notification_type,
+                AgenticStatus::WaitingForInput,
+                None,
+                None,
+            )
+            .await;
+        }
+    }
 }
 
 /// Route handler for idle_prompt notifications.
@@ -509,7 +573,15 @@ async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
         "CC elicitation event"
     );
 
-    send_waiting_for_input(state, payload, "Elicitation").await;
+    send_input_status(
+        state,
+        payload,
+        "Elicitation",
+        AgenticStatus::RequiresAction,
+        payload.mcp_server_name.clone(),
+        payload.message.clone(),
+    )
+    .await;
 }
 
 async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
@@ -523,6 +595,8 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+    state.mapper.mark_hook_activity(mapped.session_id);
+    state.mapper.set_hook_mode(mapped.session_id);
 
     let msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
@@ -530,6 +604,8 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
         task_name: None,
         prompt_message: None,
         permission_mode: payload.permission_mode.clone(),
+        action_tool_name: None,
+        action_description: None,
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
@@ -943,7 +1019,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[tokio::test]
-    async fn elicitation_sends_waiting_for_input() {
+    async fn elicitation_sends_requires_action() {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let (_sid, loop_id) = setup_loop(&state).await;
 
@@ -959,7 +1035,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(lid, loop_id);
-                assert_eq!(status, AgenticStatus::WaitingForInput);
+                assert_eq!(status, AgenticStatus::RequiresAction);
                 assert!(task_name.is_none());
             }
             other => panic!("unexpected message: {other:?}"),
@@ -972,6 +1048,62 @@ mod tests {
         let p = payload("Elicitation", "unknown-cc");
         handle_elicitation(&state, &p).await;
         assert!(agentic_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // handle_notification_typed
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn permission_prompt_sends_requires_action_with_tool_name() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let mut p = payload("Notification", "cc-perm");
+        p.tool_name = Some("Bash".to_string());
+        p.message = Some("Allow Bash tool?".to_string());
+        handle_notification_typed(&state, &p, "permission_prompt").await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                action_tool_name,
+                action_description,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::RequiresAction);
+                assert_eq!(action_tool_name.as_deref(), Some("Bash"));
+                assert!(action_description.is_some());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_prompt_sends_waiting_for_input() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, loop_id) = setup_loop(&state).await;
+
+        let p = payload("Notification", "cc-idle");
+        handle_notification_typed(&state, &p, "idle_prompt").await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                action_tool_name,
+                ..
+            } => {
+                assert_eq!(lid, loop_id);
+                assert_eq!(status, AgenticStatus::WaitingForInput);
+                assert!(action_tool_name.is_none());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1069,6 +1201,8 @@ mod tests {
                         task_name: None,
                         prompt_message: None,
                         permission_mode: None,
+                        action_tool_name: None,
+                        action_description: None,
                     });
             }
         }
@@ -1635,6 +1769,8 @@ mod tests {
                     task_name: Some("spawning subagent".to_string()),
                     prompt_message: None,
                     permission_mode: None,
+                    action_tool_name: None,
+                    action_description: None,
                 });
         }
 

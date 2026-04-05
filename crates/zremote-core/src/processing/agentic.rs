@@ -51,6 +51,8 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
         task_name: row.task_name,
         prompt_message: None,
         permission_mode: None,
+        action_tool_name: None,
+        action_description: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -108,6 +110,8 @@ impl AgenticProcessor {
                 task_name,
                 prompt_message,
                 permission_mode,
+                action_tool_name,
+                action_description,
             } => {
                 self.handle_loop_state_update(
                     loop_id,
@@ -115,6 +119,8 @@ impl AgenticProcessor {
                     task_name,
                     prompt_message,
                     permission_mode,
+                    action_tool_name,
+                    action_description,
                 )
                 .await?;
             }
@@ -285,6 +291,7 @@ impl AgenticProcessor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_loop_state_update(
         &self,
         loop_id: AgenticLoopId,
@@ -292,6 +299,8 @@ impl AgenticProcessor {
         task_name: Option<String>,
         prompt_message: Option<String>,
         permission_mode: Option<String>,
+        action_tool_name: Option<String>,
+        action_description: Option<String>,
     ) -> Result<(), AppError> {
         if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
             entry.status = status;
@@ -362,6 +371,8 @@ impl AgenticProcessor {
                     .get(&loop_id)
                     .and_then(|e| e.permission_mode.clone())
             });
+            loop_info.action_tool_name = action_tool_name;
+            loop_info.action_description = action_description;
             let _ = self.events.send(ServerEvent::LoopStatusChanged {
                 loop_info,
                 host_id: self.host_id.to_string(),
@@ -671,6 +682,8 @@ mod tests {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -713,6 +726,8 @@ mod tests {
             task_name: Some("fix-tests".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -799,6 +814,8 @@ mod tests {
             task_name: Some("refactor-auth".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -849,6 +866,8 @@ mod tests {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -896,6 +915,8 @@ mod tests {
             task_name: Some(String::new()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -946,6 +967,8 @@ mod tests {
             task_name: Some("new-task-name".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1139,6 +1162,8 @@ mod tests {
             task_name: Some("debug-issue".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1232,6 +1257,8 @@ mod tests {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1322,6 +1349,8 @@ mod tests {
             task_name: Some("implement-feature-x".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1363,6 +1392,8 @@ mod tests {
             task_name: Some("first-task".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1374,6 +1405,8 @@ mod tests {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();
@@ -1390,6 +1423,8 @@ mod tests {
             task_name: Some("second-task".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         })
         .await
         .unwrap();

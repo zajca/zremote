@@ -43,6 +43,8 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         task_name: row.task_name,
         prompt_message: None,
         permission_mode: None,
+        action_tool_name: None,
+        action_description: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -276,6 +278,10 @@ mod tests {
         assert_eq!(
             super::parse_status("waiting_for_input"),
             AgenticStatus::WaitingForInput
+        );
+        assert_eq!(
+            super::parse_status("requires_action"),
+            AgenticStatus::RequiresAction
         );
         assert_eq!(super::parse_status("error"), AgenticStatus::Error);
         assert_eq!(super::parse_status("completed"), AgenticStatus::Completed);

@@ -572,6 +572,8 @@ mod tests {
             task_name: Some("Fix the build".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         };
         handle_agentic_message(&state, host_id, update_msg)
             .await

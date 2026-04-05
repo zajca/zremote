@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::{Notify, RwLock};
 use zremote_protocol::{AgenticLoopId, SessionId};
 
@@ -26,6 +26,10 @@ pub struct SessionMapper {
     /// Tracks when the last hook event fired for each PTY session.
     /// Used by the output analyzer to suppress updates when hooks are active.
     hook_activity: Arc<DashMap<SessionId, Instant>>,
+    /// Sessions where hooks are the authoritative state source.
+    /// Once set, the PTY output analyzer is permanently suppressed
+    /// for phase detection on this session.
+    hook_mode: Arc<DashSet<SessionId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +50,7 @@ impl SessionMapper {
             claude_task_ids: Arc::new(RwLock::new(HashMap::new())),
             loop_registered: Arc::new(Notify::new()),
             hook_activity: Arc::new(DashMap::new()),
+            hook_mode: Arc::new(DashSet::new()),
         }
     }
 
@@ -71,6 +76,18 @@ impl SessionMapper {
         self.hook_activity
             .get(session_id)
             .is_some_and(|t| t.elapsed() < window)
+    }
+
+    /// Mark a session as having active hooks. Once set, the PTY output
+    /// analyzer is permanently suppressed for this session's phase detection.
+    /// Called from hook handlers on first successful resolve.
+    pub fn set_hook_mode(&self, session_id: SessionId) {
+        self.hook_mode.insert(session_id);
+    }
+
+    /// Check if hooks are the authoritative state source for this session.
+    pub fn is_hook_mode(&self, session_id: &SessionId) -> bool {
+        self.hook_mode.contains(session_id)
     }
 
     /// Register a PTY session as a Claude task (started via UI).
@@ -144,6 +161,7 @@ impl SessionMapper {
         for sid in &session_ids {
             s2l.remove(sid);
             self.hook_activity.remove(sid);
+            self.hook_mode.remove(sid);
         }
     }
 
@@ -400,5 +418,50 @@ mod tests {
             .await
             .expect("CC session should be registered after resolve");
         assert_eq!(mapped2.loop_id, loop_id);
+    }
+
+    #[tokio::test]
+    async fn set_hook_mode_and_check() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+
+        mapper.set_hook_mode(session_id);
+        assert!(
+            mapper.is_hook_mode(&session_id),
+            "should return true after set_hook_mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_mode_false_by_default() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+
+        assert!(
+            !mapper.is_hook_mode(&session_id),
+            "should return false for unknown session"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_loop_cleans_hook_mode() {
+        let mapper = SessionMapper::new();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+
+        mapper.register_loop(session_id, loop_id).await;
+        mapper.set_hook_mode(session_id);
+
+        assert!(
+            mapper.is_hook_mode(&session_id),
+            "hook mode should exist before removal"
+        );
+
+        mapper.remove_loop(&loop_id).await;
+
+        assert!(
+            !mapper.is_hook_mode(&session_id),
+            "hook mode should be cleaned up after remove_loop"
+        );
     }
 }

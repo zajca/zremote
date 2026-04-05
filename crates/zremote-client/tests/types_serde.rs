@@ -884,6 +884,8 @@ fn server_event_roundtrip_loop_detected() {
             task_name: None,
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,

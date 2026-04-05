@@ -451,9 +451,9 @@ mod tests {
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
             zremote_protocol::AgenticAgentMessage::LoopStateUpdate { status, .. } => {
-                assert_eq!(status, zremote_protocol::AgenticStatus::WaitingForInput);
+                assert_eq!(status, zremote_protocol::AgenticStatus::RequiresAction);
             }
-            other => panic!("expected WaitingForInput, got {other:?}"),
+            other => panic!("expected RequiresAction, got {other:?}"),
         }
 
         shutdown_tx.send(true).unwrap();

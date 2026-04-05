@@ -138,7 +138,7 @@ fn format_cost(cost_usd: f64) -> String {
 pub fn cc_bot_icon(status: AgenticStatus, size: f32) -> gpui::Svg {
     let color = match status {
         AgenticStatus::Working => theme::accent(),
-        AgenticStatus::WaitingForInput => theme::warning(),
+        AgenticStatus::RequiresAction | AgenticStatus::WaitingForInput => theme::warning(),
         AgenticStatus::Error => theme::error(),
         AgenticStatus::Completed => theme::success(),
         _ => theme::text_tertiary(),
@@ -170,6 +170,7 @@ pub fn render_cc_tooltip(
     if let Some(status) = status {
         let status_text = match status {
             AgenticStatus::Working => "Working",
+            AgenticStatus::RequiresAction => "Requires action",
             AgenticStatus::WaitingForInput => "Waiting for input",
             AgenticStatus::Error => "Error",
             AgenticStatus::Completed => "Completed",

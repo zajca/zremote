@@ -56,6 +56,8 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         task_name: row.task_name,
         prompt_message: None,
         permission_mode: None,
+        action_tool_name: None,
+        action_description: None,
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
@@ -1072,6 +1074,8 @@ pub(super) async fn handle_agentic_message(
             task_name,
             prompt_message,
             permission_mode,
+            action_tool_name,
+            action_description,
         } => {
             // Update in-memory state
             if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
@@ -1130,6 +1134,8 @@ pub(super) async fn handle_agentic_message(
                         .get(&loop_id)
                         .and_then(|e| e.permission_mode.clone())
                 });
+                loop_info.action_tool_name = action_tool_name;
+                loop_info.action_description = action_description;
                 let _ = state.events.send(ServerEvent::LoopStatusChanged {
                     loop_info,
                     host_id: host_id.to_string(),
@@ -2204,6 +2210,8 @@ mod tests {
             task_name: Some("Fix the build".to_string()),
             prompt_message: None,
             permission_mode: None,
+            action_tool_name: None,
+            action_description: None,
         };
         handle_agentic_message(&state, host_id, update_msg)
             .await

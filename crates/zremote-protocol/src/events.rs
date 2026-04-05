@@ -28,6 +28,10 @@ pub struct LoopInfo {
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_description: Option<String>,
 }
 
 /// Nested host info in server events.
@@ -242,6 +246,8 @@ mod tests {
             output_tokens: 0,
             cost_usd: None,
             channel_available: None,
+            action_tool_name: None,
+            action_description: None,
         }
     }
 
