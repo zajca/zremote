@@ -387,6 +387,7 @@ pub async fn configure_with_claude(
         skip_permissions,
         output_format: None,
         custom_flags: None,
+        channel_enabled: false,
     };
 
     let cmd = CommandBuilder::build(&opts)

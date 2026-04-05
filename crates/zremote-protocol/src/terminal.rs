@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::channel::{ChannelAgentAction, ChannelServerAction};
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::{
@@ -124,6 +125,7 @@ pub enum AgentMessage {
     },
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
+    ChannelAction(ChannelAgentAction),
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -168,6 +170,7 @@ pub enum ServerMessage {
     },
     KnowledgeAction(KnowledgeServerMessage),
     ClaudeAction(ClaudeServerMessage),
+    ChannelAction(ChannelServerAction),
     ProjectScan,
     ProjectRegister {
         path: String,
@@ -965,5 +968,71 @@ mod tests {
             memories: vec![],
             conventions: vec![],
         });
+    }
+
+    #[test]
+    fn channel_agent_action_worker_response_roundtrip() {
+        use crate::channel::{ChannelAgentAction, ChannelResponse, WorkerStatus};
+        roundtrip_agent(&AgentMessage::ChannelAction(
+            ChannelAgentAction::WorkerResponse {
+                session_id: Uuid::new_v4(),
+                response: ChannelResponse::StatusReport {
+                    status: WorkerStatus::Completed,
+                    summary: "All tests pass".to_string(),
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn channel_agent_action_permission_request_roundtrip() {
+        use crate::channel::ChannelAgentAction;
+        roundtrip_agent(&AgentMessage::ChannelAction(
+            ChannelAgentAction::PermissionRequest {
+                session_id: Uuid::new_v4(),
+                request_id: "req-001".to_string(),
+                tool_name: "Bash".to_string(),
+                tool_input: serde_json::json!({"command": "rm -rf /tmp/test"}),
+            },
+        ));
+    }
+
+    #[test]
+    fn channel_agent_action_status_roundtrip() {
+        use crate::channel::ChannelAgentAction;
+        roundtrip_agent(&AgentMessage::ChannelAction(
+            ChannelAgentAction::ChannelStatus {
+                session_id: Uuid::new_v4(),
+                available: true,
+            },
+        ));
+    }
+
+    #[test]
+    fn channel_server_action_send_roundtrip() {
+        use crate::channel::{ChannelMessage, ChannelServerAction, Priority};
+        roundtrip_server(&ServerMessage::ChannelAction(
+            ChannelServerAction::ChannelSend {
+                session_id: Uuid::new_v4(),
+                message: ChannelMessage::Instruction {
+                    from: "commander".to_string(),
+                    content: "Fix tests".to_string(),
+                    priority: Priority::High,
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn channel_server_action_permission_response_roundtrip() {
+        use crate::channel::ChannelServerAction;
+        roundtrip_server(&ServerMessage::ChannelAction(
+            ChannelServerAction::PermissionResponse {
+                session_id: Uuid::new_v4(),
+                request_id: "perm-001".to_string(),
+                allowed: true,
+                reason: None,
+            },
+        ));
     }
 }

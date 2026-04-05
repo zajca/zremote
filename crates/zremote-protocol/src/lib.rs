@@ -1,4 +1,5 @@
 pub mod agentic;
+pub mod channel;
 pub mod claude;
 pub mod events;
 pub mod knowledge;

@@ -130,6 +130,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
+            channel_available: None,
         }
     }
 

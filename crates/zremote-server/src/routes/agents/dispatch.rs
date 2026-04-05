@@ -59,6 +59,7 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
+        channel_available: None,
     })
 }
 
@@ -607,6 +608,68 @@ pub(super) async fn handle_agent_message(
                     request_id = %request_id,
                     "received ActionInputsResolved for unknown request"
                 );
+            }
+        }
+        AgentMessage::ChannelAction(action) => {
+            use zremote_protocol::channel::ChannelAgentAction;
+            let host_id_str = host_id.to_string();
+            match action {
+                ChannelAgentAction::WorkerResponse {
+                    session_id,
+                    response,
+                } => {
+                    if let zremote_protocol::channel::ChannelResponse::Reply {
+                        ref message,
+                        ref metadata,
+                    } = response
+                    {
+                        let _ =
+                            state
+                                .events
+                                .send(zremote_protocol::ServerEvent::ChannelWorkerReply {
+                                    session_id: session_id.to_string(),
+                                    host_id: host_id_str,
+                                    message: message.clone(),
+                                    metadata: metadata.clone(),
+                                });
+                    }
+                    tracing::info!(
+                        session = %session_id,
+                        ?response,
+                        "channel worker response"
+                    );
+                }
+                ChannelAgentAction::PermissionRequest {
+                    session_id,
+                    request_id,
+                    tool_name,
+                    ..
+                } => {
+                    let _ = state.events.send(
+                        zremote_protocol::ServerEvent::ChannelPermissionRequested {
+                            session_id: session_id.to_string(),
+                            host_id: host_id_str,
+                            request_id: request_id.clone(),
+                            tool_name: tool_name.clone(),
+                        },
+                    );
+                    tracing::info!(
+                        session = %session_id,
+                        request_id,
+                        tool_name,
+                        "channel permission request"
+                    );
+                }
+                ChannelAgentAction::ChannelStatus {
+                    session_id,
+                    available,
+                } => {
+                    tracing::info!(
+                        session = %session_id,
+                        available,
+                        "channel status update"
+                    );
+                }
             }
         }
     }

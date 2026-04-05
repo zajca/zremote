@@ -7,9 +7,10 @@ edition.workspace = true
 workspace = true
 
 [features]
-default = ["local", "server"]
+default = ["local", "server", "channel"]
 local = ["dep:tower-http"]
 server = ["dep:zremote-server"]
+channel = []
 
 [dependencies]
 zremote-protocol.workspace = true

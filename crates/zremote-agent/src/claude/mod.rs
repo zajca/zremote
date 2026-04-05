@@ -17,6 +17,8 @@ pub struct CommandOptions<'a> {
     pub skip_permissions: bool,
     pub output_format: Option<&'a str>,
     pub custom_flags: Option<&'a str>,
+    /// Enable Channel Bridge for bidirectional communication.
+    pub channel_enabled: bool,
 }
 
 /// Builds a `claude` CLI command string from structured options.
@@ -39,6 +41,7 @@ impl CommandBuilder {
             skip_permissions,
             output_format,
             custom_flags,
+            channel_enabled,
         } = opts;
 
         // Validate model if provided: only alphanumeric, dots, and hyphens
@@ -96,6 +99,10 @@ impl CommandBuilder {
         if let Some(fmt) = output_format {
             parts.push("--output-format".to_string());
             parts.push(shell_quote(fmt));
+        }
+
+        if *channel_enabled {
+            parts.push("--dangerously-load-development-channels".to_string());
         }
 
         if let Some(flags) = custom_flags {
@@ -328,6 +335,7 @@ mod tests {
             skip_permissions: false,
             output_format: None,
             custom_flags: None,
+            channel_enabled: false,
         }
     }
 
@@ -449,6 +457,7 @@ mod tests {
             skip_permissions: true,
             output_format: Some("stream-json"),
             custom_flags: Some("--verbose"),
+            channel_enabled: false,
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
         assert!(cmd.starts_with("cd '/home/user/project' && claude"));
@@ -519,6 +528,22 @@ mod tests {
         let result = CommandBuilder::build(&opts);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid tool name"));
+    }
+
+    #[test]
+    fn build_with_channel_enabled() {
+        let opts = CommandOptions {
+            channel_enabled: true,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("--dangerously-load-development-channels"));
+    }
+
+    #[test]
+    fn build_without_channel_enabled() {
+        let cmd = CommandBuilder::build(&minimal_opts("/tmp")).unwrap();
+        assert!(!cmd.contains("--dangerously-load-development-channels"));
     }
 
     #[test]

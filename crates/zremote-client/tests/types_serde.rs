@@ -887,6 +887,7 @@ fn server_event_roundtrip_loop_detected() {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
+            channel_available: None,
         },
         host_id: "h-1".to_string(),
         hostname: "host".to_string(),

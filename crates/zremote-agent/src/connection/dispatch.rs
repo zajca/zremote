@@ -192,6 +192,7 @@ pub(super) async fn handle_server_message(
     bridge_senders: &BridgeSenders,
     bridge_scrollback: &bridge::BridgeScrollbackStore,
     session_analyzers: &mut std::collections::HashMap<SessionId, OutputAnalyzer>,
+    mut channel_bridge: Option<&mut crate::channel::bridge::ChannelBridge>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -224,8 +225,11 @@ pub(super) async fn handle_server_message(
             );
         }
         ServerMessage::SessionClose { session_id } => {
-            // Clean up analyzer and agentic loop
+            // Clean up analyzer, channel bridge, and agentic loop
             session_analyzers.remove(session_id);
+            if let Some(bridge) = channel_bridge.as_mut() {
+                bridge.remove(session_id);
+            }
             if let Some(loop_ended) = agentic_manager.on_session_closed(session_id)
                 && agentic_tx.try_send(loop_ended).is_err()
             {
@@ -951,6 +955,56 @@ pub(super) async fn handle_server_message(
                 );
             }
         }
+        ServerMessage::ChannelAction(action) => {
+            use zremote_protocol::channel::ChannelServerAction;
+            match action {
+                ChannelServerAction::ChannelSend {
+                    session_id: sid,
+                    message,
+                } => {
+                    if let Some(channel_bridge) = channel_bridge.as_mut() {
+                        // Try to discover first if not already connected
+                        if !channel_bridge.is_available(sid) {
+                            match channel_bridge.discover(*sid).await {
+                                Ok(true) => {
+                                    tracing::info!(session = %sid, "channel server discovered on demand");
+                                }
+                                Ok(false) => {
+                                    tracing::warn!(session = %sid, "no channel server found for session");
+                                    return;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(session = %sid, error = %e, "failed to discover channel server");
+                                    return;
+                                }
+                            }
+                        }
+                        if let Err(e) = channel_bridge.send(sid, message).await {
+                            tracing::warn!(session = %sid, error = %e, "failed to send channel message");
+                        }
+                    } else {
+                        tracing::debug!(?action, "channel bridge not available");
+                    }
+                }
+                ChannelServerAction::PermissionResponse {
+                    session_id: sid,
+                    request_id,
+                    allowed,
+                    reason,
+                } => {
+                    if let Some(channel_bridge) = channel_bridge.as_mut() {
+                        if let Err(e) = channel_bridge
+                            .respond_permission(sid, request_id, *allowed, reason.as_deref())
+                            .await
+                        {
+                            tracing::warn!(session = %sid, error = %e, "failed to forward permission response");
+                        }
+                    } else {
+                        tracing::debug!(?action, "channel bridge not available");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1013,6 +1067,7 @@ async fn handle_claude_server_message(
                 skip_permissions: *skip_permissions,
                 output_format: output_format.as_deref(),
                 custom_flags: custom_flags.as_deref(),
+                channel_enabled: false,
             };
             let command = match crate::claude::CommandBuilder::build(&opts) {
                 Ok(cmd) => cmd,
@@ -1223,6 +1278,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
     }
@@ -1248,6 +1304,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
     }
@@ -1273,6 +1330,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
     }
@@ -1297,6 +1355,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
 
@@ -1336,6 +1395,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
     }
@@ -1364,6 +1424,7 @@ mod tests {
             &bs,
             &bsb,
             &mut sa,
+            None,
         )
         .await;
 

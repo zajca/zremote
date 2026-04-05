@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod context;
 pub mod handler;
 pub mod installer;

@@ -204,6 +204,25 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/hosts/{host_id}/knowledge/service",
             post(routes::knowledge::control_service),
         )
+        // Channel routes
+        .route(
+            "/api/projects/{project_id}/permission-policy",
+            get(routes::channel::get_policy)
+                .put(routes::channel::upsert_policy)
+                .delete(routes::channel::delete_policy),
+        )
+        .route(
+            "/api/sessions/{session_id}/channel/send",
+            post(routes::channel::channel_send),
+        )
+        .route(
+            "/api/sessions/{session_id}/channel/permission/{request_id}",
+            post(routes::channel::permission_respond),
+        )
+        .route(
+            "/api/sessions/{session_id}/channel/status",
+            get(routes::channel::channel_status),
+        )
         // Claude task routes
         .route(
             "/api/claude-tasks",

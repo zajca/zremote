@@ -466,6 +466,9 @@ pub async fn run_connection(
         }
     }
 
+    // Channel bridge for dispatching channel messages to per-session servers
+    let mut channel_bridge = crate::channel::bridge::ChannelBridge::new();
+
     // Main message loop
     let result = loop {
         tokio::select! {
@@ -487,6 +490,7 @@ pub async fn run_connection(
                                     bridge_senders,
                                     bridge_scrollback,
                                     &mut session_analyzers,
+                                    Some(&mut channel_bridge),
                                 ).await;
                             }
                             Err(e) => {

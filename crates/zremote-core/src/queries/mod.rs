@@ -4,5 +4,6 @@ pub mod execution_nodes;
 pub mod hosts;
 pub mod knowledge;
 pub mod loops;
+pub mod permission_policy;
 pub mod projects;
 pub mod sessions;

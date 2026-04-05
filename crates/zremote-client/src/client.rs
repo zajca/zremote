@@ -1102,6 +1102,96 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    // --- Channel Bridge ---
+
+    /// Send a message to a CC worker via channel bridge.
+    pub async fn channel_send(
+        &self,
+        session_id: &str,
+        message: &serde_json::Value,
+    ) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/sessions/{}/channel/send",
+                self.base_url,
+                encode_path(session_id)
+            ))
+            .json(message)
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Get channel status for a session.
+    pub async fn channel_status(&self, session_id: &str) -> Result<serde_json::Value, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/sessions/{}/channel/status",
+                self.base_url,
+                encode_path(session_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Get permission policy for a project.
+    pub async fn get_permission_policy(
+        &self,
+        project_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/projects/{}/permission-policy",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Set permission policy for a project.
+    pub async fn set_permission_policy(
+        &self,
+        project_id: &str,
+        policy: &serde_json::Value,
+    ) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/projects/{}/permission-policy",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .json(policy)
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Delete permission policy for a project.
+    pub async fn delete_permission_policy(&self, project_id: &str) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/projects/{}/permission-policy",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
     /// Discover Claude Code sessions on a host.
     pub async fn discover_claude_sessions(
         &self,
