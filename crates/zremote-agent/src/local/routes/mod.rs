@@ -1,4 +1,5 @@
 pub mod agentic;
+pub mod channel;
 pub mod claude_sessions;
 pub mod config;
 pub mod events;

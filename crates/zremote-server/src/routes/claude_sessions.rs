@@ -28,6 +28,7 @@ pub struct CreateClaudeTaskRequest {
     pub skip_permissions: Option<bool>,
     pub output_format: Option<String>,
     pub custom_flags: Option<String>,
+    pub channel_enabled: Option<bool>,
 }
 
 /// `POST /api/claude-tasks` - Create and start a Claude task.
@@ -67,14 +68,18 @@ pub async fn create_claude_task(
         q::resolve_project_id_by_path(&state.db, &body.host_id, &body.project_path).await?
     };
 
+    let channel_enabled = body.channel_enabled.unwrap_or(false);
+
     let options_json = if body.allowed_tools.is_some()
         || body.output_format.is_some()
         || body.custom_flags.is_some()
+        || channel_enabled
     {
         let opts = serde_json::json!({
             "allowed_tools": body.allowed_tools,
             "output_format": body.output_format,
             "custom_flags": body.custom_flags,
+            "channel_enabled": channel_enabled,
         });
         Some(opts.to_string())
     } else {
@@ -120,6 +125,7 @@ pub async fn create_claude_task(
         output_format: body.output_format,
         custom_flags: body.custom_flags,
         continue_last: false,
+        channel_enabled,
     });
 
     if sender.send(msg).await.is_err() {
@@ -245,7 +251,7 @@ pub async fn resume_claude_task(
         );
     }
 
-    let (allowed_tools, skip_permissions, output_format, custom_flags) =
+    let (allowed_tools, skip_permissions, output_format, custom_flags, channel_enabled) =
         if let Some(ref opts_str) = original.options_json {
             let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
             let tools = opts["allowed_tools"]
@@ -259,9 +265,10 @@ pub async fn resume_claude_task(
             let skip = opts["skip_permissions"].as_bool().unwrap_or(false);
             let fmt = opts["output_format"].as_str().map(String::from);
             let flags = opts["custom_flags"].as_str().map(String::from);
-            (tools, skip, fmt, flags)
+            let channel = opts["channel_enabled"].as_bool().unwrap_or(false);
+            (tools, skip, fmt, flags, channel)
         } else {
-            (vec![], false, None, None)
+            (vec![], false, None, None, false)
         };
 
     let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::StartSession {
@@ -276,6 +283,7 @@ pub async fn resume_claude_task(
         output_format,
         custom_flags,
         continue_last,
+        channel_enabled,
     });
 
     if sender.send(msg).await.is_err() {
@@ -342,6 +350,144 @@ pub async fn discover_claude_sessions(
 #[derive(Debug, Deserialize)]
 pub struct DiscoverQuery {
     pub project_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CancelTaskBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/claude-tasks/:task_id/cancel` - Cancel a running Claude task.
+pub async fn cancel_claude_task(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    body: Option<Json<CancelTaskBody>>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+
+    if task.status != "starting" && task.status != "active" {
+        return Err(AppError::Conflict(format!(
+            "cannot cancel task with status '{}'",
+            task.status
+        )));
+    }
+
+    let force = body.is_some_and(|Json(b)| b.force);
+    let session_id: Uuid = task
+        .session_id
+        .parse()
+        .map_err(|_| AppError::Internal("invalid session_id".to_string()))?;
+    let host_id: Uuid = task
+        .host_id
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
+
+    // If not force and channel might be available, try graceful abort
+    if !force && let Some(sender) = state.connections.get_sender(&host_id).await {
+        let abort_msg = ServerMessage::ChannelAction(
+            zremote_protocol::channel::ChannelServerAction::ChannelSend {
+                session_id,
+                message: zremote_protocol::channel::ChannelMessage::Signal {
+                    action: zremote_protocol::channel::SignalAction::Abort,
+                    reason: Some("task cancelled by user".to_string()),
+                },
+            },
+        );
+        let _ = sender.send(abort_msg).await;
+        // No blocking sleep -- the session close below kills the PTY immediately.
+        // CC will receive SIGHUP and exit.
+    }
+
+    // Close the session by marking it as closed
+    if let Err(e) = sqlx::query("UPDATE sessions SET status = 'closed' WHERE id = ?")
+        .bind(&task.session_id)
+        .execute(&state.db)
+        .await
+    {
+        tracing::warn!(task_id = %task_id, "failed to update session status on cancel: {e}");
+    }
+
+    // Update task status to error with cancel reason
+    if let Err(e) = sqlx::query(
+        "UPDATE claude_sessions SET status = 'error', error_message = 'cancelled by user' WHERE id = ?",
+    )
+    .bind(&task_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(task_id = %task_id, "failed to update task status on cancel: {e}");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/claude-tasks/:task_id/log` - Get task output (scrollback).
+pub async fn get_task_log(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+    let session_id: Uuid = task
+        .session_id
+        .parse()
+        .map_err(|_| AppError::Internal("invalid session_id".to_string()))?;
+
+    let sessions = state.sessions.read().await;
+    let output = sessions
+        .get(&session_id)
+        .map(|s| {
+            let mut buf = Vec::new();
+            for chunk in &s.scrollback {
+                buf.extend_from_slice(chunk);
+            }
+            String::from_utf8_lossy(&buf).to_string()
+        })
+        .unwrap_or_default();
+
+    // Strip ANSI escape codes
+    let stripped = strip_ansi_escapes(&output);
+    Ok(stripped)
+}
+
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ ... final byte
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // consume until final byte (0x40-0x7E)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                // OSC or other: consume until BEL or ST
+                while let Some(&next) = chars.peek() {
+                    if next == '\x07' {
+                        chars.next();
+                        break;
+                    }
+                    if next == '\x1b' {
+                        chars.next();
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

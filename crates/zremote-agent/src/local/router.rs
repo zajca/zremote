@@ -181,6 +181,14 @@ pub(crate) fn build_router(
             post(routes::claude_sessions::resume_claude_task),
         )
         .route(
+            "/api/claude-tasks/{task_id}/cancel",
+            post(routes::claude_sessions::cancel_claude_task),
+        )
+        .route(
+            "/api/claude-tasks/{task_id}/log",
+            get(routes::claude_sessions::get_task_log),
+        )
+        .route(
             "/api/hosts/{host_id}/claude-tasks/discover",
             get(routes::claude_sessions::discover_claude_sessions),
         )
@@ -212,6 +220,19 @@ pub(crate) fn build_router(
         .route(
             "/api/projects/{project_id}/linear/actions/{action_index}",
             post(routes::linear::execute_action),
+        )
+        // Channel Bridge (local mode)
+        .route(
+            "/api/sessions/{session_id}/channel/send",
+            post(routes::channel::channel_send),
+        )
+        .route(
+            "/api/sessions/{session_id}/channel/permission/{request_id}",
+            post(routes::channel::permission_respond),
+        )
+        .route(
+            "/api/sessions/{session_id}/channel/status",
+            get(routes::channel::channel_status),
         )
         // Terminal WebSocket
         .route(

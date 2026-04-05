@@ -120,14 +120,18 @@ impl Formatter for LlmFormatter {
     }
 
     fn task(&self, t: &ClaudeTask) -> String {
-        to_line(&json!({
+        let mut val = json!({
             "_t": "task",
             "id": t.id,
             "st": status_str(&t.status),
             "model": opt_str(t.model.as_ref()),
             "project": t.project_path,
             "cost": t.total_cost_usd,
-        }))
+        });
+        if let Some(ref err) = t.error_message {
+            val["error"] = json!(err);
+        }
+        to_line(&val)
     }
 
     fn memories(&self, memories: &[Memory]) -> String {
@@ -341,6 +345,7 @@ mod tests {
             summary: None,
             task_name: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
+            error_message: None,
         }
     }
 

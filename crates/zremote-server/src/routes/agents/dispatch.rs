@@ -194,7 +194,7 @@ pub(super) async fn handle_agent_message(
                 let now_ct = chrono::Utc::now().to_rfc3339();
                 // starting -> error (session closed before Claude started)
                 if let Ok(result) = sqlx::query(
-                    "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+                    "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'session closed before task started' \
                      WHERE session_id = ? AND status = 'starting'",
                 )
                 .bind(&now_ct)
@@ -1352,9 +1352,10 @@ async fn handle_claude_message(
             .flatten();
 
             if let Err(e) = sqlx::query(
-                "UPDATE claude_sessions SET status = 'error', ended_at = ? WHERE id = ?",
+                "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = ? WHERE id = ?",
             )
             .bind(&now)
+            .bind(&error)
             .bind(&task_id_str)
             .execute(&state.db)
             .await

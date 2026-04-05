@@ -1202,6 +1202,65 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Respond to a permission request via channel bridge.
+    pub async fn channel_permission_respond(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        allowed: bool,
+        reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let body = serde_json::json!({
+            "allowed": allowed,
+            "reason": reason,
+        });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/sessions/{}/channel/permission/{}",
+                self.base_url,
+                encode_path(session_id),
+                encode_path(request_id)
+            ))
+            .json(&body)
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Cancel a running Claude task.
+    pub async fn cancel_claude_task(&self, task_id: &str, force: bool) -> Result<(), ApiError> {
+        let body = serde_json::json!({ "force": force });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/claude-tasks/{}/cancel",
+                self.base_url,
+                encode_path(task_id)
+            ))
+            .json(&body)
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Get task log (scrollback output).
+    pub async fn get_task_log(&self, task_id: &str) -> Result<String, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/claude-tasks/{}/log",
+                self.base_url,
+                encode_path(task_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.text().await?)
+    }
+
     /// Discover Claude Code sessions on a host.
     pub async fn discover_claude_sessions(
         &self,

@@ -50,6 +50,9 @@ pub enum TaskCommand {
         /// Custom CLI flags passed to Claude
         #[arg(long)]
         custom_flags: Option<String>,
+        /// Enable Channel Bridge for bidirectional communication
+        #[arg(long)]
+        channel: bool,
     },
     /// Resume an existing task
     Resume {
@@ -58,6 +61,42 @@ pub enum TaskCommand {
         /// Resume prompt
         #[arg(long)]
         prompt: Option<String>,
+    },
+    /// Send a message to a running task via channel
+    Send {
+        /// Task ID
+        task_id: String,
+        /// Message to send
+        message: String,
+        /// Priority (normal, high, urgent)
+        #[arg(long, default_value = "normal", value_parser = ["normal", "high", "urgent"])]
+        priority: String,
+    },
+    /// Approve or deny a permission request
+    Approve {
+        /// Task ID
+        task_id: String,
+        /// Permission request ID
+        request_id: String,
+        /// Decision
+        #[arg(value_parser = ["yes", "no"])]
+        decision: String,
+        /// Reason
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Cancel a running task
+    Cancel {
+        /// Task ID
+        task_id: String,
+        /// Force cancel without graceful abort
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show task output
+    Log {
+        /// Task ID
+        task_id: String,
     },
     /// Discover Claude Code sessions on the host
     Discover {
@@ -111,6 +150,7 @@ pub async fn run(
             skip_permissions,
             output_format,
             custom_flags,
+            channel,
         } => {
             let host_id = match resolver.resolve_host_id(client).await {
                 Ok(id) => id,
@@ -129,6 +169,7 @@ pub async fn run(
                 skip_permissions: if skip_permissions { Some(true) } else { None },
                 output_format,
                 custom_flags,
+                channel_enabled: if channel { Some(true) } else { None },
             };
             match client.create_claude_task(&req).await {
                 Ok(task) => {
@@ -156,6 +197,99 @@ pub async fn run(
                 }
             }
         }
+        TaskCommand::Send {
+            task_id,
+            message,
+            priority,
+        } => {
+            const MAX_MESSAGE_LEN: usize = 65_536;
+            if message.len() > MAX_MESSAGE_LEN {
+                eprintln!(
+                    "Error: message too large ({} bytes, max {MAX_MESSAGE_LEN})",
+                    message.len()
+                );
+                return 1;
+            }
+            let task = match client.get_claude_task(&task_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let channel_msg = serde_json::json!({
+                "type": "Instruction",
+                "from": "cli",
+                "content": message,
+                "priority": priority,
+            });
+            match client.channel_send(&task.session_id, &channel_msg).await {
+                Ok(()) => {
+                    println!("Message sent to task {task_id}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        TaskCommand::Approve {
+            task_id,
+            request_id,
+            decision,
+            reason,
+        } => {
+            let task = match client.get_claude_task(&task_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let allowed = decision == "yes";
+            match client
+                .channel_permission_respond(
+                    &task.session_id,
+                    &request_id,
+                    allowed,
+                    reason.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    let verb = if allowed { "approved" } else { "denied" };
+                    println!("Permission request {request_id} {verb}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        TaskCommand::Cancel { task_id, force } => {
+            match client.cancel_claude_task(&task_id, force).await {
+                Ok(()) => {
+                    println!("Task {task_id} cancelled");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        TaskCommand::Log { task_id } => match client.get_task_log(&task_id).await {
+            Ok(log) => {
+                print!("{log}");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        },
         TaskCommand::Discover { project_path } => {
             let host_id = match resolver.resolve_host_id(client).await {
                 Ok(id) => id,

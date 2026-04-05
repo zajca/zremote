@@ -41,6 +41,8 @@ pub enum ClaudeServerMessage {
         custom_flags: Option<String>,
         #[serde(default)]
         continue_last: bool,
+        #[serde(default)]
+        channel_enabled: bool,
     },
     DiscoverSessions {
         project_path: String,
@@ -169,6 +171,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
+            channel_enabled: false,
         });
     }
 
@@ -186,6 +189,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
+            channel_enabled: false,
         });
     }
 
@@ -203,6 +207,7 @@ mod tests {
             output_format: Some("stream-json".to_string()),
             custom_flags: Some("--verbose".to_string()),
             continue_last: false,
+            channel_enabled: false,
         });
     }
 
@@ -220,6 +225,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: true,
+            channel_enabled: false,
         });
     }
 
@@ -332,6 +338,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
+            channel_enabled: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();

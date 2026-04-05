@@ -53,15 +53,21 @@ impl ChannelBridge {
     pub async fn discover(&mut self, session_id: SessionId) -> Result<bool, std::io::Error> {
         match port::read_port_file(&session_id).await {
             Ok(port) => {
-                let base_url = format!("http://127.0.0.1:{port}");
-                tracing::info!(session = %session_id, port, "discovered channel server");
-                self.channels
-                    .insert(session_id, ChannelConnection { port, base_url });
+                self.register(session_id, port);
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Register a channel server for a session with a known port.
+    /// Use this when the port was discovered outside the lock.
+    pub fn register(&mut self, session_id: SessionId, port: u16) {
+        let base_url = format!("http://127.0.0.1:{port}");
+        tracing::info!(session = %session_id, port, "registered channel server");
+        self.channels
+            .insert(session_id, ChannelConnection { port, base_url });
     }
 
     /// Send a `ChannelMessage` to a session's channel server.

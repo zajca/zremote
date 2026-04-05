@@ -22,10 +22,14 @@ All commands: `zremote cli [--server URL] [--host ID] [--output llm] <command>`
 - `worktree delete <project_id> <path>` → remove worktree
 
 ### Tasks
-- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>]` → creates CC task
+- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>] [--channel]` → creates CC task
 - `task list [--host <id>] [--status <s>]` → `{"_t":"task","id","st","model","project","cost"}`
-- `task get <id>` → single task with full details
+- `task get <id>` → single task with full details (includes error_message on failure)
 - `task resume <id>` → resume paused task
+- `task log <id>` → get task output (ANSI-stripped scrollback)
+- `task send <id> <message> [--priority normal|high|urgent]` → send message to running task via channel
+- `task approve <id> <request_id> yes|no [--reason <text>]` → approve/deny permission request
+- `task cancel <id> [--force]` → cancel running task (graceful abort, then kill)
 
 ### Context
 - `memory list <project_id>` → `{"_t":"memory","id","key","cat","content"}`

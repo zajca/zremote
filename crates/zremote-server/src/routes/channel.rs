@@ -56,12 +56,32 @@ pub async fn delete_policy(
     }
 }
 
+/// Maximum allowed content length for channel messages (64 KB).
+const MAX_CHANNEL_CONTENT_LEN: usize = 65_536;
+
+/// Validate channel message content length.
+fn validate_channel_message(message: &ChannelMessage) -> Result<(), AppError> {
+    let content_len = match message {
+        ChannelMessage::Instruction { content, .. } => content.len(),
+        ChannelMessage::ContextUpdate { content, .. } => content.len(),
+        ChannelMessage::Signal { .. } => 0,
+    };
+    if content_len > MAX_CHANNEL_CONTENT_LEN {
+        return Err(AppError::BadRequest(format!(
+            "message content too large: {content_len} bytes (max {MAX_CHANNEL_CONTENT_LEN})"
+        )));
+    }
+    Ok(())
+}
+
 /// `POST /api/sessions/{id}/channel/send`
 pub async fn channel_send(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(message): Json<ChannelMessage>,
 ) -> Result<impl IntoResponse, AppError> {
+    validate_channel_message(&message)?;
+
     let parsed_session_id: Uuid = session_id
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;

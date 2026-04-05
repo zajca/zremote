@@ -1029,6 +1029,7 @@ async fn handle_claude_server_message(
             output_format,
             custom_flags,
             continue_last,
+            channel_enabled,
         } => {
             // Write large prompts to temp file to avoid PTY buffer overflow
             let prompt_file_path = initial_prompt
@@ -1067,7 +1068,7 @@ async fn handle_claude_server_message(
                 skip_permissions: *skip_permissions,
                 output_format: output_format.as_deref(),
                 custom_flags: custom_flags.as_deref(),
-                channel_enabled: false,
+                channel_enabled: *channel_enabled,
             };
             let command = match crate::claude::CommandBuilder::build(&opts) {
                 Ok(cmd) => cmd,

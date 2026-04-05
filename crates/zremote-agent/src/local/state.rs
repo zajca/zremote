@@ -8,6 +8,7 @@ use zremote_core::processing::AgenticProcessor;
 use zremote_core::state::{AgenticLoopStore, ServerEvent, SessionStore};
 
 use crate::agentic::manager::AgenticLoopManager;
+use crate::channel::bridge::ChannelBridge;
 use crate::hooks::mapper::SessionMapper;
 use crate::session::{PtyOutput, SessionManager};
 
@@ -28,6 +29,8 @@ pub struct LocalAppState {
     pub agentic_manager: Mutex<AgenticLoopManager>,
     pub agentic_processor: Arc<AgenticProcessor>,
     pub session_mapper: SessionMapper,
+    /// Channel bridge for local mode CC channel communication.
+    pub channel_bridge: Arc<Mutex<ChannelBridge>>,
     /// Optional channel to send messages to the KnowledgeManager.
     /// `None` when the knowledge service is not configured.
     pub knowledge_tx: Option<mpsc::Sender<zremote_protocol::knowledge::KnowledgeServerMessage>>,
@@ -51,6 +54,7 @@ impl LocalAppState {
 
         let agentic_manager = AgenticLoopManager::new();
         let session_mapper = SessionMapper::new();
+        let channel_bridge = Arc::new(Mutex::new(ChannelBridge::new()));
 
         let agentic_processor = Arc::new(AgenticProcessor {
             db: db.clone(),
@@ -73,6 +77,7 @@ impl LocalAppState {
             agentic_manager: Mutex::new(agentic_manager),
             agentic_processor,
             session_mapper,
+            channel_bridge,
             knowledge_tx: None,
         })
     }

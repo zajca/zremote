@@ -239,6 +239,14 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::claude_sessions::resume_claude_task),
         )
         .route(
+            "/api/claude-tasks/{task_id}/cancel",
+            post(routes::claude_sessions::cancel_claude_task),
+        )
+        .route(
+            "/api/claude-tasks/{task_id}/log",
+            get(routes::claude_sessions::get_task_log),
+        )
+        .route(
             "/api/hosts/{host_id}/claude-tasks/discover",
             get(routes::claude_sessions::discover_claude_sessions),
         )
@@ -282,7 +290,7 @@ pub async fn run_server(config: ServerConfig) {
         tracing::error!(error = %e, "failed to close stale agentic loops at startup");
     }
     if let Err(e) = sqlx::query(
-        "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+        "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'server restarted while task was running' \
          WHERE status IN ('starting', 'active')",
     )
     .bind(&startup_now)

@@ -25,6 +25,7 @@ pub struct CreateClaudeTaskRequest {
     pub skip_permissions: Option<bool>,
     pub output_format: Option<String>,
     pub custom_flags: Option<String>,
+    pub channel_enabled: Option<bool>,
 }
 
 /// Resolve the default shell (same logic as sessions.rs).
@@ -52,14 +53,18 @@ pub async fn create_claude_task(
         q::resolve_project_id_by_path(&state.db, &host_id, &body.project_path).await?
     };
 
+    let channel_enabled = body.channel_enabled.unwrap_or(false);
+
     let options_json = if body.allowed_tools.is_some()
         || body.output_format.is_some()
         || body.custom_flags.is_some()
+        || channel_enabled
     {
         let opts = serde_json::json!({
             "allowed_tools": body.allowed_tools,
             "output_format": body.output_format,
             "custom_flags": body.custom_flags,
+            "channel_enabled": channel_enabled,
         });
         Some(opts.to_string())
     } else {
@@ -119,7 +124,7 @@ pub async fn create_claude_task(
         skip_permissions: body.skip_permissions.unwrap_or(false),
         output_format: body.output_format.as_deref(),
         custom_flags: body.custom_flags.as_deref(),
-        channel_enabled: false,
+        channel_enabled,
     };
 
     let cmd = CommandBuilder::build(&opts)
@@ -160,6 +165,27 @@ pub async fn create_claude_task(
         let mut mgr = state.session_manager.lock().await;
         mgr.write_to(&session_id, cmd.as_bytes())
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
+    }
+
+    // Start channel bridge discovery if channel is enabled
+    if channel_enabled {
+        let bridge = state.channel_bridge.clone();
+        let sid = session_id;
+        tokio::spawn(async move {
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Discover outside the lock (does async I/O)
+                match crate::channel::port::read_port_file(&sid).await {
+                    Ok(port) => {
+                        let mut b = bridge.lock().await;
+                        b.register(sid, port);
+                        tracing::info!(%sid, port, "channel bridge discovered for task session");
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
     }
 
     // Broadcast event
@@ -276,7 +302,7 @@ pub async fn resume_claude_task(
         );
     }
 
-    let (allowed_tools, skip_permissions, output_format, custom_flags) =
+    let (allowed_tools, skip_permissions, output_format, custom_flags, channel_enabled) =
         if let Some(ref opts_str) = original.options_json {
             let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
             let tools = opts["allowed_tools"]
@@ -290,9 +316,10 @@ pub async fn resume_claude_task(
             let skip = opts["skip_permissions"].as_bool().unwrap_or(false);
             let fmt = opts["output_format"].as_str().map(String::from);
             let flags = opts["custom_flags"].as_str().map(String::from);
-            (tools, skip, fmt, flags)
+            let channel = opts["channel_enabled"].as_bool().unwrap_or(false);
+            (tools, skip, fmt, flags, channel)
         } else {
-            (vec![], false, None, None)
+            (vec![], false, None, None, false)
         };
 
     // Use prompt file for large prompts to avoid PTY buffer overflow
@@ -317,7 +344,7 @@ pub async fn resume_claude_task(
         skip_permissions,
         output_format: output_format.as_deref(),
         custom_flags: custom_flags.as_deref(),
-        channel_enabled: false,
+        channel_enabled,
     };
 
     let cmd = CommandBuilder::build(&cmd_opts)
@@ -360,6 +387,26 @@ pub async fn resume_claude_task(
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
     }
 
+    // Start channel bridge discovery if channel is enabled
+    if channel_enabled {
+        let bridge = state.channel_bridge.clone();
+        let sid = new_session_id;
+        tokio::spawn(async move {
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                match crate::channel::port::read_port_file(&sid).await {
+                    Ok(port) => {
+                        let mut b = bridge.lock().await;
+                        b.register(sid, port);
+                        tracing::info!(%sid, port, "channel bridge discovered for resumed task session");
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
+    }
+
     let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
         task_id: new_task_id_str.clone(),
         session_id: new_session_id_str.clone(),
@@ -392,6 +439,141 @@ pub async fn discover_claude_sessions(
         .map_err(|e| AppError::Internal(format!("discover task failed: {e}")))?;
 
     Ok(Json(sessions))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CancelTaskBody {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/claude-tasks/:task_id/cancel` - Cancel a running Claude task.
+pub async fn cancel_claude_task(
+    State(state): State<Arc<LocalAppState>>,
+    Path(task_id): Path<String>,
+    body: Option<Json<CancelTaskBody>>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+
+    if task.status != "starting" && task.status != "active" {
+        return Err(AppError::Conflict(format!(
+            "cannot cancel task with status '{}'",
+            task.status
+        )));
+    }
+
+    let force = body.is_some_and(|Json(b)| b.force);
+    let session_id: Uuid = task
+        .session_id
+        .parse()
+        .map_err(|_| AppError::Internal("invalid session_id".to_string()))?;
+
+    // If not force and channel is available, try graceful abort first
+    if !force {
+        let bridge = state.channel_bridge.lock().await;
+        if bridge.is_available(&session_id) {
+            let msg = zremote_protocol::channel::ChannelMessage::Signal {
+                action: zremote_protocol::channel::SignalAction::Abort,
+                reason: Some("task cancelled by user".to_string()),
+            };
+            // Send abort and immediately release the lock
+            let _ = bridge.send(&session_id, &msg).await;
+            drop(bridge);
+        }
+    }
+
+    // Close PTY session (sends SIGHUP)
+    {
+        let mut mgr = state.session_manager.lock().await;
+        let _ = mgr.close(&session_id);
+    }
+
+    // Update DB
+    if let Err(e) = sqlx::query("UPDATE sessions SET status = 'closed' WHERE id = ?")
+        .bind(&task.session_id)
+        .execute(&state.db)
+        .await
+    {
+        tracing::warn!(task_id = %task_id, "failed to update session status on cancel: {e}");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE claude_sessions SET status = 'error', error_message = 'cancelled by user' WHERE id = ?",
+    )
+    .bind(&task_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(task_id = %task_id, "failed to update task status on cancel: {e}");
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/claude-tasks/:task_id/log` - Get task output (scrollback).
+pub async fn get_task_log(
+    State(state): State<Arc<LocalAppState>>,
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+    let session_id: Uuid = task
+        .session_id
+        .parse()
+        .map_err(|_| AppError::Internal("invalid session_id".to_string()))?;
+
+    let sessions = state.sessions.read().await;
+    let raw_bytes = sessions
+        .get(&session_id)
+        .map(|s| {
+            let mut buf = Vec::new();
+            for chunk in &s.scrollback {
+                buf.extend_from_slice(chunk);
+            }
+            buf
+        })
+        .unwrap_or_default();
+
+    // Strip ANSI escape codes in a single pass from raw bytes
+    let text = String::from_utf8_lossy(&raw_bytes);
+    let stripped = strip_ansi_escapes(&text);
+    Ok(stripped)
+}
+
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                while let Some(&next) = chars.peek() {
+                    if next == '\x07' {
+                        chars.next();
+                        break;
+                    }
+                    if next == '\x1b' {
+                        chars.next();
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

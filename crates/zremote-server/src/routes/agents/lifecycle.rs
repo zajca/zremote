@@ -404,7 +404,7 @@ pub(super) async fn cleanup_agent(state: &AppState, host_id: &HostId, generation
 
     // Mark starting/active claude_sessions for this host as error
     if let Err(e) = sqlx::query(
-        "UPDATE claude_sessions SET status = 'error', ended_at = ? \
+        "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'agent disconnected while task was running' \
          WHERE host_id = ? AND status IN ('starting', 'active')",
     )
     .bind(&now)

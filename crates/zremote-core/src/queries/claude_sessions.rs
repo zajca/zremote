@@ -33,13 +33,14 @@ pub struct ClaudeTaskRow {
     pub lines_added: Option<i64>,
     pub lines_removed: Option<i64>,
     pub cc_version: Option<String>,
+    pub error_message: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, session_id, host_id, project_path, project_id, model, initial_prompt, \
      claude_session_id, resume_from, status, options_json, loop_id, started_at, ended_at, \
      total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at, \
      context_used_pct, context_window_size, rate_limit_5h_pct, rate_limit_7d_pct, \
-     lines_added, lines_removed, cc_version";
+     lines_added, lines_removed, cc_version, error_message";
 
 pub struct ListClaudeTasksFilter {
     pub host_id: Option<String>,
@@ -804,5 +805,41 @@ mod tests {
         let tasks = list_claude_tasks(&pool, &filter).await.unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "t1");
+    }
+
+    #[tokio::test]
+    async fn get_claude_task_returns_error_message() {
+        let pool = test_db().await;
+        let host_id = "host-1";
+        let session_id = "sess-1";
+        let task_id = "task-1";
+        insert_host(&pool, host_id).await;
+        insert_session(&pool, session_id, host_id).await;
+
+        insert_claude_task(
+            &pool, task_id, session_id, host_id, "/proj", None, None, None, None,
+        )
+        .await
+        .unwrap();
+
+        // Initially error_message should be None
+        let task = get_claude_task(&pool, task_id).await.unwrap();
+        assert!(task.error_message.is_none());
+
+        // Set error_message via UPDATE (simulating what dispatch does on SessionStartFailed)
+        sqlx::query(
+            "UPDATE claude_sessions SET status = 'error', error_message = 'failed to build claude command: invalid model' WHERE id = ?",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let task = get_claude_task(&pool, task_id).await.unwrap();
+        assert_eq!(task.status, "error");
+        assert_eq!(
+            task.error_message,
+            Some("failed to build claude command: invalid model".to_string())
+        );
     }
 }

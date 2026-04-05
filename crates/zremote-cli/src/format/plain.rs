@@ -1,5 +1,7 @@
 //! Plain text output formatter (for piped output / grep).
 
+use std::fmt::Write;
+
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
     ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus,
@@ -102,7 +104,7 @@ impl Formatter for PlainFormatter {
     }
 
     fn task(&self, t: &ClaudeTask) -> String {
-        format!(
+        let mut result = format!(
             "id: {}\nstatus: {:?}\nmodel: {}\nproject: {}\ncost: {}\ncreated: {}",
             t.id,
             t.status,
@@ -111,7 +113,11 @@ impl Formatter for PlainFormatter {
             t.total_cost_usd
                 .map_or("-".to_string(), |c| format!("${c:.4}")),
             relative_time(&t.created_at),
-        )
+        );
+        if let Some(ref err) = t.error_message {
+            let _ = write!(result, "\nerror: {err}");
+        }
+        result
     }
 
     fn memories(&self, memories: &[Memory]) -> String {

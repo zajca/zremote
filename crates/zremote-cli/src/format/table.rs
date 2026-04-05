@@ -1,5 +1,7 @@
 //! Table output formatter using comfy-table.
 
+use std::fmt::Write;
+
 use comfy_table::{ContentArrangement, Table};
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
@@ -183,7 +185,7 @@ impl Formatter for TableFormatter {
     }
 
     fn task(&self, t: &ClaudeTask) -> String {
-        format!(
+        let mut result = format!(
             "ID:          {}\nSession:     {}\nHost:        {}\nProject:     {}\nModel:       {}\nStatus:      {:?}\nPrompt:      {}\nCost:        {}\nTokens In:   {}\nTokens Out:  {}\nStarted:     {}\nEnded:       {}\nSummary:     {}",
             t.id,
             short_id(&t.session_id),
@@ -204,7 +206,11 @@ impl Formatter for TableFormatter {
             t.summary
                 .as_deref()
                 .map_or("-".to_string(), |s| truncate(s, 80)),
-        )
+        );
+        if let Some(ref err) = t.error_message {
+            let _ = write!(result, "\nError:       {err}");
+        }
+        result
     }
 
     fn memories(&self, memories: &[Memory]) -> String {

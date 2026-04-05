@@ -185,6 +185,8 @@ pub struct ClaudeTask {
     pub summary: Option<String>,
     pub task_name: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +460,8 @@ pub struct CreateClaudeTaskRequest {
     pub output_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_flags: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_enabled: Option<bool>,
 }
 
 /// Request body for resuming a Claude task.

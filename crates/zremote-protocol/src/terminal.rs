@@ -688,6 +688,7 @@ mod tests {
                 output_format: None,
                 custom_flags: None,
                 continue_last: false,
+                channel_enabled: false,
             },
         ));
     }
