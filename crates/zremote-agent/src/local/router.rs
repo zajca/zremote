@@ -220,8 +220,8 @@ pub(crate) fn build_router(
         )
         // Events WebSocket
         .route("/ws/events", get(routes::events::ws_handler))
-        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

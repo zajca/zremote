@@ -242,8 +242,8 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/hosts/{host_id}/claude-tasks/discover",
             get(routes::claude_sessions::discover_claude_sessions),
         )
-        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -421,7 +421,7 @@ fn spawn_pending_request_cleanup(state: Arc<AppState>, shutdown: CancellationTok
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(30));
+                    let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(120));
                     if removed > 0 {
                         tracing::info!(removed, "cleaned up stale pending requests");
                     }

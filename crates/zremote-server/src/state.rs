@@ -133,7 +133,7 @@ impl ConnectionManager {
 /// Wraps a oneshot sender with a creation timestamp for stale-entry cleanup.
 pub struct PendingRequest<T> {
     pub sender: tokio::sync::oneshot::Sender<T>,
-    pub created_at: Instant,
+    pub(crate) created_at: Instant,
 }
 
 impl<T> PendingRequest<T> {
