@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::prompts::ActionInput;
+use super::prompts::{ActionInput, PromptTemplate};
 
 /// Where an action should appear in the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -33,6 +33,15 @@ pub struct ProjectAction {
     pub scopes: Vec<ActionScope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<ActionInput>,
+}
+
+/// Response from the actions list endpoint, including both actions and prompts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ActionsResponse {
+    #[serde(default)]
+    pub actions: Vec<ProjectAction>,
+    #[serde(default)]
+    pub prompts: Vec<PromptTemplate>,
 }
 
 /// Worktree lifecycle hook configuration.

@@ -8,8 +8,8 @@ mod table;
 use clap::ValueEnum;
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
-    AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, KnowledgeBase, Memory, ModeInfo,
-    Project, ProjectAction, SearchResult, ServerEvent, Session, WorktreeInfo,
+    ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, KnowledgeBase,
+    Memory, ModeInfo, Project, SearchResult, ServerEvent, Session,
 };
 
 use crate::GlobalOpts;
@@ -38,9 +38,9 @@ pub trait Formatter {
     fn memories(&self, memories: &[Memory]) -> String;
     fn memory(&self, memory: &Memory) -> String;
     fn config_value(&self, cv: &ConfigValue) -> String;
-    fn settings(&self, settings: &ProjectSettings) -> String;
-    fn actions(&self, actions: &[ProjectAction]) -> String;
-    fn worktrees(&self, worktrees: &[WorktreeInfo]) -> String;
+    fn settings(&self, settings: &Option<ProjectSettings>) -> String;
+    fn actions(&self, actions: &ActionsResponse) -> String;
+    fn worktrees(&self, worktrees: &[Project]) -> String;
     fn knowledge_status(&self, kb: &KnowledgeBase) -> String;
     fn search_results(&self, results: &SearchResult) -> String;
     fn status_info(&self, mode: &ModeInfo, hosts: &[Host]) -> String;

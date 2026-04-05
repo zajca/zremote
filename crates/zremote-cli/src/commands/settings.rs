@@ -60,8 +60,8 @@ pub async fn run(
                 }
             };
             match client.save_settings(&project_id, &settings).await {
-                Ok(saved) => {
-                    println!("{}", fmt.settings(&saved));
+                Ok(()) => {
+                    println!("Settings saved.");
                     0
                 }
                 Err(e) => {

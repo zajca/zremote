@@ -743,12 +743,20 @@ async fn list_worktrees_parses_response() {
         get(|| async {
             Json(serde_json::json!([
                 {
+                    "id": "wt-1",
+                    "host_id": "h-1",
                     "path": "/home/user/proj-wt",
-                    "branch": "feature-1",
-                    "commit_hash": "abc1234",
-                    "is_detached": false,
-                    "is_locked": false,
-                    "is_dirty": true
+                    "name": "proj-wt",
+                    "has_claude_config": false,
+                    "has_zremote_config": false,
+                    "project_type": "worktree",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "parent_project_id": "p-1",
+                    "git_branch": "feature-1",
+                    "git_commit_hash": "abc1234",
+                    "git_is_dirty": true,
+                    "git_ahead": 0,
+                    "git_behind": 0
                 }
             ]))
         }),
@@ -760,8 +768,8 @@ async fn list_worktrees_parses_response() {
 
     assert_eq!(worktrees.len(), 1);
     assert_eq!(worktrees[0].path, "/home/user/proj-wt");
-    assert_eq!(worktrees[0].branch.as_deref(), Some("feature-1"));
-    assert!(worktrees[0].is_dirty);
+    assert_eq!(worktrees[0].git_branch.as_deref(), Some("feature-1"));
+    assert!(worktrees[0].git_is_dirty);
 }
 
 #[tokio::test]
@@ -790,7 +798,7 @@ async fn create_worktree_sends_post() {
     };
     let wt = client.create_worktree("p-1", &req).await.unwrap();
 
-    assert_eq!(wt.branch.as_deref(), Some("feature-2"));
+    assert_eq!(wt["branch"], "feature-2");
 }
 
 #[tokio::test]
@@ -827,7 +835,7 @@ async fn get_settings_parses_response() {
     let client = ApiClient::new(&url).unwrap();
     let settings = client.get_settings("p-1").await.unwrap();
 
-    assert_eq!(settings.shell.as_deref(), Some("/bin/zsh"));
+    assert_eq!(settings.unwrap().shell.as_deref(), Some("/bin/zsh"));
 }
 
 #[tokio::test]
@@ -837,7 +845,7 @@ async fn save_settings_sends_put() {
         put(
             |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| async move {
                 assert_eq!(body["shell"], "/bin/bash");
-                Json(body)
+                StatusCode::NO_CONTENT
             },
         ),
     );
@@ -855,9 +863,7 @@ async fn save_settings_sends_put() {
         prompts: vec![],
         claude: None,
     };
-    let result = client.save_settings("p-1", &settings).await.unwrap();
-
-    assert_eq!(result.shell.as_deref(), Some("/bin/bash"));
+    client.save_settings("p-1", &settings).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -869,22 +875,25 @@ async fn list_actions_parses_response() {
     let router = Router::new().route(
         "/api/projects/{id}/actions",
         get(|| async {
-            Json(serde_json::json!([
-                {
-                    "name": "test",
-                    "command": "cargo test"
-                }
-            ]))
+            Json(serde_json::json!({
+                "actions": [
+                    {
+                        "name": "test",
+                        "command": "cargo test"
+                    }
+                ],
+                "prompts": []
+            }))
         }),
     );
 
     let (url, _handle) = setup_server(router).await;
     let client = ApiClient::new(&url).unwrap();
-    let actions = client.list_actions("p-1").await.unwrap();
+    let resp = client.list_actions("p-1").await.unwrap();
 
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0].name, "test");
-    assert_eq!(actions[0].command, "cargo test");
+    assert_eq!(resp.actions.len(), 1);
+    assert_eq!(resp.actions[0].name, "test");
+    assert_eq!(resp.actions[0].command, "cargo test");
 }
 
 #[tokio::test]

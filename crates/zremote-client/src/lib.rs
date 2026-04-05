@@ -21,6 +21,7 @@ pub use flume;
 
 // Re-export commonly used types at crate root
 pub use types::{
+    ActionsResponse,
     AddProjectRequest,
     // SDK types
     AgenticLoop,

@@ -85,6 +85,16 @@ impl ConnectionResolver {
         let hosts = client.list_hosts().await.map_err(CliConnectionError::Api)?;
 
         let prefix_lower = prefix.to_lowercase();
+
+        // Exact match takes priority over prefix matching
+        if let Some(exact) = hosts.iter().find(|h| {
+            h.name.to_lowercase() == prefix_lower
+                || h.hostname.to_lowercase() == prefix_lower
+                || h.id.to_lowercase() == prefix_lower
+        }) {
+            return Ok(exact.id.clone());
+        }
+
         let matches: Vec<&Host> = hosts
             .iter()
             .filter(|h| {

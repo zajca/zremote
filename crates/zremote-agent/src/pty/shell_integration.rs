@@ -182,15 +182,15 @@ fn prepare_zsh_integration(
     zshrc.push_str("setopt HIST_IGNORE_SPACE\n");
 
     if config.force_sigwinch {
-        zshrc.push_str("# Force SIGWINCH after prompt renders (or fallback after 100ms)\n");
+        // Force SIGWINCH after a short delay so the terminal can query dimensions.
+        // IMPORTANT: Do NOT use `read < /dev/tty` here — it competes with zsh for
+        // PTY input and steals bytes from commands written by task dispatch,
+        // causing commands to appear on screen but never execute.
+        zshrc.push_str("# Force SIGWINCH after shell init settles\n");
         zshrc.push_str("{\n");
         zshrc.push_str("    (\n");
-        zshrc.push_str("        if read -t 0.5 -n 1 < /dev/tty 2>/dev/null; then\n");
-        zshrc.push_str("            kill -WINCH $$ 2>/dev/null\n");
-        zshrc.push_str("        else\n");
-        zshrc.push_str("            sleep 0.1\n");
-        zshrc.push_str("            kill -WINCH $$ 2>/dev/null\n");
-        zshrc.push_str("        fi\n");
+        zshrc.push_str("        sleep 0.2\n");
+        zshrc.push_str("        kill -WINCH $$ 2>/dev/null\n");
         zshrc.push_str("    ) &\n");
         zshrc.push_str("    disown\n");
         zshrc.push_str("}\n");

@@ -29,8 +29,8 @@ pub async fn run(
 ) -> i32 {
     match command {
         ActionCommand::List { project_id } => match client.list_actions(&project_id).await {
-            Ok(actions) => {
-                println!("{}", fmt.actions(&actions));
+            Ok(resp) => {
+                println!("{}", fmt.actions(&resp));
                 0
             }
             Err(e) => {

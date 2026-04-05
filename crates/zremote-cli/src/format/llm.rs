@@ -6,8 +6,8 @@
 use serde_json::json;
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
-    AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus, KnowledgeBase, Memory,
-    ModeInfo, Project, ProjectAction, SearchResult, ServerEvent, Session, WorktreeInfo,
+    ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus,
+    KnowledgeBase, Memory, ModeInfo, Project, SearchResult, ServerEvent, Session,
 };
 
 use super::Formatter;
@@ -156,12 +156,17 @@ impl Formatter for LlmFormatter {
         }))
     }
 
-    fn settings(&self, settings: &ProjectSettings) -> String {
-        serde_json::to_string(settings).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    fn settings(&self, settings: &Option<ProjectSettings>) -> String {
+        match settings {
+            Some(s) => {
+                serde_json::to_string(s).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+            }
+            None => r#"{"_t":"settings","empty":true}"#.to_string(),
+        }
     }
 
-    fn actions(&self, actions: &[ProjectAction]) -> String {
-        actions
+    fn actions(&self, resp: &ActionsResponse) -> String {
+        resp.actions
             .iter()
             .map(|a| {
                 to_line(&json!({
@@ -174,15 +179,16 @@ impl Formatter for LlmFormatter {
             .join("\n")
     }
 
-    fn worktrees(&self, worktrees: &[WorktreeInfo]) -> String {
+    fn worktrees(&self, worktrees: &[Project]) -> String {
         worktrees
             .iter()
             .map(|w| {
                 to_line(&json!({
                     "_t": "worktree",
+                    "id": w.id,
                     "path": w.path,
-                    "branch": opt_str(w.branch.as_ref()),
-                    "dirty": w.is_dirty,
+                    "branch": opt_str(w.git_branch.as_ref()),
+                    "dirty": w.git_is_dirty,
                 }))
             })
             .collect::<Vec<_>>()
@@ -561,14 +567,29 @@ mod tests {
     #[test]
     fn worktrees_produce_valid_json() {
         let f = LlmFormatter;
-        let wt = WorktreeInfo {
+        let wt = Project {
+            id: "wt-1".to_string(),
+            host_id: "h-1".to_string(),
             path: "/home/user/repo-feat".to_string(),
-            branch: Some("feature".to_string()),
-            commit_hash: Some("abc1234".to_string()),
-            is_detached: false,
-            is_locked: false,
-            is_dirty: true,
-            commit_message: None,
+            name: "repo-feat".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "worktree".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            parent_project_id: Some("p-1".to_string()),
+            git_branch: Some("feature".to_string()),
+            git_commit_hash: Some("abc1234".to_string()),
+            git_commit_message: None,
+            git_is_dirty: true,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
         };
         let out = f.worktrees(&[wt]);
         let v = parse_json(&out);

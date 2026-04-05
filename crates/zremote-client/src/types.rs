@@ -10,9 +10,9 @@ pub use zremote_protocol::{
         SearchResult, SearchTier,
     },
     project::{
-        ActionScope, AgenticSettings, ClaudeDefaults, DirectoryEntry, GitInfo, GitRemote,
-        LinearSettings, ProjectAction, ProjectInfo, ProjectSettings, PromptBody, PromptTemplate,
-        WorktreeInfo, WorktreeSettings,
+        ActionScope, ActionsResponse, AgenticSettings, ClaudeDefaults, DirectoryEntry, GitInfo,
+        GitRemote, LinearSettings, ProjectAction, ProjectInfo, ProjectSettings, PromptBody,
+        PromptTemplate, WorktreeInfo, WorktreeSettings,
     },
     status::{HostStatus, SessionStatus},
 };

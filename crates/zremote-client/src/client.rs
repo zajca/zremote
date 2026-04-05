@@ -5,13 +5,13 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use crate::error::ApiError;
 use crate::terminal::TerminalSession;
 use crate::types::{
-    AddProjectRequest, AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue,
+    ActionsResponse, AddProjectRequest, AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue,
     CreateClaudeTaskRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
     DirectoryEntry, ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase,
     ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project,
-    ProjectAction, ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult,
-    ServiceControlRequest, Session, SessionPreviewsResponse, SetConfigRequest, UpdateHostRequest,
-    UpdateMemoryRequest, UpdateProjectRequest, UpdateSessionRequest, WorktreeInfo,
+    ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest,
+    Session, SessionPreviewsResponse, SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest,
+    UpdateProjectRequest, UpdateSessionRequest,
 };
 
 /// Percent-encode a single URL path segment (RFC 3986 unreserved characters preserved).
@@ -523,7 +523,9 @@ impl ApiClient {
     }
 
     /// List worktrees for a project.
-    pub async fn list_worktrees(&self, project_id: &str) -> Result<Vec<WorktreeInfo>, ApiError> {
+    ///
+    /// Returns project rows (worktrees are stored as child projects in the DB).
+    pub async fn list_worktrees(&self, project_id: &str) -> Result<Vec<Project>, ApiError> {
         let resp = self
             .client
             .get(format!(
@@ -538,12 +540,13 @@ impl ApiClient {
     }
 
     /// Create a worktree for a project.
-    #[must_use = "worktree creation returns the new worktree"]
+    ///
+    /// Returns the created project (worktree) or a status JSON depending on mode.
     pub async fn create_worktree(
         &self,
         project_id: &str,
         req: &CreateWorktreeRequest,
-    ) -> Result<WorktreeInfo, ApiError> {
+    ) -> Result<serde_json::Value, ApiError> {
         let resp = self
             .client
             .post(format!(
@@ -579,7 +582,12 @@ impl ApiClient {
     }
 
     /// Get project settings.
-    pub async fn get_settings(&self, project_id: &str) -> Result<ProjectSettings, ApiError> {
+    ///
+    /// Returns `None` if the project has no `.zremote/settings.json`.
+    pub async fn get_settings(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectSettings>, ApiError> {
         let resp = self
             .client
             .get(format!(
@@ -594,11 +602,13 @@ impl ApiClient {
     }
 
     /// Save project settings.
+    ///
+    /// Both server and local agent return 204 No Content on success.
     pub async fn save_settings(
         &self,
         project_id: &str,
         settings: &ProjectSettings,
-    ) -> Result<ProjectSettings, ApiError> {
+    ) -> Result<(), ApiError> {
         let resp = self
             .client
             .put(format!(
@@ -609,12 +619,12 @@ impl ApiClient {
             .json(settings)
             .send()
             .await?;
-        let resp = self.check_response(resp).await?;
-        Ok(resp.json().await?)
+        self.check_response(resp).await?;
+        Ok(())
     }
 
     /// List actions for a project.
-    pub async fn list_actions(&self, project_id: &str) -> Result<Vec<ProjectAction>, ApiError> {
+    pub async fn list_actions(&self, project_id: &str) -> Result<ActionsResponse, ApiError> {
         let resp = self
             .client
             .get(format!(

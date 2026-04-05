@@ -3,8 +3,8 @@
 use serde::Serialize;
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
-    AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, KnowledgeBase, Memory, ModeInfo,
-    Project, ProjectAction, SearchResult, ServerEvent, Session, WorktreeInfo,
+    ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, KnowledgeBase,
+    Memory, ModeInfo, Project, SearchResult, ServerEvent, Session,
 };
 
 use super::Formatter;
@@ -59,13 +59,13 @@ impl Formatter for JsonFormatter {
     fn config_value(&self, cv: &ConfigValue) -> String {
         to_json(cv)
     }
-    fn settings(&self, settings: &ProjectSettings) -> String {
+    fn settings(&self, settings: &Option<ProjectSettings>) -> String {
         to_json(settings)
     }
-    fn actions(&self, actions: &[ProjectAction]) -> String {
-        to_json(&actions)
+    fn actions(&self, resp: &ActionsResponse) -> String {
+        to_json(resp)
     }
-    fn worktrees(&self, worktrees: &[WorktreeInfo]) -> String {
+    fn worktrees(&self, worktrees: &[Project]) -> String {
         to_json(&worktrees)
     }
     fn knowledge_status(&self, kb: &KnowledgeBase) -> String {

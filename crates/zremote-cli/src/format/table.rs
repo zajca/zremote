@@ -3,8 +3,8 @@
 use comfy_table::{ContentArrangement, Table};
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
-    AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus, KnowledgeBase, Memory,
-    ModeInfo, Project, ProjectAction, SearchResult, ServerEvent, Session, WorktreeInfo,
+    ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus,
+    KnowledgeBase, Memory, ModeInfo, Project, SearchResult, ServerEvent, Session,
 };
 
 use super::{Formatter, opt, relative_time, short_id, truncate};
@@ -241,16 +241,19 @@ impl Formatter for TableFormatter {
         format!("{} = {}", cv.key, cv.value)
     }
 
-    fn settings(&self, settings: &ProjectSettings) -> String {
-        serde_json::to_string_pretty(settings).unwrap_or_else(|e| format!("Error: {e}"))
+    fn settings(&self, settings: &Option<ProjectSettings>) -> String {
+        match settings {
+            Some(s) => serde_json::to_string_pretty(s).unwrap_or_else(|e| format!("Error: {e}")),
+            None => "No settings configured.".to_string(),
+        }
     }
 
-    fn actions(&self, actions: &[ProjectAction]) -> String {
-        if actions.is_empty() {
+    fn actions(&self, resp: &ActionsResponse) -> String {
+        if resp.actions.is_empty() {
             return "No actions configured.".to_string();
         }
         let mut t = new_table(&["NAME", "COMMAND", "DESCRIPTION"]);
-        for a in actions {
+        for a in &resp.actions {
             t.add_row([
                 &a.name,
                 &truncate(&a.command, 40),
@@ -260,20 +263,18 @@ impl Formatter for TableFormatter {
         t.to_string()
     }
 
-    fn worktrees(&self, worktrees: &[WorktreeInfo]) -> String {
+    fn worktrees(&self, worktrees: &[Project]) -> String {
         if worktrees.is_empty() {
             return "No worktrees found.".to_string();
         }
-        let mut t = new_table(&["PATH", "BRANCH", "COMMIT", "DIRTY", "LOCKED"]);
+        let mut t = new_table(&["ID", "PATH", "BRANCH", "DIRTY"]);
         for w in worktrees {
-            let dirty = if w.is_dirty { "yes" } else { "-" };
-            let locked = if w.is_locked { "yes" } else { "-" };
+            let dirty = if w.git_is_dirty { "yes" } else { "-" };
             t.add_row([
+                short_id(&w.id),
                 &truncate(&w.path, 45),
-                opt(&w.branch),
-                opt(&w.commit_hash),
+                opt(&w.git_branch),
                 dirty,
-                locked,
             ]);
         }
         t.to_string()

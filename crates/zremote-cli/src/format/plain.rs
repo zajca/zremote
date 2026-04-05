@@ -2,8 +2,8 @@
 
 use zremote_client::types::ProjectSettings;
 use zremote_client::{
-    AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus, KnowledgeBase, Memory,
-    ModeInfo, Project, ProjectAction, SearchResult, ServerEvent, Session, WorktreeInfo,
+    ActionsResponse, AgenticLoop, ClaudeTask, ConfigValue, DirectoryEntry, Host, HostStatus,
+    KnowledgeBase, Memory, ModeInfo, Project, SearchResult, ServerEvent, Session,
 };
 
 use super::{Formatter, opt, relative_time};
@@ -133,27 +133,31 @@ impl Formatter for PlainFormatter {
         format!("{}: {}", cv.key, cv.value)
     }
 
-    fn settings(&self, settings: &ProjectSettings) -> String {
-        serde_json::to_string_pretty(settings).unwrap_or_else(|e| format!("error: {e}"))
+    fn settings(&self, settings: &Option<ProjectSettings>) -> String {
+        match settings {
+            Some(s) => serde_json::to_string_pretty(s).unwrap_or_else(|e| format!("error: {e}")),
+            None => "No settings configured.".to_string(),
+        }
     }
 
-    fn actions(&self, actions: &[ProjectAction]) -> String {
-        actions
+    fn actions(&self, resp: &ActionsResponse) -> String {
+        resp.actions
             .iter()
             .map(|a| format!("{}: {}", a.name, a.command))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn worktrees(&self, worktrees: &[WorktreeInfo]) -> String {
+    fn worktrees(&self, worktrees: &[Project]) -> String {
         worktrees
             .iter()
             .map(|w| {
                 format!(
-                    "path: {}\nbranch: {}\ndirty: {}",
+                    "id: {}\npath: {}\nbranch: {}\ndirty: {}",
+                    w.id,
                     w.path,
-                    opt(&w.branch),
-                    w.is_dirty
+                    opt(&w.git_branch),
+                    w.git_is_dirty
                 )
             })
             .collect::<Vec<_>>()

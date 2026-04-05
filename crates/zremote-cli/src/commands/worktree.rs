@@ -68,8 +68,10 @@ pub async fn run(
                 new_branch,
             };
             match client.create_worktree(&project_id, &req).await {
-                Ok(worktree) => {
-                    println!("{}", fmt.worktrees(&[worktree]));
+                Ok(resp) => {
+                    let output = serde_json::to_string_pretty(&resp)
+                        .unwrap_or_else(|e| format!("Error: {e}"));
+                    println!("{output}");
                     0
                 }
                 Err(e) => {
