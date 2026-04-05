@@ -8,10 +8,10 @@ use crate::types::{
     AddProjectRequest, AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue,
     CreateClaudeTaskRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
     DirectoryEntry, ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase,
-    ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, Project, ProjectAction,
-    ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest,
-    Session, SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
-    UpdateSessionRequest, WorktreeInfo,
+    ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project,
+    ProjectAction, ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult,
+    ServiceControlRequest, Session, SessionPreviewsResponse, SetConfigRequest, UpdateHostRequest,
+    UpdateMemoryRequest, UpdateProjectRequest, UpdateSessionRequest, WorktreeInfo,
 };
 
 /// Percent-encode a single URL path segment (RFC 3986 unreserved characters preserved).
@@ -373,6 +373,20 @@ impl ApiClient {
             .await?;
         self.check_response(resp).await?;
         Ok(())
+    }
+
+    /// Get terminal preview snapshots for all active sessions.
+    pub async fn get_session_previews(
+        &self,
+    ) -> Result<std::collections::HashMap<String, PreviewSnapshot>, ApiError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/sessions/previews", self.base_url))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        let body: SessionPreviewsResponse = resp.json().await?;
+        Ok(body.previews)
     }
 
     // --- Projects ---

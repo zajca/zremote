@@ -1608,3 +1608,66 @@ async fn check_response_error_with_json_body() {
     assert!(!err.is_not_found());
     assert!(!err.is_server_error());
 }
+
+// ---------------------------------------------------------------------------
+// Session previews
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_session_previews_parses_response() {
+    let router = Router::new().route(
+        "/api/sessions/previews",
+        get(|| async {
+            Json(serde_json::json!({
+                "previews": {
+                    "s-1": {
+                        "lines": [
+                            {
+                                "text": "$ cargo build",
+                                "spans": [
+                                    {"start": 0, "end": 1, "fg": "#00ff00"},
+                                    {"start": 2, "end": 13, "fg": "#ffffff"}
+                                ]
+                            },
+                            {
+                                "text": "   Compiling zremote v0.10.0",
+                                "spans": [
+                                    {"start": 3, "end": 12, "fg": "#00ff00"},
+                                    {"start": 13, "end": 28, "fg": "#ffffff"}
+                                ]
+                            }
+                        ],
+                        "cols": 80,
+                        "rows": 24
+                    },
+                    "s-2": {
+                        "lines": [],
+                        "cols": 120,
+                        "rows": 40
+                    }
+                }
+            }))
+        }),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let previews = client.get_session_previews().await.unwrap();
+
+    assert_eq!(previews.len(), 2);
+
+    let s1 = &previews["s-1"];
+    assert_eq!(s1.cols, 80);
+    assert_eq!(s1.rows, 24);
+    assert_eq!(s1.lines.len(), 2);
+    assert_eq!(s1.lines[0].text, "$ cargo build");
+    assert_eq!(s1.lines[0].spans.len(), 2);
+    assert_eq!(s1.lines[0].spans[0].start, 0);
+    assert_eq!(s1.lines[0].spans[0].end, 1);
+    assert_eq!(s1.lines[0].spans[0].fg, "#00ff00");
+
+    let s2 = &previews["s-2"];
+    assert_eq!(s2.cols, 120);
+    assert_eq!(s2.rows, 40);
+    assert!(s2.lines.is_empty());
+}

@@ -9,6 +9,8 @@ use zremote_protocol::agentic::AgenticStatus;
 use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgenticLoopId, HostId, SessionId};
 
+use crate::snapshot_parser::{ScreenSnapshot, SnapshotParser};
+
 pub const MAX_SCROLLBACK_BYTES: usize = 100 * 1024; // 100KB
 
 /// In-memory state for an active terminal session.
@@ -22,6 +24,8 @@ pub struct SessionState {
     /// Last known terminal dimensions (updated on resize, sent with scrollback).
     pub last_cols: u16,
     pub last_rows: u16,
+    /// VTE parser for generating terminal screen preview snapshots.
+    snapshot_parser: SnapshotParser,
 }
 
 impl SessionState {
@@ -35,10 +39,12 @@ impl SessionState {
             scrollback_size: 0,
             last_cols: 0,
             last_rows: 0,
+            snapshot_parser: SnapshotParser::new(),
         }
     }
 
     pub fn append_scrollback(&mut self, data: Vec<u8>) {
+        self.snapshot_parser.advance(&data);
         self.scrollback_size += data.len();
         self.scrollback.push_back(data);
         while self.scrollback_size > MAX_SCROLLBACK_BYTES {
@@ -46,6 +52,12 @@ impl SessionState {
                 self.scrollback_size -= old.len();
             }
         }
+    }
+
+    /// Get a snapshot of the current terminal screen for preview rendering.
+    #[must_use]
+    pub fn screen_snapshot(&self) -> ScreenSnapshot {
+        self.snapshot_parser.snapshot()
     }
 }
 

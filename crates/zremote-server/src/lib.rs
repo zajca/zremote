@@ -90,6 +90,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             "/api/execution-nodes/cleanup",
             delete(routes::sessions::cleanup_execution_nodes),
         )
+        .route(
+            "/api/sessions/previews",
+            get(routes::sessions::get_session_previews),
+        )
         .merge(ws_routes)
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))

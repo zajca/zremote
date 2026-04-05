@@ -492,6 +492,21 @@ pub async fn cleanup_execution_nodes(
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
+/// `GET /api/sessions/previews` - batch fetch screen snapshots for all active sessions.
+pub async fn get_session_previews(
+    State(state): State<Arc<LocalAppState>>,
+) -> Result<impl IntoResponse, AppError> {
+    let sessions = state.sessions.read().await;
+    let mut previews = serde_json::Map::new();
+    for (id, session_state) in &*sessions {
+        let snapshot = session_state.screen_snapshot();
+        let value = serde_json::to_value(&snapshot)
+            .map_err(|e| AppError::Internal(format!("snapshot serialization: {e}")))?;
+        previews.insert(id.to_string(), value);
+    }
+    Ok(Json(serde_json::json!({ "previews": previews })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

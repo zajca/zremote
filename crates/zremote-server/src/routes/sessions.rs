@@ -385,6 +385,21 @@ pub async fn cleanup_execution_nodes(
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
+/// `GET /api/sessions/previews` - batch fetch screen snapshots for all active sessions.
+pub async fn get_session_previews(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
+    let sessions = state.sessions.read().await;
+    let mut previews = serde_json::Map::new();
+    for (id, session_state) in &*sessions {
+        let snapshot = session_state.screen_snapshot();
+        let value = serde_json::to_value(&snapshot)
+            .map_err(|e| AppError::Internal(format!("snapshot serialization: {e}")))?;
+        previews.insert(id.to_string(), value);
+    }
+    Ok(Json(serde_json::json!({ "previews": previews })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,5 +916,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.0, "closed");
+    }
+
+    #[tokio::test]
+    async fn get_session_previews_empty_returns_empty_object() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/sessions/previews")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["previews"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_session_previews_returns_snapshot_for_active_session() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4();
+        let host_id = uuid::Uuid::new_v4();
+
+        // Insert a session into the in-memory store with some data
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut session_state = SessionState::new(session_id, host_id);
+            session_state.append_scrollback(b"Hello Preview".to_vec());
+            sessions.insert(session_id, session_state);
+        }
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/sessions/previews")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let previews = json["previews"].as_object().unwrap();
+        assert_eq!(previews.len(), 1);
+
+        let snapshot = &previews[&session_id.to_string()];
+        assert_eq!(snapshot["cols"], 120);
+        assert_eq!(snapshot["rows"], 30);
+        assert_eq!(snapshot["lines"][0]["text"], "Hello Preview");
     }
 }
