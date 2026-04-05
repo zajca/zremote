@@ -130,6 +130,21 @@ impl ConnectionManager {
     }
 }
 
+/// Wraps a oneshot sender with a creation timestamp for stale-entry cleanup.
+pub struct PendingRequest<T> {
+    pub sender: tokio::sync::oneshot::Sender<T>,
+    pub(crate) created_at: Instant,
+}
+
+impl<T> PendingRequest<T> {
+    pub fn new(sender: tokio::sync::oneshot::Sender<T>) -> Self {
+        Self {
+            sender,
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// Response type for directory listing oneshot channels.
 pub struct DirectoryListingResponse {
     pub entries: Vec<zremote_protocol::project::DirectoryEntry>,
@@ -163,25 +178,80 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     pub events: broadcast::Sender<ServerEvent>,
     pub knowledge_requests: Arc<
-        DashMap<
-            uuid::Uuid,
-            tokio::sync::oneshot::Sender<zremote_protocol::knowledge::KnowledgeAgentMessage>,
-        >,
+        DashMap<uuid::Uuid, PendingRequest<zremote_protocol::knowledge::KnowledgeAgentMessage>>,
     >,
-    pub claude_discover_requests: Arc<
-        DashMap<
-            String,
-            tokio::sync::oneshot::Sender<Vec<zremote_protocol::claude::ClaudeSessionInfo>>,
-        >,
-    >,
-    pub directory_requests:
-        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<DirectoryListingResponse>>>,
-    pub settings_get_requests:
-        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsGetResponse>>>,
-    pub settings_save_requests:
-        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<SettingsSaveResponse>>>,
+    pub claude_discover_requests:
+        Arc<DashMap<String, PendingRequest<Vec<zremote_protocol::claude::ClaudeSessionInfo>>>>,
+    pub directory_requests: Arc<DashMap<uuid::Uuid, PendingRequest<DirectoryListingResponse>>>,
+    pub settings_get_requests: Arc<DashMap<uuid::Uuid, PendingRequest<SettingsGetResponse>>>,
+    pub settings_save_requests: Arc<DashMap<uuid::Uuid, PendingRequest<SettingsSaveResponse>>>,
     pub action_inputs_requests:
-        Arc<DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<ActionInputsResolveResponse>>>,
+        Arc<DashMap<uuid::Uuid, PendingRequest<ActionInputsResolveResponse>>>,
+}
+
+impl AppState {
+    /// Remove pending requests older than `max_age` from all DashMap fields.
+    /// Returns the total number of stale entries removed.
+    pub fn cleanup_stale_requests(&self, max_age: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let mut removed = 0;
+
+        self.knowledge_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "knowledge_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.claude_discover_requests.retain(|key, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_key = %key, map = "claude_discover_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.directory_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "directory_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.settings_get_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "settings_get_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.settings_save_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "settings_save_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.action_inputs_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= max_age;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "action_inputs_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +429,128 @@ mod tests {
                 .await;
         }
         assert_eq!(mgr.connected_count().await, 5);
+    }
+
+    async fn make_app_state() -> AppState {
+        let pool = crate::db::init_db("sqlite::memory:").await.unwrap();
+        let (events_tx, _) = tokio::sync::broadcast::channel(1024);
+        AppState {
+            db: pool,
+            connections: Arc::new(ConnectionManager::new()),
+            sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            agentic_loops: Arc::new(DashMap::new()),
+            agent_token_hash: String::new(),
+            shutdown: CancellationToken::new(),
+            events: events_tx,
+            knowledge_requests: Arc::new(DashMap::new()),
+            claude_discover_requests: Arc::new(DashMap::new()),
+            directory_requests: Arc::new(DashMap::new()),
+            settings_get_requests: Arc::new(DashMap::new()),
+            settings_save_requests: Arc::new(DashMap::new()),
+            action_inputs_requests: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[test]
+    fn pending_request_new_sets_created_at() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+        let before = Instant::now();
+        let req = PendingRequest::new(tx);
+        let after = Instant::now();
+        assert!(req.created_at >= before);
+        assert!(req.created_at <= after);
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_nothing_when_empty() {
+        let state = make_app_state().await;
+        let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(30));
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_stale_entries() {
+        let state = make_app_state().await;
+
+        // Insert entries with a created_at in the past
+        let id1 = Uuid::new_v4();
+        let (tx1, _rx1) = tokio::sync::oneshot::channel::<SettingsGetResponse>();
+        let mut req1 = PendingRequest::new(tx1);
+        req1.created_at = Instant::now() - std::time::Duration::from_secs(60);
+        state.settings_get_requests.insert(id1, req1);
+
+        // Insert a fresh entry that should survive
+        let id2 = Uuid::new_v4();
+        let (tx2, _rx2) = tokio::sync::oneshot::channel::<SettingsGetResponse>();
+        state
+            .settings_get_requests
+            .insert(id2, PendingRequest::new(tx2));
+
+        let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(30));
+        assert_eq!(removed, 1);
+        assert!(
+            state.settings_get_requests.get(&id1).is_none(),
+            "stale entry should be removed"
+        );
+        assert!(
+            state.settings_get_requests.get(&id2).is_some(),
+            "fresh entry should remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_stale_entries_across_all_maps() {
+        let state = make_app_state().await;
+        let old = Instant::now() - std::time::Duration::from_secs(60);
+
+        let (tx1, _) = tokio::sync::oneshot::channel();
+        let mut r1 = PendingRequest::new(tx1);
+        r1.created_at = old;
+        state.knowledge_requests.insert(Uuid::new_v4(), r1);
+
+        let (tx2, _) = tokio::sync::oneshot::channel();
+        let mut r2 = PendingRequest::new(tx2);
+        r2.created_at = old;
+        state
+            .claude_discover_requests
+            .insert("stale-key".to_string(), r2);
+
+        let (tx3, _) = tokio::sync::oneshot::channel();
+        let mut r3 = PendingRequest::new(tx3);
+        r3.created_at = old;
+        state.directory_requests.insert(Uuid::new_v4(), r3);
+
+        let (tx4, _) = tokio::sync::oneshot::channel();
+        let mut r4 = PendingRequest::new(tx4);
+        r4.created_at = old;
+        state.settings_save_requests.insert(Uuid::new_v4(), r4);
+
+        let (tx5, _) = tokio::sync::oneshot::channel();
+        let mut r5 = PendingRequest::new(tx5);
+        r5.created_at = old;
+        state.action_inputs_requests.insert(Uuid::new_v4(), r5);
+
+        let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(30));
+        assert_eq!(removed, 5);
+        assert!(state.knowledge_requests.is_empty());
+        assert!(state.claude_discover_requests.is_empty());
+        assert!(state.directory_requests.is_empty());
+        assert!(state.settings_save_requests.is_empty());
+        assert!(state.action_inputs_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_fresh_entries_with_zero_max_age() {
+        let state = make_app_state().await;
+
+        let (tx, _rx) = tokio::sync::oneshot::channel::<SettingsGetResponse>();
+        state
+            .settings_get_requests
+            .insert(Uuid::new_v4(), PendingRequest::new(tx));
+
+        // Zero duration means everything is stale
+        let removed = state.cleanup_stale_requests(std::time::Duration::ZERO);
+        assert_eq!(removed, 1);
+        assert!(state.settings_get_requests.is_empty());
     }
 }

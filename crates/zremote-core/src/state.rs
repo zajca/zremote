@@ -694,6 +694,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {
@@ -842,6 +843,7 @@ mod tests {
                 project_path: Some("/home/user/project".to_string()),
                 task_name: Some("fix bug".to_string()),
             },
+            ServerEvent::EventsLagged { missed: 10 },
         ];
         for event in &events {
             let json = serde_json::to_string(event).unwrap();

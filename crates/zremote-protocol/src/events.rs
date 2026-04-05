@@ -212,6 +212,8 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         metadata: std::collections::HashMap<String, String>,
     },
+    #[serde(rename = "events_lagged")]
+    EventsLagged { missed: u64 },
     /// Unknown event type for forward compatibility.
     /// New event types added in future versions will deserialize as `Unknown`
     /// instead of failing, allowing older clients to gracefully ignore them.
@@ -372,6 +374,7 @@ mod tests {
                 rate_limit_7d_pct: Some(85),
                 permission_mode: None,
             },
+            ServerEvent::EventsLagged { missed: 42 },
         ];
         for event in &events {
             let json = serde_json::to_string(event).unwrap();
@@ -409,6 +412,24 @@ mod tests {
         let info: SessionInfo = serde_json::from_str(json).unwrap();
         assert!(info.shell.is_none());
         assert_eq!(info.status, SessionStatus::default());
+    }
+
+    #[test]
+    fn events_lagged_serialization() {
+        let event = ServerEvent::EventsLagged { missed: 150 };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "events_lagged");
+        assert_eq!(json["missed"], 150);
+    }
+
+    #[test]
+    fn events_lagged_deserialization() {
+        let json = r#"{"type":"events_lagged","missed":99}"#;
+        let event: ServerEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ServerEvent::EventsLagged { missed } => assert_eq!(missed, 99),
+            other => panic!("expected EventsLagged, got {other:?}"),
+        }
     }
 
     #[test]

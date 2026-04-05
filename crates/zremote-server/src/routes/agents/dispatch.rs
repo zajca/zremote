@@ -567,8 +567,10 @@ pub(super) async fn handle_agent_message(
             error,
             ..
         } => {
-            if let Some((_, sender)) = state.directory_requests.remove(&request_id) {
-                let _ = sender.send(crate::state::DirectoryListingResponse { entries, error });
+            if let Some((_, pending)) = state.directory_requests.remove(&request_id) {
+                let _ = pending
+                    .sender
+                    .send(crate::state::DirectoryListingResponse { entries, error });
             } else {
                 tracing::warn!(request_id = %request_id, "no pending request for directory listing");
             }
@@ -578,15 +580,19 @@ pub(super) async fn handle_agent_message(
             settings,
             error,
         } => {
-            if let Some((_, sender)) = state.settings_get_requests.remove(&request_id) {
-                let _ = sender.send(crate::state::SettingsGetResponse { settings, error });
+            if let Some((_, pending)) = state.settings_get_requests.remove(&request_id) {
+                let _ = pending
+                    .sender
+                    .send(crate::state::SettingsGetResponse { settings, error });
             } else {
                 tracing::warn!(request_id = %request_id, "no pending request for settings get");
             }
         }
         AgentMessage::ProjectSettingsSaved { request_id, error } => {
-            if let Some((_, sender)) = state.settings_save_requests.remove(&request_id) {
-                let _ = sender.send(crate::state::SettingsSaveResponse { error });
+            if let Some((_, pending)) = state.settings_save_requests.remove(&request_id) {
+                let _ = pending
+                    .sender
+                    .send(crate::state::SettingsSaveResponse { error });
             } else {
                 tracing::warn!(request_id = %request_id, "no pending request for settings save");
             }
@@ -601,8 +607,10 @@ pub(super) async fn handle_agent_message(
             inputs,
             error,
         } => {
-            if let Some((_, sender)) = state.action_inputs_requests.remove(&request_id) {
-                let _ = sender.send(crate::state::ActionInputsResolveResponse { inputs, error });
+            if let Some((_, pending)) = state.action_inputs_requests.remove(&request_id) {
+                let _ = pending
+                    .sender
+                    .send(crate::state::ActionInputsResolveResponse { inputs, error });
             } else {
                 tracing::warn!(
                     request_id = %request_id,
@@ -1373,8 +1381,8 @@ async fn handle_claude_message(
 
             // Resolve pending discover request via oneshot channel
             let request_key = format!("{host_id}:{project_path}");
-            if let Some((_, tx)) = state.claude_discover_requests.remove(&request_key) {
-                let _ = tx.send(sessions);
+            if let Some((_, pending)) = state.claude_discover_requests.remove(&request_key) {
+                let _ = pending.sender.send(sessions);
             }
         }
         ClaudeAgentMessage::SessionIdCaptured {
@@ -1617,8 +1625,8 @@ async fn handle_knowledge_message(
             results,
             duration_ms,
         } => {
-            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
-                let _ = sender.send(KnowledgeAgentMessage::SearchResults {
+            if let Some((_, pending)) = state.knowledge_requests.remove(&request_id) {
+                let _ = pending.sender.send(KnowledgeAgentMessage::SearchResults {
                     project_path: String::new(),
                     request_id,
                     results,
@@ -1784,12 +1792,14 @@ async fn handle_knowledge_message(
                 format!("instructions:{host_id_str}:{project_path}").as_bytes(),
             );
 
-            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
-                let _ = sender.send(KnowledgeAgentMessage::InstructionsGenerated {
-                    project_path,
-                    content,
-                    memories_used,
-                });
+            if let Some((_, pending)) = state.knowledge_requests.remove(&request_id) {
+                let _ = pending
+                    .sender
+                    .send(KnowledgeAgentMessage::InstructionsGenerated {
+                        project_path,
+                        content,
+                        memories_used,
+                    });
             } else {
                 tracing::warn!(
                     host_id = %host_id,
@@ -1808,8 +1818,8 @@ async fn handle_knowledge_message(
                 format!("write-claude-md:{host_id_str}:{project_path}").as_bytes(),
             );
 
-            if let Some((_, sender)) = state.knowledge_requests.remove(&request_id) {
-                let _ = sender.send(KnowledgeAgentMessage::ClaudeMdWritten {
+            if let Some((_, pending)) = state.knowledge_requests.remove(&request_id) {
+                let _ = pending.sender.send(KnowledgeAgentMessage::ClaudeMdWritten {
                     project_path,
                     bytes_written,
                     error,

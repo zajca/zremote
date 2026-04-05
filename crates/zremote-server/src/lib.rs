@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use zremote_core::request_id::request_id_middleware;
 
 use state::{AppState, ConnectionManager};
 
@@ -242,6 +243,7 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::claude_sessions::discover_claude_sessions),
         )
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -366,6 +368,9 @@ pub async fn run_server(config: ServerConfig) {
     // Spawn heartbeat monitor background task
     routes::agents::spawn_heartbeat_monitor(Arc::clone(&state), shutdown.clone());
 
+    // Spawn periodic cleanup for stale pending requests (agent disconnect leak prevention)
+    spawn_pending_request_cleanup(Arc::clone(&state), shutdown.clone());
+
     // Start Telegram bot (optional -- skipped if TELEGRAM_BOT_TOKEN not set)
     telegram::try_start(Arc::clone(&state), shutdown.clone());
 
@@ -402,6 +407,24 @@ fn spawn_idle_loop_checker(state: Arc<AppState>, shutdown: CancellationToken) {
                         &state.db,
                         &state.events,
                     ).await;
+                }
+                () = shutdown.cancelled() => break,
+            }
+        }
+    });
+}
+
+fn spawn_pending_request_cleanup(state: Arc<AppState>, shutdown: CancellationToken) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(120));
+                    if removed > 0 {
+                        tracing::info!(removed, "cleaned up stale pending requests");
+                    }
                 }
                 () = shutdown.cancelled() => break,
             }
