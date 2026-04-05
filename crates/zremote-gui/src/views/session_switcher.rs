@@ -25,7 +25,8 @@ use crate::persistence::RecentSession;
 use crate::theme;
 use crate::views::cc_widgets;
 use crate::views::sidebar::{CcMetrics, CcState};
-use zremote_client::{AgenticStatus, Host, Project, Session, SessionStatus};
+use crate::views::terminal_element::FONT_FAMILY;
+use zremote_client::{AgenticStatus, Host, PreviewSnapshot, Project, Session, SessionStatus};
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -43,6 +44,8 @@ struct SwitcherEntry {
     cc_metrics: Option<CcMetrics>,
     /// CC permission mode (plan, auto, acceptEdits, etc.)
     permission_mode: Option<String>,
+    /// Terminal preview snapshot for this session.
+    preview: Option<PreviewSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +88,7 @@ impl SessionSwitcher {
         mode: &str,
         cc_states: &HashMap<String, CcState>,
         cc_metrics: &HashMap<String, CcMetrics>,
+        preview_snapshots: &HashMap<String, PreviewSnapshot>,
         cx: &mut Context<Self>,
     ) -> Self {
         let entries = build_entries(
@@ -96,6 +100,7 @@ impl SessionSwitcher {
             mode,
             cc_states,
             cc_metrics,
+            preview_snapshots,
         );
         let focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
@@ -151,6 +156,184 @@ impl SessionSwitcher {
     }
 }
 
+impl SessionSwitcher {
+    fn render_entry(entry: &SwitcherEntry, is_selected: bool, idx: usize) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("switcher-{idx}")))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .when(is_selected, |d: Stateful<Div>| {
+                d.bg(theme::bg_tertiary())
+                    .border_l_3()
+                    .border_color(theme::accent())
+            })
+            .when(!is_selected, |d: Stateful<Div>| d.ml(px(3.0)))
+            // Status dot
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(theme::success())
+                    .flex_shrink_0(),
+            )
+            // Icon
+            .child(
+                icon(Icon::SquareTerminal)
+                    .size(px(14.0))
+                    .text_color(if is_selected {
+                        theme::text_primary()
+                    } else {
+                        theme::text_secondary()
+                    })
+                    .flex_shrink_0(),
+            )
+            // Title + subtitle
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(if is_selected {
+                                theme::text_primary()
+                            } else {
+                                theme::text_secondary()
+                            })
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(entry.title.clone()),
+                    )
+                    .when(!entry.subtitle.is_empty(), |d: Div| {
+                        d.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme::text_tertiary())
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(entry.subtitle.clone()),
+                        )
+                    }),
+            )
+            // Permission mode badge
+            .when_some(
+                entry
+                    .permission_mode
+                    .as_ref()
+                    .filter(|m| m.as_str() != "default"),
+                |d: Stateful<Div>, mode| {
+                    let (bg, fg, label) = cc_widgets::permission_mode_badge_style(mode);
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(bg)
+                            .text_color(fg)
+                            .text_size(px(10.0))
+                            .child(label.to_string()),
+                    )
+                },
+            )
+            // Agentic state indicator
+            .when_some(
+                entry.cc_state.as_ref(),
+                |d: Stateful<Div>, (status, task_name)| {
+                    let mut indicator = div().flex().items_center().gap(px(4.0)).flex_shrink_0();
+
+                    // Context bar + model (if metrics available)
+                    if let Some(ref metrics) = entry.cc_metrics {
+                        indicator =
+                            indicator.child(cc_widgets::render_context_bar(metrics, 40.0, 3.0));
+                        if let Some(ref model) = metrics.model {
+                            indicator = indicator.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme::text_tertiary())
+                                    .child(cc_widgets::short_model_name(model)),
+                            );
+                        }
+                    }
+
+                    // Bot icon
+                    indicator = indicator.child(cc_widgets::cc_bot_icon(*status, 12.0));
+
+                    // Task name
+                    if let Some(task) = task_name {
+                        indicator = indicator.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(theme::text_tertiary())
+                                .max_w(px(80.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(task.clone()),
+                        );
+                    }
+                    d.child(indicator)
+                },
+            )
+            // "current" badge
+            .when(entry.is_current, |d: Stateful<Div>| {
+                d.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme::accent())
+                        .flex_shrink_0()
+                        .child("current"),
+                )
+            })
+    }
+
+    fn render_preview(preview: Option<&PreviewSnapshot>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(350.0))
+            .max_h(px(400.0))
+            .bg(theme::terminal_bg())
+            .p(px(8.0))
+            .overflow_hidden()
+            .font_family(FONT_FAMILY)
+            .text_size(px(11.0))
+            .when_some(preview, |d, snapshot| {
+                d.children(snapshot.lines.iter().map(|line| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(theme::text_secondary())
+                        .child(line.text.clone())
+                }))
+            })
+            .when(preview.is_none(), |d| {
+                d.items_center().justify_center().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            icon(Icon::SquareTerminal)
+                                .size(px(24.0))
+                                .text_color(theme::text_tertiary()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme::text_tertiary())
+                                .child("No preview available"),
+                        ),
+                )
+            })
+    }
+}
+
 impl Render for SessionSwitcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_index;
@@ -161,10 +344,12 @@ impl Render for SessionSwitcher {
         // Scroll selected item into view
         self.scroll_handle.scroll_to_item(selected);
 
+        let preview = self.entries.get(selected).and_then(|e| e.preview.as_ref());
+
         div()
             .track_focus(&self.focus_handle)
             .flex()
-            .flex_col()
+            .flex_row()
             .w_full()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
@@ -196,154 +381,27 @@ impl Render for SessionSwitcher {
                     }
                 },
             ))
+            // Left panel: session list
             .child(
                 div()
                     .id("switcher-scroll")
                     .flex()
                     .flex_col()
-                    .max_h(px(320.0))
+                    .w(px(280.0))
+                    .max_h(px(400.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .children(self.entries.iter().enumerate().map(|(idx, entry)| {
-                        let is_selected = idx == selected;
-
-                        div()
-                            .id(SharedString::from(format!("switcher-{idx}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .when(is_selected, |d: Stateful<Div>| {
-                                d.bg(theme::bg_tertiary())
-                                    .border_l_3()
-                                    .border_color(theme::accent())
-                            })
-                            .when(!is_selected, |d: Stateful<Div>| d.ml(px(3.0)))
-                            // Status dot
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(theme::success())
-                                    .flex_shrink_0(),
-                            )
-                            // Icon
-                            .child(
-                                icon(Icon::SquareTerminal)
-                                    .size(px(14.0))
-                                    .text_color(if is_selected {
-                                        theme::text_primary()
-                                    } else {
-                                        theme::text_secondary()
-                                    })
-                                    .flex_shrink_0(),
-                            )
-                            // Title + subtitle
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(if is_selected {
-                                                theme::text_primary()
-                                            } else {
-                                                theme::text_secondary()
-                                            })
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .child(entry.title.clone()),
-                                    )
-                                    .when(!entry.subtitle.is_empty(), |d: Div| {
-                                        d.child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(theme::text_tertiary())
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .child(entry.subtitle.clone()),
-                                        )
-                                    }),
-                            )
-                            // Permission mode badge
-                            .when_some(
-                                entry
-                                    .permission_mode
-                                    .as_ref()
-                                    .filter(|m| m.as_str() != "default"),
-                                |d: Stateful<Div>, mode| {
-                                    let (bg, fg, label) =
-                                        cc_widgets::permission_mode_badge_style(mode);
-                                    d.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(bg)
-                                            .text_color(fg)
-                                            .text_size(px(10.0))
-                                            .child(label.to_string()),
-                                    )
-                                },
-                            )
-                            // Agentic state indicator
-                            .when_some(
-                                entry.cc_state.as_ref(),
-                                |d: Stateful<Div>, (status, task_name)| {
-                                    let mut indicator =
-                                        div().flex().items_center().gap(px(4.0)).flex_shrink_0();
-
-                                    // Context bar + model (if metrics available)
-                                    if let Some(ref metrics) = entry.cc_metrics {
-                                        indicator = indicator.child(
-                                            cc_widgets::render_context_bar(metrics, 40.0, 3.0),
-                                        );
-                                        if let Some(ref model) = metrics.model {
-                                            indicator = indicator.child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme::text_tertiary())
-                                                    .child(cc_widgets::short_model_name(model)),
-                                            );
-                                        }
-                                    }
-
-                                    // Bot icon
-                                    indicator =
-                                        indicator.child(cc_widgets::cc_bot_icon(*status, 12.0));
-
-                                    // Task name
-                                    if let Some(task) = task_name {
-                                        indicator = indicator.child(
-                                            div()
-                                                .text_size(px(10.0))
-                                                .text_color(theme::text_tertiary())
-                                                .max_w(px(80.0))
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .child(task.clone()),
-                                        );
-                                    }
-                                    d.child(indicator)
-                                },
-                            )
-                            // "current" badge
-                            .when(entry.is_current, |d: Stateful<Div>| {
-                                d.child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(theme::accent())
-                                        .flex_shrink_0()
-                                        .child("current"),
-                                )
-                            })
-                    })),
+                    .border_r_1()
+                    .border_color(theme::border())
+                    .children(
+                        self.entries
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, entry)| Self::render_entry(entry, idx == selected, idx)),
+                    ),
             )
+            // Right panel: preview
+            .child(Self::render_preview(preview))
     }
 }
 
@@ -361,6 +419,7 @@ fn build_entries(
     mode: &str,
     cc_states: &HashMap<String, CcState>,
     cc_metrics: &HashMap<String, CcMetrics>,
+    preview_snapshots: &HashMap<String, PreviewSnapshot>,
 ) -> Vec<SwitcherEntry> {
     let host_names: HashMap<&str, &str> = hosts
         .iter()
@@ -444,6 +503,7 @@ fn build_entries(
                 cc_state,
                 cc_metrics: cc_metrics.get(&s.id).cloned(),
                 permission_mode: cc.and_then(|c| c.permission_mode.clone()),
+                preview: preview_snapshots.get(&s.id).cloned(),
             }
         })
         .collect()

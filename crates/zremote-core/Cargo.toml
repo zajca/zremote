@@ -23,6 +23,7 @@ dashmap.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 base64.workspace = true
+vte = "0.14.1"
 
 [dev-dependencies]
 http-body-util = "0.1"

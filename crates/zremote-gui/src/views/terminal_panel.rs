@@ -362,6 +362,73 @@ impl TerminalPanel {
         &self.session_id
     }
 
+    /// Extract the last N visible lines from the terminal for preview rendering.
+    /// Returns `(lines, cols, rows)` with `PreviewLine`-compatible data (text + color spans).
+    pub fn extract_preview_lines(
+        &self,
+        max_lines: usize,
+    ) -> (Vec<zremote_client::PreviewLine>, u16, u16) {
+        let Ok(term) = self.term.lock() else {
+            return (Vec::new(), 0, 0);
+        };
+
+        let cols = term.columns();
+        let rows = term.screen_lines();
+        let start_row = rows.saturating_sub(max_lines);
+        let mut lines = Vec::with_capacity(max_lines);
+
+        for row_idx in start_row..rows {
+            let line_idx = row_idx as i32;
+            let mut text = String::with_capacity(cols);
+            let mut spans: Vec<zremote_client::PreviewColorSpan> = Vec::new();
+            let mut current_fg: Option<String> = None;
+            let mut span_start: u16 = 0;
+
+            for col in 0..cols {
+                let point = alacritty_terminal::index::Point::new(
+                    alacritty_terminal::index::Line(line_idx),
+                    alacritty_terminal::index::Column(col),
+                );
+                let cell = &term.grid()[point];
+                let ch = if cell.c == '\0' { ' ' } else { cell.c };
+                text.push(ch);
+
+                let fg_hex = ansi_color_to_hex(cell.fg);
+
+                if fg_hex != current_fg {
+                    if let Some(ref fg) = current_fg {
+                        spans.push(zremote_client::PreviewColorSpan {
+                            start: span_start,
+                            end: col as u16,
+                            fg: fg.clone(),
+                        });
+                    }
+                    current_fg = fg_hex;
+                    span_start = col as u16;
+                }
+            }
+            if let Some(fg) = current_fg {
+                spans.push(zremote_client::PreviewColorSpan {
+                    start: span_start,
+                    end: cols as u16,
+                    fg,
+                });
+            }
+
+            let trimmed = text.trim_end().to_string();
+            lines.push(zremote_client::PreviewLine {
+                text: trimmed,
+                spans,
+            });
+        }
+
+        while lines.last().is_some_and(|l| l.text.is_empty()) {
+            lines.pop();
+        }
+
+        (lines, cols as u16, rows as u16)
+    }
+
     /// Get a clonable input sender for writing to this terminal's PTY.
     pub fn input_sender(&self) -> InputSender {
         self.handle.input_sender()
@@ -1768,6 +1835,74 @@ fn strip_cpr_responses(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         Cow::Owned(result)
     } else {
         Cow::Borrowed(data)
+    }
+}
+
+/// Convert an alacritty ANSI color to an optional hex string for preview rendering.
+/// Returns `None` for the default foreground color.
+fn ansi_color_to_hex(color: alacritty_terminal::vte::ansi::Color) -> Option<String> {
+    use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+
+    match color {
+        AnsiColor::Named(NamedColor::Foreground | NamedColor::Background) => None,
+        AnsiColor::Named(name) => {
+            let hex = match name {
+                NamedColor::Black => "#1a1a1e",
+                NamedColor::Red => "#ef4444",
+                NamedColor::Green => "#4ade80",
+                NamedColor::Yellow => "#facc15",
+                NamedColor::Blue => "#60a5fa",
+                NamedColor::Magenta => "#c084fc",
+                NamedColor::Cyan => "#22d3ee",
+                NamedColor::White => "#cccccc",
+                NamedColor::BrightBlack => "#555555",
+                NamedColor::BrightRed => "#f87171",
+                NamedColor::BrightGreen => "#86efac",
+                NamedColor::BrightYellow => "#fde68a",
+                NamedColor::BrightBlue => "#93c5fd",
+                NamedColor::BrightMagenta => "#d8b4fe",
+                NamedColor::BrightCyan => "#67e8f9",
+                NamedColor::BrightWhite => "#ffffff",
+                _ => return None,
+            };
+            Some(hex.to_string())
+        }
+        AnsiColor::Spec(rgb) => Some(format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)),
+        AnsiColor::Indexed(idx) => {
+            // Indices 0-15 map to named colors; higher indices use the 256-color palette
+            if idx < 16 {
+                // Re-use named color mapping via recursive call
+                let named = match idx {
+                    0 => NamedColor::Black,
+                    1 => NamedColor::Red,
+                    2 => NamedColor::Green,
+                    3 => NamedColor::Yellow,
+                    4 => NamedColor::Blue,
+                    5 => NamedColor::Magenta,
+                    6 => NamedColor::Cyan,
+                    7 => NamedColor::White,
+                    8 => NamedColor::BrightBlack,
+                    9 => NamedColor::BrightRed,
+                    10 => NamedColor::BrightGreen,
+                    11 => NamedColor::BrightYellow,
+                    12 => NamedColor::BrightBlue,
+                    13 => NamedColor::BrightMagenta,
+                    14 => NamedColor::BrightCyan,
+                    15 => NamedColor::BrightWhite,
+                    _ => return None,
+                };
+                ansi_color_to_hex(AnsiColor::Named(named))
+            } else if idx < 232 {
+                let i = u16::from(idx) - 16;
+                let r = (i / 36) * 51;
+                let g = ((i % 36) / 6) * 51;
+                let b = (i % 6) * 51;
+                Some(format!("#{r:02x}{g:02x}{b:02x}"))
+            } else {
+                let level = u16::from(idx - 232) * 10 + 8;
+                Some(format!("#{level:02x}{level:02x}{level:02x}"))
+            }
+        }
     }
 }
 

@@ -107,7 +107,7 @@ use crate::theme;
 use crate::views::terminal_panel::{TerminalLayoutInfo, TerminalTerm};
 
 const FONT_SIZE: f32 = 14.0;
-const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+pub const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 const CURSOR_BAR_WIDTH: f32 = 2.0;
 const CURSOR_UNDERLINE_HEIGHT: f32 = 2.0;
 /// Extra vertical padding per cell for comfortable line spacing (logical pixels).

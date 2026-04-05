@@ -5,6 +5,7 @@ pub mod error;
 pub mod events_ws;
 pub mod processing;
 pub mod queries;
+pub mod snapshot_parser;
 pub mod state;
 #[cfg(feature = "axum")]
 pub mod terminal_ws;

@@ -322,6 +322,10 @@ fn build_router(state: Arc<LocalAppState>) -> Result<Router, Box<dyn std::error:
             "/api/execution-nodes/cleanup",
             delete(routes::sessions::cleanup_execution_nodes),
         )
+        .route(
+            "/api/sessions/previews",
+            get(routes::sessions::get_session_previews),
+        )
         // Agentic loop endpoints
         .route("/api/loops", get(routes::agentic::list_loops))
         .route("/api/loops/{loop_id}", get(routes::agentic::get_loop))

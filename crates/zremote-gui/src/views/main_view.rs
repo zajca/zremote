@@ -235,6 +235,7 @@ impl MainView {
                 Timer::after(std::time::Duration::from_secs(5)).await;
                 let should_continue = sidebar.update(cx, |sidebar, cx| {
                     sidebar.reconcile_loops(cx);
+                    sidebar.poll_previews(cx);
                 });
                 if should_continue.is_err() {
                     break; // Entity dropped
@@ -997,7 +998,21 @@ impl MainView {
         let projects = Rc::clone(snapshot.projects_rc());
         let cc_states = snapshot.cc_states().clone();
         let cc_metrics = snapshot.cc_metrics().clone();
+        let mut preview_snapshots = snapshot.preview_snapshots().clone();
         let mode = self.app_state.mode.clone();
+
+        // Merge live terminal preview for the current session
+        if let Some(terminal) = &self.terminal {
+            let term = terminal.read(cx);
+            let session_id = term.session_id().to_string();
+            let (lines, cols, rows) = term.extract_preview_lines(30);
+            if !lines.is_empty() {
+                preview_snapshots.insert(
+                    session_id,
+                    zremote_client::PreviewSnapshot { lines, cols, rows },
+                );
+            }
+        }
 
         let switcher = cx.new(|cx| {
             SessionSwitcher::new(
@@ -1009,6 +1024,7 @@ impl MainView {
                 &mode,
                 &cc_states,
                 &cc_metrics,
+                &preview_snapshots,
                 cx,
             )
         });
@@ -1278,8 +1294,8 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("switcher-container")
-                                    .w(px(400.0))
-                                    .max_h(px(320.0))
+                                    .w(px(680.0))
+                                    .max_h(px(420.0))
                                     .rounded(px(8.0))
                                     .border_1()
                                     .border_color(theme::border())

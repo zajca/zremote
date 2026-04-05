@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
     AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter,
-    ListLoopsFilter, Project, ServerEvent, Session, SessionStatus,
+    ListLoopsFilter, PreviewSnapshot, Project, ServerEvent, Session, SessionStatus,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -82,6 +82,8 @@ pub struct SidebarView {
     terminal_titles: HashMap<String, String>,
     /// Claude task lifecycle state, keyed by task_id.
     claude_tasks: HashMap<String, ClaudeTaskInfo>,
+    /// Cached terminal preview snapshots per session_id.
+    preview_snapshots: HashMap<String, PreviewSnapshot>,
 }
 
 impl SidebarView {
@@ -115,6 +117,10 @@ impl SidebarView {
 
     pub fn cc_metrics(&self) -> &HashMap<String, CcMetrics> {
         &self.cc_metrics
+    }
+
+    pub fn preview_snapshots(&self) -> &HashMap<String, PreviewSnapshot> {
+        &self.preview_snapshots
     }
 
     /// Look up a Claude task's session, host, and project path by task ID.
@@ -160,8 +166,10 @@ impl SidebarView {
             cc_metrics: HashMap::new(),
             terminal_titles: HashMap::new(),
             claude_tasks: HashMap::new(),
+            preview_snapshots: HashMap::new(),
         };
         view.load_data(cx);
+        view.poll_previews(cx);
         view
     }
 
@@ -300,12 +308,14 @@ impl SidebarView {
                 self.cc_states.remove(session_id);
                 self.cc_metrics.remove(session_id);
                 self.terminal_titles.remove(session_id);
+                self.preview_snapshots.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::SessionSuspended { session_id } => {
                 self.cc_states.remove(session_id);
                 self.cc_metrics.remove(session_id);
                 self.terminal_titles.remove(session_id);
+                self.preview_snapshots.remove(session_id);
                 self.load_data(cx);
             }
             ServerEvent::HostDisconnected { host_id } => {
@@ -320,6 +330,7 @@ impl SidebarView {
                     self.cc_states.remove(sid);
                     self.cc_metrics.remove(sid);
                     self.terminal_titles.remove(sid);
+                    self.preview_snapshots.remove(sid);
                 }
                 self.load_data(cx);
             }
@@ -553,6 +564,37 @@ impl SidebarView {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Fetch terminal preview snapshots for all active sessions and update the cache.
+    pub fn poll_previews(&mut self, cx: &mut Context<Self>) {
+        let api = self.app_state.api.clone();
+        let handle = self.app_state.tokio_handle.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let previews = handle
+                .spawn(async move { api.get_session_previews().await })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "preview poll task panicked");
+                    Ok(HashMap::new())
+                });
+
+            match previews {
+                Ok(previews) => {
+                    let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                        if this.preview_snapshots != previews {
+                            this.preview_snapshots = previews;
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to fetch session previews");
+                }
+            }
         })
         .detach();
     }

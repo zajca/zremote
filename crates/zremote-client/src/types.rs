@@ -293,6 +293,39 @@ pub enum TerminalEvent {
     Disconnected,
 }
 
+// ---------------------------------------------------------------------------
+// Session preview types
+// ---------------------------------------------------------------------------
+
+/// A snapshot of a terminal session's visible screen for preview rendering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewSnapshot {
+    pub lines: Vec<PreviewLine>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A single line in a terminal preview.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewLine {
+    pub text: String,
+    pub spans: Vec<PreviewColorSpan>,
+}
+
+/// A colored span within a preview line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PreviewColorSpan {
+    pub start: u16,
+    pub end: u16,
+    pub fg: String,
+}
+
+/// Response from the session previews endpoint.
+#[derive(Debug, Deserialize)]
+pub struct SessionPreviewsResponse {
+    pub previews: std::collections::HashMap<String, PreviewSnapshot>,
+}
+
 /// Mode response from /api/mode.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ModeResponse {
