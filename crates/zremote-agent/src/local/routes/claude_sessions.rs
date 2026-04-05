@@ -26,6 +26,7 @@ pub struct CreateClaudeTaskRequest {
     pub output_format: Option<String>,
     pub custom_flags: Option<String>,
     pub channel_enabled: Option<bool>,
+    pub print_mode: Option<bool>,
 }
 
 /// Resolve the default shell (same logic as sessions.rs).
@@ -54,17 +55,20 @@ pub async fn create_claude_task(
     };
 
     let channel_enabled = body.channel_enabled.unwrap_or(false);
+    let print_mode = body.print_mode.unwrap_or(false);
 
     let options_json = if body.allowed_tools.is_some()
         || body.output_format.is_some()
         || body.custom_flags.is_some()
         || channel_enabled
+        || print_mode
     {
         let opts = serde_json::json!({
             "allowed_tools": body.allowed_tools,
             "output_format": body.output_format,
             "custom_flags": body.custom_flags,
             "channel_enabled": channel_enabled,
+            "print_mode": print_mode,
         });
         Some(opts.to_string())
     } else {
@@ -125,6 +129,7 @@ pub async fn create_claude_task(
         output_format: body.output_format.as_deref(),
         custom_flags: body.custom_flags.as_deref(),
         channel_enabled,
+        print_mode,
     };
 
     let cmd = CommandBuilder::build(&opts)
@@ -302,7 +307,7 @@ pub async fn resume_claude_task(
         );
     }
 
-    let (allowed_tools, skip_permissions, output_format, custom_flags, channel_enabled) =
+    let (allowed_tools, skip_permissions, output_format, custom_flags, channel_enabled, print_mode) =
         if let Some(ref opts_str) = original.options_json {
             let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
             let tools = opts["allowed_tools"]
@@ -317,9 +322,10 @@ pub async fn resume_claude_task(
             let fmt = opts["output_format"].as_str().map(String::from);
             let flags = opts["custom_flags"].as_str().map(String::from);
             let channel = opts["channel_enabled"].as_bool().unwrap_or(false);
-            (tools, skip, fmt, flags, channel)
+            let print = opts["print_mode"].as_bool().unwrap_or(false);
+            (tools, skip, fmt, flags, channel, print)
         } else {
-            (vec![], false, None, None, false)
+            (vec![], false, None, None, false, false)
         };
 
     // Use prompt file for large prompts to avoid PTY buffer overflow
@@ -345,6 +351,7 @@ pub async fn resume_claude_task(
         output_format: output_format.as_deref(),
         custom_flags: custom_flags.as_deref(),
         channel_enabled,
+        print_mode,
     };
 
     let cmd = CommandBuilder::build(&cmd_opts)

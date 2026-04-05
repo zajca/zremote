@@ -3,6 +3,7 @@ use std::path::Path;
 use zremote_protocol::claude::ClaudeSessionInfo;
 
 /// Options for building a `claude` CLI command.
+#[allow(clippy::struct_excessive_bools)]
 pub struct CommandOptions<'a> {
     pub working_dir: &'a str,
     pub model: Option<&'a str>,
@@ -19,6 +20,10 @@ pub struct CommandOptions<'a> {
     pub custom_flags: Option<&'a str>,
     /// Enable Channel Bridge for bidirectional communication.
     pub channel_enabled: bool,
+    /// Run Claude Code in non-interactive print mode (`-p` flag).
+    /// When true, Claude answers the prompt and exits instead of waiting
+    /// for further input in the TUI.
+    pub print_mode: bool,
 }
 
 /// Builds a `claude` CLI command string from structured options.
@@ -42,6 +47,7 @@ impl CommandBuilder {
             output_format,
             custom_flags,
             channel_enabled,
+            print_mode,
         } = opts;
 
         // Validate model if provided: only alphanumeric, dots, and hyphens
@@ -108,6 +114,10 @@ impl CommandBuilder {
         if let Some(flags) = custom_flags {
             // Custom flags are appended as-is (user is responsible for correctness)
             parts.push(flags.to_string());
+        }
+
+        if *print_mode {
+            parts.push("-p".to_string());
         }
 
         if let Some(file_path) = prompt_file {
@@ -336,6 +346,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             channel_enabled: false,
+            print_mode: false,
         }
     }
 
@@ -363,7 +374,10 @@ mod tests {
             ..minimal_opts("/tmp")
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
-        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(
+            !cmd.contains("claude -p") && !cmd.contains(" -p '"),
+            "should not use -p flag"
+        );
         assert!(cmd.contains("'Fix the bug'"));
     }
 
@@ -374,7 +388,10 @@ mod tests {
             ..minimal_opts("/tmp")
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
-        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(
+            !cmd.contains("claude -p") && !cmd.contains(" -p '"),
+            "should not use -p flag"
+        );
         assert!(cmd.contains("\"$(cat '/tmp/zremote-prompt-abc.txt')\""));
     }
 
@@ -458,6 +475,7 @@ mod tests {
             output_format: Some("stream-json"),
             custom_flags: Some("--verbose"),
             channel_enabled: false,
+            print_mode: false,
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
         assert!(cmd.starts_with("cd '/home/user/project' && claude"));
@@ -467,7 +485,10 @@ mod tests {
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(cmd.contains("--output-format 'stream-json'"));
         assert!(cmd.contains("--verbose"));
-        assert!(!cmd.contains("--print"), "should not use --print flag");
+        assert!(
+            !cmd.contains("claude -p") && !cmd.contains(" -p '"),
+            "should not use -p flag"
+        );
         assert!(cmd.contains("'Fix all tests'"));
         assert!(cmd.ends_with('\n'));
     }
@@ -544,6 +565,24 @@ mod tests {
     fn build_without_channel_enabled() {
         let cmd = CommandBuilder::build(&minimal_opts("/tmp")).unwrap();
         assert!(!cmd.contains("--dangerously-load-development-channels"));
+    }
+
+    #[test]
+    fn build_with_print_mode() {
+        let opts = CommandOptions {
+            print_mode: true,
+            initial_prompt: Some("Fix the bug"),
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains(" -p "));
+        assert!(cmd.contains("'Fix the bug'"));
+    }
+
+    #[test]
+    fn build_without_print_mode() {
+        let cmd = CommandBuilder::build(&minimal_opts("/tmp")).unwrap();
+        assert!(!cmd.contains(" -p "));
     }
 
     #[test]

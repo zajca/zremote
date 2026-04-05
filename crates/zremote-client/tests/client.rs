@@ -1401,6 +1401,7 @@ async fn create_claude_task_sends_post() {
         output_format: None,
         custom_flags: None,
         channel_enabled: None,
+        print_mode: None,
     };
     let task = client.create_claude_task(&req).await.unwrap();
 

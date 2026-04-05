@@ -388,6 +388,7 @@ pub async fn configure_with_claude(
         output_format: None,
         custom_flags: None,
         channel_enabled: false,
+        print_mode: false,
     };
 
     let cmd = CommandBuilder::build(&opts)

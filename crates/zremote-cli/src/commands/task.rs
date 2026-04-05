@@ -53,6 +53,9 @@ pub enum TaskCommand {
         /// Enable Channel Bridge for bidirectional communication
         #[arg(long)]
         channel: bool,
+        /// Run in non-interactive print mode (answer and exit)
+        #[arg(long)]
+        print: bool,
     },
     /// Resume an existing task
     Resume {
@@ -151,6 +154,7 @@ pub async fn run(
             output_format,
             custom_flags,
             channel,
+            print,
         } => {
             let host_id = match resolver.resolve_host_id(client).await {
                 Ok(id) => id,
@@ -170,6 +174,7 @@ pub async fn run(
                 output_format,
                 custom_flags,
                 channel_enabled: if channel { Some(true) } else { None },
+                print_mode: if print { Some(true) } else { None },
             };
             match client.create_claude_task(&req).await {
                 Ok(task) => {

@@ -462,6 +462,8 @@ pub struct CreateClaudeTaskRequest {
     pub custom_flags: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub print_mode: Option<bool>,
 }
 
 /// Request body for resuming a Claude task.

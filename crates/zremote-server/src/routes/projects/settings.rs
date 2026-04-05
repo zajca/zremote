@@ -769,6 +769,7 @@ pub async fn configure_with_claude(
         custom_flags: None,
         continue_last: false,
         channel_enabled: false,
+        print_mode: false,
     });
 
     if sender.send(msg).await.is_err() {
