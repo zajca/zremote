@@ -102,6 +102,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: commands::action::ActionCommand,
     },
+    /// Channel Bridge operations
+    Channel {
+        #[command(subcommand)]
+        command: commands::channel::ChannelCommand,
+    },
     /// Commander orchestration
     Commander {
         #[command(subcommand)]
@@ -199,6 +204,9 @@ async fn run_async(global: GlobalOpts, command: Commands) -> i32 {
         }
         Commands::Action { command } => {
             commands::action::run(&client, &resolver, &*fmt, command).await
+        }
+        Commands::Channel { command } => {
+            commands::channel::run(&client, &resolver, &*fmt, command).await
         }
         Commands::Commander { command } => {
             commands::commander::run(&client, command, &global).await

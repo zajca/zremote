@@ -43,6 +43,9 @@ pub enum CommanderCommand {
         /// Path to claude binary
         #[arg(long, env = "CLAUDE_CODE_PATH")]
         claude_path: Option<PathBuf>,
+        /// Enable Channel Bridge for bidirectional communication
+        #[arg(long)]
+        channel: bool,
     },
     /// Show commander state
     Status {
@@ -65,6 +68,7 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
             prompt,
             skip_permissions,
             claude_path,
+            channel,
         } => {
             run_start(
                 client,
@@ -74,6 +78,7 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
                 prompt,
                 skip_permissions,
                 claude_path,
+                channel,
             )
             .await
         }
@@ -283,6 +288,7 @@ async fn generate_dynamic(client: &ApiClient, server_url: &str) -> Result<String
 // Commander start & status
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_start(
     client: &ApiClient,
     global: &GlobalOpts,
@@ -291,6 +297,7 @@ async fn run_start(
     prompt: Option<String>,
     skip_permissions: bool,
     claude_path: Option<PathBuf>,
+    channel: bool,
 ) -> i32 {
     let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
     if !work_dir.exists() {
@@ -335,6 +342,9 @@ async fn run_start(
     }
     if skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
+    }
+    if channel {
+        cmd.arg("--dangerously-load-development-channels");
     }
     if let Some(ref p) = prompt {
         cmd.arg("-p").arg(p);

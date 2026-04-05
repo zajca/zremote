@@ -74,6 +74,8 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::ClaudeTaskEnded { .. } => "claude_task_ended",
         ServerEvent::ClaudeSessionMetrics { .. } => "claude_session_metrics",
         ServerEvent::ExecutionNodeCreated { .. } => "execution_node_created",
+        ServerEvent::ChannelPermissionRequested { .. } => "channel_permission_requested",
+        ServerEvent::ChannelWorkerReply { .. } => "channel_worker_reply",
         ServerEvent::Unknown => "unknown",
     }
 }

@@ -26,6 +26,8 @@ pub struct LoopInfo {
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_available: Option<bool>,
 }
 
 /// Nested host info in server events.
@@ -195,6 +197,21 @@ pub enum ServerEvent {
         #[serde(default)]
         duration_ms: i64,
     },
+    #[serde(rename = "channel_permission_requested")]
+    ChannelPermissionRequested {
+        session_id: String,
+        host_id: String,
+        request_id: String,
+        tool_name: String,
+    },
+    #[serde(rename = "channel_worker_reply")]
+    ChannelWorkerReply {
+        session_id: String,
+        host_id: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        metadata: std::collections::HashMap<String, String>,
+    },
     /// Unknown event type for forward compatibility.
     /// New event types added in future versions will deserialize as `Unknown`
     /// instead of failing, allowing older clients to gracefully ignore them.
@@ -222,6 +239,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
+            channel_available: None,
         }
     }
 
@@ -405,5 +423,65 @@ mod tests {
         let event = ServerEvent::Unknown;
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Unknown"));
+    }
+
+    #[test]
+    fn channel_permission_requested_roundtrip() {
+        let event = ServerEvent::ChannelPermissionRequested {
+            session_id: "s1".to_string(),
+            host_id: "h1".to_string(),
+            request_id: "perm-001".to_string(),
+            tool_name: "Bash".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+    }
+
+    #[test]
+    fn channel_worker_reply_roundtrip() {
+        let event = ServerEvent::ChannelWorkerReply {
+            session_id: "s1".to_string(),
+            host_id: "h1".to_string(),
+            message: "Tests fixed".to_string(),
+            metadata: std::collections::HashMap::from([(
+                "duration".to_string(),
+                "30s".to_string(),
+            )]),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+    }
+
+    #[test]
+    fn channel_worker_reply_empty_metadata_roundtrip() {
+        let event = ServerEvent::ChannelWorkerReply {
+            session_id: "s1".to_string(),
+            host_id: "h1".to_string(),
+            message: "Done".to_string(),
+            metadata: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("metadata"));
+        let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+    }
+
+    #[test]
+    fn loop_info_channel_available_backward_compat() {
+        let json = r#"{"id":"l1","session_id":"s1","project_path":null,"tool_name":"t","status":"working","started_at":"2026-01-01T00:00:00Z","ended_at":null,"end_reason":null,"task_name":null}"#;
+        let info: LoopInfo = serde_json::from_str(json).unwrap();
+        assert!(info.channel_available.is_none());
+    }
+
+    #[test]
+    fn loop_info_channel_available_present() {
+        let mut info = make_loop_info(AgenticStatus::Working);
+        info.channel_available = Some(true);
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("channel_available"));
+        let parsed: LoopInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.channel_available, Some(true));
     }
 }

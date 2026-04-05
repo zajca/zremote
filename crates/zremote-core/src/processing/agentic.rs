@@ -54,6 +54,7 @@ pub async fn fetch_loop_info_by_id(db: &SqlitePool, loop_id: &str) -> Option<Loo
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
+        channel_available: None,
     })
 }
 

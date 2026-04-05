@@ -566,6 +566,52 @@ impl ContextTransport for PtyTransport {
 }
 
 // ---------------------------------------------------------------------------
+// Channel transport
+// ---------------------------------------------------------------------------
+
+/// Channel-based context delivery backend.
+/// Sends context as structured `ChannelMessage::ContextUpdate` via the Channel Bridge.
+pub struct ChannelTransport {
+    bridge: std::sync::Arc<tokio::sync::Mutex<crate::channel::bridge::ChannelBridge>>,
+}
+
+impl ChannelTransport {
+    pub fn new(
+        bridge: std::sync::Arc<tokio::sync::Mutex<crate::channel::bridge::ChannelBridge>>,
+    ) -> Self {
+        Self { bridge }
+    }
+}
+
+impl ContextTransport for ChannelTransport {
+    async fn deliver(
+        &self,
+        session_id: &SessionId,
+        content: &str,
+    ) -> Result<DeliveryStatus, DeliveryError> {
+        use zremote_protocol::channel::{ChannelMessage, ContextUpdateKind};
+
+        let bridge = self.bridge.lock().await;
+        if !bridge.is_available(session_id) {
+            return Err(DeliveryError::SessionNotFound(*session_id));
+        }
+
+        let msg = ChannelMessage::ContextUpdate {
+            kind: ContextUpdateKind::ConventionUpdate,
+            content: content.to_string(),
+            estimated_tokens: content.len() / 4,
+        };
+
+        bridge.send(session_id, &msg).await.map_err(|e| {
+            tracing::warn!(error = ?e, "channel transport delivery failed");
+            DeliveryError::ChannelClosed
+        })?;
+
+        Ok(DeliveryStatus::Confirmed)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Inotify helper
 // ---------------------------------------------------------------------------
 
@@ -1729,5 +1775,29 @@ mod tests {
         let rendered2 = coord.on_phase_idle(&sid).unwrap();
         assert!(rendered2.contains("m3"));
         assert!(!rendered2.contains("m1"));
+    }
+
+    // -- ChannelTransport tests --
+
+    #[tokio::test]
+    async fn channel_transport_session_not_found() {
+        let bridge = crate::channel::bridge::ChannelBridge::new();
+        let bridge = std::sync::Arc::new(tokio::sync::Mutex::new(bridge));
+        let transport = ChannelTransport::new(bridge);
+
+        let sid = uuid::Uuid::new_v4();
+        let result = transport.deliver(&sid, "test content").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DeliveryError::SessionNotFound(id) => assert_eq!(id, sid),
+            other => panic!("expected SessionNotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn channel_transport_construction() {
+        let bridge = crate::channel::bridge::ChannelBridge::new();
+        let bridge = std::sync::Arc::new(tokio::sync::Mutex::new(bridge));
+        let _transport = ChannelTransport::new(bridge);
     }
 }

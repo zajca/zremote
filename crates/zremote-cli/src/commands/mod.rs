@@ -1,4 +1,5 @@
 pub mod action;
+pub mod channel;
 pub mod commander;
 pub mod config;
 pub mod events;

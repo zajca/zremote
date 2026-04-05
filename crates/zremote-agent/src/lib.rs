@@ -23,6 +23,7 @@
 mod agentic;
 mod bridge;
 mod ccline;
+mod channel;
 mod claude;
 mod config;
 mod connection;
@@ -101,6 +102,10 @@ pub enum Commands {
         #[arg(long)]
         skip_permissions: bool,
     },
+    /// Internal: Channel Bridge MCP server for CC (not for direct use)
+    #[command(hide = true)]
+    #[cfg(feature = "channel")]
+    ChannelServer,
     /// Internal: Claude Code status line handler (reads JSON from stdin, outputs formatted status)
     #[command(hide = true)]
     Ccline,
@@ -142,6 +147,22 @@ pub fn run(command: Option<Commands>) {
     // Ccline: synchronous, no tokio runtime needed
     if matches!(command, Some(Commands::Ccline)) {
         ccline::run_ccline();
+        return;
+    }
+
+    // ChannelServer: initializes its own tracing (stderr-only), skip normal tracing
+    #[cfg(feature = "channel")]
+    if matches!(command, Some(Commands::ChannelServer)) {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(async {
+                if let Err(e) = channel::run_channel_server().await {
+                    eprintln!("channel server error: {e}");
+                    std::process::exit(1);
+                }
+            });
         return;
     }
 
@@ -277,6 +298,8 @@ async fn async_main(command: Option<Commands>) {
         } => {
             run_configure(&project, &model, skip_permissions);
         }
+        #[cfg(feature = "channel")]
+        Commands::ChannelServer => unreachable!("handled above"),
         Commands::Ccline | Commands::PtyDaemon { .. } => unreachable!("handled above"),
     }
 }

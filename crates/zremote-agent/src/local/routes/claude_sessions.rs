@@ -119,6 +119,7 @@ pub async fn create_claude_task(
         skip_permissions: body.skip_permissions.unwrap_or(false),
         output_format: body.output_format.as_deref(),
         custom_flags: body.custom_flags.as_deref(),
+        channel_enabled: false,
     };
 
     let cmd = CommandBuilder::build(&opts)
@@ -316,6 +317,7 @@ pub async fn resume_claude_task(
         skip_permissions,
         output_format: output_format.as_deref(),
         custom_flags: custom_flags.as_deref(),
+        channel_enabled: false,
     };
 
     let cmd = CommandBuilder::build(&cmd_opts)

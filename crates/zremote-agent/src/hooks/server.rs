@@ -58,6 +58,16 @@ impl HooksServer {
             .route(
                 "/hooks/notification/permission",
                 post(handler::handle_notification_permission),
+            );
+        let app = app
+            .route("/channel/reply", post(super::channel::handle_channel_reply))
+            .route(
+                "/channel/permission-request",
+                post(super::channel::handle_channel_permission_request),
+            )
+            .route(
+                "/channel/status",
+                post(super::channel::handle_channel_status),
             )
             .layer(DefaultBodyLimit::max(1_048_576))
             .with_state(self.state);

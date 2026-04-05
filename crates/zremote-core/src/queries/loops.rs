@@ -46,6 +46,7 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         input_tokens: row.input_tokens.cast_unsigned(),
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
+        channel_available: None,
     }
 }
 
