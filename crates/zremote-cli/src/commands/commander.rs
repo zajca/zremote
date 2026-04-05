@@ -471,7 +471,9 @@ fn generate_workflow_recipes() -> String {
      ### Task Dispatch\n\
      1. Check host status: `host list` → verify target host is online\n\
      2. Load context: `memory list <project_id>` → get relevant memories\n\
-     3. Create task: `task create --host <id> --project-path <path> --prompt \"...\"`\n\
+     3. Create task: `task create --host <id> --project-path <path> --print --prompt \"...\"`\n\
+     NOTE: Always use `--print` for autonomous tasks (non-interactive, answers and exits).\n\
+     Without `--print`, Claude Code stays in TUI mode and the task never completes.\n\
      4. Monitor: `task get <task_id>` or `loop list --host <id>` for progress\n\
      5. Collect result: `task get <task_id>` → check status and summary\n\
      \n\
