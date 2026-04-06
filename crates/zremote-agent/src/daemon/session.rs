@@ -19,6 +19,7 @@ pub struct DaemonSession {
     session_id: SessionId,
     socket_path: PathBuf,
     state_path: PathBuf,
+    log_path: PathBuf,
     daemon_pid: u32,
     shell_pid: u32,
     writer_tx: mpsc::Sender<DaemonRequest>,
@@ -49,6 +50,7 @@ impl DaemonSession {
         let sock_dir = PathBuf::from(format!("/tmp/zremote-pty-{uid}"));
         let socket_path = sock_dir.join(format!("{session_id}.sock"));
         let state_path = sock_dir.join(format!("{session_id}.json"));
+        let log_path = sock_dir.join(format!("{session_id}.log"));
 
         // Build args for the daemon subprocess.
         // When running as unified binary (`zremote`), pty-daemon is nested under
@@ -101,15 +103,53 @@ impl DaemonSession {
             }
         }
 
-        // Try systemd-run first, fall back to direct spawn
-        let spawn_result = spawn_via_systemd(&exe, &args, &session_id);
-        if spawn_result.is_err() {
-            tracing::debug!("systemd-run unavailable, falling back to direct spawn");
-            spawn_direct(&exe, &args)?;
+        // Ensure socket directory exists before opening log file
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&sock_dir);
         }
 
-        // Wait for state file (poll 100ms, timeout 3s)
-        let state = wait_for_state_file(&state_path).await?;
+        // Open per-session log file for daemon stderr (diagnostics)
+        let log_file = std::fs::File::create(&log_path).map_err(|e| {
+            format!(
+                "failed to create daemon log file {}: {e}",
+                log_path.display()
+            )
+        })?;
+
+        // Try systemd-run first, fall back to direct spawn
+        let used_systemd = spawn_via_systemd(&exe, &args, &session_id, &log_file).is_ok();
+        if !used_systemd {
+            tracing::debug!("systemd-run unavailable, falling back to direct spawn");
+            spawn_direct(&exe, &args, &log_file)?;
+        }
+
+        // Wait for state file (poll 100ms, timeout 3s).
+        // If systemd-run "succeeded" (process spawned) but daemon never started,
+        // retry with direct spawn as fallback.
+        let state = match wait_for_state_file(&state_path).await {
+            Ok(state) => state,
+            Err(_) if used_systemd => {
+                let daemon_log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                tracing::warn!(
+                    session_id = %session_id,
+                    daemon_stderr = %daemon_log.trim(),
+                    "systemd scope daemon didn't start, falling back to direct spawn"
+                );
+                spawn_direct(&exe, &args, &log_file)?;
+                wait_for_state_file(&state_path).await.map_err(|e2| {
+                    let daemon_log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                    format!("{e2}\ndaemon stderr (direct spawn):\n{}", daemon_log.trim())
+                })?
+            }
+            Err(e) => {
+                let daemon_log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                return Err(format!("{e}\ndaemon stderr:\n{}", daemon_log.trim()).into());
+            }
+        };
 
         // Connect to the Unix socket
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
@@ -126,6 +166,7 @@ impl DaemonSession {
             session_id,
             socket_path,
             state_path,
+            log_path,
             daemon_pid: state.daemon_pid,
             shell_pid: state.shell_pid,
             writer_tx,
@@ -172,6 +213,7 @@ impl DaemonSession {
         // Clean up files from agent side (don't rely on daemon cleanup running)
         let _ = std::fs::remove_file(&self.state_path);
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.log_path);
     }
 
     /// Detach from the daemon without sending shutdown.
@@ -259,10 +301,12 @@ impl DaemonSession {
         let (reader_handle, writer_handle, writer_tx) =
             start_io_tasks(session_id, stream, output_tx);
 
+        let log_path = socket_path.with_extension("log");
         let session = Self {
             session_id,
             socket_path,
             state_path,
+            log_path,
             daemon_pid,
             shell_pid,
             writer_tx,
@@ -378,8 +422,10 @@ fn spawn_via_systemd(
     exe: &std::path::Path,
     args: &[String],
     session_id: &SessionId,
+    log_file: &std::fs::File,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let unit_name = format!("zremote-pty-{session_id}");
+    let stderr_file = log_file.try_clone()?;
     let mut cmd = tokio::process::Command::new("systemd-run");
     cmd.arg("--scope")
         .arg("--user")
@@ -391,7 +437,7 @@ fn spawn_via_systemd(
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::from(stderr_file));
 
     // Note: do NOT use .process_group(0) here — systemd-run --scope needs to
     // stay in the caller's session to communicate with the user's systemd manager.
@@ -405,7 +451,9 @@ fn spawn_via_systemd(
 fn spawn_direct(
     exe: &std::path::Path,
     args: &[String],
+    log_file: &std::fs::File,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let stderr_file = log_file.try_clone()?;
     tokio::process::Command::new(exe)
         .args(args)
         // Note: do NOT use .process_group(0) here — it makes the child a process
@@ -413,7 +461,7 @@ fn spawn_direct(
         // The daemon calls setsid() itself on startup, providing full isolation.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
         .spawn()?;
     Ok(())
 }
