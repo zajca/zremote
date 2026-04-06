@@ -45,7 +45,15 @@ impl DaemonSession {
         output_tx: mpsc::Sender<PtyOutput>,
         shell_config: Option<&ShellIntegrationConfig>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
-        let exe = std::env::current_exe()?;
+        // Use /proc/self/exe on Linux instead of current_exe() resolved path.
+        // After recompilation, cargo replaces the binary on disk, so the
+        // resolved path points to "(deleted)". /proc/self/exe still works
+        // because the kernel keeps the inode alive while the process runs.
+        let exe = if cfg!(target_os = "linux") {
+            PathBuf::from(format!("/proc/{}/exe", std::process::id()))
+        } else {
+            std::env::current_exe()?
+        };
         let uid = nix::unistd::getuid();
         let sock_dir = PathBuf::from(format!("/tmp/zremote-pty-{uid}"));
         let socket_path = sock_dir.join(format!("{session_id}.sock"));
