@@ -727,10 +727,16 @@ async fn write_mcp_json(project_path: &str) {
         return;
     }
 
+    let agent_command = if let Ok(root) = std::env::var("ZREMOTE_DEV_ROOT") {
+        format!("{root}/target/debug/zremote-agent")
+    } else {
+        "zremote-agent".to_string()
+    };
+
     let content = serde_json::json!({
         "mcpServers": {
             "zremote-knowledge": {
-                "command": "zremote-agent",
+                "command": agent_command,
                 "args": ["mcp-serve", "--project", project_path],
                 "env": {}
             }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
@@ -46,6 +46,12 @@ pub enum CommanderCommand {
         /// Channel specs to load (e.g. plugin:zremote@local)
         #[arg(long = "channel", value_name = "SPEC")]
         channels: Vec<String>,
+        /// Dev mode: use target/debug binary instead of installed zremote
+        #[arg(long)]
+        dev: bool,
+        /// Cargo workspace root for dev mode (default: auto-detected)
+        #[arg(long)]
+        dev_root: Option<PathBuf>,
     },
     /// Show commander state
     Status {
@@ -69,6 +75,8 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
             skip_permissions,
             claude_path,
             channels,
+            dev,
+            dev_root,
         } => {
             run_start(
                 client,
@@ -79,6 +87,8 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
                 skip_permissions,
                 claude_path,
                 channels,
+                dev,
+                dev_root,
             )
             .await
         }
@@ -90,12 +100,17 @@ async fn generate_commander_content(
     client: &ApiClient,
     server_url: &str,
     no_dynamic: bool,
+    dev_root: Option<&Path>,
 ) -> String {
     let mut sections = vec![
         generate_identity(),
         CLI_REFERENCE.to_string(),
         generate_context_protocol(),
     ];
+
+    if let Some(root) = dev_root {
+        sections.push(generate_dev_mode_section(root));
+    }
 
     // Dynamic infrastructure (API calls or cache)
     if !no_dynamic {
@@ -122,7 +137,7 @@ async fn run_generate(
     dir: Option<PathBuf>,
     no_dynamic: bool,
 ) -> i32 {
-    let content = generate_commander_content(client, &global.server, no_dynamic).await;
+    let content = generate_commander_content(client, &global.server, no_dynamic, None).await;
 
     if write {
         let target = dir.unwrap_or_else(|| PathBuf::from("."));
@@ -298,6 +313,8 @@ async fn run_start(
     skip_permissions: bool,
     claude_path: Option<PathBuf>,
     channels: Vec<String>,
+    dev: bool,
+    dev_root: Option<PathBuf>,
 ) -> i32 {
     let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
     if !work_dir.exists() {
@@ -305,8 +322,35 @@ async fn run_start(
         return 1;
     }
 
+    // Resolve dev mode workspace root
+    let dev_root_resolved = if dev {
+        let root = dev_root.or_else(|| {
+            find_cargo_workspace_root(&work_dir.canonicalize().unwrap_or_else(|_| work_dir.clone()))
+        });
+        if let Some(r) = root {
+            let bin = r.join("target/debug/zremote");
+            if !bin.exists() {
+                eprintln!(
+                    "Warning: {} does not exist. Run `cargo build -p zremote` first.",
+                    bin.display()
+                );
+            }
+            eprintln!("Dev mode: workspace root at {}", r.display());
+            Some(r)
+        } else {
+            eprintln!(
+                "Error: dev mode could not find Cargo workspace root. Use --dev-root or run from within the zremote source tree."
+            );
+            return 1;
+        }
+    } else {
+        None
+    };
+
     // Step 1: Generate commander content in memory
-    let content = generate_commander_content(client, &global.server, false).await;
+    let content =
+        generate_commander_content(client, &global.server, false, dev_root_resolved.as_deref())
+            .await;
 
     if content.len() > 100_000 {
         eprintln!(
@@ -332,6 +376,18 @@ async fn run_start(
     cmd.env("ZREMOTE_SERVER_URL", &global.server);
     if let Some(ref host) = global.host {
         cmd.env("ZREMOTE_HOST_ID", host);
+    }
+
+    // Dev mode: prepend target/debug to PATH so zremote/zremote-agent resolve to dev builds
+    if let Some(ref root) = dev_root_resolved {
+        let debug_dir = root.join("target").join("debug");
+        let mut paths: Vec<_> =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+        paths.insert(0, debug_dir);
+        if let Ok(new_path) = std::env::join_paths(&paths) {
+            cmd.env("PATH", &new_path);
+        }
+        cmd.env("ZREMOTE_DEV_ROOT", root);
     }
 
     // Pass commander instructions via --append-system-prompt
@@ -417,7 +473,52 @@ fn run_status(_dir: Option<PathBuf>) -> i32 {
         println!("Infrastructure cache: stale or missing");
     }
 
+    if let Ok(root) = std::env::var("ZREMOTE_DEV_ROOT") {
+        println!("Dev mode: active (root: {root})");
+    } else {
+        println!("Dev mode: inactive");
+    }
+
     0
+}
+
+// ---------------------------------------------------------------------------
+// Dev mode helpers
+// ---------------------------------------------------------------------------
+
+fn find_cargo_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists()
+            && let Ok(content) = std::fs::read_to_string(&cargo_toml)
+            && content.contains("[workspace]")
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn generate_dev_mode_section(workspace_root: &Path) -> String {
+    format!(
+        "## Development Mode (ACTIVE)\n\
+         \n\
+         You are running in **dev mode**. The `zremote` binary resolves to the debug build at:\n\
+         `{root}/target/debug/zremote`\n\
+         \n\
+         ### After making code changes to zremote:\n\
+         1. Run `cargo build -p zremote` in `{root}` to rebuild\n\
+         2. Then test with `zremote cli ...` as usual -- it will use the fresh build\n\
+         \n\
+         ### Important:\n\
+         - `nix develop` is required for linking (system libs). The current session should already be inside nix develop.\n\
+         - The `ZREMOTE_DEV_ROOT` env var is set to `{root}`\n\
+         - Both `zremote` and `zremote-agent` resolve from `target/debug/`",
+        root = workspace_root.display()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -604,5 +705,67 @@ mod tests {
             "Combined sections are {} characters, exceeding 24000 limit",
             combined.len()
         );
+    }
+
+    #[test]
+    fn all_sections_with_dev_mode_under_token_limit() {
+        let sections = [
+            generate_identity(),
+            CLI_REFERENCE.to_string(),
+            generate_context_protocol(),
+            generate_dev_mode_section(Path::new("/home/user/Code/myremote")),
+            generate_error_handling(),
+            generate_workflow_recipes(),
+            generate_limitations(),
+        ];
+        let combined = sections.join("\n\n");
+        assert!(
+            combined.len() < 28_000,
+            "Combined sections with dev mode are {} characters, exceeding 28000 limit",
+            combined.len()
+        );
+    }
+
+    #[test]
+    fn find_cargo_workspace_root_finds_workspace() {
+        let dir = std::env::temp_dir().join("zremote-test-ws-root");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sub = dir.join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+
+        let result = find_cargo_workspace_root(&sub);
+        assert_eq!(result, Some(dir.clone()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_cargo_workspace_root_skips_non_workspace() {
+        let dir = std::env::temp_dir().join("zremote-test-no-ws");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"foo\"\n").unwrap();
+
+        let result = find_cargo_workspace_root(&dir);
+        // Should not match this dir since there's no [workspace]
+        if let Some(ref found) = result {
+            assert_ne!(found, &dir);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_dev_mode_section_contains_root_path() {
+        let section = generate_dev_mode_section(Path::new("/home/user/myremote"));
+        assert!(section.contains("Development Mode (ACTIVE)"));
+        assert!(section.contains("/home/user/myremote"));
+        assert!(section.contains("cargo build -p zremote"));
+        assert!(section.contains("ZREMOTE_DEV_ROOT"));
     }
 }
