@@ -28,7 +28,7 @@ pub struct CreateClaudeTaskRequest {
     pub skip_permissions: Option<bool>,
     pub output_format: Option<String>,
     pub custom_flags: Option<String>,
-    pub channel_enabled: Option<bool>,
+    pub development_channels: Option<Vec<String>>,
     pub print_mode: Option<bool>,
 }
 
@@ -69,20 +69,20 @@ pub async fn create_claude_task(
         q::resolve_project_id_by_path(&state.db, &body.host_id, &body.project_path).await?
     };
 
-    let channel_enabled = body.channel_enabled.unwrap_or(false);
+    let development_channels = body.development_channels.unwrap_or_default();
     let print_mode = body.print_mode.unwrap_or(false);
 
     let options_json = if body.allowed_tools.is_some()
         || body.output_format.is_some()
         || body.custom_flags.is_some()
-        || channel_enabled
+        || !development_channels.is_empty()
         || print_mode
     {
         let opts = serde_json::json!({
             "allowed_tools": body.allowed_tools,
             "output_format": body.output_format,
             "custom_flags": body.custom_flags,
-            "channel_enabled": channel_enabled,
+            "development_channels": development_channels,
             "print_mode": print_mode,
         });
         Some(opts.to_string())
@@ -129,7 +129,7 @@ pub async fn create_claude_task(
         output_format: body.output_format,
         custom_flags: body.custom_flags,
         continue_last: false,
-        channel_enabled,
+        development_channels,
         print_mode,
     });
 
@@ -256,26 +256,40 @@ pub async fn resume_claude_task(
         );
     }
 
-    let (allowed_tools, skip_permissions, output_format, custom_flags, channel_enabled, print_mode) =
-        if let Some(ref opts_str) = original.options_json {
-            let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
-            let tools = opts["allowed_tools"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let skip = opts["skip_permissions"].as_bool().unwrap_or(false);
-            let fmt = opts["output_format"].as_str().map(String::from);
-            let flags = opts["custom_flags"].as_str().map(String::from);
-            let channel = opts["channel_enabled"].as_bool().unwrap_or(false);
-            let print = opts["print_mode"].as_bool().unwrap_or(false);
-            (tools, skip, fmt, flags, channel, print)
-        } else {
-            (vec![], false, None, None, false, false)
-        };
+    let (
+        allowed_tools,
+        skip_permissions,
+        output_format,
+        custom_flags,
+        development_channels,
+        print_mode,
+    ) = if let Some(ref opts_str) = original.options_json {
+        let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
+        let tools = opts["allowed_tools"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let skip = opts["skip_permissions"].as_bool().unwrap_or(false);
+        let fmt = opts["output_format"].as_str().map(String::from);
+        let flags = opts["custom_flags"].as_str().map(String::from);
+        // Prefer new key; fall back to old "channel_enabled": true for pre-migration rows
+        let channels = opts["development_channels"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let print = opts["print_mode"].as_bool().unwrap_or(false);
+        (tools, skip, fmt, flags, channels, print)
+    } else {
+        (vec![], false, None, None, vec![], false)
+    };
 
     let msg = ServerMessage::ClaudeAction(ClaudeServerMessage::StartSession {
         session_id: new_session_id,
@@ -289,7 +303,7 @@ pub async fn resume_claude_task(
         output_format,
         custom_flags,
         continue_last,
-        channel_enabled,
+        development_channels,
         print_mode,
     });
 

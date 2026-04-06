@@ -18,8 +18,9 @@ pub struct CommandOptions<'a> {
     pub skip_permissions: bool,
     pub output_format: Option<&'a str>,
     pub custom_flags: Option<&'a str>,
-    /// Enable Channel Bridge for bidirectional communication.
-    pub channel_enabled: bool,
+    /// Channel specs to load via `--dangerously-load-development-channels`.
+    /// Each entry is a tagged channel identifier, e.g. `plugin:zremote@local`.
+    pub development_channels: &'a [String],
     /// Run Claude Code in non-interactive print mode (`-p` flag).
     /// When true, Claude answers the prompt and exits instead of waiting
     /// for further input in the TUI.
@@ -46,7 +47,7 @@ impl CommandBuilder {
             skip_permissions,
             output_format,
             custom_flags,
-            channel_enabled,
+            development_channels,
             print_mode,
         } = opts;
 
@@ -107,8 +108,9 @@ impl CommandBuilder {
             parts.push(shell_quote(fmt));
         }
 
-        if *channel_enabled {
+        for ch in *development_channels {
             parts.push("--dangerously-load-development-channels".to_string());
+            parts.push(shell_quote(ch));
         }
 
         if let Some(flags) = custom_flags {
@@ -345,7 +347,7 @@ mod tests {
             skip_permissions: false,
             output_format: None,
             custom_flags: None,
-            channel_enabled: false,
+            development_channels: &[],
             print_mode: false,
         }
     }
@@ -474,7 +476,7 @@ mod tests {
             skip_permissions: true,
             output_format: Some("stream-json"),
             custom_flags: Some("--verbose"),
-            channel_enabled: false,
+            development_channels: &[],
             print_mode: false,
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
@@ -552,17 +554,33 @@ mod tests {
     }
 
     #[test]
-    fn build_with_channel_enabled() {
+    fn build_with_development_channels() {
+        let channels = vec!["plugin:zremote@local".to_string()];
         let opts = CommandOptions {
-            channel_enabled: true,
+            development_channels: &channels,
             ..minimal_opts("/tmp")
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
-        assert!(cmd.contains("--dangerously-load-development-channels"));
+        assert!(cmd.contains("--dangerously-load-development-channels 'plugin:zremote@local'"));
     }
 
     #[test]
-    fn build_without_channel_enabled() {
+    fn build_with_multiple_development_channels() {
+        let channels = vec![
+            "plugin:zremote@local".to_string(),
+            "plugin:other@dev".to_string(),
+        ];
+        let opts = CommandOptions {
+            development_channels: &channels,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("--dangerously-load-development-channels 'plugin:zremote@local'"));
+        assert!(cmd.contains("--dangerously-load-development-channels 'plugin:other@dev'"));
+    }
+
+    #[test]
+    fn build_without_development_channels() {
         let cmd = CommandBuilder::build(&minimal_opts("/tmp")).unwrap();
         assert!(!cmd.contains("--dangerously-load-development-channels"));
     }

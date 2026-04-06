@@ -22,7 +22,7 @@ All commands: `zremote cli [--server URL] [--host ID] [--output llm] <command>`
 - `worktree delete <project_id> <path>` → remove worktree
 
 ### Tasks
-- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>] [--print] [--channel]` → creates CC task (use --print for non-interactive tasks that should answer and exit)
+- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>] [--print] [--channel <spec>]` → creates CC task (use --print for non-interactive tasks that should answer and exit, --channel takes a tagged channel spec e.g. plugin:zremote@local)
 - `task list [--host <id>] [--status <s>]` → `{"_t":"task","id","st","model","project","cost"}`
 - `task get <id>` → single task with full details (includes error_message on failure)
 - `task resume <id>` → resume paused task

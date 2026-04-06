@@ -50,9 +50,9 @@ pub enum TaskCommand {
         /// Custom CLI flags passed to Claude
         #[arg(long)]
         custom_flags: Option<String>,
-        /// Enable Channel Bridge for bidirectional communication
-        #[arg(long)]
-        channel: bool,
+        /// Channel specs to load (e.g. plugin:zremote@local)
+        #[arg(long = "channel", value_name = "SPEC")]
+        channels: Vec<String>,
         /// Run in non-interactive print mode (answer and exit)
         #[arg(long)]
         print: bool,
@@ -153,7 +153,7 @@ pub async fn run(
             skip_permissions,
             output_format,
             custom_flags,
-            channel,
+            channels,
             print,
         } => {
             let host_id = match resolver.resolve_host_id(client).await {
@@ -173,7 +173,11 @@ pub async fn run(
                 skip_permissions: if skip_permissions { Some(true) } else { None },
                 output_format,
                 custom_flags,
-                channel_enabled: if channel { Some(true) } else { None },
+                development_channels: if channels.is_empty() {
+                    None
+                } else {
+                    Some(channels)
+                },
                 print_mode: if print { Some(true) } else { None },
             };
             match client.create_claude_task(&req).await {

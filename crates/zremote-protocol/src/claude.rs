@@ -27,6 +27,9 @@ pub struct ClaudeSessionInfo {
 /// Claude messages sent from server to agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "payload")]
+// StartSession is much larger than DiscoverSessions due to many String fields;
+// boxing would require an API change across all call sites.
+#[allow(clippy::large_enum_variant)]
 pub enum ClaudeServerMessage {
     StartSession {
         session_id: SessionId,
@@ -42,7 +45,7 @@ pub enum ClaudeServerMessage {
         #[serde(default)]
         continue_last: bool,
         #[serde(default)]
-        channel_enabled: bool,
+        development_channels: Vec<String>,
         #[serde(default)]
         print_mode: bool,
     },
@@ -173,7 +176,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
-            channel_enabled: false,
+            development_channels: vec![],
             print_mode: false,
         });
     }
@@ -192,7 +195,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
-            channel_enabled: false,
+            development_channels: vec![],
             print_mode: false,
         });
     }
@@ -211,7 +214,7 @@ mod tests {
             output_format: Some("stream-json".to_string()),
             custom_flags: Some("--verbose".to_string()),
             continue_last: false,
-            channel_enabled: false,
+            development_channels: vec![],
             print_mode: false,
         });
     }
@@ -230,7 +233,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: true,
-            channel_enabled: false,
+            development_channels: vec![],
             print_mode: false,
         });
     }
@@ -344,7 +347,7 @@ mod tests {
             output_format: None,
             custom_flags: None,
             continue_last: false,
-            channel_enabled: false,
+            development_channels: vec![],
             print_mode: false,
         };
         let json = serde_json::to_string(&msg).unwrap();

@@ -1400,7 +1400,7 @@ async fn create_claude_task_sends_post() {
         skip_permissions: None,
         output_format: None,
         custom_flags: None,
-        channel_enabled: None,
+        development_channels: None,
         print_mode: None,
     };
     let task = client.create_claude_task(&req).await.unwrap();

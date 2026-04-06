@@ -461,7 +461,7 @@ pub struct CreateClaudeTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_flags: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_enabled: Option<bool>,
+    pub development_channels: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub print_mode: Option<bool>,
 }

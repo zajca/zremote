@@ -768,7 +768,7 @@ pub async fn configure_with_claude(
         output_format: None,
         custom_flags: None,
         continue_last: false,
-        channel_enabled: false,
+        development_channels: vec![],
         print_mode: false,
     });
 

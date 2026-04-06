@@ -43,9 +43,9 @@ pub enum CommanderCommand {
         /// Path to claude binary
         #[arg(long, env = "CLAUDE_CODE_PATH")]
         claude_path: Option<PathBuf>,
-        /// Enable Channel Bridge for bidirectional communication
-        #[arg(long)]
-        channel: bool,
+        /// Channel specs to load (e.g. plugin:zremote@local)
+        #[arg(long = "channel", value_name = "SPEC")]
+        channels: Vec<String>,
     },
     /// Show commander state
     Status {
@@ -68,7 +68,7 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
             prompt,
             skip_permissions,
             claude_path,
-            channel,
+            channels,
         } => {
             run_start(
                 client,
@@ -78,7 +78,7 @@ pub async fn run(client: &ApiClient, command: CommanderCommand, global: &GlobalO
                 prompt,
                 skip_permissions,
                 claude_path,
-                channel,
+                channels,
             )
             .await
         }
@@ -297,7 +297,7 @@ async fn run_start(
     prompt: Option<String>,
     skip_permissions: bool,
     claude_path: Option<PathBuf>,
-    channel: bool,
+    channels: Vec<String>,
 ) -> i32 {
     let work_dir = dir.unwrap_or_else(|| PathBuf::from("."));
     if !work_dir.exists() {
@@ -343,8 +343,8 @@ async fn run_start(
     if skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
     }
-    if channel {
-        cmd.arg("--dangerously-load-development-channels");
+    for ch in &channels {
+        cmd.arg("--dangerously-load-development-channels").arg(ch);
     }
     if let Some(ref p) = prompt {
         cmd.arg("-p").arg(p);
