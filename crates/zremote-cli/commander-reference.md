@@ -22,7 +22,7 @@ All commands: `zremote cli [--server URL] [--host ID] [--output llm] <command>`
 - `worktree delete <project_id> <path>` → remove worktree
 
 ### Tasks
-- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>] [--print] [--channel <spec>]` → creates CC task (use --print for non-interactive tasks that should answer and exit, --channel takes a tagged channel spec e.g. plugin:zremote@local)
+- `task create --host <id> --project-path <path> [--model <m>] [--prompt <text>] [--print] [--channel <spec>]` → creates CC task
 - `task list [--host <id>] [--status <s>]` → `{"_t":"task","id","st","model","project","cost"}`
 - `task get <id>` → single task with full details (includes error_message on failure)
 - `task resume <id>` → resume paused task
@@ -30,6 +30,16 @@ All commands: `zremote cli [--server URL] [--host ID] [--output llm] <command>`
 - `task send <id> <message> [--priority normal|high|urgent]` → send message to running task via channel
 - `task approve <id> <request_id> yes|no [--reason <text>]` → approve/deny permission request
 - `task cancel <id> [--force]` → cancel running task (graceful abort, then kill)
+
+#### Task creation flags
+- `--print` — non-interactive mode: task answers the prompt and exits (no TUI). Use for fire-and-forget work.
+- `--channel <spec>` — load a development channel into the task's Claude Code session. The spec is a tagged identifier (e.g. `plugin:zremote@local`). Can be repeated for multiple channels. When a channel is active, you can interact with the running task via `task send` and `task approve`.
+
+#### Channel workflow
+1. Create a task with `--channel plugin:zremote@local` to enable bidirectional communication
+2. Use `task send <id> <message>` to send instructions or context to the running task
+3. Use `task approve <id> <request_id> yes|no` to approve/deny permission requests from the task
+4. Without `--channel`, the task runs autonomously — `task send` and `task approve` are not available
 
 ### Context
 - `memory list <project_id>` → `{"_t":"memory","id","key","cat","content"}`
