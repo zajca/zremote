@@ -45,14 +45,15 @@ impl DaemonSession {
         output_tx: mpsc::Sender<PtyOutput>,
         shell_config: Option<&ShellIntegrationConfig>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
-        // Use /proc/self/exe on Linux instead of current_exe() resolved path.
-        // After recompilation, cargo replaces the binary on disk, so the
-        // resolved path points to "(deleted)". /proc/self/exe still works
-        // because the kernel keeps the inode alive while the process runs.
+        // Use current_exe() for binary name detection, but /proc/PID/exe for
+        // the actual spawn path on Linux. After recompilation, cargo replaces
+        // the binary on disk so the resolved path becomes "(deleted)", but
+        // /proc/PID/exe still works because the kernel keeps the inode alive.
+        let resolved_exe = std::env::current_exe()?;
         let exe = if cfg!(target_os = "linux") {
             PathBuf::from(format!("/proc/{}/exe", std::process::id()))
         } else {
-            std::env::current_exe()?
+            resolved_exe.clone()
         };
         let uid = nix::unistd::getuid();
         let sock_dir = PathBuf::from(format!("/tmp/zremote-pty-{uid}"));
@@ -64,7 +65,7 @@ impl DaemonSession {
         // When running as unified binary (`zremote`), pty-daemon is nested under
         // `agent` subcommand: `zremote agent pty-daemon ...`.
         // When running as standalone agent binary, it's a direct subcommand.
-        let is_unified_binary = exe
+        let is_unified_binary = resolved_exe
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|name| name == "zremote");
