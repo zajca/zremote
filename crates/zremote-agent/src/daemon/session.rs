@@ -65,10 +65,11 @@ impl DaemonSession {
         // When running as unified binary (`zremote`), pty-daemon is nested under
         // `agent` subcommand: `zremote agent pty-daemon ...`.
         // When running as standalone agent binary, it's a direct subcommand.
+        // On Linux, current_exe() may return "zremote (deleted)" after recompilation.
         let is_unified_binary = resolved_exe
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|name| name == "zremote");
+            .is_some_and(|name| name == "zremote" || name.starts_with("zremote "));
         let mut args: Vec<String> = Vec::new();
         if is_unified_binary {
             args.push("agent".to_string());
