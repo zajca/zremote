@@ -275,11 +275,19 @@ impl ChannelDialogDetector {
             self.buffer.drain(..start);
         }
 
-        // Check for all three marker strings (case-insensitive on the ASCII portion).
-        // The PTY output contains ANSI escape codes, so we search the raw bytes.
-        let has_loading = contains_ascii_ci(&self.buffer, b"Loading development channel");
-        let has_option = contains_ascii_ci(&self.buffer, b"I am using this for local development");
-        let has_confirm = contains_ascii_ci(&self.buffer, b"Enter to confirm");
+        // Check for marker strings in the printable-ASCII-only version of the buffer.
+        // TUI rendering uses ANSI cursor positioning instead of spaces, so the raw
+        // PTY output contains words run together (e.g. "Entertoconfirm").  Stripping
+        // non-printable bytes and searching without spaces handles both plain and TUI output.
+        let printable: Vec<u8> = self
+            .buffer
+            .iter()
+            .copied()
+            .filter(|b| b.is_ascii_graphic())
+            .collect();
+        let has_loading = contains_ascii_ci(&printable, b"Loadingdevelopmentchannel");
+        let has_option = contains_ascii_ci(&printable, b"Iamusingthisforlocaldevelopment");
+        let has_confirm = contains_ascii_ci(&printable, b"Entertoconfirm");
 
         if has_loading && has_option && has_confirm {
             self.triggered = true;
@@ -994,6 +1002,15 @@ mod tests {
         let large_data = vec![b'x'; 4096];
         detector.feed(&large_data);
         assert!(detector.buffer.len() <= 2048);
+    }
+
+    #[test]
+    fn channel_detector_handles_tui_no_spaces() {
+        let mut detector = ChannelDialogDetector::new();
+        // Real TUI output: words run together because spaces are cursor positioning
+        let output = b"WARNING:Loadingdevelopmentchannels\r\r\n> 1.Iamusingthisforlocaldevelopment\r\r\n  2.Exit\r\r\nEntertoconfirm";
+        assert!(detector.feed(output));
+        assert!(detector.triggered());
     }
 
     #[test]
