@@ -212,6 +212,11 @@ fn create_router(state: Arc<AppState>) -> Router {
                 .put(routes::channel::upsert_policy)
                 .delete(routes::channel::delete_policy),
         )
+        // Terminal input (HTTP)
+        .route(
+            "/api/sessions/{session_id}/terminal/input",
+            post(routes::sessions::terminal_input),
+        )
         .route(
             "/api/sessions/{session_id}/channel/send",
             post(routes::channel::channel_send),

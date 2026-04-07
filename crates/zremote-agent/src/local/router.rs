@@ -234,6 +234,11 @@ pub(crate) fn build_router(
             "/api/sessions/{session_id}/channel/status",
             get(routes::channel::channel_status),
         )
+        // Terminal input (HTTP)
+        .route(
+            "/api/sessions/{session_id}/terminal/input",
+            post(routes::terminal::terminal_input),
+        )
         // Terminal WebSocket
         .route(
             "/ws/terminal/{session_id}",

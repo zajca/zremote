@@ -400,12 +400,80 @@ pub async fn get_session_previews(
     Ok(Json(serde_json::json!({ "previews": previews })))
 }
 
+/// Request body for terminal input via HTTP.
+#[derive(Debug, Deserialize)]
+pub struct TerminalInputBody {
+    /// Base64-encoded bytes to send to PTY stdin.
+    pub data: String,
+}
+
+/// Maximum allowed PTY input size per request (64 KB).
+const MAX_PTY_INPUT_BYTES: usize = 65_536;
+
+/// `POST /api/sessions/{id}/terminal/input`
+pub async fn terminal_input(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<TerminalInputBody>,
+) -> Result<impl IntoResponse, AppError> {
+    use base64::Engine;
+
+    let parsed_session_id: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&body.data)
+        .map_err(|e| AppError::BadRequest(format!("invalid base64 data: {e}")))?;
+
+    if data.is_empty() {
+        return Err(AppError::BadRequest("data must not be empty".to_string()));
+    }
+
+    if data.len() > MAX_PTY_INPUT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "data too large: {} bytes (max {MAX_PTY_INPUT_BYTES})",
+            data.len()
+        )));
+    }
+
+    let (_id, host_id_str) = q::find_session_for_close(&state.db, &session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+
+    let host_id: Uuid = host_id_str
+        .parse()
+        .map_err(|_| AppError::Internal("invalid host_id in database".to_string()))?;
+
+    let sender = state
+        .connections
+        .get_sender(&host_id)
+        .await
+        .ok_or_else(|| {
+            AppError::Conflict("host is offline, cannot send terminal input".to_string())
+        })?;
+
+    let msg = ServerMessage::TerminalInput {
+        session_id: parsed_session_id,
+        data,
+    };
+
+    if sender.send(msg).await.is_err() {
+        return Err(AppError::Conflict(
+            "host went offline, cannot send terminal input".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::ACCEPTED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{AppState, ConnectionManager};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use base64::Engine;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -971,5 +1039,110 @@ mod tests {
         assert_eq!(snapshot["cols"], 120);
         assert_eq!(snapshot["rows"], 30);
         assert_eq!(snapshot["lines"][0]["text"], "Hello Preview");
+    }
+
+    // -- Terminal input tests --
+
+    #[tokio::test]
+    async fn terminal_input_invalid_session_id() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let data = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/not-a-uuid/terminal/input")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"data":"{data}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_session_not_found() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let data = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/terminal/input"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"data":"{data}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_agent_offline() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4().to_string();
+        insert_test_host(&state, &host_id, "host", "host").await;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        insert_test_session(&state, &session_id, &host_id, "active").await;
+
+        let data = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/terminal/input"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"data":"{data}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_empty_data() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let data = base64::engine::general_purpose::STANDARD.encode(b"");
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/terminal/input"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"data":"{data}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn terminal_input_invalid_base64() {
+        let state = test_state().await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/terminal/input"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"data":"not-valid!!!"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

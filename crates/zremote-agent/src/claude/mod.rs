@@ -122,6 +122,14 @@ impl CommandBuilder {
             parts.push("-p".to_string());
         }
 
+        // When channels are present, variadic flags like
+        // --dangerously-load-development-channels consume subsequent positional
+        // args.  Insert "--" to separate options from the prompt argument.
+        let has_prompt = prompt_file.is_some() || initial_prompt.is_some();
+        if !development_channels.is_empty() && has_prompt {
+            parts.push("--".to_string());
+        }
+
         if let Some(file_path) = prompt_file {
             // Read prompt from file via shell expansion to avoid PTY buffer limits
             parts.push(format!("\"$(cat {})\"", shell_quote(file_path)));
@@ -577,6 +585,32 @@ mod tests {
         let cmd = CommandBuilder::build(&opts).unwrap();
         assert!(cmd.contains("--dangerously-load-development-channels 'plugin:zremote@local'"));
         assert!(cmd.contains("--dangerously-load-development-channels 'plugin:other@dev'"));
+    }
+
+    #[test]
+    fn build_with_channels_and_prompt_inserts_separator() {
+        let channels = vec!["plugin:zremote@local".to_string()];
+        let opts = CommandOptions {
+            development_channels: &channels,
+            initial_prompt: Some("Fix the bug"),
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        // The "--" separator must appear between channel flags and the prompt
+        // so that variadic --dangerously-load-development-channels doesn't
+        // swallow the prompt as another channel entry.
+        assert!(cmd.contains("-- 'Fix the bug'"));
+    }
+
+    #[test]
+    fn build_with_channels_no_prompt_omits_separator() {
+        let channels = vec!["plugin:zremote@local".to_string()];
+        let opts = CommandOptions {
+            development_channels: &channels,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(!cmd.contains(" -- "));
     }
 
     #[test]

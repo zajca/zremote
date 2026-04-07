@@ -21,6 +21,7 @@ flume.workspace = true
 tracing.workspace = true
 tokio-util.workspace = true
 percent-encoding = "2"
+base64.workspace = true
 rand.workspace = true
 
 [dev-dependencies]

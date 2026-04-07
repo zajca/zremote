@@ -101,6 +101,17 @@ pub enum TaskCommand {
         /// Task ID
         task_id: String,
     },
+    /// Send raw input to a task's PTY session
+    Input {
+        /// Task ID
+        task_id: String,
+        /// Text to send (appends newline)
+        #[arg(long, conflicts_with = "raw")]
+        text: Option<String>,
+        /// Raw bytes with escape sequences (\n, \x1b, \x03, etc.)
+        #[arg(long, conflicts_with = "text")]
+        raw: Option<String>,
+    },
     /// Discover Claude Code sessions on the host
     Discover {
         /// Project path on the remote host
@@ -299,6 +310,38 @@ pub async fn run(
                 1
             }
         },
+        TaskCommand::Input { task_id, text, raw } => {
+            let bytes = match (text, raw) {
+                (Some(t), None) => {
+                    let mut b = t.into_bytes();
+                    b.push(b'\n');
+                    b
+                }
+                (None, Some(r)) => parse_escape_sequences(&r),
+                (None, None) => {
+                    eprintln!("Error: either --text or --raw must be specified");
+                    return 1;
+                }
+                _ => unreachable!(),
+            };
+            let task = match client.get_claude_task(&task_id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            match client.send_session_input(&task.session_id, &bytes).await {
+                Ok(()) => {
+                    println!("Input sent to task {task_id} ({} bytes)", bytes.len());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
         TaskCommand::Discover { project_path } => {
             let host_id = match resolver.resolve_host_id(client).await {
                 Ok(id) => id,
@@ -323,5 +366,121 @@ pub async fn run(
                 }
             }
         }
+    }
+}
+
+/// Parse a string containing escape sequences into raw bytes.
+///
+/// Supported sequences: `\\` (backslash), `\n` (newline), `\r` (carriage return),
+/// `\t` (tab), `\e` (ESC/0x1B), `\xNN` (hex byte).
+fn parse_escape_sequences(input: &str) -> Vec<u8> {
+    let mut result = Vec::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') | None => result.push(b'\\'),
+                Some('n') => result.push(b'\n'),
+                Some('r') => result.push(b'\r'),
+                Some('t') => result.push(b'\t'),
+                Some('e') => result.push(0x1B),
+                Some('x') => {
+                    let hi_char = chars.next();
+                    let hi = hi_char.and_then(|c| c.to_digit(16));
+                    let lo_char = chars.next();
+                    let lo = lo_char.and_then(|c| c.to_digit(16));
+                    if let (Some(h), Some(l)) = (hi, lo) {
+                        // h and l are each 0..=15, so h*16+l fits in u8
+                        #[allow(clippy::cast_possible_truncation)]
+                        result.push((h * 16 + l) as u8);
+                    } else {
+                        // Invalid hex sequence — emit consumed chars literally
+                        result.extend_from_slice(b"\\x");
+                        let mut buf = [0u8; 4];
+                        if let Some(c) = hi_char {
+                            result.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                        }
+                        if let Some(c) = lo_char {
+                            result.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                        }
+                    }
+                }
+                Some(other) => {
+                    result.push(b'\\');
+                    let mut buf = [0u8; 4];
+                    result.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+        } else {
+            let mut buf = [0u8; 4];
+            result.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_newline() {
+        assert_eq!(parse_escape_sequences(r"\n"), vec![0x0A]);
+    }
+
+    #[test]
+    fn parse_carriage_return() {
+        assert_eq!(parse_escape_sequences(r"\r"), vec![0x0D]);
+    }
+
+    #[test]
+    fn parse_tab() {
+        assert_eq!(parse_escape_sequences(r"\t"), vec![0x09]);
+    }
+
+    #[test]
+    fn parse_escape() {
+        assert_eq!(parse_escape_sequences(r"\e"), vec![0x1B]);
+    }
+
+    #[test]
+    fn parse_hex_escape() {
+        assert_eq!(parse_escape_sequences(r"\x1b"), vec![0x1B]);
+    }
+
+    #[test]
+    fn parse_hex_ctrl_c() {
+        assert_eq!(parse_escape_sequences(r"\x03"), vec![0x03]);
+    }
+
+    #[test]
+    fn parse_backslash() {
+        assert_eq!(parse_escape_sequences(r"\\"), vec![b'\\']);
+    }
+
+    #[test]
+    fn parse_mixed() {
+        assert_eq!(parse_escape_sequences(r"yes\n"), b"yes\n".to_vec());
+    }
+
+    #[test]
+    fn parse_plain_text() {
+        assert_eq!(parse_escape_sequences("hello"), b"hello".to_vec());
+    }
+
+    #[test]
+    fn parse_invalid_hex_preserves_chars() {
+        // \xAZ: A is valid hex, Z is not — both should be preserved
+        assert_eq!(parse_escape_sequences(r"\xAZ"), b"\\xAZ".to_vec());
+    }
+
+    #[test]
+    fn parse_trailing_backslash() {
+        assert_eq!(parse_escape_sequences("test\\"), b"test\\".to_vec());
+    }
+
+    #[test]
+    fn parse_multiple_hex() {
+        assert_eq!(parse_escape_sequences(r"\x1b[A"), vec![0x1B, b'[', b'A']);
     }
 }

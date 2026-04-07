@@ -1112,6 +1112,27 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    // --- Terminal Input ---
+
+    /// Send raw bytes to a session's PTY stdin.
+    pub async fn send_session_input(&self, session_id: &str, data: &[u8]) -> Result<(), ApiError> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let body = serde_json::json!({ "data": encoded });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/sessions/{}/terminal/input",
+                self.base_url,
+                encode_path(session_id)
+            ))
+            .json(&body)
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
     // --- Channel Bridge ---
 
     /// Send a message to a CC worker via channel bridge.
