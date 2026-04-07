@@ -39,12 +39,8 @@ impl ConnectionResolver {
     /// With `--host`, accepts a UUID or unique name/hostname prefix.
     /// In server mode without `--host`, errors (or could prompt interactively).
     pub async fn resolve_host_id(&self, client: &ApiClient) -> Result<String, CliConnectionError> {
-        // If explicit host is a UUID-like string, use directly
+        // Resolve by name, hostname, or ID prefix (including full UUIDs)
         if let Some(ref host) = self.host_override {
-            if looks_like_uuid(host) {
-                return Ok(host.clone());
-            }
-            // Otherwise treat as name/hostname prefix
             return self.resolve_by_prefix(client, host).await;
         }
 
@@ -115,15 +111,6 @@ impl ConnectionResolver {
             }),
         }
     }
-}
-
-fn looks_like_uuid(s: &str) -> bool {
-    // Simple heuristic: 36 chars with dashes in the right places
-    s.len() == 36
-        && s.chars().enumerate().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => c == '-',
-            _ => c.is_ascii_hexdigit(),
-        })
 }
 
 /// Errors specific to connection/host resolution.

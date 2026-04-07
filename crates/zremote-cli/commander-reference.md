@@ -78,8 +78,9 @@ Key: `\r` is Enter for TUI dialogs (carriage return), not `\n`.
 ### Config
 - `config get <key>` → `{"_t":"config","key","v"}`
 - `config set <key> <value>` → set global config
-- `settings list <project_id>` → project settings JSON
-- `settings set <project_id> <key> <value>` → update setting
+- `settings get <project_id>` → project settings JSON
+- `settings save <project_id> --file <path>` → save project settings from JSON file
+- `settings configure <project_id>` → configure project with Claude AI
 
 ### Actions
 - `action list <project_id>` → `{"_t":"action","n","command"}`
