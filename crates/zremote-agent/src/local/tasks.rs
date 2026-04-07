@@ -180,8 +180,12 @@ pub(crate) fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
             if data.is_empty() {
                 // EOF from main pane -- session ended
 
-                // Clean up analyzer for this session
+                // Clean up analyzer and channel dialog detector for this session
                 session_analyzers.remove(&session_id);
+                {
+                    let mut detectors = state.channel_dialog_detectors.lock().await;
+                    detectors.remove(&session_id);
+                }
 
                 // Notify agentic manager that session closed
                 let loop_ended = {
@@ -247,6 +251,32 @@ pub(crate) fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                         exit_code,
                     });
             } else {
+                // Check for dev channel dialog auto-approval.
+                // Release detectors lock before acquiring session_manager to
+                // avoid ABBA deadlock with route handlers.
+                let should_approve = {
+                    let mut detectors = state.channel_dialog_detectors.lock().await;
+                    if let Some(detector) = detectors.get_mut(&session_id) {
+                        let fired = detector.feed(&data);
+                        if detector.triggered() {
+                            detectors.remove(&session_id);
+                        }
+                        fired
+                    } else {
+                        false
+                    }
+                };
+                if should_approve {
+                    tracing::info!(%session_id, "auto-approving dev channel dialog");
+                    let mut mgr = state.session_manager.lock().await;
+                    if let Err(e) = mgr.write_to(&session_id, b"\r") {
+                        tracing::warn!(
+                            %session_id, error = %e,
+                            "failed to auto-approve dev channel dialog"
+                        );
+                    }
+                }
+
                 // Feed through per-session analyzer
                 let analyzer = session_analyzers.entry(session_id).or_insert_with(|| {
                     let default_cwd = dirs::home_dir().map(|p| p.to_string_lossy().to_string());

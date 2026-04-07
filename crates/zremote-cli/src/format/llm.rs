@@ -123,6 +123,7 @@ impl Formatter for LlmFormatter {
         let mut val = json!({
             "_t": "task",
             "id": t.id,
+            "sid": t.session_id,
             "st": status_str(&t.status),
             "model": opt_str(t.model.as_ref()),
             "project": t.project_path,
@@ -472,6 +473,7 @@ mod tests {
 
         assert_eq!(v["_t"], "task");
         assert_eq!(v["id"], t.id);
+        assert_eq!(v["sid"], t.session_id);
         assert_eq!(v["st"], "active");
         assert_eq!(v["model"], "opus");
         assert_eq!(v["project"], "/home/user/repo");

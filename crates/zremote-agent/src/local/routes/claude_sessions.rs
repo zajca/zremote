@@ -172,6 +172,12 @@ pub async fn create_claude_task(
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
     }
 
+    // Register channel dialog auto-approval detector
+    if !development_channels.is_empty() {
+        let mut detectors = state.channel_dialog_detectors.lock().await;
+        detectors.insert(session_id, crate::claude::ChannelDialogDetector::new());
+    }
+
     // Start channel bridge discovery if channels are configured
     if !development_channels.is_empty() {
         let bridge = state.channel_bridge.clone();
@@ -406,6 +412,12 @@ pub async fn resume_claude_task(
         let mut mgr = state.session_manager.lock().await;
         mgr.write_to(&new_session_id, cmd.as_bytes())
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
+    }
+
+    // Register channel dialog auto-approval detector
+    if !development_channels.is_empty() {
+        let mut detectors = state.channel_dialog_detectors.lock().await;
+        detectors.insert(new_session_id, crate::claude::ChannelDialogDetector::new());
     }
 
     // Start channel bridge discovery if channels are configured

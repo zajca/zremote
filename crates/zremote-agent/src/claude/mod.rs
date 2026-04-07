@@ -225,6 +225,90 @@ fn strip_trailing_whitespace_except_space(data: &[u8]) -> &[u8] {
     &data[..end]
 }
 
+/// Watches PTY output for the Claude Code development channel confirmation dialog.
+///
+/// When `--dangerously-load-development-channels` is used, Claude Code shows a TUI
+/// dialog requiring the user to press Enter to confirm. Since the task was explicitly
+/// created with channels, the agent auto-approves by sending `\r` when the dialog
+/// is detected.
+///
+/// The detector looks for these strings in the output:
+/// - "Loading development channels" (from the WARNING line)
+/// - "I am using this for local development" (menu option)
+/// - "Enter to confirm" (action hint)
+pub struct ChannelDialogDetector {
+    buffer: Vec<u8>,
+    triggered: bool,
+}
+
+impl Default for ChannelDialogDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChannelDialogDetector {
+    /// Create a new channel dialog detector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(2048),
+            triggered: false,
+        }
+    }
+
+    /// Feed output bytes. Returns `true` if the dialog was detected in this call.
+    ///
+    /// Once triggered, subsequent calls always return `false` (one-shot).
+    pub fn feed(&mut self, data: &[u8]) -> bool {
+        if self.triggered {
+            return false;
+        }
+
+        self.buffer.extend_from_slice(data);
+
+        // Keep only the last 2048 bytes to limit memory usage.
+        // The dialog is ~200 bytes but may be spread across multiple chunks
+        // with ANSI escape sequences inflating the size.
+        if self.buffer.len() > 2048 {
+            let start = self.buffer.len() - 2048;
+            self.buffer.drain(..start);
+        }
+
+        // Check for all three marker strings (case-insensitive on the ASCII portion).
+        // The PTY output contains ANSI escape codes, so we search the raw bytes.
+        let has_loading = contains_ascii_ci(&self.buffer, b"Loading development channel");
+        let has_option = contains_ascii_ci(&self.buffer, b"I am using this for local development");
+        let has_confirm = contains_ascii_ci(&self.buffer, b"Enter to confirm");
+
+        if has_loading && has_option && has_confirm {
+            self.triggered = true;
+            return true;
+        }
+
+        false
+    }
+
+    /// Returns `true` if the dialog has been detected.
+    #[must_use]
+    pub fn triggered(&self) -> bool {
+        self.triggered
+    }
+}
+
+/// Case-insensitive ASCII substring search in a byte slice.
+fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// Scans `~/.claude/projects/` for discoverable Claude Code sessions.
 pub struct SessionScanner;
 
@@ -849,5 +933,75 @@ mod tests {
         assert_eq!(info.session_id, "camel-123");
         assert_eq!(info.last_active, Some("2026-01-01T00:00:00Z".to_string()));
         assert_eq!(info.message_count, Some(5));
+    }
+
+    // --- ChannelDialogDetector tests ---
+
+    #[test]
+    fn channel_detector_triggers_on_full_dialog() {
+        let mut detector = ChannelDialogDetector::new();
+        let output = b"WARNING: Loading development channels\n> 1. I am using this for local development\n  2. Exit\nEnter to confirm";
+        assert!(detector.feed(output));
+        assert!(detector.triggered());
+    }
+
+    #[test]
+    fn channel_detector_triggers_across_multiple_chunks() {
+        let mut detector = ChannelDialogDetector::new();
+        assert!(!detector.feed(b"WARNING: Loading development channels\n"));
+        assert!(!detector.feed(b"> 1. I am using this for local development\n"));
+        assert!(detector.feed(b"  2. Exit\nEnter to confirm"));
+        assert!(detector.triggered());
+    }
+
+    #[test]
+    fn channel_detector_fires_only_once() {
+        let mut detector = ChannelDialogDetector::new();
+        let output = b"WARNING: Loading development channels\n> 1. I am using this for local development\n  2. Exit\nEnter to confirm";
+        assert!(detector.feed(output));
+        // Second feed should return false
+        assert!(!detector.feed(output));
+        assert!(detector.triggered());
+    }
+
+    #[test]
+    fn channel_detector_no_false_positive_on_partial() {
+        let mut detector = ChannelDialogDetector::new();
+        assert!(!detector.feed(b"WARNING: Loading development channels\n"));
+        assert!(!detector.feed(b"some other output\n"));
+        assert!(!detector.triggered());
+    }
+
+    #[test]
+    fn channel_detector_no_false_positive_on_regular_output() {
+        let mut detector = ChannelDialogDetector::new();
+        assert!(!detector.feed(b"compiling zremote-agent...\n"));
+        assert!(!detector.feed(b"warning: unused variable\n"));
+        assert!(!detector.triggered());
+    }
+
+    #[test]
+    fn channel_detector_handles_ansi_escape_codes() {
+        let mut detector = ChannelDialogDetector::new();
+        // Simulate ANSI-colored output
+        let output = b"\x1b[33mWARNING\x1b[0m: Loading development channels\n\x1b[1m> 1. I am using this for local development\x1b[0m\n  2. Exit\nEnter to confirm";
+        assert!(detector.feed(output));
+    }
+
+    #[test]
+    fn channel_detector_buffer_limits_to_2048_bytes() {
+        let mut detector = ChannelDialogDetector::new();
+        let large_data = vec![b'x'; 4096];
+        detector.feed(&large_data);
+        assert!(detector.buffer.len() <= 2048);
+    }
+
+    #[test]
+    fn contains_ascii_ci_basic() {
+        assert!(contains_ascii_ci(b"Hello World", b"hello"));
+        assert!(contains_ascii_ci(b"Hello World", b"WORLD"));
+        assert!(!contains_ascii_ci(b"Hello", b"World"));
+        assert!(contains_ascii_ci(b"anything", b""));
+        assert!(!contains_ascii_ci(b"", b"x"));
     }
 }

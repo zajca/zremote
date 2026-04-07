@@ -105,7 +105,7 @@ pub enum TaskCommand {
     Input {
         /// Task ID
         task_id: String,
-        /// Text to send (appends newline)
+        /// Text to send (appends carriage return)
         #[arg(long, conflicts_with = "raw")]
         text: Option<String>,
         /// Raw bytes with escape sequences (\n, \x1b, \x03, etc.)
@@ -314,7 +314,7 @@ pub async fn run(
             let bytes = match (text, raw) {
                 (Some(t), None) => {
                     let mut b = t.into_bytes();
-                    b.push(b'\n');
+                    b.push(b'\r');
                     b
                 }
                 (None, Some(r)) => parse_escape_sequences(&r),

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
@@ -6,9 +7,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zremote_core::processing::AgenticProcessor;
 use zremote_core::state::{AgenticLoopStore, ServerEvent, SessionStore};
+use zremote_protocol::SessionId;
 
 use crate::agentic::manager::AgenticLoopManager;
 use crate::channel::bridge::ChannelBridge;
+use crate::claude::ChannelDialogDetector;
 use crate::hooks::mapper::SessionMapper;
 use crate::session::{PtyOutput, SessionManager};
 
@@ -34,6 +37,10 @@ pub struct LocalAppState {
     /// Optional channel to send messages to the KnowledgeManager.
     /// `None` when the knowledge service is not configured.
     pub knowledge_tx: Option<mpsc::Sender<zremote_protocol::knowledge::KnowledgeServerMessage>>,
+    /// Per-session detectors for auto-approving the dev channel confirmation dialog.
+    /// Populated when a task is created with `development_channels`. The PTY output
+    /// loop feeds output into these and sends `\r` when the dialog is detected.
+    pub channel_dialog_detectors: Mutex<HashMap<SessionId, ChannelDialogDetector>>,
 }
 
 impl LocalAppState {
@@ -79,6 +86,7 @@ impl LocalAppState {
             session_mapper,
             channel_bridge,
             knowledge_tx: None,
+            channel_dialog_detectors: Mutex::new(HashMap::new()),
         })
     }
 }
