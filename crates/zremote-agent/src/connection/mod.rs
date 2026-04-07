@@ -15,6 +15,7 @@ use crate::agentic::analyzer::{AnalyzerEvent, AnalyzerPhase, OutputAnalyzer};
 use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::BridgeCommand;
 use crate::bridge::{self, BridgeSenders};
+use crate::claude::ChannelDialogDetector;
 use crate::config::AgentConfig;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
@@ -468,6 +469,9 @@ pub async fn run_connection(
         }
     }
 
+    // Track dev-channel dialog detectors per session (for auto-approve)
+    let mut channel_dialog_detectors: HashMap<SessionId, ChannelDialogDetector> = HashMap::new();
+
     // Channel bridge for dispatching channel messages to per-session servers
     let mut channel_bridge = crate::channel::bridge::ChannelBridge::new();
 
@@ -493,6 +497,7 @@ pub async fn run_connection(
                                     bridge_scrollback,
                                     &mut session_analyzers,
                                     Some(&mut channel_bridge),
+                                    &mut channel_dialog_detectors,
                                 ).await;
                             }
                             Err(e) => {
@@ -560,6 +565,7 @@ pub async fn run_connection(
                     }
 
                     // Session ended (EOF from main PTY reader)
+                    channel_dialog_detectors.remove(&session_id);
                     session_analyzers.remove(&session_id);
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()
@@ -581,6 +587,23 @@ pub async fn run_connection(
                         tracing::warn!("outbound channel full, message dropped");
                     }
                 } else {
+                    // Check for dev channel dialog auto-approval
+                    if let Some(detector) = channel_dialog_detectors.get_mut(&session_id) {
+                        let fired = detector.feed(&data);
+                        if detector.triggered() {
+                            channel_dialog_detectors.remove(&session_id);
+                        }
+                        if fired {
+                            tracing::info!(%session_id, "auto-approving dev channel dialog (server mode)");
+                            if let Err(e) = session_manager.write_to(&session_id, b"\r") {
+                                tracing::warn!(
+                                    %session_id, error = %e,
+                                    "failed to auto-approve dev channel dialog"
+                                );
+                            }
+                        }
+                    }
+
                     // Feed through per-session analyzer
                     if let Some(analyzer) = session_analyzers.get_mut(&session_id) {
                         let events = analyzer.process_output(&data);
@@ -650,6 +673,7 @@ pub async fn run_connection(
                     .map(|(id, _)| id)
                     .collect();
                 for session_id in dead_sessions {
+                    channel_dialog_detectors.remove(&session_id);
                     session_analyzers.remove(&session_id);
                     if let Some(loop_ended) = agentic_manager.on_session_closed(&session_id)
                         && agentic_tx.try_send(loop_ended).is_err()

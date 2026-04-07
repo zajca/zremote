@@ -9,6 +9,7 @@ use super::registration::default_shell;
 use crate::agentic::analyzer::OutputAnalyzer;
 use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::{self, BridgeSenders};
+use crate::claude::ChannelDialogDetector;
 use crate::hooks::mapper::SessionMapper;
 use crate::project::ProjectScanner;
 use crate::project::git::GitInspector;
@@ -193,6 +194,7 @@ pub(super) async fn handle_server_message(
     bridge_scrollback: &bridge::BridgeScrollbackStore,
     session_analyzers: &mut std::collections::HashMap<SessionId, OutputAnalyzer>,
     mut channel_bridge: Option<&mut crate::channel::bridge::ChannelBridge>,
+    channel_dialog_detectors: &mut std::collections::HashMap<SessionId, ChannelDialogDetector>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -804,8 +806,14 @@ pub(super) async fn handle_server_message(
             });
         }
         ServerMessage::ClaudeAction(claude_msg) => {
-            handle_claude_server_message(claude_msg, session_manager, outbound_tx, session_mapper)
-                .await;
+            handle_claude_server_message(
+                claude_msg,
+                session_manager,
+                outbound_tx,
+                session_mapper,
+                channel_dialog_detectors,
+            )
+            .await;
         }
         ServerMessage::KnowledgeAction(knowledge_msg) => {
             if let Some(tx) = knowledge_tx {
@@ -1015,6 +1023,7 @@ async fn handle_claude_server_message(
     session_manager: &mut SessionManager,
     outbound_tx: &mpsc::Sender<AgentMessage>,
     session_mapper: &SessionMapper,
+    channel_dialog_detectors: &mut std::collections::HashMap<SessionId, ChannelDialogDetector>,
 ) {
     match msg {
         ClaudeServerMessage::StartSession {
@@ -1142,6 +1151,15 @@ async fn handle_claude_server_message(
                             session_id = %session_id,
                             error = %e,
                             "failed to write claude command to PTY"
+                        );
+                    }
+
+                    // Register a channel dialog detector for auto-approval
+                    if !development_channels.is_empty() {
+                        channel_dialog_detectors.insert(*session_id, ChannelDialogDetector::new());
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "registered channel dialog detector for auto-approve"
                         );
                     }
 
@@ -1282,6 +1300,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
     }
@@ -1308,6 +1327,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
     }
@@ -1334,6 +1354,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
     }
@@ -1359,6 +1380,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
 
@@ -1399,6 +1421,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
     }
@@ -1428,6 +1451,7 @@ mod tests {
             &bsb,
             &mut sa,
             None,
+            &mut std::collections::HashMap::new(),
         )
         .await;
 
