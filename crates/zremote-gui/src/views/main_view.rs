@@ -24,7 +24,7 @@ use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use crate::views::toast::{
-    ToastAction, ToastContainer, ToastContainerEvent, ToastContext, ToastLevel,
+    ToastAction, ToastContainer, ToastContainerEvent, ToastContext, ToastKind, ToastLevel,
 };
 
 /// How long to wait before showing a WaitingForInput notification.
@@ -600,7 +600,7 @@ impl MainView {
                                     ToastLevel::Warning,
                                     Some(Icon::MessageCircle),
                                     actions,
-                                    true, // persistent
+                                    ToastKind::RequiresAction,
                                     ctx.clone(),
                                 );
                                 cx.notify();
@@ -681,7 +681,7 @@ impl MainView {
                                                 ToastLevel::Warning,
                                                 Some(Icon::MessageCircle),
                                                 actions,
-                                                true, // persistent
+                                                ToastKind::WaitingForInput,
                                                 ctx.clone(),
                                             );
                                             cx.notify();
