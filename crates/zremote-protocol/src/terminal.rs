@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agents::{AgentLifecycleMessage, AgentServerMessage};
 use crate::channel::{ChannelAgentAction, ChannelServerAction};
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
@@ -126,6 +127,9 @@ pub enum AgentMessage {
     KnowledgeAction(KnowledgeAgentMessage),
     ClaudeAction(ClaudeAgentMessage),
     ChannelAction(ChannelAgentAction),
+    /// Generic agentic launcher lifecycle notifications (new in RFC-003).
+    /// Older servers that predate agent profiles simply ignore unknown variants.
+    AgentLifecycle(AgentLifecycleMessage),
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -171,6 +175,10 @@ pub enum ServerMessage {
     KnowledgeAction(KnowledgeServerMessage),
     ClaudeAction(ClaudeServerMessage),
     ChannelAction(ChannelServerAction),
+    /// Generic agentic launcher spawn requests (new in RFC-003). Delivered to
+    /// the agent where `LauncherRegistry::get(kind)` dispatches to the right
+    /// launcher. Older agents that predate this variant will ignore it.
+    AgentAction(AgentServerMessage),
     ProjectScan,
     ProjectRegister {
         path: String,
@@ -1034,6 +1042,61 @@ mod tests {
                 request_id: "perm-001".to_string(),
                 allowed: true,
                 reason: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn agent_action_start_agent_roundtrip() {
+        use crate::agents::{AgentProfileData, AgentServerMessage};
+        use std::collections::BTreeMap;
+
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        roundtrip_server(&ServerMessage::AgentAction(
+            AgentServerMessage::StartAgent {
+                session_id: Uuid::new_v4().to_string(),
+                task_id: Uuid::new_v4().to_string(),
+                host_id: Uuid::new_v4().to_string(),
+                project_path: "/home/user/project".to_string(),
+                profile: AgentProfileData {
+                    id: Uuid::new_v4().to_string(),
+                    agent_kind: "claude".to_string(),
+                    name: "Default".to_string(),
+                    description: Some("default profile".to_string()),
+                    model: Some("sonnet-4-5".to_string()),
+                    initial_prompt: Some("Go!".to_string()),
+                    skip_permissions: false,
+                    allowed_tools: vec!["Read".to_string()],
+                    extra_args: vec!["--verbose".to_string()],
+                    env_vars: env,
+                    settings_json: serde_json::json!({"print_mode": false}),
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn agent_lifecycle_started_roundtrip() {
+        use crate::agents::AgentLifecycleMessage;
+        roundtrip_agent(&AgentMessage::AgentLifecycle(
+            AgentLifecycleMessage::Started {
+                session_id: Uuid::new_v4().to_string(),
+                task_id: Uuid::new_v4().to_string(),
+                agent_kind: "claude".to_string(),
+            },
+        ));
+    }
+
+    #[test]
+    fn agent_lifecycle_start_failed_roundtrip() {
+        use crate::agents::AgentLifecycleMessage;
+        roundtrip_agent(&AgentMessage::AgentLifecycle(
+            AgentLifecycleMessage::StartFailed {
+                session_id: Uuid::new_v4().to_string(),
+                task_id: Uuid::new_v4().to_string(),
+                agent_kind: "claude".to_string(),
+                error: "spawn failed".to_string(),
             },
         ));
     }

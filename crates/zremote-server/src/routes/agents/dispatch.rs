@@ -691,6 +691,55 @@ pub(super) async fn handle_agent_message(
                 }
             }
         }
+        AgentMessage::AgentLifecycle(lifecycle) => {
+            use zremote_protocol::agents::AgentLifecycleMessage;
+            match lifecycle {
+                AgentLifecycleMessage::Started {
+                    session_id,
+                    task_id,
+                    agent_kind,
+                } => {
+                    tracing::info!(
+                        host_id = %host_id,
+                        session_id = %session_id,
+                        task_id = %task_id,
+                        agent_kind = %agent_kind,
+                        "agent launcher started"
+                    );
+                }
+                AgentLifecycleMessage::StartFailed {
+                    session_id,
+                    task_id,
+                    agent_kind,
+                    error,
+                } => {
+                    tracing::warn!(
+                        host_id = %host_id,
+                        session_id = %session_id,
+                        task_id = %task_id,
+                        agent_kind = %agent_kind,
+                        error = %error,
+                        "agent launcher failed"
+                    );
+                    // Mark the session row as errored so the UI sees the
+                    // failure instead of a dangling `creating` row. The
+                    // `sessions` table has no `updated_at` column — we use
+                    // `closed_at` instead. `mark_session_error` is a no-op
+                    // when the row does not exist (the agent may reject
+                    // the spawn before the server committed the row).
+                    if let Err(e) =
+                        zremote_core::queries::sessions::mark_session_error(&state.db, &session_id)
+                            .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to mark session as errored"
+                        );
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

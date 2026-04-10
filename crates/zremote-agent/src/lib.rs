@@ -21,6 +21,7 @@
 )]
 
 mod agentic;
+mod agents;
 mod bridge;
 mod ccline;
 mod channel;
@@ -395,6 +396,10 @@ async fn run_agent() {
     let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(
         std::collections::HashSet::<String>::new(),
     ));
+    // Generic agent launcher registry — shared across reconnects so
+    // ServerMessage::AgentAction has a single source of truth for supported
+    // agent kinds. Built once and passed by reference to run_connection.
+    let launcher_registry = std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins());
 
     // Start ccline Unix socket listener for Claude Code status line data.
     // In server mode, metrics are forwarded as AgentMessages through this channel.
@@ -468,6 +473,7 @@ async fn run_agent() {
             &bridge_senders,
             &bridge_scrollback,
             &mut bridge_cmd_rx,
+            &launcher_registry,
         )
         .await
         {

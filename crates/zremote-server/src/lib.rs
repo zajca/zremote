@@ -19,7 +19,8 @@ mod telegram;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{delete, get, post, put};
 use tokio_util::sync::CancellationToken;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
@@ -30,6 +31,14 @@ use state::{AppState, ConnectionManager};
 
 /// Maximum number of concurrent WebSocket connections allowed.
 const MAX_WS_CONNECTIONS: usize = 200;
+
+/// Maximum request body size for `/api/agent-profiles` endpoints. The default
+/// axum body limit (2 MiB) is fine for most REST traffic, but we tighten this
+/// layer because a profile only contains short strings and small arrays — an
+/// oversized payload is almost certainly an abuse attempt. Individual field
+/// length caps enforced in `zremote_core::validation::agent_profile` match
+/// this ceiling.
+const AGENT_PROFILES_BODY_LIMIT: usize = 1_048_576; // 1 MiB
 
 /// Configuration for running the multi-host server.
 pub struct ServerConfig {
@@ -49,6 +58,32 @@ fn create_router(state: Arc<AppState>) -> Router {
             get(routes::terminal::ws_handler),
         )
         .layer(ConcurrencyLimitLayer::new(MAX_WS_CONNECTIONS));
+
+    // Agent profiles (generic kind-agnostic CRUD).
+    //
+    // Scoped into its own router so we can attach a tight `DefaultBodyLimit`
+    // layer without affecting the rest of the REST surface. Individual field
+    // caps enforced inside the handlers match this 1 MiB ceiling.
+    let agent_profiles_router: Router<Arc<AppState>> = Router::new()
+        .route(
+            "/api/agent-profiles",
+            get(routes::agent_profiles::list_profiles).post(routes::agent_profiles::create_profile),
+        )
+        .route(
+            "/api/agent-profiles/kinds",
+            get(routes::agent_profiles::list_kinds),
+        )
+        .route(
+            "/api/agent-profiles/{id}",
+            get(routes::agent_profiles::get_profile)
+                .put(routes::agent_profiles::update_profile)
+                .delete(routes::agent_profiles::delete_profile),
+        )
+        .route(
+            "/api/agent-profiles/{id}/default",
+            put(routes::agent_profiles::set_default),
+        )
+        .layer(DefaultBodyLimit::max(AGENT_PROFILES_BODY_LIMIT));
 
     // TODO(phase-3): Add authentication middleware for REST API endpoints
     Router::new()
@@ -228,6 +263,15 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{session_id}/channel/status",
             get(routes::channel::channel_status),
+        )
+        // Agent profiles (generic kind-agnostic CRUD) — merged from its own
+        // sub-router so a tight `DefaultBodyLimit` layer can apply without
+        // leaking to unrelated routes. See `agent_profiles_router` above.
+        .merge(agent_profiles_router)
+        // Profile-driven agent task launch
+        .route(
+            "/api/agent-tasks",
+            post(routes::agent_tasks::create_agent_task),
         )
         // Claude task routes
         .route(

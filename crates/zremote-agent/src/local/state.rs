@@ -41,6 +41,10 @@ pub struct LocalAppState {
     /// Populated when a task is created with `development_channels`. The PTY output
     /// loop feeds output into these and sends `\r` when the dialog is detected.
     pub channel_dialog_detectors: Mutex<HashMap<SessionId, ChannelDialogDetector>>,
+    /// Generic launcher registry dispatched from `POST /api/agent-tasks` and
+    /// `ServerMessage::AgentAction`. Shared (Arc) so the REST layer and the
+    /// WS dispatch layer hold the same instance.
+    pub launcher_registry: Arc<crate::agents::LauncherRegistry>,
 }
 
 impl LocalAppState {
@@ -87,6 +91,7 @@ impl LocalAppState {
             channel_bridge,
             knowledge_tx: None,
             channel_dialog_detectors: Mutex::new(HashMap::new()),
+            launcher_registry: Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         })
     }
 }

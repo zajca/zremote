@@ -225,6 +225,7 @@ pub async fn run_connection(
     bridge_senders: &BridgeSenders,
     bridge_scrollback: &bridge::BridgeScrollbackStore,
     bridge_cmd_rx: &mut mpsc::Receiver<BridgeCommand>,
+    launcher_registry: &Arc<crate::agents::LauncherRegistry>,
 ) -> Result<(), ConnectionError> {
     let supports_persistence = session_manager.supports_persistence();
     tracing::info!(server_url = %config.server_url, "connecting to server");
@@ -498,6 +499,7 @@ pub async fn run_connection(
                                     &mut session_analyzers,
                                     Some(&mut channel_bridge),
                                     &mut channel_dialog_detectors,
+                                    launcher_registry,
                                 ).await;
                             }
                             Err(e) => {

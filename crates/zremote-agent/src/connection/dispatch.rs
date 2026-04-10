@@ -195,6 +195,7 @@ pub(super) async fn handle_server_message(
     session_analyzers: &mut std::collections::HashMap<SessionId, OutputAnalyzer>,
     mut channel_bridge: Option<&mut crate::channel::bridge::ChannelBridge>,
     channel_dialog_detectors: &mut std::collections::HashMap<SessionId, ChannelDialogDetector>,
+    launcher_registry: &std::sync::Arc<crate::agents::LauncherRegistry>,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -1013,6 +1014,232 @@ pub(super) async fn handle_server_message(
                 }
             }
         }
+        ServerMessage::AgentAction(action) => {
+            handle_agent_server_message(
+                action,
+                session_manager,
+                outbound_tx,
+                launcher_registry,
+                channel_dialog_detectors,
+            )
+            .await;
+        }
+    }
+}
+
+/// Handle a generic agent-launcher spawn request from the server.
+///
+/// This is the server-mode counterpart to `POST /api/agent-tasks` in local
+/// mode: it looks up the launcher for the requested `agent_kind`, builds the
+/// shell command, spawns a PTY, writes the command to the PTY, and notifies
+/// the server via [`zremote_protocol::agents::AgentLifecycleMessage`].
+///
+/// On any failure it sends a `StartFailed` back so the server can mark the
+/// session row as errored and surface the error to the GUI.
+async fn handle_agent_server_message(
+    action: &zremote_protocol::agents::AgentServerMessage,
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    launcher_registry: &std::sync::Arc<crate::agents::LauncherRegistry>,
+    channel_dialog_detectors: &mut std::collections::HashMap<SessionId, ChannelDialogDetector>,
+) {
+    use zremote_protocol::agents::{AgentLifecycleMessage, AgentServerMessage};
+
+    let AgentServerMessage::StartAgent {
+        session_id,
+        task_id,
+        host_id: _,
+        project_path,
+        profile,
+    } = action;
+
+    // Send a StartFailed lifecycle event to the server. `error` is the
+    // already-sanitized user-facing string. The full error should be logged
+    // locally before calling this helper to avoid path/token disclosure over
+    // the WS, then GUI, then log pipelines. The `task_id` is echoed back so
+    // the server can correlate the failure with the originating launch.
+    let send_failed = |error: String, agent_kind: String| {
+        let msg = AgentMessage::AgentLifecycle(AgentLifecycleMessage::StartFailed {
+            session_id: session_id.clone(),
+            task_id: task_id.clone(),
+            agent_kind,
+            error,
+        });
+        if outbound_tx.try_send(msg).is_err() {
+            tracing::warn!(
+                session_id = %session_id,
+                "outbound channel full, AgentLifecycle::StartFailed dropped; session may hang on the server"
+            );
+        }
+    };
+
+    // Map a `LauncherError` to a user-facing error string that is safe to
+    // propagate back to the server. The full error is logged locally; the
+    // returned string deliberately omits paths, tokens, and nested reasons
+    // that an attacker could harvest from a misconfigured GUI client.
+    fn sanitize_launcher_error(e: &crate::agents::LauncherError) -> String {
+        use crate::agents::LauncherError;
+        match e {
+            LauncherError::UnknownKind(k) => format!("unknown agent kind: {k}"),
+            LauncherError::InvalidSettings(_) => "invalid profile settings".to_string(),
+            LauncherError::BuildFailed(_) => "command build failed".to_string(),
+        }
+    }
+
+    // Resolve the launcher.
+    let launcher = match launcher_registry.get(&profile.agent_kind) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                kind = %profile.agent_kind,
+                error = %e,
+                "unknown agent kind for StartAgent"
+            );
+            send_failed(sanitize_launcher_error(&e), profile.agent_kind.clone());
+            return;
+        }
+    };
+
+    // Parse the session_id coming over the wire.
+    let parsed_session_id = match uuid::Uuid::parse_str(session_id) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "invalid session_id in StartAgent"
+            );
+            send_failed("invalid session_id".to_string(), profile.agent_kind.clone());
+            return;
+        }
+    };
+
+    // Validate the working directory to reject path traversal from the
+    // server. Path traversal on its own is caught by the kernel, but an
+    // untrusted server should not be able to coax an agent into cd-ing
+    // to an unrelated location silently.
+    if let Err(e) = zremote_core::validation::validate_path_no_traversal(project_path) {
+        tracing::warn!(
+            session_id = %session_id,
+            path = %project_path,
+            error = %e,
+            "invalid project_path in StartAgent"
+        );
+        send_failed(
+            "invalid project_path".to_string(),
+            profile.agent_kind.clone(),
+        );
+        return;
+    }
+
+    // Build command via the launcher.
+    let request = crate::agents::LaunchRequest {
+        session_id: parsed_session_id,
+        working_dir: project_path,
+        profile,
+    };
+    let launch = match launcher.build_command(&request) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "launcher build_command failed"
+            );
+            send_failed(sanitize_launcher_error(&e), profile.agent_kind.clone());
+            return;
+        }
+    };
+
+    // Spawn PTY session.
+    let shell = default_shell();
+    let ai_config = ShellIntegrationConfig::for_ai_session();
+    let pid = match session_manager
+        .create(
+            parsed_session_id,
+            shell,
+            120,
+            40,
+            Some(project_path.as_str()),
+            None,
+            Some(&ai_config),
+        )
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "failed to spawn PTY for agent session"
+            );
+            send_failed(
+                "failed to spawn PTY".to_string(),
+                profile.agent_kind.clone(),
+            );
+            return;
+        }
+    };
+
+    tracing::info!(
+        session_id = %session_id,
+        kind = %profile.agent_kind,
+        pid = pid,
+        "agent PTY session created"
+    );
+
+    // Notify that the PTY session is created (generic terminal-layer event
+    // the server already handles for all sessions).
+    if outbound_tx
+        .try_send(AgentMessage::SessionCreated {
+            session_id: parsed_session_id,
+            shell: shell.to_string(),
+            pid,
+        })
+        .is_err()
+    {
+        tracing::warn!("outbound channel full, SessionCreated dropped");
+    }
+
+    // Brief delay to let the shell initialize before writing the command.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Write the launcher command directly to the PTY stdin.
+    if let Err(e) = session_manager.write_to(&parsed_session_id, launch.command.as_bytes()) {
+        tracing::error!(
+            session_id = %session_id,
+            error = %e,
+            "failed to write launcher command to PTY"
+        );
+        send_failed(
+            "failed to write command to PTY".to_string(),
+            profile.agent_kind.clone(),
+        );
+        return;
+    }
+
+    // Give the launcher a chance to register kind-specific state (e.g.
+    // Claude's channel dialog auto-approve detector).
+    let mut ctx = crate::agents::LauncherContext::Remote {
+        channel_dialog_detectors,
+    };
+    launcher.after_spawn(parsed_session_id, &request, &mut ctx);
+
+    // Send success lifecycle event back to server. Log a warning if the
+    // outbound channel is full: the server will not learn the session
+    // started and will mark it as errored when it times out. `task_id` is
+    // echoed back so the server can correlate replies with pending launches.
+    let started_msg = AgentMessage::AgentLifecycle(AgentLifecycleMessage::Started {
+        session_id: session_id.clone(),
+        task_id: task_id.clone(),
+        agent_kind: profile.agent_kind.clone(),
+    });
+    if outbound_tx.try_send(started_msg).is_err() {
+        tracing::warn!(
+            session_id = %session_id,
+            "outbound channel full, AgentLifecycle::Started dropped; server may mark session as errored"
+        );
     }
 }
 
@@ -1062,7 +1289,11 @@ async fn handle_claude_server_message(
                 None => None,
             };
 
-            // Build the claude CLI command
+            // Build the claude CLI command. The legacy (pre-phase-2) claude
+            // flow has no env vars, so pass a shared empty map instead of
+            // allocating a fresh `BTreeMap` on every message.
+            static EMPTY_ENV: std::sync::LazyLock<std::collections::BTreeMap<String, String>> =
+                std::sync::LazyLock::new(std::collections::BTreeMap::new);
             let opts = crate::claude::CommandOptions {
                 working_dir,
                 model: model.as_deref(),
@@ -1080,6 +1311,8 @@ async fn handle_claude_server_message(
                 custom_flags: custom_flags.as_deref(),
                 development_channels,
                 print_mode: *print_mode,
+                extra_args: &[],
+                env_vars: &EMPTY_ENV,
             };
             let command = match crate::claude::CommandBuilder::build(&opts) {
                 Ok(cmd) => cmd,
@@ -1301,6 +1534,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
     }
@@ -1328,6 +1562,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
     }
@@ -1355,6 +1590,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
     }
@@ -1381,6 +1617,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
 
@@ -1422,6 +1659,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
     }
@@ -1452,6 +1690,7 @@ mod tests {
             &mut sa,
             None,
             &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
         )
         .await;
 

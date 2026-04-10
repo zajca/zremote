@@ -121,6 +121,32 @@ impl AgentProfileRow {
     }
 }
 
+/// Convert a DB-level [`AgentProfile`] into the wire snapshot used by the
+/// generic launcher protocol ([`zremote_protocol::agents::AgentProfileData`]).
+///
+/// Strips DB-only fields (`sort_order`, `is_default`, `created_at`,
+/// `updated_at`) that the launcher does not care about. Lives in
+/// `zremote-core` so both the local (`zremote-agent`) and server
+/// (`zremote-server`) REST handlers can share the conversion — a previous
+/// revision had two private copies in the `agent_tasks` handlers.
+impl From<AgentProfile> for zremote_protocol::agents::AgentProfileData {
+    fn from(profile: AgentProfile) -> Self {
+        Self {
+            id: profile.id,
+            agent_kind: profile.agent_kind,
+            name: profile.name,
+            description: profile.description,
+            model: profile.model,
+            initial_prompt: profile.initial_prompt,
+            skip_permissions: profile.skip_permissions,
+            allowed_tools: profile.allowed_tools,
+            extra_args: profile.extra_args,
+            env_vars: profile.env_vars,
+            settings_json: profile.settings,
+        }
+    }
+}
+
 fn serialize_profile_json(
     profile: &AgentProfile,
 ) -> Result<(String, String, String, String), AppError> {
@@ -372,6 +398,39 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn profile_into_profile_data_strips_db_only_fields() {
+        use zremote_protocol::agents::AgentProfileData;
+        let mut profile = sample_profile("pid1", "claude", "Review");
+        profile.is_default = true;
+        profile.sort_order = 42;
+        profile.created_at = "2025-01-01T00:00:00Z".to_string();
+        profile.updated_at = "2025-01-02T00:00:00Z".to_string();
+
+        let data: AgentProfileData = profile.into();
+
+        assert_eq!(data.id, "pid1");
+        assert_eq!(data.agent_kind, "claude");
+        assert_eq!(data.name, "Review");
+        assert_eq!(data.description.as_deref(), Some("sample"));
+        assert_eq!(data.model.as_deref(), Some("opus"));
+        assert_eq!(data.initial_prompt.as_deref(), Some("Say hi"));
+        assert!(data.skip_permissions);
+        assert_eq!(data.allowed_tools, vec!["Read", "Edit"]);
+        assert_eq!(data.extra_args, vec!["--verbose"]);
+        assert_eq!(data.env_vars.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(
+            data.settings_json,
+            serde_json::json!({
+                "development_channels": ["plugin:zremote@local"],
+                "print_mode": true,
+            })
+        );
+        // Fields not on the wire: confirm the struct shape by field name —
+        // `AgentProfileData` has no `is_default`, `sort_order`, `created_at`,
+        // or `updated_at` to read, so if this compiles the drop is correct.
     }
 
     #[tokio::test]

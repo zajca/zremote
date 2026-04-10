@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{delete, get, post, put};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use zremote_core::request_id::request_id_middleware;
@@ -9,9 +10,38 @@ use zremote_core::request_id::request_id_middleware;
 use super::routes;
 use super::state::LocalAppState;
 
+/// Maximum request body size for `/api/agent-profiles` endpoints. Mirrors
+/// the server-mode router — individual field caps in the core validator
+/// track this ceiling.
+const AGENT_PROFILES_BODY_LIMIT: usize = 1_048_576; // 1 MiB
+
 pub(crate) fn build_router(
     state: Arc<LocalAppState>,
 ) -> Result<Router, Box<dyn std::error::Error>> {
+    // Agent profiles (generic, kind-agnostic CRUD). Scoped into its own
+    // sub-router so a tight `DefaultBodyLimit` layer can be applied without
+    // affecting unrelated routes.
+    let agent_profiles_router: Router<Arc<LocalAppState>> = Router::new()
+        .route(
+            "/api/agent-profiles",
+            get(routes::agent_profiles::list_profiles).post(routes::agent_profiles::create_profile),
+        )
+        .route(
+            "/api/agent-profiles/kinds",
+            get(routes::agent_profiles::list_kinds),
+        )
+        .route(
+            "/api/agent-profiles/{id}",
+            get(routes::agent_profiles::get_profile)
+                .put(routes::agent_profiles::update_profile)
+                .delete(routes::agent_profiles::delete_profile),
+        )
+        .route(
+            "/api/agent-profiles/{id}/default",
+            put(routes::agent_profiles::set_default),
+        )
+        .layer(DefaultBodyLimit::max(AGENT_PROFILES_BODY_LIMIT));
+
     let router = Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
@@ -165,6 +195,16 @@ pub(crate) fn build_router(
         .route(
             "/api/hosts/{host_id}/knowledge/service",
             post(routes::knowledge::control_service),
+        )
+        // Agent profiles (generic, kind-agnostic CRUD) — merged from its own
+        // sub-router so a tight `DefaultBodyLimit` layer can apply without
+        // leaking to unrelated routes. See `agent_profiles_router` above.
+        .merge(agent_profiles_router)
+        // Profile-driven agent task launch (generic replacement for
+        // /api/claude-tasks — the legacy route stays for backwards compat).
+        .route(
+            "/api/agent-tasks",
+            post(routes::agent_tasks::create_agent_task),
         )
         // Claude Tasks
         .route(

@@ -16,6 +16,17 @@ use std::collections::BTreeMap;
 /// free-form `custom_flags` setting in the claude launcher.
 const SHELL_METACHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '\n', '\r', '\0'];
 
+/// Upper bounds on profile field sizes. These match the
+/// `DefaultBodyLimit::max(1 MiB)` layer on the `agent-profiles` router:
+/// individual field limits are cheap early rejects and bound memory spent
+/// on validation itself. See finding #6 of the phase-2 review.
+pub const MAX_NAME_LEN: usize = 255;
+pub const MAX_DESCRIPTION_LEN: usize = 1024;
+pub const MAX_INITIAL_PROMPT_LEN: usize = 65_536;
+pub const MAX_ALLOWED_TOOLS: usize = 64;
+pub const MAX_EXTRA_ARGS: usize = 32;
+pub const MAX_ENV_VARS: usize = 64;
+
 fn contains_shell_metachars(s: &str) -> bool {
     s.chars().any(|c| SHELL_METACHARS.contains(&c))
 }
@@ -202,20 +213,131 @@ pub fn validate_profile_fields(
         validate_model(m)?;
     }
 
+    if allowed_tools.len() > MAX_ALLOWED_TOOLS {
+        return Err(format!("too many allowed_tools (max {MAX_ALLOWED_TOOLS})"));
+    }
     for tool in allowed_tools {
         validate_allowed_tool(tool)?;
     }
 
+    if extra_args.len() > MAX_EXTRA_ARGS {
+        return Err(format!("too many extra_args (max {MAX_EXTRA_ARGS})"));
+    }
     for arg in extra_args {
         validate_extra_arg(arg)?;
     }
 
+    if env_vars.len() > MAX_ENV_VARS {
+        return Err(format!("too many env_vars (max {MAX_ENV_VARS})"));
+    }
     for (k, v) in env_vars {
         validate_env_var_key(k)?;
         validate_env_var_value(v)?;
     }
 
     Ok(())
+}
+
+/// Validate bounded-length top-level string fields on a profile request.
+///
+/// Kept separate from [`validate_profile_fields`] because existing REST
+/// handlers receive these fields as `Option`-wrapped request values and this
+/// check is orthogonal to the shell-safety rules above. Call this in
+/// addition to `validate_profile_fields` inside `validate_all` helpers.
+///
+/// # Errors
+/// Returns `Err(reason)` on the first over-limit field.
+pub fn validate_profile_length_limits(
+    name: &str,
+    description: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<(), String> {
+    if name.len() > MAX_NAME_LEN {
+        return Err(format!("profile name too long (max {MAX_NAME_LEN} bytes)"));
+    }
+    if let Some(d) = description
+        && d.len() > MAX_DESCRIPTION_LEN
+    {
+        return Err(format!(
+            "description too long (max {MAX_DESCRIPTION_LEN} bytes)"
+        ));
+    }
+    if let Some(p) = initial_prompt
+        && p.len() > MAX_INITIAL_PROMPT_LEN
+    {
+        return Err(format!(
+            "initial_prompt too long (max {MAX_INITIAL_PROMPT_LEN} bytes)"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeSettingsShape {
+    #[serde(default)]
+    development_channels: Vec<String>,
+    #[serde(default)]
+    output_format: Option<String>,
+    #[serde(default)]
+    custom_flags: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    print_mode: bool,
+}
+
+/// Validate the claude-specific `settings_json` blob.
+///
+/// The server crate cannot depend on the agent-side launcher, so this is
+/// the shared "schema check" for claude's `development_channels` / `output_format`
+/// / `custom_flags` settings. Both server and local REST handlers call this
+/// from their `validate_all` helpers; the agent-side `ClaudeLauncher` remains
+/// the final arbiter at spawn time (defense in depth).
+///
+/// A null / missing blob is accepted — profiles without kind-specific
+/// settings are valid.
+///
+/// # Errors
+/// Returns `Err(reason)` on the first failing field, or if the JSON does
+/// not decode as the expected shape.
+pub fn validate_claude_settings(settings: &serde_json::Value) -> Result<(), String> {
+    if settings.is_null() {
+        return Ok(());
+    }
+
+    let parsed: ClaudeSettingsShape = serde_json::from_value(settings.clone())
+        .map_err(|e| format!("invalid claude settings: {e}"))?;
+
+    for ch in &parsed.development_channels {
+        validate_development_channel(ch)?;
+    }
+    if let Some(of) = parsed.output_format.as_deref() {
+        validate_output_format(of)?;
+    }
+    for cf in &parsed.custom_flags {
+        validate_custom_flags(cf)?;
+    }
+
+    Ok(())
+}
+
+/// Dispatch to the kind-specific settings validator.
+///
+/// Today only `claude` has a typed settings shape; future kinds can add
+/// arms here. Unknown kinds are rejected upstream by `validate_profile_fields`,
+/// so hitting the default arm here means a kind was added to `SUPPORTED_KINDS`
+/// but nobody wrote a validator — we fall back to "no check" rather than
+/// hard-rejecting, because the agent-side launcher is still a backstop.
+///
+/// # Errors
+/// Propagates the error from the kind-specific validator.
+pub fn validate_settings_for_kind(
+    agent_kind: &str,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
+    match agent_kind {
+        "claude" => validate_claude_settings(settings),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -459,5 +581,141 @@ mod tests {
         env.insert("GOOD".to_string(), "bad\nvalue".to_string());
         let result = validate_profile_fields("claude", &["claude"], None, &[], &[], &env);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn aggregate_rejects_too_many_allowed_tools() {
+        let tools: Vec<String> = (0..=MAX_ALLOWED_TOOLS)
+            .map(|i| format!("Tool{i}"))
+            .collect();
+        let result =
+            validate_profile_fields("claude", &["claude"], None, &tools, &[], &BTreeMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many allowed_tools"));
+    }
+
+    #[test]
+    fn aggregate_rejects_too_many_extra_args() {
+        let extra: Vec<String> = (0..=MAX_EXTRA_ARGS).map(|i| format!("--flag{i}")).collect();
+        let result =
+            validate_profile_fields("claude", &["claude"], None, &[], &extra, &BTreeMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many extra_args"));
+    }
+
+    #[test]
+    fn aggregate_rejects_too_many_env_vars() {
+        let mut env = BTreeMap::new();
+        for i in 0..=MAX_ENV_VARS {
+            env.insert(format!("VAR_{i}"), "v".to_string());
+        }
+        let result = validate_profile_fields("claude", &["claude"], None, &[], &[], &env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many env_vars"));
+    }
+
+    #[test]
+    fn length_limits_accept_short_values() {
+        assert!(validate_profile_length_limits("Short", None, None).is_ok());
+        assert!(validate_profile_length_limits("Short", Some("brief"), Some("hello")).is_ok());
+    }
+
+    #[test]
+    fn length_limits_reject_long_name() {
+        let big = "x".repeat(MAX_NAME_LEN + 1);
+        let result = validate_profile_length_limits(&big, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("profile name too long"));
+    }
+
+    #[test]
+    fn length_limits_reject_long_description() {
+        let big = "x".repeat(MAX_DESCRIPTION_LEN + 1);
+        let result = validate_profile_length_limits("ok", Some(&big), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("description too long"));
+    }
+
+    #[test]
+    fn length_limits_reject_long_initial_prompt() {
+        let big = "x".repeat(MAX_INITIAL_PROMPT_LEN + 1);
+        let result = validate_profile_length_limits("ok", None, Some(&big));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("initial_prompt too long"));
+    }
+
+    #[test]
+    fn length_limits_allow_description_at_boundary() {
+        let at_limit = "x".repeat(MAX_DESCRIPTION_LEN);
+        assert!(validate_profile_length_limits("ok", Some(&at_limit), None).is_ok());
+    }
+
+    #[test]
+    fn claude_settings_accepts_null() {
+        assert!(validate_claude_settings(&serde_json::Value::Null).is_ok());
+    }
+
+    #[test]
+    fn claude_settings_accepts_empty_object() {
+        assert!(validate_claude_settings(&serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn claude_settings_accepts_typical_payload() {
+        let settings = serde_json::json!({
+            "development_channels": ["plugin:zremote@local"],
+            "output_format": "stream-json",
+            "custom_flags": ["--verbose"],
+            "print_mode": true,
+        });
+        assert!(validate_claude_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn claude_settings_rejects_bad_development_channel() {
+        let settings = serde_json::json!({
+            "development_channels": ["plugin;ls"],
+        });
+        assert!(validate_claude_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn claude_settings_rejects_bad_output_format() {
+        let settings = serde_json::json!({
+            "output_format": "json format",
+        });
+        assert!(validate_claude_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn claude_settings_rejects_bad_custom_flags() {
+        let settings = serde_json::json!({
+            "custom_flags": ["--foo;rm -rf /"],
+        });
+        assert!(validate_claude_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn claude_settings_rejects_wrong_shape() {
+        // development_channels must be an array of strings, not an object
+        let settings = serde_json::json!({
+            "development_channels": { "not": "an array" },
+        });
+        assert!(validate_claude_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn settings_for_kind_dispatches_claude() {
+        let bad = serde_json::json!({ "development_channels": ["plugin;ls"] });
+        assert!(validate_settings_for_kind("claude", &bad).is_err());
+    }
+
+    #[test]
+    fn settings_for_kind_allows_unknown_kinds_noop() {
+        // Kinds not known to core fall through to the default arm. Unknown
+        // kinds are separately rejected by `validate_profile_fields`, so
+        // this helper only needs to be a no-op pass-through.
+        let anything = serde_json::json!({ "arbitrary": "shape" });
+        assert!(validate_settings_for_kind("future-kind", &anything).is_ok());
     }
 }
