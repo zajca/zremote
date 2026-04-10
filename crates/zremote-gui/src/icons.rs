@@ -28,6 +28,7 @@ pub enum Icon {
     CheckCircle,
     XCircle,
     Info,
+    Settings,
 }
 
 impl Icon {
@@ -59,6 +60,7 @@ impl Icon {
             Self::CheckCircle => "icons/check-circle.svg",
             Self::XCircle => "icons/x-circle.svg",
             Self::Info => "icons/info.svg",
+            Self::Settings => "icons/settings.svg",
         }
     }
 }

@@ -21,6 +21,7 @@ use crate::views::command_palette::{
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
+use crate::views::settings_modal::{SettingsModal, SettingsModalEvent, SettingsTab};
 use crate::views::sidebar::SidebarView;
 use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use crate::views::toast::{
@@ -41,6 +42,7 @@ pub struct MainView {
     command_palette: Option<Entity<CommandPalette>>,
     session_switcher: Option<Entity<SessionSwitcher>>,
     help_modal: Option<Entity<HelpModal>>,
+    settings_modal: Option<Entity<SettingsModal>>,
     double_shift: DoubleShiftDetector,
     toasts: Entity<ToastContainer>,
     /// Whether the OS window is currently focused/active.
@@ -111,6 +113,7 @@ impl MainView {
             command_palette: None,
             session_switcher: None,
             help_modal: None,
+            settings_modal: None,
             double_shift: DoubleShiftDetector::new(),
             toasts,
             window_active: window.is_window_active(),
@@ -159,8 +162,7 @@ impl MainView {
                 self.open_help_modal(cx);
             }
             SidebarEvent::OpenSettings => {
-                // Phase 6 will wire this to the agent profile settings modal.
-                tracing::debug!("settings requested — phase 6 will wire this");
+                self.open_settings_modal(cx);
             }
         }
     }
@@ -1149,12 +1151,11 @@ impl MainView {
                 }
             }
             CommandPaletteEvent::ShowSettings => {
-                // Phase 6 will replace this with `self.open_settings_modal(cx)`.
                 // Handled directly here (not via `SidebarEvent::OpenSettings`)
-                // because the modal is owned by `MainView`, not the sidebar —
+                // because the modal is owned by `MainView`, not the sidebar --
                 // bouncing through `sidebar.update()` would hold the sidebar
                 // entity lock during the emit for no gain.
-                tracing::debug!("settings requested — phase 6 will wire this");
+                self.open_settings_modal(cx);
             }
             CommandPaletteEvent::Close => {}
         }
@@ -1274,6 +1275,53 @@ impl MainView {
 
     fn close_help_modal(&mut self, cx: &mut Context<Self>) {
         self.help_modal = None;
+        cx.notify();
+    }
+
+    fn open_settings_modal(&mut self, cx: &mut Context<Self>) {
+        // Close other overlays first (mutual exclusion).
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+        if self.session_switcher.is_some() {
+            self.close_session_switcher(cx);
+        }
+        if self.help_modal.is_some() {
+            self.close_help_modal(cx);
+        }
+        // Toggle if already open.
+        if self.settings_modal.is_some() {
+            self.close_settings_modal(cx);
+            return;
+        }
+
+        let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
+        let kinds = Rc::clone(self.sidebar.read(cx).agent_kinds_rc());
+        let app_state = self.app_state.clone();
+        let modal = cx.new(|cx| {
+            SettingsModal::new(app_state, profiles, kinds, SettingsTab::AgentProfiles, cx)
+        });
+        cx.subscribe(
+            &modal,
+            |this, _, event: &SettingsModalEvent, cx| match event {
+                SettingsModalEvent::Close => this.close_settings_modal(cx),
+                SettingsModalEvent::ProfilesChanged => {
+                    // Re-fetch profiles/kinds into the sidebar's shared cache.
+                    // The render loop below pushes the refreshed Rcs into the
+                    // modal on each frame, so the tab stays in sync.
+                    this.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.refresh_agent_profiles(cx);
+                    });
+                }
+            },
+        )
+        .detach();
+        self.settings_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
+        self.settings_modal = None;
         cx.notify();
     }
 
@@ -1549,6 +1597,54 @@ impl Render for MainView {
                                     .bg(theme::bg_secondary())
                                     .overflow_hidden()
                                     .child(help.clone()),
+                            ),
+                    ),
+            );
+        }
+
+        // Settings modal overlay. Before rendering, push the sidebar's latest
+        // profile/kind snapshots into the modal so CRUD refreshes flow
+        // transparently without explicit event plumbing between the sidebar
+        // and the modal. The modal/tab short-circuit unchanged Rc pointers
+        // so this is cheap.
+        if let Some(settings) = &self.settings_modal {
+            let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
+            let kinds = Rc::clone(self.sidebar.read(cx).agent_kinds_rc());
+            settings.update(cx, |modal, cx| {
+                modal.set_profiles(profiles, kinds, cx);
+            });
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        div()
+                            .id("settings-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba(0x1111_1366))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.close_settings_modal(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .justify_center()
+                            .pt(px(60.0))
+                            .child(
+                                div()
+                                    .id("settings-container")
+                                    .w(px(720.0))
+                                    .max_h(px(560.0))
+                                    .rounded(px(8.0))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .bg(theme::bg_secondary())
+                                    .overflow_hidden()
+                                    .child(settings.clone()),
                             ),
                     ),
             );

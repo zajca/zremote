@@ -1641,6 +1641,26 @@ impl Render for SidebarView {
                             .gap(px(8.0))
                             .child(
                                 div()
+                                    .id("settings-button")
+                                    .cursor_pointer()
+                                    .child(
+                                        icon(Icon::Settings)
+                                            .size(px(14.0))
+                                            .text_color(theme::text_secondary()),
+                                    )
+                                    .hover(|s| s.text_color(theme::text_primary()))
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SidebarTextTooltip("Settings".to_string()))
+                                            .into()
+                                    })
+                                    .on_click(cx.listener(
+                                        |_this, _event: &ClickEvent, _window, cx| {
+                                            cx.emit(SidebarEvent::OpenSettings);
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
                                     .id("help-button")
                                     .cursor_pointer()
                                     .child(

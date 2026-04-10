@@ -278,8 +278,16 @@ struct ClaudeSettingsShape {
     development_channels: Vec<String>,
     #[serde(default)]
     output_format: Option<String>,
+    /// Single free-form flag blob forwarded to the claude binary after
+    /// shell-metachar validation. The runtime shape in
+    /// `zremote_agent::claude::CommandOptions::custom_flags` is
+    /// `Option<&str>` (one string appended verbatim), so the validator
+    /// must accept the same shape. A prior iteration used `Vec<String>`,
+    /// which caused server-mode saves to 422 with
+    /// "invalid type: string, expected a sequence" whenever the GUI
+    /// sent a non-empty value.
     #[serde(default)]
-    custom_flags: Vec<String>,
+    custom_flags: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     print_mode: bool,
@@ -313,7 +321,7 @@ pub fn validate_claude_settings(settings: &serde_json::Value) -> Result<(), Stri
     if let Some(of) = parsed.output_format.as_deref() {
         validate_output_format(of)?;
     }
-    for cf in &parsed.custom_flags {
+    if let Some(cf) = parsed.custom_flags.as_deref() {
         validate_custom_flags(cf)?;
     }
 
@@ -665,8 +673,17 @@ mod tests {
         let settings = serde_json::json!({
             "development_channels": ["plugin:zremote@local"],
             "output_format": "stream-json",
-            "custom_flags": ["--verbose"],
+            "custom_flags": "--verbose",
             "print_mode": true,
+        });
+        assert!(validate_claude_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn claude_settings_accepts_missing_custom_flags() {
+        // `custom_flags` is Option<String> — omitting it is fine.
+        let settings = serde_json::json!({
+            "development_channels": [],
         });
         assert!(validate_claude_settings(&settings).is_ok());
     }
@@ -690,7 +707,7 @@ mod tests {
     #[test]
     fn claude_settings_rejects_bad_custom_flags() {
         let settings = serde_json::json!({
-            "custom_flags": ["--foo;rm -rf /"],
+            "custom_flags": "--foo;rm -rf /",
         });
         assert!(validate_claude_settings(&settings).is_err());
     }
