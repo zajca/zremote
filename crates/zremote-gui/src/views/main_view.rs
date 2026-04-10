@@ -1622,7 +1622,7 @@ impl Render for MainView {
                             .id("settings-backdrop")
                             .absolute()
                             .inset_0()
-                            .bg(gpui::rgba(0x1111_1366))
+                            .bg(theme::modal_backdrop())
                             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                 this.close_settings_modal(cx);
                             })),

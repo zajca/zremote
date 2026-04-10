@@ -14,7 +14,13 @@ use std::collections::BTreeMap;
 /// Characters that would let a profile inject extra shell commands when the
 /// value is interpolated into a command line. Used by `extra_args` and the
 /// free-form `custom_flags` setting in the claude launcher.
-const SHELL_METACHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '\n', '\r', '\0'];
+///
+/// Backslash is included because `custom_flags` is appended to the command
+/// verbatim (not `shell_quote`d), so a trailing `\` followed by a newline
+/// would enable bash line continuation tricks, and arbitrary `\` escapes can
+/// neutralize later quoting. Legitimate Linux flag values do not need
+/// backslashes, so blocking it is low-cost defense-in-depth.
+const SHELL_METACHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '\\', '\n', '\r', '\0'];
 
 /// Upper bounds on profile field sizes. These match the
 /// `DefaultBodyLimit::max(1 MiB)` layer on the `agent-profiles` router:
@@ -439,6 +445,7 @@ mod tests {
         assert!(validate_extra_arg("--foo=line\nnext").is_err());
         assert!(validate_extra_arg("--foo=line\rnext").is_err());
         assert!(validate_extra_arg("--foo=\0").is_err());
+        assert!(validate_extra_arg("--foo=\\evil").is_err());
     }
 
     #[test]
@@ -452,6 +459,11 @@ mod tests {
         assert!(validate_custom_flags("--foo;rm -rf /").is_err());
         assert!(validate_custom_flags("--foo`id`").is_err());
         assert!(validate_custom_flags("--foo$HOME").is_err());
+        // Backslash enables line continuation / character escape and can
+        // smuggle meaning into adjacent tokens when the blob is appended
+        // verbatim. Security review found this gap post-merge-prep.
+        assert!(validate_custom_flags("--foo\\\nrm").is_err());
+        assert!(validate_custom_flags("--foo \\").is_err());
     }
 
     #[test]

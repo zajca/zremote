@@ -35,12 +35,22 @@ use crate::local::state::LocalAppState;
 /// `profile_id` must reference an existing row; `project_path` is the
 /// working directory the launcher `cd`s into. Anything else on the launcher
 /// command line comes from the saved profile, not the request.
+///
+/// `host_id` exists for parity with the server-mode route, which routes
+/// launches across many agents and needs the field to be mandatory. In local
+/// mode there is exactly one host (ours), so the field is **optional** but
+/// **verified**: if the caller provides it we reject any mismatch with
+/// `state.host_id`. Silently ignoring the field would let a `zremote-client`
+/// call intended for host A land on host B without any diagnostic, which the
+/// phase-7 rust-reviewer flagged as a semantic gap.
 #[derive(Debug, Deserialize)]
 pub struct CreateAgentTaskRequest {
     pub profile_id: String,
     pub project_path: String,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub host_id: Option<String>,
 }
 
 /// JSON shape returned by `POST /api/agent-tasks`.
@@ -88,6 +98,17 @@ pub async fn create_agent_task(
     AppJson(body): AppJson<CreateAgentTaskRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let host_id = state.host_id.to_string();
+
+    // 0a. If the caller specified a host_id, it must match the local host.
+    // Silently ignoring the field would let a client intended for a remote
+    // host land here without diagnostic.
+    if let Some(requested) = body.host_id.as_deref()
+        && requested != host_id
+    {
+        return Err(AppError::BadRequest(format!(
+            "host_id mismatch: this is the local host ({host_id}), got {requested}"
+        )));
+    }
 
     // 0. Reject path traversal in the working directory before touching the
     // DB. Mirrors the same check the project-register path does in
@@ -330,6 +351,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_agent_task_host_id_mismatch_returns_400() {
+        // Client sent an explicit host_id that does not match this agent.
+        // Silently ignoring the field would be a semantic gap; reject it.
+        let state = test_state().await;
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "profile_id": "irrelevant",
+            "project_path": "/tmp",
+            "host_id": "00000000-0000-0000-0000-000000000000",
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agent-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::BAD_REQUEST);
+        let json = read_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("host_id mismatch"),
+            "expected host_id mismatch error, got {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_agent_task_matching_host_id_passes_guard() {
+        // Client sent a host_id that matches this agent. The guard should
+        // let the request through to the profile-lookup stage, which then
+        // returns 404 for the non-existent profile_id. If the guard were
+        // broken (always reject), this test would get 400 instead.
+        let state = test_state().await;
+        let matching = state.host_id.to_string();
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "profile_id": "does-not-exist",
+            "project_path": "/tmp",
+            "host_id": matching,
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agent-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::NOT_FOUND);
     }
 
     #[tokio::test]
