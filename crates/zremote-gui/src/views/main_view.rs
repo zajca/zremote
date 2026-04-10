@@ -1266,7 +1266,7 @@ impl MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Build the content area (terminal or empty state) as a vertical column
         // so we can prepend the connection banner when disconnected.
         let content_area = if let Some(terminal) = &self.terminal {
@@ -1398,6 +1398,18 @@ impl Render for MainView {
 
         // Session switcher overlay (same backdrop+sibling pattern as command palette)
         if let Some(switcher) = &self.session_switcher {
+            // Responsive modal size: the preview pane shows live terminal content, so
+            // narrow windows squeeze 80+ column TUIs and make them look scrambled.
+            // Grow with the window while keeping sane bounds.
+            let viewport = window.viewport_size();
+            let viewport_w = f32::from(viewport.width);
+            let viewport_h = f32::from(viewport.height);
+            let switcher_w = px((viewport_w - 160.0).clamp(760.0, 1200.0));
+            // Use an explicit height (not just max_h) so h_full() on inner flex
+            // children resolves to a definite value, keeping the left list's
+            // overflow_y_scroll() active from the first overflowing item.
+            let switcher_h = px((viewport_h - 200.0).clamp(340.0, 640.0));
+
             root = root.child(
                 div()
                     .absolute()
@@ -1422,8 +1434,8 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("switcher-container")
-                                    .w(px(680.0))
-                                    .max_h(px(420.0))
+                                    .w(switcher_w)
+                                    .h(switcher_h)
                                     .rounded(px(8.0))
                                     .border_1()
                                     .border_color(theme::border())

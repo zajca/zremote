@@ -296,8 +296,12 @@ impl SessionSwitcher {
             .flex()
             .flex_col()
             .flex_1()
-            .min_w(px(350.0))
-            .max_h(px(400.0))
+            // Floor matches the minimum container width (760) minus the left
+            // list (280), so the preview never overflows the container at the
+            // smallest responsive size. At larger window sizes flex_1 lets the
+            // preview grow to fit 100+ column terminals comfortably.
+            .min_w(px(480.0))
+            .h_full()
             .bg(theme::terminal_bg())
             .p(px(8.0))
             .overflow_hidden()
@@ -351,6 +355,7 @@ impl Render for SessionSwitcher {
             .flex()
             .flex_row()
             .w_full()
+            .h_full()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
                 let mods = &event.keystroke.modifiers;
@@ -388,7 +393,7 @@ impl Render for SessionSwitcher {
                     .flex()
                     .flex_col()
                     .w(px(280.0))
-                    .max_h(px(400.0))
+                    .h_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
                     .border_r_1()
