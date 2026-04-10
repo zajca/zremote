@@ -7,6 +7,10 @@ use crate::error::AppError;
 use crate::state::LoopInfo;
 
 /// Agentic loop response for API.
+///
+/// `project_name` is populated by `SELECT ... LEFT JOIN projects ON (host_id, path)`
+/// in `list_loops` / `get_loop`, and falls back to `None` when the loop's working
+/// directory does not correspond to a registered project.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct LoopRow {
     pub id: String,
@@ -21,6 +25,8 @@ pub struct LoopRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 /// Parse a status string from DB into `AgenticStatus`.
@@ -49,6 +55,7 @@ pub fn enrich_loop(row: LoopRow) -> LoopInfo {
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
         channel_available: None,
+        project_name: row.project_name,
     }
 }
 
@@ -65,30 +72,34 @@ pub async fn list_loops(
     filter: &ListLoopsFilter,
 ) -> Result<Vec<LoopRow>, AppError> {
     let mut sql = String::from(
-        "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
-         FROM agentic_loops WHERE 1=1",
+        "SELECT l.id, l.session_id, l.project_path, l.tool_name, l.status, l.started_at, \
+         l.ended_at, l.end_reason, l.task_name, l.input_tokens, l.output_tokens, l.cost_usd, \
+         p.name AS project_name \
+         FROM agentic_loops l \
+         LEFT JOIN sessions s ON s.id = l.session_id \
+         LEFT JOIN projects  p ON p.host_id = s.host_id AND p.path = l.project_path \
+         WHERE 1=1",
     );
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(ref status) = filter.status {
-        sql.push_str(" AND status = ?");
+        sql.push_str(" AND l.status = ?");
         binds.push(status.clone());
     }
     if let Some(ref session_id) = filter.session_id {
-        sql.push_str(" AND session_id = ?");
+        sql.push_str(" AND l.session_id = ?");
         binds.push(session_id.clone());
     }
     if let Some(ref host_id) = filter.host_id {
-        sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE host_id = ?)");
+        sql.push_str(" AND l.session_id IN (SELECT id FROM sessions WHERE host_id = ?)");
         binds.push(host_id.clone());
     }
     if let Some(ref project_id) = filter.project_id {
-        sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE project_id = ?)");
+        sql.push_str(" AND l.session_id IN (SELECT id FROM sessions WHERE project_id = ?)");
         binds.push(project_id.clone());
     }
 
-    sql.push_str(" ORDER BY started_at DESC");
+    sql.push_str(" ORDER BY l.started_at DESC");
 
     let mut q = sqlx::query_as::<_, LoopRow>(&sql);
     for bind in &binds {
@@ -101,9 +112,13 @@ pub async fn list_loops(
 
 pub async fn get_loop(pool: &SqlitePool, loop_id: &str) -> Result<LoopRow, AppError> {
     let row: LoopRow = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
-         FROM agentic_loops WHERE id = ?",
+        "SELECT l.id, l.session_id, l.project_path, l.tool_name, l.status, l.started_at, \
+         l.ended_at, l.end_reason, l.task_name, l.input_tokens, l.output_tokens, l.cost_usd, \
+         p.name AS project_name \
+         FROM agentic_loops l \
+         LEFT JOIN sessions s ON s.id = l.session_id \
+         LEFT JOIN projects  p ON p.host_id = s.host_id AND p.path = l.project_path \
+         WHERE l.id = ?",
     )
     .bind(loop_id)
     .fetch_optional(pool)
@@ -179,6 +194,112 @@ mod tests {
         let loops = list_loops(&pool, &filter).await.unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].id, "l1");
+    }
+
+    #[tokio::test]
+    async fn list_loops_joins_project_name() {
+        let pool = setup_db().await;
+
+        // Register a project whose (host_id, path) matches a loop we will insert.
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES ('p1', 'h1', '/work/myremote', 'myremote', 'rust')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model, status, started_at) \
+             VALUES ('l_proj', 's1', '/work/myremote', 'claude', 'opus', 'waiting_for_input', '2026-03-10T11:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let filter = ListLoopsFilter {
+            status: Some("waiting_for_input".to_string()),
+            host_id: None,
+            session_id: None,
+            project_id: None,
+        };
+        let loops = list_loops(&pool, &filter).await.unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].id, "l_proj");
+        assert_eq!(loops[0].project_name.as_deref(), Some("myremote"));
+    }
+
+    #[tokio::test]
+    async fn get_loop_includes_project_name_when_matched() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES ('p1', 'h1', '/work/myremote', 'myremote', 'rust')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model, status, started_at) \
+             VALUES ('l2', 's1', '/work/myremote', 'claude', 'opus', 'working', '2026-03-10T12:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = get_loop(&pool, "l2").await.unwrap();
+        assert_eq!(row.project_name.as_deref(), Some("myremote"));
+    }
+
+    #[tokio::test]
+    async fn get_loop_project_name_none_when_no_match() {
+        let pool = setup_db().await;
+
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model, status, started_at) \
+             VALUES ('l3', 's1', '/work/unknown', 'claude', 'opus', 'working', '2026-03-10T12:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = get_loop(&pool, "l3").await.unwrap();
+        assert_eq!(row.project_name, None);
+    }
+
+    #[tokio::test]
+    async fn get_loop_project_name_ignores_other_host() {
+        let pool = setup_db().await;
+
+        // Another host has a project with the same path.
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h2', 'other', 'other-host', 'hash2', 'online')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES ('p_other', 'h2', '/work/myremote', 'other-project', 'rust')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Loop is on h1/s1, with the same path -- it must NOT pick up h2's project name.
+        sqlx::query(
+            "INSERT INTO agentic_loops (id, session_id, project_path, tool_name, model, status, started_at) \
+             VALUES ('l4', 's1', '/work/myremote', 'claude', 'opus', 'working', '2026-03-10T12:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = get_loop(&pool, "l4").await.unwrap();
+        assert_eq!(row.project_name, None);
     }
 
     #[tokio::test]

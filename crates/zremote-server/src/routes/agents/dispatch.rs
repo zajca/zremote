@@ -15,7 +15,9 @@ use crate::state::{AgenticLoopState, AppState, LoopInfo, ServerEvent, SessionInf
 
 use super::send_server_message;
 
-/// DB row for an agentic loop, matching the `agentic_loops` table columns.
+/// DB row for an agentic loop, enriched with the project name resolved via
+/// `LEFT JOIN projects ON (host_id, path)`. `project_name` is `None` when no
+/// registered project matches the loop's working directory.
 #[derive(sqlx::FromRow)]
 struct LoopRow {
     id: String,
@@ -30,14 +32,20 @@ struct LoopRow {
     input_tokens: i64,
     output_tokens: i64,
     cost_usd: Option<f64>,
+    project_name: Option<String>,
 }
 
-/// Fetch a `LoopInfo` from the DB.
+/// Fetch a `LoopInfo` from the DB with `project_name` resolved from the
+/// `projects` table (matching on the session's host_id + the loop's path).
 pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<LoopInfo> {
     let row: LoopRow = sqlx::query_as(
-        "SELECT id, session_id, project_path, tool_name, status, started_at, \
-         ended_at, end_reason, task_name, input_tokens, output_tokens, cost_usd \
-         FROM agentic_loops WHERE id = ?",
+        "SELECT l.id, l.session_id, l.project_path, l.tool_name, l.status, l.started_at, \
+         l.ended_at, l.end_reason, l.task_name, l.input_tokens, l.output_tokens, l.cost_usd, \
+         p.name AS project_name \
+         FROM agentic_loops l \
+         LEFT JOIN sessions s ON s.id = l.session_id \
+         LEFT JOIN projects  p ON p.host_id = s.host_id AND p.path = l.project_path \
+         WHERE l.id = ?",
     )
     .bind(loop_id)
     .fetch_optional(&state.db)
@@ -62,6 +70,7 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
         output_tokens: row.output_tokens.cast_unsigned(),
         cost_usd: row.cost_usd,
         channel_available: None,
+        project_name: row.project_name,
     })
 }
 
