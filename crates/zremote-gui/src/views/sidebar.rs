@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
-    AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter,
-    ListLoopsFilter, PreviewSnapshot, Project, ServerEvent, Session, SessionStatus,
+    AgentKindInfo, AgentProfile, AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host,
+    HostStatus, ListClaudeTasksFilter, ListLoopsFilter, PreviewSnapshot, Project, ServerEvent,
+    Session, SessionStatus,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -71,6 +72,8 @@ pub struct SidebarView {
     hosts: Rc<Vec<Host>>,
     sessions: Rc<Vec<Session>>,
     projects: Rc<Vec<Project>>,
+    agent_profiles: Rc<Vec<AgentProfile>>,
+    agent_kinds: Rc<Vec<AgentKindInfo>>,
     selected_session_id: Option<String>,
     loading: bool,
     load_generation: u64,
@@ -97,6 +100,22 @@ impl SidebarView {
 
     pub fn projects_rc(&self) -> &Rc<Vec<Project>> {
         &self.projects
+    }
+
+    pub fn agent_profiles_rc(&self) -> &Rc<Vec<AgentProfile>> {
+        &self.agent_profiles
+    }
+
+    pub fn agent_kinds_rc(&self) -> &Rc<Vec<AgentKindInfo>> {
+        &self.agent_kinds
+    }
+
+    /// Default profile for a given `agent_kind`, if one is marked default.
+    /// Returns `None` if there are no profiles for that kind or none is default.
+    pub fn default_profile_for_kind(&self, agent_kind: &str) -> Option<&AgentProfile> {
+        self.agent_profiles
+            .iter()
+            .find(|p| p.agent_kind == agent_kind && p.is_default)
     }
 
     pub fn selected_session_id(&self) -> Option<&str> {
@@ -159,6 +178,8 @@ impl SidebarView {
             hosts: Rc::new(Vec::new()),
             sessions: Rc::new(Vec::new()),
             projects: Rc::new(Vec::new()),
+            agent_profiles: Rc::new(Vec::new()),
+            agent_kinds: Rc::new(Vec::new()),
             selected_session_id: restored_session_id,
             loading: true,
             load_generation: 0,
@@ -191,7 +212,7 @@ impl SidebarView {
                 return;
             }
 
-            let (hosts, all_sessions, all_projects, active_tasks) = handle
+            let (hosts, all_sessions, all_projects, active_tasks, profiles, kinds) = handle
                 .spawn(async move {
                     let hosts = api.list_hosts().await.unwrap_or_default();
                     let mut all_sessions = Vec::new();
@@ -217,7 +238,12 @@ impl SidebarView {
                     );
                     let mut tasks = active.unwrap_or_default();
                     tasks.extend(starting.unwrap_or_default());
-                    (hosts, all_sessions, all_projects, tasks)
+                    // Fetch agent profiles and supported kinds.
+                    let (profiles, kinds) =
+                        tokio::join!(api.list_agent_profiles(None), api.list_agent_kinds());
+                    let profiles = profiles.unwrap_or_default();
+                    let kinds = kinds.unwrap_or_default();
+                    (hosts, all_sessions, all_projects, tasks, profiles, kinds)
                 })
                 .await
                 .unwrap_or_default();
@@ -231,6 +257,8 @@ impl SidebarView {
                 this.hosts = Rc::new(hosts);
                 this.sessions = Rc::new(all_sessions);
                 this.projects = Rc::new(all_projects);
+                this.agent_profiles = Rc::new(profiles);
+                this.agent_kinds = Rc::new(kinds);
                 this.loading = false;
 
                 // Seed Claude tasks from API (only add tasks we don't already track)
@@ -288,6 +316,29 @@ impl SidebarView {
                     });
                 }
 
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-fetch *only* agent profiles and kinds, leaving hosts/sessions/projects
+    /// untouched. Called by the settings modal after a CRUD operation so the
+    /// user sees their change without a full sidebar refresh.
+    pub fn refresh_agent_profiles(&mut self, cx: &mut Context<Self>) {
+        let api = self.app_state.api.clone();
+        let handle = self.app_state.tokio_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let (profiles, kinds) = handle
+                .spawn(async move {
+                    tokio::join!(api.list_agent_profiles(None), api.list_agent_kinds())
+                })
+                .await
+                .unwrap_or_else(|_| (Ok(Vec::new()), Ok(Vec::new())));
+
+            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                this.agent_profiles = Rc::new(profiles.unwrap_or_default());
+                this.agent_kinds = Rc::new(kinds.unwrap_or_default());
                 cx.notify();
             });
         })
