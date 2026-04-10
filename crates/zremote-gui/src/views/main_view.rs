@@ -267,11 +267,20 @@ impl MainView {
     ///
     /// `hostname` is a direct fallback for `host_name` when the sidebar hasn't
     /// loaded hosts yet (e.g. first event after connect).
+    ///
+    /// `loop_project_name` is the authoritative project name resolved
+    /// server-side via a `projects` JOIN in `fetch_loop_info`. When present it
+    /// wins over all client-side heuristics. If `None` (e.g. the loop's path
+    /// has no registered project yet) the resolver falls back to
+    /// `sidebar.projects` lookup, then to the session's `project_id`, then to
+    /// the basename of `project_path` (trailing slashes stripped).
+    #[allow(clippy::too_many_arguments)]
     fn resolve_toast_context(
         &self,
         session_id: Option<&str>,
         host_id: Option<&str>,
         project_path: Option<&str>,
+        loop_project_name: Option<&str>,
         task_name: Option<&str>,
         hostname: Option<&str>,
         cx: &Context<Self>,
@@ -292,27 +301,55 @@ impl MainView {
                 .and_then(|s| s.name.clone())
         });
 
-        let project_name = if let Some(path) = project_path {
-            projects
-                .iter()
-                .find(|p| p.path == path)
-                .map(|p| p.name.clone())
-                .or_else(|| {
+        // Normalize path by stripping trailing slashes so lookups and basename
+        // fallback tolerate either form.
+        let normalized_path = project_path.map(|p| p.trim_end_matches('/').to_string());
+
+        // Priority order (stop at first hit):
+        //   1. Authoritative name from the server/agent `LoopInfo`.
+        //   2. Sidebar project matching `(host_id, path)`.
+        //   3. Sidebar project matching path only (single-host fallback).
+        //   4. Session's linked `project_id`.
+        //   5. Basename of `project_path`.
+        let project_name = loop_project_name
+            .map(String::from)
+            .or_else(|| {
+                normalized_path.as_deref().and_then(|path| {
+                    projects
+                        .iter()
+                        .find(|p| {
+                            p.path.trim_end_matches('/') == path
+                                && host_id.is_some_and(|hid| p.host_id == hid)
+                        })
+                        .map(|p| p.name.clone())
+                })
+            })
+            .or_else(|| {
+                normalized_path.as_deref().and_then(|path| {
+                    projects
+                        .iter()
+                        .find(|p| p.path.trim_end_matches('/') == path)
+                        .map(|p| p.name.clone())
+                })
+            })
+            .or_else(|| {
+                session_id.and_then(|sid| {
+                    sessions
+                        .iter()
+                        .find(|s| s.id == sid)
+                        .and_then(|s| s.project_id.as_ref())
+                        .and_then(|pid| projects.iter().find(|p| p.id == *pid))
+                        .map(|p| p.name.clone())
+                })
+            })
+            .or_else(|| {
+                normalized_path.as_deref().and_then(|path| {
                     path.rsplit('/')
                         .next()
                         .filter(|s| !s.is_empty())
                         .map(String::from)
                 })
-        } else {
-            session_id.and_then(|sid| {
-                sessions
-                    .iter()
-                    .find(|s| s.id == sid)
-                    .and_then(|s| s.project_id.as_ref())
-                    .and_then(|pid| projects.iter().find(|p| p.id == *pid))
-                    .map(|p| p.name.clone())
-            })
-        };
+            });
 
         ToastContext {
             host_name,
@@ -382,8 +419,15 @@ impl MainView {
             message,
         } = event
         {
-            let ctx =
-                self.resolve_toast_context(None, Some(host_id), Some(project_path), None, None, cx);
+            let ctx = self.resolve_toast_context(
+                None,
+                Some(host_id),
+                Some(project_path),
+                None,
+                None,
+                None,
+                cx,
+            );
             let msg = format!("Worktree error: {message}");
             self.show_toast(&msg, ToastLevel::Error, Some(Icon::AlertTriangle), ctx, cx);
         }
@@ -453,6 +497,7 @@ impl MainView {
                     sid.as_deref(),
                     hid.as_deref(),
                     ppath.as_deref(),
+                    None,
                     tname.as_deref(),
                     None,
                     cx,
@@ -574,6 +619,7 @@ impl MainView {
                             Some(&session_id),
                             Some(&host_id),
                             loop_info.project_path.as_deref(),
+                            loop_info.project_name.as_deref(),
                             loop_info.task_name.as_deref(),
                             Some(&hostname),
                             cx,
@@ -782,6 +828,7 @@ impl MainView {
                         Some(&loop_info.session_id),
                         Some(host_id),
                         loop_info.project_path.as_deref(),
+                        loop_info.project_name.as_deref(),
                         loop_info.task_name.as_deref(),
                         Some(hostname),
                         cx,
@@ -969,8 +1016,15 @@ impl MainView {
                 });
             }
             CommandPaletteEvent::AddProject { host_id, path } => {
-                let ctx =
-                    self.resolve_toast_context(None, Some(host_id), Some(path), None, None, cx);
+                let ctx = self.resolve_toast_context(
+                    None,
+                    Some(host_id),
+                    Some(path),
+                    None,
+                    None,
+                    None,
+                    cx,
+                );
                 let api = self.app_state.api.clone();
                 let host_id = host_id.clone();
                 let path = path.clone();
@@ -996,6 +1050,7 @@ impl MainView {
                     let ctx = self.resolve_toast_context(
                         Some(&session_id),
                         Some(&host_id),
+                        None,
                         None,
                         None,
                         None,

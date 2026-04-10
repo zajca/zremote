@@ -32,6 +32,11 @@ pub struct LoopInfo {
     pub action_tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_description: Option<String>,
+    /// Human-readable project name, resolved on the server/agent from the
+    /// `projects` table by `(host_id, project_path)`. When `None`, the client
+    /// may fall back to the basename of `project_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
 }
 
 /// Nested host info in server events.
@@ -248,6 +253,7 @@ mod tests {
             channel_available: None,
             action_tool_name: None,
             action_description: None,
+            project_name: None,
         }
     }
 
@@ -396,6 +402,35 @@ mod tests {
         assert_eq!(info.input_tokens, 0);
         assert_eq!(info.output_tokens, 0);
         assert!(info.cost_usd.is_none());
+    }
+
+    #[test]
+    fn loop_info_backward_compat_missing_project_name() {
+        // Payload from an older agent/server that never serialized `project_name`.
+        let json = r#"{"id":"l1","session_id":"s1","project_path":"/work/repo","tool_name":"t","status":"working","started_at":"2026-01-01T00:00:00Z","ended_at":null,"end_reason":null,"task_name":null}"#;
+        let info: LoopInfo = serde_json::from_str(json).unwrap();
+        assert!(info.project_name.is_none());
+    }
+
+    #[test]
+    fn loop_info_project_name_roundtrip() {
+        let info = LoopInfo {
+            project_name: Some("myremote".to_string()),
+            ..make_loop_info(AgenticStatus::WaitingForInput)
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"project_name\":\"myremote\""));
+        let parsed: LoopInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.project_name.as_deref(), Some("myremote"));
+    }
+
+    #[test]
+    fn loop_info_project_name_none_skipped_in_json() {
+        // When project_name is None the field should not appear in the JSON —
+        // preserves wire compatibility with older clients.
+        let info = make_loop_info(AgenticStatus::Working);
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("project_name"));
     }
 
     #[test]

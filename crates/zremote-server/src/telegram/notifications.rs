@@ -133,6 +133,7 @@ mod tests {
             output_tokens: 0,
             cost_usd: None,
             channel_available: None,
+            project_name: None,
         }
     }
 
