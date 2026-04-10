@@ -23,6 +23,8 @@ pub use flume;
 pub use types::{
     ActionsResponse,
     AddProjectRequest,
+    AgentKindInfo,
+    AgentProfile,
     // SDK types
     AgenticLoop,
     // Protocol re-exports
@@ -32,6 +34,7 @@ pub use types::{
     ClaudeTask,
     ClaudeTaskStatus,
     ConfigValue,
+    CreateAgentProfileRequest,
     CreateClaudeTaskRequest,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -72,9 +75,12 @@ pub use types::{
     SessionId,
     SessionInfo,
     SessionStatus,
+    StartAgentRequest,
+    StartAgentResponse,
     TERMINAL_CHANNEL_CAPACITY,
     TerminalEvent,
     TerminalInput,
+    UpdateAgentProfileRequest,
     UpdateProjectRequest,
     WorktreeInfo,
 };

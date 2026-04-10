@@ -1682,3 +1682,261 @@ async fn get_session_previews_parses_response() {
     assert_eq!(s2.rows, 40);
     assert!(s2.lines.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Agent profiles & tasks (RFC-003 Phase 3)
+// ---------------------------------------------------------------------------
+
+fn sample_profile_json(id: &str, name: &str, kind: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "description": null,
+        "agent_kind": kind,
+        "is_default": false,
+        "sort_order": 0,
+        "model": "sonnet",
+        "initial_prompt": null,
+        "skip_permissions": false,
+        "allowed_tools": ["Read", "Edit"],
+        "extra_args": [],
+        "env_vars": {},
+        "settings": {},
+        "created_at": "2026-04-10T10:00:00Z",
+        "updated_at": "2026-04-10T10:00:00Z"
+    })
+}
+
+#[tokio::test]
+async fn list_agent_profiles_parses_response() {
+    let router = Router::new().route(
+        "/api/agent-profiles",
+        get(|| async {
+            Json(serde_json::json!([
+                sample_profile_json("p-1", "Default", "claude"),
+                sample_profile_json("p-2", "Review", "claude"),
+            ]))
+        }),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let profiles = client.list_agent_profiles(None).await.unwrap();
+
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0].id, "p-1");
+    assert_eq!(profiles[0].name, "Default");
+    assert_eq!(profiles[0].agent_kind, "claude");
+    assert_eq!(profiles[1].id, "p-2");
+}
+
+#[tokio::test]
+async fn list_agent_profiles_forwards_kind_query_param() {
+    let router = Router::new().route(
+        "/api/agent-profiles",
+        get(
+            |axum::extract::Query(params): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| async move {
+                assert_eq!(params.get("kind").map(String::as_str), Some("claude"));
+                Json(serde_json::json!([]))
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let profiles = client.list_agent_profiles(Some("claude")).await.unwrap();
+
+    assert!(profiles.is_empty());
+}
+
+#[tokio::test]
+async fn list_agent_kinds_parses_response() {
+    let router = Router::new().route(
+        "/api/agent-profiles/kinds",
+        get(|| async {
+            Json(serde_json::json!([
+                {
+                    "kind": "claude",
+                    "display_name": "Claude Code",
+                    "description": "Anthropic's Claude Code CLI"
+                }
+            ]))
+        }),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let kinds = client.list_agent_kinds().await.unwrap();
+
+    assert_eq!(kinds.len(), 1);
+    assert_eq!(kinds[0].kind, "claude");
+    assert_eq!(kinds[0].display_name, "Claude Code");
+    assert_eq!(kinds[0].description, "Anthropic's Claude Code CLI");
+}
+
+#[tokio::test]
+async fn get_agent_profile_parses_response() {
+    let router = Router::new().route(
+        "/api/agent-profiles/{id}",
+        get(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                assert_eq!(id, "p-1");
+                Json(sample_profile_json("p-1", "Default", "claude"))
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let profile = client.get_agent_profile("p-1").await.unwrap();
+
+    assert_eq!(profile.id, "p-1");
+    assert_eq!(profile.name, "Default");
+    assert_eq!(profile.model.as_deref(), Some("sonnet"));
+    assert_eq!(profile.allowed_tools, vec!["Read", "Edit"]);
+}
+
+#[tokio::test]
+async fn create_agent_profile_sends_post() {
+    let router = Router::new().route(
+        "/api/agent-profiles",
+        post(
+            |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| async move {
+                assert_eq!(body["name"], "Review mode");
+                assert_eq!(body["agent_kind"], "claude");
+                assert_eq!(body["model"], "opus");
+                assert_eq!(body["skip_permissions"], false);
+                assert_eq!(body["allowed_tools"], serde_json::json!(["Read"]));
+                (
+                    StatusCode::CREATED,
+                    Json(sample_profile_json("p-new", "Review mode", "claude")),
+                )
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let req = zremote_client::CreateAgentProfileRequest {
+        name: "Review mode".to_string(),
+        agent_kind: "claude".to_string(),
+        model: Some("opus".to_string()),
+        allowed_tools: vec!["Read".to_string()],
+        ..Default::default()
+    };
+    let profile = client.create_agent_profile(&req).await.unwrap();
+
+    assert_eq!(profile.id, "p-new");
+    assert_eq!(profile.name, "Review mode");
+}
+
+#[tokio::test]
+async fn update_agent_profile_sends_put() {
+    let router = Router::new().route(
+        "/api/agent-profiles/{id}",
+        put(
+            |axum::extract::Path(id): axum::extract::Path<String>,
+             axum::extract::Json(body): axum::extract::Json<serde_json::Value>| async move {
+                assert_eq!(id, "p-1");
+                assert_eq!(body["name"], "Renamed");
+                assert_eq!(body["model"], "sonnet");
+                // agent_kind must not appear in the update body — the server
+                // refuses kind changes.
+                assert!(body.get("agent_kind").is_none());
+                assert!(body.get("is_default").is_none());
+                Json(sample_profile_json("p-1", "Renamed", "claude"))
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let req = zremote_client::UpdateAgentProfileRequest {
+        name: "Renamed".to_string(),
+        model: Some("sonnet".to_string()),
+        ..Default::default()
+    };
+    let profile = client.update_agent_profile("p-1", &req).await.unwrap();
+
+    assert_eq!(profile.id, "p-1");
+    assert_eq!(profile.name, "Renamed");
+}
+
+#[tokio::test]
+async fn delete_agent_profile_sends_delete() {
+    let router = Router::new().route(
+        "/api/agent-profiles/{id}",
+        delete(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                assert_eq!(id, "p-1");
+                StatusCode::NO_CONTENT
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    client.delete_agent_profile("p-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn set_default_agent_profile_sends_put() {
+    let router = Router::new().route(
+        "/api/agent-profiles/{id}/default",
+        put(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                assert_eq!(id, "p-1");
+                let mut profile = sample_profile_json("p-1", "Default", "claude");
+                profile["is_default"] = serde_json::Value::Bool(true);
+                Json(profile)
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let profile = client.set_default_agent_profile("p-1").await.unwrap();
+
+    assert_eq!(profile.id, "p-1");
+    assert!(profile.is_default);
+}
+
+#[tokio::test]
+async fn start_agent_task_sends_post() {
+    let router = Router::new().route(
+        "/api/agent-tasks",
+        post(
+            |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| async move {
+                assert_eq!(body["host_id"], "h-1");
+                assert_eq!(body["profile_id"], "p-1");
+                assert_eq!(body["project_path"], "/home/user/proj");
+                assert_eq!(body["project_id"], "proj-1");
+                Json(serde_json::json!({
+                    "session_id": "s-new",
+                    "task_id": "t-new",
+                    "agent_kind": "claude",
+                    "profile_id": "p-1",
+                    "host_id": "h-1",
+                    "project_path": "/home/user/proj"
+                }))
+            },
+        ),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let req = zremote_client::StartAgentRequest {
+        host_id: "h-1".to_string(),
+        profile_id: "p-1".to_string(),
+        project_path: "/home/user/proj".to_string(),
+        project_id: Some("proj-1".to_string()),
+    };
+    let resp = client.start_agent_task(&req).await.unwrap();
+
+    assert_eq!(resp.session_id, "s-new");
+    assert_eq!(resp.task_id, "t-new");
+    assert_eq!(resp.agent_kind, "claude");
+    assert_eq!(resp.profile_id, "p-1");
+}

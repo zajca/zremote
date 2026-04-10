@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
@@ -158,11 +158,24 @@ fn validate_all(
     Ok(())
 }
 
-/// `GET /api/agent-profiles` - List all profiles.
+/// Query params for `GET /api/agent-profiles`. The `kind` filter narrows
+/// the result set to a single `agent_kind`; omitting it returns every
+/// profile across every kind.
+#[derive(Debug, Deserialize, Default)]
+pub struct ListProfilesQuery {
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `GET /api/agent-profiles` - List all profiles, optionally filtered by kind.
 pub async fn list_profiles(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListProfilesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profiles = q::list_profiles(&state.db).await?;
+    let profiles = match query.kind.as_deref() {
+        Some(k) => q::list_by_kind(&state.db, k).await?,
+        None => q::list_profiles(&state.db).await?,
+    };
     Ok(Json(profiles))
 }
 
@@ -400,6 +413,32 @@ mod tests {
         let json = read_json(resp).await;
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_profiles_filters_by_kind() {
+        let state = test_state().await;
+        let app = router(state);
+
+        // The migration seeds a default claude profile, so asking for
+        // `?kind=claude` must return at least that row and every returned row
+        // must have `agent_kind == "claude"`.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agent-profiles?kind=claude")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::OK);
+        let json = read_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert!(!arr.is_empty(), "expected at least the seeded claude row");
+        for row in arr {
+            assert_eq!(row["agent_kind"], "claude");
+        }
     }
 
     #[tokio::test]

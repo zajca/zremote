@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 // Re-export protocol types used in SDK API
@@ -471,6 +473,121 @@ pub struct CreateClaudeTaskRequest {
 pub struct ResumeClaudeTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent profiles & tasks (RFC-003)
+// ---------------------------------------------------------------------------
+
+/// An agent profile as returned by `/api/agent-profiles`. Wire-compatible with
+/// `zremote_core::queries::agent_profiles::AgentProfile`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub agent_kind: String,
+    pub is_default: bool,
+    pub sort_order: i64,
+    pub model: Option<String>,
+    pub initial_prompt: Option<String>,
+    pub skip_permissions: bool,
+    pub allowed_tools: Vec<String>,
+    pub extra_args: Vec<String>,
+    pub env_vars: BTreeMap<String, String>,
+    pub settings: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Request body for `POST /api/agent-profiles`. Wire-compatible with
+/// `zremote_server::routes::agent_profiles::CreateProfileRequest`.
+///
+/// Use `Default` + struct-update syntax in callers; every field except
+/// `name` and `agent_kind` is optional/defaulting server-side.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateAgentProfileRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub agent_kind: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub sort_order: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
+    #[serde(default)]
+    pub skip_permissions: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+    #[serde(default)]
+    pub settings: serde_json::Value,
+}
+
+/// Request body for `PUT /api/agent-profiles/{id}`. Mirrors the server's
+/// `UpdateProfileRequest`. `agent_kind` and `is_default` are intentionally
+/// absent — the server rejects kind changes and `set_default` is a dedicated
+/// endpoint.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateAgentProfileRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
+    #[serde(default)]
+    pub skip_permissions: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+    #[serde(default)]
+    pub settings: serde_json::Value,
+}
+
+/// Request body for `POST /api/agent-tasks`. Mirrors server
+/// `CreateAgentTaskRequest`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StartAgentRequest {
+    pub host_id: String,
+    pub profile_id: String,
+    pub project_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// Response from `POST /api/agent-tasks`. Mirrors server
+/// `CreateAgentTaskResponse`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartAgentResponse {
+    pub session_id: String,
+    pub task_id: String,
+    pub agent_kind: String,
+    pub profile_id: String,
+    pub host_id: String,
+    pub project_path: String,
+}
+
+/// Metadata for a supported agent kind as returned by
+/// `GET /api/agent-profiles/kinds`. Mirrors server `KindInfoResponse`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentKindInfo {
+    pub kind: String,
+    pub display_name: String,
+    pub description: String,
 }
 
 /// Request body for knowledge search.
