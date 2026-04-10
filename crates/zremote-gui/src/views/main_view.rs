@@ -1481,7 +1481,7 @@ impl Render for MainView {
                             .id("palette-backdrop")
                             .absolute()
                             .inset_0()
-                            .bg(gpui::rgba(0x1111_1366))
+                            .bg(theme::modal_backdrop())
                             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                 this.close_command_palette(cx);
                             })),
@@ -1535,7 +1535,7 @@ impl Render for MainView {
                             .id("switcher-backdrop")
                             .absolute()
                             .inset_0()
-                            .bg(gpui::rgba(0x1111_1366))
+                            .bg(theme::modal_backdrop())
                             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                 this.close_session_switcher(cx);
                             })),
@@ -1574,7 +1574,7 @@ impl Render for MainView {
                             .id("help-backdrop")
                             .absolute()
                             .inset_0()
-                            .bg(gpui::rgba(0x1111_1366))
+                            .bg(theme::modal_backdrop())
                             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                 this.close_help_modal(cx);
                             })),
