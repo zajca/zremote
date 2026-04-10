@@ -5,7 +5,9 @@ use std::rc::Rc;
 
 use super::actions::PaletteAction;
 use crate::views::sidebar::{CcMetrics, CcState};
-use zremote_client::{AgenticStatus, Host, HostStatus, Project, Session, SessionStatus};
+use zremote_client::{
+    AgentKindInfo, AgentProfile, AgenticStatus, Host, HostStatus, Project, Session, SessionStatus,
+};
 
 use crate::persistence::RecentSession;
 use crate::views::fuzzy::FuzzyMatch;
@@ -116,6 +118,8 @@ pub struct PaletteSnapshot {
     pub projects: Rc<Vec<Project>>,
     pub mode: String,
     pub active_session_id: Option<String>,
+    pub agent_profiles: Rc<Vec<AgentProfile>>,
+    pub agent_kinds: Rc<Vec<AgentKindInfo>>,
     pub(super) host_names: HashMap<String, String>,
     pub(super) project_names: HashMap<String, String>,
     pub(super) project_names_by_path: HashMap<(String, String), String>,
@@ -135,6 +139,8 @@ impl PaletteSnapshot {
         recent_sessions: &[RecentSession],
         cc_states: HashMap<String, CcState>,
         cc_metrics: HashMap<String, CcMetrics>,
+        agent_profiles: Rc<Vec<AgentProfile>>,
+        agent_kinds: Rc<Vec<AgentKindInfo>>,
     ) -> Self {
         let host_names: HashMap<String, String> = hosts
             .iter()
@@ -158,6 +164,8 @@ impl PaletteSnapshot {
             projects,
             mode,
             active_session_id,
+            agent_profiles,
+            agent_kinds,
             host_names,
             project_names,
             project_names_by_path,
@@ -320,6 +328,37 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
             selectable: true,
         });
     }
+
+    // Agent profile quick-start entries — one per profile.
+    for profile in snapshot.agent_profiles.iter() {
+        let kind_display = snapshot
+            .agent_kinds
+            .iter()
+            .find(|k| k.kind == profile.agent_kind)
+            .map(|k| k.display_name.as_str())
+            .unwrap_or(profile.agent_kind.as_str());
+        let title = format!("{} · {}", kind_display, profile.name);
+        let subtitle = profile
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("Start {kind_display} agent"));
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::StartAgent {
+                profile_id: profile.id.clone(),
+            }),
+            title,
+            subtitle,
+            selectable: true,
+        });
+    }
+
+    // Manage profiles entry (static, always present).
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::ManageAgentProfiles),
+        title: "Agents: Manage Profiles".to_string(),
+        subtitle: String::new(),
+        selectable: true,
+    });
 
     for p in snapshot.projects.iter() {
         let label = if p.pinned {
@@ -730,6 +769,8 @@ mod tests {
             &[],
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
+            Rc::new(Vec::new()),
+            Rc::new(Vec::new()),
         )
     }
 
@@ -905,6 +946,159 @@ mod tests {
         }
     }
 
+    /// Build a snapshot with two agent profiles and one `claude` kind entry,
+    /// then verify `build_action_items` emits a `StartAgent` per profile plus
+    /// a single `ManageAgentProfiles` entry.
+    #[test]
+    fn test_action_items_include_agent_profiles() {
+        use std::collections::BTreeMap;
+
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            name: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }]);
+        let sessions = Rc::new(Vec::new());
+        let projects = Rc::new(Vec::new());
+
+        let make_profile = |id: &str, name: &str, is_default: bool| AgentProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: Some(format!("{name} description")),
+            agent_kind: "claude".to_string(),
+            is_default,
+            sort_order: 0,
+            model: None,
+            initial_prompt: None,
+            skip_permissions: false,
+            allowed_tools: Vec::new(),
+            extra_args: Vec::new(),
+            env_vars: BTreeMap::new(),
+            settings: serde_json::Value::Null,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let profiles = Rc::new(vec![
+            make_profile("prof-1", "Default Claude", true),
+            make_profile("prof-2", "Review Claude", false),
+        ]);
+        let kinds = Rc::new(vec![AgentKindInfo {
+            kind: "claude".to_string(),
+            display_name: "Claude".to_string(),
+            description: "Claude Code".to_string(),
+        }]);
+
+        let snapshot = PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "local".to_string(),
+            None,
+            &[],
+            HashMap::new(),
+            HashMap::new(),
+            profiles,
+            kinds,
+        );
+
+        let items = build_action_items(&snapshot);
+
+        // Collect StartAgent entries by profile_id, title, and subtitle.
+        let start_entries: Vec<(&str, &str, &str)> = items
+            .iter()
+            .filter_map(|i| match &i.item {
+                PaletteItem::Action(PaletteAction::StartAgent { profile_id }) => {
+                    Some((profile_id.as_str(), i.title.as_str(), i.subtitle.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            start_entries.len(),
+            2,
+            "should have one StartAgent action per profile"
+        );
+        // Title is exactly "{display_name} · {profile_name}" and subtitle is
+        // the profile description when present.
+        assert!(
+            start_entries
+                .iter()
+                .any(|(id, title, subtitle)| *id == "prof-1"
+                    && *title == "Claude · Default Claude"
+                    && *subtitle == "Default Claude description"),
+            "prof-1 entry missing or wrong title/subtitle: {start_entries:?}",
+        );
+        assert!(
+            start_entries
+                .iter()
+                .any(|(id, title, subtitle)| *id == "prof-2"
+                    && *title == "Claude · Review Claude"
+                    && *subtitle == "Review Claude description"),
+            "prof-2 entry missing or wrong title/subtitle: {start_entries:?}",
+        );
+
+        // Exactly one ManageAgentProfiles entry with the exact label.
+        let manage_entries: Vec<&ResultItem> = items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.item,
+                    PaletteItem::Action(PaletteAction::ManageAgentProfiles)
+                )
+            })
+            .collect();
+        assert_eq!(
+            manage_entries.len(),
+            1,
+            "Manage Profiles action must appear once"
+        );
+        assert_eq!(
+            manage_entries[0].title, "Agents: Manage Profiles",
+            "Manage Profiles title must be exact",
+        );
+    }
+
+    /// With no profiles, there should be no `StartAgent` entries but the
+    /// manage-profiles entry is always present.
+    #[test]
+    fn test_action_items_manage_profiles_always_present() {
+        let snapshot = test_snapshot(); // empty profiles/kinds via Rc::new(Vec::new())
+        let items = build_action_items(&snapshot);
+
+        let start_count = items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.item,
+                    PaletteItem::Action(PaletteAction::StartAgent { .. })
+                )
+            })
+            .count();
+        assert_eq!(start_count, 0, "no profiles means no StartAgent entries");
+
+        let manage_count = items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.item,
+                    PaletteItem::Action(PaletteAction::ManageAgentProfiles)
+                )
+            })
+            .count();
+        assert_eq!(
+            manage_count, 1,
+            "Manage Profiles must always be present even without profiles"
+        );
+    }
+
     #[test]
     fn test_project_drill_no_sessions_still_has_actions() {
         let hosts = Rc::new(vec![Host {
@@ -953,6 +1147,8 @@ mod tests {
             &[],
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
+            Rc::new(Vec::new()),
+            Rc::new(Vec::new()),
         );
         let session_items = build_session_items(&snapshot);
         let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
@@ -1092,6 +1288,8 @@ mod tests {
             &[],
             HashMap::new(),
             HashMap::new(),
+            Rc::new(Vec::new()),
+            Rc::new(Vec::new()),
         );
 
         let items = build_session_items(&snapshot);
@@ -1164,6 +1362,8 @@ mod tests {
             &[],
             HashMap::new(),
             HashMap::new(),
+            Rc::new(Vec::new()),
+            Rc::new(Vec::new()),
         );
 
         let session_items = build_session_items(&snapshot);

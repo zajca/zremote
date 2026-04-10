@@ -158,6 +158,10 @@ impl MainView {
             SidebarEvent::OpenHelp => {
                 self.open_help_modal(cx);
             }
+            SidebarEvent::OpenSettings => {
+                // Phase 6 will wire this to the agent profile settings modal.
+                tracing::debug!("settings requested — phase 6 will wire this");
+            }
         }
     }
 
@@ -917,6 +921,8 @@ impl MainView {
             &recent_sessions,
             cc_states,
             cc_metrics,
+            Rc::clone(snapshot.agent_profiles_rc()),
+            Rc::clone(snapshot.agent_kinds_rc()),
         );
         let palette = cx.new(|cx| CommandPalette::new(palette_snapshot, tab, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();
@@ -1087,6 +1093,68 @@ impl MainView {
                         cx,
                     );
                 }
+            }
+            CommandPaletteEvent::StartAgent { profile_id } => {
+                // Resolve (host_id, project_path) for the launch.
+                //
+                // Strategy (MVP): prefer the currently-selected session's host
+                // + working_dir. If unavailable, try the single online host's
+                // first project. Anything more involved (multi-host picker,
+                // per-kind project chooser) belongs to a follow-up UX pass --
+                // the project-row quick-launch button already provides the
+                // primary entry point with a known project.
+                let profile_id = profile_id.clone();
+                let selected = self
+                    .sidebar
+                    .read(cx)
+                    .selected_session_id()
+                    .map(String::from);
+                let sessions = Rc::clone(self.sidebar.read(cx).sessions_rc());
+                let hosts = Rc::clone(self.sidebar.read(cx).hosts_rc());
+                let projects = Rc::clone(self.sidebar.read(cx).projects_rc());
+
+                let resolved = selected.as_ref().and_then(|sid| {
+                    sessions
+                        .iter()
+                        .find(|s| &s.id == sid)
+                        .and_then(|s| s.working_dir.clone().map(|wd| (s.host_id.clone(), wd)))
+                });
+
+                let resolved = resolved.or_else(|| {
+                    let online: Vec<&zremote_client::Host> = hosts
+                        .iter()
+                        .filter(|h| h.status == zremote_client::HostStatus::Online)
+                        .collect();
+                    if let [only_host] = online.as_slice() {
+                        let host_projects: Vec<&zremote_client::Project> = projects
+                            .iter()
+                            .filter(|p| p.host_id == only_host.id)
+                            .collect();
+                        if let Some(first_project) = host_projects.first() {
+                            return Some((only_host.id.clone(), first_project.path.clone()));
+                        }
+                    }
+                    None
+                });
+
+                if let Some((host_id, project_path)) = resolved {
+                    self.sidebar.update(cx, |s, cx| {
+                        s.launch_agent_for_project(&host_id, &project_path, &profile_id, cx);
+                    });
+                } else {
+                    tracing::info!(
+                        %profile_id,
+                        "StartAgent: no resolvable host/project from selection; use the project row quick-launch button instead",
+                    );
+                }
+            }
+            CommandPaletteEvent::ShowSettings => {
+                // Phase 6 will replace this with `self.open_settings_modal(cx)`.
+                // Handled directly here (not via `SidebarEvent::OpenSettings`)
+                // because the modal is owned by `MainView`, not the sidebar —
+                // bouncing through `sidebar.update()` would hold the sidebar
+                // entity lock during the emit for no gain.
+                tracing::debug!("settings requested — phase 6 will wire this");
             }
             CommandPaletteEvent::Close => {}
         }
@@ -1575,6 +1643,7 @@ pub enum SidebarEvent {
     SessionSelected { session_id: String, host_id: String },
     SessionClosed { session_id: String },
     OpenHelp,
+    OpenSettings,
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}

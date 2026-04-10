@@ -33,6 +33,10 @@ pub enum PaletteAction {
     },
     SwitchSession,
     AddProject,
+    StartAgent {
+        profile_id: String,
+    },
+    ManageAgentProfiles,
 }
 
 impl CommandPalette {
@@ -135,6 +139,14 @@ impl CommandPalette {
                 }
                 PaletteAction::SwitchSession => {
                     cx.emit(CommandPaletteEvent::OpenSessionSwitcher);
+                }
+                PaletteAction::StartAgent { profile_id } => {
+                    cx.emit(CommandPaletteEvent::StartAgent {
+                        profile_id: profile_id.clone(),
+                    });
+                }
+                PaletteAction::ManageAgentProfiles => {
+                    cx.emit(CommandPaletteEvent::ShowSettings);
                 }
             },
         }

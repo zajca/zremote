@@ -15,7 +15,7 @@ use crate::views::main_view::SidebarEvent;
 use zremote_client::{
     AgentKindInfo, AgentProfile, AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host,
     HostStatus, ListClaudeTasksFilter, ListLoopsFilter, PreviewSnapshot, Project, ServerEvent,
-    Session, SessionStatus,
+    Session, SessionStatus, StartAgentRequest,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -679,6 +679,69 @@ impl SidebarView {
         .detach();
     }
 
+    /// Start an agent task for the given project using the specified profile.
+    /// On success, adds the session to the sidebar and selects it. On error,
+    /// logs via tracing.
+    pub fn launch_agent_for_project(
+        &mut self,
+        host_id: &str,
+        project_path: &str,
+        profile_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.app_state.api.clone();
+        let host_id = host_id.to_string();
+        let project_path = project_path.to_string();
+        let profile_id = profile_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let req = StartAgentRequest {
+                host_id: host_id.clone(),
+                profile_id,
+                project_path: project_path.clone(),
+                project_id: None,
+            };
+            let result = handle
+                .spawn(async move { api.start_agent_task(&req).await })
+                .await
+                .unwrap();
+            match result {
+                Ok(resp) => {
+                    let session_id = resp.session_id.clone();
+                    let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                        if !this.sessions.iter().any(|s| s.id == session_id) {
+                            let session = Session {
+                                id: resp.session_id,
+                                host_id: host_id.clone(),
+                                name: None,
+                                shell: None,
+                                status: SessionStatus::Active,
+                                pid: None,
+                                exit_code: None,
+                                created_at: String::new(),
+                                closed_at: None,
+                                project_id: None,
+                                working_dir: Some(project_path),
+                            };
+                            Rc::make_mut(&mut this.sessions).push(session);
+                        }
+                        this.selected_session_id = Some(session_id.clone());
+                        cx.emit(SidebarEvent::SessionSelected {
+                            session_id,
+                            host_id,
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to start agent task");
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn create_session(
         &mut self,
         host_id: &str,
@@ -1075,6 +1138,53 @@ impl SidebarView {
             )
     }
 
+    // `cx.listener` requires a method receiver on `Self`, so `&self` is
+    // kept even though the render helper reads all state from its explicit
+    // parameters. Mirrors `render_project_new_session_button` right above.
+    #[allow(clippy::unused_self)]
+    fn render_project_agent_button(
+        &self,
+        project_id: &str,
+        host_id: &str,
+        project_path: &str,
+        profile: &AgentProfile,
+        kind_display: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project_id = project_id.to_string();
+        let host_id = host_id.to_string();
+        let project_path = project_path.to_string();
+        let profile_id = profile.id.clone();
+        let profile_name = profile.name.clone();
+        let tooltip_text = format!("Start {kind_display} ({profile_name})");
+
+        div()
+            .invisible()
+            .group_hover("project-row", |mut s| {
+                s.visibility = Some(gpui::Visibility::Visible);
+                s
+            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("agent-in-{project_id}")))
+                    .p(px(2.0))
+                    .rounded(px(3.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::Zap)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| SidebarTextTooltip(tooltip_text.clone())).into()
+                    })
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.launch_agent_for_project(&host_id, &project_path, &profile_id, cx);
+                    })),
+            )
+    }
+
     fn render_project_item(
         &self,
         node: &ProjectNode,
@@ -1167,7 +1277,37 @@ impl SidebarView {
             .overflow_hidden()
             .hover(|s| s.bg(theme::bg_tertiary()))
             .child(left)
-            .child(self.render_project_new_session_button(&project_id, host_id, &project.path, cx));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .when_some(
+                        self.default_profile_for_kind("claude").cloned(),
+                        |el, profile| {
+                            let kind_display = self
+                                .agent_kinds
+                                .iter()
+                                .find(|k| k.kind == profile.agent_kind)
+                                .map(|k| k.display_name.clone())
+                                .unwrap_or_else(|| "Claude".to_string());
+                            el.child(self.render_project_agent_button(
+                                &project_id,
+                                host_id,
+                                &project.path,
+                                &profile,
+                                kind_display,
+                                cx,
+                            ))
+                        },
+                    )
+                    .child(self.render_project_new_session_button(
+                        &project_id,
+                        host_id,
+                        &project.path,
+                        cx,
+                    )),
+            );
 
         let mut container = div().flex().flex_col().w_full().child(row);
 
@@ -1391,6 +1531,24 @@ impl SidebarView {
                 col
             })
             .child(close_button)
+    }
+}
+
+/// Minimal text-only tooltip view (GPUI tooltips require `AnyView`).
+struct SidebarTextTooltip(String);
+
+impl Render for SidebarTextTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme::bg_tertiary())
+            .border_1()
+            .border_color(theme::border())
+            .text_size(px(11.0))
+            .text_color(theme::text_secondary())
+            .child(self.0.clone())
     }
 }
 
