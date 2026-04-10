@@ -240,6 +240,13 @@ pub async fn insert_profile(pool: &SqlitePool, profile: &AgentProfile) -> Result
 /// Update an existing profile by id. `updated_at` is refreshed to
 /// `CURRENT_TIMESTAMP` on every call; callers do not need to set it.
 ///
+/// `agent_kind` is **immutable** after insert — the `profile.agent_kind`
+/// field is ignored here. Moving a profile between kinds would invalidate
+/// launcher-specific settings and can race the `agent_profiles_default_per_kind`
+/// partial unique index. Callers that need to "convert" a profile should
+/// `delete_profile` + `insert_profile` with the new kind so validation runs
+/// against the correct whitelist.
+///
 /// # Errors
 /// Propagates SQL errors. A caller that wants to surface "not found" should
 /// check `get_profile` first.
@@ -253,7 +260,7 @@ pub async fn update_profile(
 
     sqlx::query(
         "UPDATE agent_profiles SET \
-         name = ?, description = ?, agent_kind = ?, sort_order = ?, \
+         name = ?, description = ?, sort_order = ?, \
          model = ?, initial_prompt = ?, skip_permissions = ?, \
          allowed_tools = ?, extra_args = ?, env_vars = ?, \
          settings_json = ?, updated_at = CURRENT_TIMESTAMP \
@@ -261,7 +268,6 @@ pub async fn update_profile(
     )
     .bind(&profile.name)
     .bind(&profile.description)
-    .bind(&profile.agent_kind)
     .bind(profile.sort_order)
     .bind(&profile.model)
     .bind(&profile.initial_prompt)
@@ -442,6 +448,42 @@ mod tests {
 
         // Idempotency: deleting again should still succeed.
         delete_profile(&pool, "id-crud").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_profile_does_not_change_kind() {
+        // `agent_kind` is immutable after insert. Attempting to mutate it via
+        // `update_profile` must silently keep the original kind — we do NOT
+        // want a claude profile to quietly become a codex profile (and vice
+        // versa), because that would bypass the launcher-specific validation
+        // whitelists and could race the `agent_profiles_default_per_kind`
+        // partial unique index.
+        let pool = test_db().await;
+
+        let original = sample_profile("kind-freeze", "claude", "Kind freeze");
+        insert_profile(&pool, &original).await.unwrap();
+
+        // Build a clone that pretends to move the profile to `codex`.
+        let mut mutated = original.clone();
+        mutated.agent_kind = "codex".to_string();
+        mutated.name = "Kind freeze v2".to_string();
+
+        update_profile(&pool, "kind-freeze", &mutated)
+            .await
+            .unwrap();
+
+        let refetched = get_profile(&pool, "kind-freeze")
+            .await
+            .unwrap()
+            .expect("profile should still exist after update");
+        assert_eq!(
+            refetched.agent_kind, "claude",
+            "update_profile must not mutate agent_kind"
+        );
+        assert_eq!(
+            refetched.name, "Kind freeze v2",
+            "other fields should still update normally"
+        );
     }
 
     #[tokio::test]

@@ -21,8 +21,10 @@ fn contains_shell_metachars(s: &str) -> bool {
 }
 
 /// Validate a model identifier. Mirrors the whitelist in
-/// `claude/mod.rs::CommandBuilder::build`: ASCII alphanumerics, `.`, `-`, `_`.
+/// `claude/mod.rs::CommandBuilder::build`: ASCII alphanumerics, `.`, `-`.
 ///
+/// Note: underscore is **not** allowed. The launcher rejects it, so accepting
+/// it here would let a profile land in `SQLite` only to fail at spawn time.
 /// Empty strings are rejected (the launcher would emit `--model ''`, which is
 /// an invalid flag value).
 ///
@@ -34,7 +36,7 @@ pub fn validate_model(s: &str) -> Result<(), String> {
     }
     if !s
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
         return Err(format!("invalid model name: {s}"));
     }
@@ -131,9 +133,6 @@ pub fn validate_development_channel(s: &str) -> Result<(), String> {
 /// Returns `Err` when the name is empty, starts with a digit, or contains any
 /// other character.
 pub fn validate_env_var_key(s: &str) -> Result<(), String> {
-    if s.is_empty() {
-        return Err("env var key must not be empty".to_string());
-    }
     let mut chars = s.chars();
     let first = chars
         .next()
@@ -227,13 +226,22 @@ mod tests {
     fn model_accepts_typical_names() {
         assert!(validate_model("claude-3-opus").is_ok());
         assert!(validate_model("gpt-4.1-mini").is_ok());
-        assert!(validate_model("sonnet_4_5").is_ok());
+        assert!(validate_model("sonnet-4-5").is_ok());
         assert!(validate_model("a").is_ok());
     }
 
     #[test]
     fn model_rejects_empty() {
         assert!(validate_model("").is_err());
+    }
+
+    #[test]
+    fn model_rejects_underscore() {
+        // The claude launcher whitelist (claude/mod.rs) forbids '_' in model
+        // names. Accepting it here would let a profile save only to fail at
+        // spawn time.
+        assert!(validate_model("my_model").is_err());
+        assert!(validate_model("sonnet_4_5").is_err());
     }
 
     #[test]
