@@ -1,3 +1,4 @@
+pub mod agent_profiles;
 pub mod claude_sessions;
 pub mod config;
 pub mod execution_nodes;
