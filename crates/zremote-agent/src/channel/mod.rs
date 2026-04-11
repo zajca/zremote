@@ -315,11 +315,11 @@ mod tests {
     async fn empty_lines_are_skipped() {
         let (server_writer, client_reader) = tokio::io::duplex(4096);
 
-        let (_stdio_tx, stdio_rx) = tokio::sync::mpsc::channel(16);
+        let (stdio_tx, stdio_rx) = tokio::sync::mpsc::channel(16);
         let state = ChannelState {
             session_id: uuid::Uuid::new_v4(),
             agent_callback: "http://127.0.0.1:0".to_string(),
-            stdio_tx: _stdio_tx,
+            stdio_tx,
             http_client: reqwest::Client::new(),
         };
 

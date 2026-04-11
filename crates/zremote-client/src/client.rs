@@ -5,13 +5,15 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use crate::error::ApiError;
 use crate::terminal::TerminalSession;
 use crate::types::{
-    ActionsResponse, AddProjectRequest, AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue,
-    CreateClaudeTaskRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
-    DirectoryEntry, ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase,
-    ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project,
-    ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest,
-    Session, SessionPreviewsResponse, SetConfigRequest, UpdateHostRequest, UpdateMemoryRequest,
-    UpdateProjectRequest, UpdateSessionRequest,
+    ActionsResponse, AddProjectRequest, AgentKindInfo, AgentProfile, AgenticLoop,
+    ClaudeSessionInfo, ClaudeTask, ConfigValue, CreateAgentProfileRequest, CreateClaudeTaskRequest,
+    CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest, DirectoryEntry,
+    ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase, ListClaudeTasksFilter,
+    ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project, ProjectSettings,
+    ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest, Session,
+    SessionPreviewsResponse, SetConfigRequest, StartAgentRequest, StartAgentResponse,
+    UpdateAgentProfileRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
+    UpdateSessionRequest,
 };
 
 /// Percent-encode a single URL path segment (RFC 3986 unreserved characters preserved).
@@ -1105,6 +1107,133 @@ impl ApiClient {
                 self.base_url,
                 encode_path(task_id)
             ))
+            .json(req)
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    // --- Agent Profiles ---
+
+    /// List all agent profiles, optionally filtered by `agent_kind`.
+    pub async fn list_agent_profiles(
+        &self,
+        kind: Option<&str>,
+    ) -> Result<Vec<AgentProfile>, ApiError> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/agent-profiles", self.base_url));
+        if let Some(k) = kind {
+            req = req.query(&[("kind", k)]);
+        }
+        let resp = self.check_response(req.send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// List the agent kinds the server knows how to launch.
+    pub async fn list_agent_kinds(&self) -> Result<Vec<AgentKindInfo>, ApiError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/agent-profiles/kinds", self.base_url))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Fetch a single agent profile by id.
+    pub async fn get_agent_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/agent-profiles/{}",
+                self.base_url,
+                encode_path(id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Create a new agent profile.
+    #[must_use = "profile creation returns the newly created profile"]
+    pub async fn create_agent_profile(
+        &self,
+        req: &CreateAgentProfileRequest,
+    ) -> Result<AgentProfile, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/agent-profiles", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Update an existing agent profile.
+    #[must_use = "profile update returns the updated profile"]
+    pub async fn update_agent_profile(
+        &self,
+        id: &str,
+        req: &UpdateAgentProfileRequest,
+    ) -> Result<AgentProfile, ApiError> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/agent-profiles/{}",
+                self.base_url,
+                encode_path(id)
+            ))
+            .json(req)
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Delete an agent profile. Idempotent — deleting a non-existent id is OK.
+    pub async fn delete_agent_profile(&self, id: &str) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/agent-profiles/{}",
+                self.base_url,
+                encode_path(id)
+            ))
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Promote a profile to default within its `agent_kind`.
+    #[must_use = "set_default returns the refreshed profile"]
+    pub async fn set_default_agent_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/agent-profiles/{}/default",
+                self.base_url,
+                encode_path(id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Dispatch a profile-driven agent launch to a host.
+    #[must_use = "start_agent_task returns the newly created session/task"]
+    pub async fn start_agent_task(
+        &self,
+        req: &StartAgentRequest,
+    ) -> Result<StartAgentResponse, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/agent-tasks", self.base_url))
             .json(req)
             .send()
             .await?;

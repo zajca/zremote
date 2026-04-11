@@ -131,6 +131,10 @@ pub enum CommandPaletteEvent {
         host_id: String,
         path: String,
     },
+    StartAgent {
+        profile_id: String,
+    },
+    ShowSettings,
     Close,
 }
 
@@ -890,6 +894,8 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::StartAgent { .. } => Icon::Zap,
+                PaletteAction::ManageAgentProfiles => Icon::Bot,
             },
         };
 
@@ -1917,6 +1923,8 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::StartAgent { .. } => Icon::Zap,
+                PaletteAction::ManageAgentProfiles => Icon::Bot,
             },
         };
 
@@ -2007,6 +2015,8 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::StartAgent { .. } => Icon::Zap,
+                PaletteAction::ManageAgentProfiles => Icon::Bot,
             },
         };
 

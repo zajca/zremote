@@ -2,6 +2,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+pub mod agent_profile;
+
 /// Validates that a path does not contain `..` (parent directory) components.
 ///
 /// This is a lightweight check suitable for paths that may not exist yet

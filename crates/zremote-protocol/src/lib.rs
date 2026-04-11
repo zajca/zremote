@@ -1,4 +1,5 @@
 pub mod agentic;
+pub mod agents;
 pub mod channel;
 pub mod claude;
 pub mod events;
@@ -8,6 +9,10 @@ pub mod status;
 mod terminal;
 
 pub use agentic::{AgenticAgentMessage, AgenticStatus};
+pub use agents::{
+    AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo, SUPPORTED_KINDS,
+    supported_kinds,
+};
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
 pub use knowledge::*;

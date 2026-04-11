@@ -73,7 +73,7 @@ mod tests {
     use axum::extract::State;
     use axum::extract::ws::WebSocketUpgrade;
     use axum::response::IntoResponse;
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::StreamExt;
     use tokio::net::TcpListener;
     use tokio::sync::broadcast;
     use zremote_protocol::events::{HostInfo, ServerEvent};
@@ -243,11 +243,11 @@ mod tests {
         // see the stream end (None) or a close/error within a few seconds.
         let result = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next()).await;
         match result {
-            Ok(None)
-            | Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))))
-            | Ok(Some(Err(_))) => {}
-            // Timeout is acceptable: handler exited but OS hasn't torn down TCP yet.
-            Err(_) => {}
+            // Ok(None) / Close / stream error = clean shutdown;
+            // Err(_) = timeout waiting for teardown (TCP still closing).
+            // Both outcomes are acceptable for this test.
+            Ok(None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_)))
+            | Err(_) => {}
             other => panic!("unexpected: {other:?}"),
         }
     }

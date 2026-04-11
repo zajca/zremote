@@ -174,3 +174,57 @@ pub async fn list_sessions_by_project(
     .await?;
     Ok(sessions)
 }
+
+/// Mark a session row as errored.
+///
+/// Used by the server-side `AgentLifecycle::StartFailed` handler to surface
+/// launcher failures to the UI instead of leaving a session stuck in
+/// `creating`. Sets `status = 'error'` and `closed_at = now()`. The
+/// `sessions` table has no `updated_at` column (see migrations/001).
+pub async fn mark_session_error(pool: &SqlitePool, session_id: &str) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE sessions SET status = 'error', closed_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup() -> SqlitePool {
+        let pool = crate::db::init_db("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'h1', 'h1', 'hash', 'online')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn mark_session_error_transitions_status_and_sets_closed_at() {
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+        mark_session_error(&pool, "s1").await.unwrap();
+        let row = get_session(&pool, "s1").await.unwrap();
+        assert_eq!(row.status, "error");
+        assert!(row.closed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn mark_session_error_is_noop_for_missing_row() {
+        let pool = setup().await;
+        // UPDATE affecting 0 rows must still return Ok so the
+        // StartFailed handler can tolerate agent-side rejections that
+        // happened before the server committed the session row.
+        mark_session_error(&pool, "nonexistent").await.unwrap();
+    }
+}

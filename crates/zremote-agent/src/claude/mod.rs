@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use zremote_protocol::claude::ClaudeSessionInfo;
@@ -25,6 +26,16 @@ pub struct CommandOptions<'a> {
     /// When true, Claude answers the prompt and exits instead of waiting
     /// for further input in the TUI.
     pub print_mode: bool,
+    /// Extra CLI args appended to the `claude` invocation (after the built-in
+    /// flags, before the prompt). Each entry must already be validated as a
+    /// flag token (`-…` with no shell metacharacters) — the builder only
+    /// quotes them. Empty slice for legacy `/api/claude-tasks` call sites.
+    pub extra_args: &'a [String],
+    /// Environment variables to prepend inline before the `claude` command,
+    /// e.g. `FOO='bar' claude …`. Keys must be POSIX-safe, values must not
+    /// contain newlines or NULs — validation is the caller's job. Empty map
+    /// for legacy `/api/claude-tasks` call sites.
+    pub env_vars: &'a BTreeMap<String, String>,
 }
 
 /// Builds a `claude` CLI command string from structured options.
@@ -49,6 +60,8 @@ impl CommandBuilder {
             custom_flags,
             development_channels,
             print_mode,
+            extra_args,
+            env_vars,
         } = opts;
 
         // Validate model if provided: only alphanumeric, dots, and hyphens
@@ -79,7 +92,28 @@ impl CommandBuilder {
             return Err(format!("invalid output format: {fmt}"));
         }
 
+        // Validate env var keys (POSIX) and values (no control chars), and
+        // extra args (must start with `-`, no shell metachars). These delegate
+        // to `zremote_core::validation::agent_profile` so the launcher stays
+        // in lockstep with REST validation — a profile that was accepted into
+        // SQLite is guaranteed to pass here.
+        use zremote_core::validation::agent_profile::{
+            validate_env_var_key, validate_env_var_value, validate_extra_arg,
+        };
+        for (k, v) in *env_vars {
+            validate_env_var_key(k)?;
+            validate_env_var_value(v)?;
+        }
+        for arg in *extra_args {
+            validate_extra_arg(arg)?;
+        }
+
         let mut parts = vec!["cd".to_string(), shell_quote(working_dir), "&&".to_string()];
+        // Env vars are prepended as `KEY='value'` tokens before `claude`.
+        // BTreeMap iteration is already ordered, so the output is stable.
+        for (k, v) in *env_vars {
+            parts.push(format!("{k}={}", shell_quote(v)));
+        }
         parts.push("claude".to_string());
 
         if let Some(m) = model {
@@ -116,6 +150,13 @@ impl CommandBuilder {
         if let Some(flags) = custom_flags {
             // Custom flags are appended as-is (user is responsible for correctness)
             parts.push(flags.to_string());
+        }
+
+        // Profile-driven extra args are shell-quoted individually to prevent
+        // them from being split by the shell (unlike custom_flags above, which
+        // is a free-form blob the user is responsible for).
+        for arg in *extra_args {
+            parts.push(shell_quote(arg));
         }
 
         if *print_mode {
@@ -429,11 +470,66 @@ fn parse_session_file(path: &Path, project_path: &str) -> Option<ClaudeSessionIn
     })
 }
 
+/// Register a `ChannelDialogDetector` + spawn channel-bridge discovery for a
+/// newly-created Claude PTY session.
+///
+/// This is a no-op when `development_channels` is empty, which lets call sites
+/// invoke it unconditionally. Extracted from the `POST /api/claude-tasks`
+/// handler so the new profile-driven `POST /api/agent-tasks` handler and the
+/// generic `LauncherRegistry::after_spawn` path can reuse the exact same
+/// logic without duplicating the retry/backoff loop.
+///
+/// # Why this lives in `claude/mod.rs` and not in a route module
+/// The channel-bridge discovery loop and the `ChannelDialogDetector` are both
+/// Claude-specific but shared between the legacy route handler, the generic
+/// agent-tasks route, and the WebSocket dispatch path. Keeping the helper in
+/// the claude module lets all three call one `pub async fn` instead of
+/// copy-pasting the same 20-iteration retry loop. The function takes
+/// `&LocalAppState` directly because the discovery loop touches the
+/// `channel_dialog_detectors` map and `channel_bridge` handle on that state.
+pub async fn register_channel_auto_approve(
+    session_id: uuid::Uuid,
+    development_channels: &[String],
+    state: &crate::local::state::LocalAppState,
+) {
+    if development_channels.is_empty() {
+        return;
+    }
+
+    // Register channel dialog auto-approval detector
+    {
+        let mut detectors = state.channel_dialog_detectors.lock().await;
+        detectors.insert(session_id, ChannelDialogDetector::new());
+    }
+
+    // Start channel bridge discovery (background task polls the port file).
+    let bridge = state.channel_bridge.clone();
+    let sid = session_id;
+    tokio::spawn(async move {
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Discover outside the lock (does async I/O)
+            match crate::channel::port::read_port_file(&sid).await {
+                Ok(port) => {
+                    let mut b = bridge.lock().await;
+                    b.register(sid, port);
+                    tracing::info!(%sid, port, "channel bridge discovered for task session");
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // --- CommandBuilder tests ---
+
+    static EMPTY_ENV: std::sync::LazyLock<BTreeMap<String, String>> =
+        std::sync::LazyLock::new(BTreeMap::new);
 
     fn minimal_opts(working_dir: &str) -> CommandOptions<'_> {
         CommandOptions {
@@ -449,6 +545,8 @@ mod tests {
             custom_flags: None,
             development_channels: &[],
             print_mode: false,
+            extra_args: &[],
+            env_vars: &EMPTY_ENV,
         }
     }
 
@@ -578,6 +676,8 @@ mod tests {
             custom_flags: Some("--verbose"),
             development_channels: &[],
             print_mode: false,
+            extra_args: &[],
+            env_vars: &EMPTY_ENV,
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
         assert!(cmd.starts_with("cd '/home/user/project' && claude"));
@@ -738,6 +838,107 @@ mod tests {
         let result = CommandBuilder::build(&opts);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid output format"));
+    }
+
+    #[test]
+    fn build_with_extra_args() {
+        let extra = vec!["--verbose".to_string(), "--log=debug".to_string()];
+        let opts = CommandOptions {
+            extra_args: &extra,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("'--verbose'"));
+        assert!(cmd.contains("'--log=debug'"));
+    }
+
+    #[test]
+    fn build_rejects_extra_arg_without_leading_dash() {
+        let extra = vec!["positional".to_string()];
+        let opts = CommandOptions {
+            extra_args: &extra,
+            ..minimal_opts("/tmp")
+        };
+        let result = CommandBuilder::build(&opts);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("extra arg must start with '-'")
+        );
+    }
+
+    #[test]
+    fn build_rejects_extra_arg_with_shell_metachar() {
+        let extra = vec!["--foo;ls".to_string()];
+        let opts = CommandOptions {
+            extra_args: &extra,
+            ..minimal_opts("/tmp")
+        };
+        let result = CommandBuilder::build(&opts);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("shell metacharacters"));
+    }
+
+    #[test]
+    fn build_with_env_vars() {
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        env.insert("HTTP_PROXY".to_string(), "http://proxy:8080".to_string());
+        let opts = CommandOptions {
+            env_vars: &env,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        // BTreeMap iterates alphabetically: FOO before HTTP_PROXY
+        assert!(cmd.contains("FOO='bar'"));
+        assert!(cmd.contains("HTTP_PROXY='http://proxy:8080'"));
+        // Env vars must appear before `claude`
+        let foo_pos = cmd.find("FOO='bar'").unwrap();
+        let claude_pos = cmd.find("claude").unwrap();
+        assert!(foo_pos < claude_pos, "env vars must precede `claude`");
+    }
+
+    #[test]
+    fn build_rejects_env_var_key_starting_with_digit() {
+        let mut env = BTreeMap::new();
+        env.insert("1BAD".to_string(), "x".to_string());
+        let opts = CommandOptions {
+            env_vars: &env,
+            ..minimal_opts("/tmp")
+        };
+        let result = CommandBuilder::build(&opts);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("env var key must start with a letter")
+        );
+    }
+
+    #[test]
+    fn build_rejects_env_var_value_with_newline() {
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "line1\nline2".to_string());
+        let opts = CommandOptions {
+            env_vars: &env,
+            ..minimal_opts("/tmp")
+        };
+        let result = CommandBuilder::build(&opts);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("control characters"));
+    }
+
+    #[test]
+    fn build_env_var_value_is_shell_quoted() {
+        let mut env = BTreeMap::new();
+        env.insert("MSG".to_string(), "hello world".to_string());
+        let opts = CommandOptions {
+            env_vars: &env,
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("MSG='hello world'"));
     }
 
     #[test]

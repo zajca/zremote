@@ -1,3 +1,5 @@
+pub mod agent_profiles;
+pub mod agent_tasks;
 pub mod agentic;
 pub mod agents;
 pub mod channel;

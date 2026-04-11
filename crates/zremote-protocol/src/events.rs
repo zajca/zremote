@@ -258,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn server_event_roundtrip() {
         let events = vec![
             ServerEvent::HostConnected {

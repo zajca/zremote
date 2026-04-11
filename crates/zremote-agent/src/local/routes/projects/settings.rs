@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -376,6 +377,7 @@ pub async fn configure_with_claude(
         .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
 
     // Build claude command via CommandBuilder (PTY injection path)
+    let empty_env: BTreeMap<String, String> = BTreeMap::new();
     let opts = CommandOptions {
         working_dir: &project_path,
         model,
@@ -389,6 +391,8 @@ pub async fn configure_with_claude(
         custom_flags: None,
         development_channels: &[],
         print_mode: false,
+        extra_args: &[],
+        env_vars: &empty_env,
     };
 
     let cmd = CommandBuilder::build(&opts)

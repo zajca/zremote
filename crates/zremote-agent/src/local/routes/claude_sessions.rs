@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -113,6 +114,7 @@ pub async fn create_claude_task(
         .map(crate::claude::write_prompt_file)
         .transpose()
         .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
+    let empty_env: BTreeMap<String, String> = BTreeMap::new();
     let opts = CommandOptions {
         working_dir: &body.project_path,
         model: body.model.as_deref(),
@@ -130,6 +132,8 @@ pub async fn create_claude_task(
         custom_flags: body.custom_flags.as_deref(),
         development_channels: &development_channels,
         print_mode,
+        extra_args: &[],
+        env_vars: &empty_env,
     };
 
     let cmd = CommandBuilder::build(&opts)
@@ -172,32 +176,8 @@ pub async fn create_claude_task(
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
     }
 
-    // Register channel dialog auto-approval detector
-    if !development_channels.is_empty() {
-        let mut detectors = state.channel_dialog_detectors.lock().await;
-        detectors.insert(session_id, crate::claude::ChannelDialogDetector::new());
-    }
-
-    // Start channel bridge discovery if channels are configured
-    if !development_channels.is_empty() {
-        let bridge = state.channel_bridge.clone();
-        let sid = session_id;
-        tokio::spawn(async move {
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                // Discover outside the lock (does async I/O)
-                match crate::channel::port::read_port_file(&sid).await {
-                    Ok(port) => {
-                        let mut b = bridge.lock().await;
-                        b.register(sid, port);
-                        tracing::info!(%sid, port, "channel bridge discovered for task session");
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-        });
-    }
+    // Register channel dialog auto-approval detector + channel bridge discovery.
+    crate::claude::register_channel_auto_approve(session_id, &development_channels, &state).await;
 
     // Broadcast event
     let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
@@ -355,6 +335,7 @@ pub async fn resume_claude_task(
         .map(crate::claude::write_prompt_file)
         .transpose()
         .map_err(|e| AppError::Internal(format!("failed to write prompt file: {e}")))?;
+    let resume_empty_env: BTreeMap<String, String> = BTreeMap::new();
     let cmd_opts = CommandOptions {
         working_dir: &original.project_path,
         model: original.model.as_deref(),
@@ -372,6 +353,8 @@ pub async fn resume_claude_task(
         custom_flags: custom_flags.as_deref(),
         development_channels: &development_channels,
         print_mode,
+        extra_args: &[],
+        env_vars: &resume_empty_env,
     };
 
     let cmd = CommandBuilder::build(&cmd_opts)
@@ -414,31 +397,9 @@ pub async fn resume_claude_task(
             .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
     }
 
-    // Register channel dialog auto-approval detector
-    if !development_channels.is_empty() {
-        let mut detectors = state.channel_dialog_detectors.lock().await;
-        detectors.insert(new_session_id, crate::claude::ChannelDialogDetector::new());
-    }
-
-    // Start channel bridge discovery if channels are configured
-    if !development_channels.is_empty() {
-        let bridge = state.channel_bridge.clone();
-        let sid = new_session_id;
-        tokio::spawn(async move {
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                match crate::channel::port::read_port_file(&sid).await {
-                    Ok(port) => {
-                        let mut b = bridge.lock().await;
-                        b.register(sid, port);
-                        tracing::info!(%sid, port, "channel bridge discovered for resumed task session");
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-        });
-    }
+    // Register channel dialog auto-approval detector + channel bridge discovery.
+    crate::claude::register_channel_auto_approve(new_session_id, &development_channels, &state)
+        .await;
 
     let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
         task_id: new_task_id_str.clone(),

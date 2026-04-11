@@ -555,9 +555,8 @@ mod tests {
             .is_ok()
         {
             assert!(mgr.has_session(&session_id));
-            let exit_code = mgr.close(&session_id);
-            // Exit code may or may not be available depending on timing
-            drop(exit_code);
+            // Exit code may or may not be available depending on timing.
+            let _exit_code = mgr.close(&session_id);
             assert!(!mgr.has_session(&session_id));
             assert_eq!(mgr.count(), 0);
         }

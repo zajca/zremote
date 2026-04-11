@@ -72,3 +72,15 @@ pub fn terminal_bg() -> Rgba {
 pub fn terminal_cursor() -> Rgba {
     rgb(0xcccccc)
 }
+
+/// Semi-transparent scrim painted behind full-screen modal surfaces (settings,
+/// help, command palette, session switcher). Dark base with ~40% alpha so the
+/// backgrounded UI stays visually anchored.
+pub fn modal_backdrop() -> Rgba {
+    Rgba {
+        r: 0.067,
+        g: 0.067,
+        b: 0.075,
+        a: 0.40,
+    }
+}
