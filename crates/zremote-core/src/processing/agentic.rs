@@ -837,10 +837,15 @@ mod tests {
             .unwrap();
         assert_eq!(name.as_deref(), Some("refactor-auth"));
 
-        // Verify SessionUpdated event was emitted
+        // Verify SessionUpdated event was emitted for our session (not a
+        // sibling). The guard compares the event's `session_id` to the
+        // outer test scope's session UUID; shadowing inside `matches!`
+        // would otherwise make this a tautology.
+        let expected_session_id = session_id.to_string();
         let mut found_session_updated = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, ServerEvent::SessionUpdated { ref session_id } if session_id == &session_id.to_string())
+            if let ServerEvent::SessionUpdated { session_id: evt_id } = &event
+                && evt_id == &expected_session_id
             {
                 found_session_updated = true;
             }

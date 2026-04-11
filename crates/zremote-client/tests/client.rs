@@ -855,8 +855,8 @@ async fn save_settings_sends_put() {
     let settings = zremote_client::ProjectSettings {
         shell: Some("/bin/bash".to_string()),
         working_dir: None,
-        env: Default::default(),
-        agentic: Default::default(),
+        env: std::collections::HashMap::new(),
+        agentic: zremote_client::types::AgenticSettings::default(),
         actions: vec![],
         worktree: None,
         linear: None,

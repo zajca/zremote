@@ -128,8 +128,22 @@ impl Focusable for SettingsModal {
 
 impl Render for SettingsModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+        // Delegate focus to the active tab so its keyboard routing receives
+        // printable chars for the text fields. Only take focus if nothing in
+        // the modal's focus tree currently holds it -- otherwise we would
+        // steal focus back from the tab every frame and break typing.
+        //
+        // FIXME: when a second tab is introduced, this check must inspect
+        // **every** tab's focus handle (not just the active one). Otherwise,
+        // switching tabs while an inactive tab's input still has focus will
+        // cause the active tab to steal it on the next frame, breaking typing
+        // in the background tab. Today only `AgentProfiles` exists, so the
+        // single-tab check is sufficient.
+        let tab_focus = self.agent_profiles_tab.read(cx).focus_handle(cx);
+        if !tab_focus.contains_focused(window, cx)
+            && !self.focus_handle.contains_focused(window, cx)
+        {
+            tab_focus.focus(window);
         }
 
         let header = div()
@@ -162,9 +176,14 @@ impl Render for SettingsModal {
                     .child(self.render_tab_button(SettingsTab::AgentProfiles, cx)),
             );
 
+        // `min_h_0` on the body is the first link in a chain that lets the
+        // profile editor's scrollable form clip against the modal's fixed
+        // 560px height. Without it, the body grows to fit its child's
+        // intrinsic height and the scroll region never gets a bounded frame.
         let body = match self.active_tab {
             SettingsTab::AgentProfiles => div()
                 .flex_1()
+                .min_h_0()
                 .child(self.agent_profiles_tab.clone())
                 .into_any_element(),
         };

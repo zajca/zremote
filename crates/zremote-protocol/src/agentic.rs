@@ -155,7 +155,7 @@ mod tests {
         roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
             session_id: Uuid::new_v4(),
             loop_id: Some(Uuid::new_v4()),
-            timestamp: 1711843200000,
+            timestamp: 1_711_843_200_000,
             kind: "tool_call".to_string(),
             input: Some("Read src/main.rs".to_string()),
             output_summary: Some("fn main() {}".to_string()),
@@ -166,7 +166,7 @@ mod tests {
         roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
             session_id: Uuid::new_v4(),
             loop_id: None,
-            timestamp: 1711843200000,
+            timestamp: 1_711_843_200_000,
             kind: "shell_command".to_string(),
             input: None,
             output_summary: None,

@@ -165,26 +165,6 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_session(pool: &SqlitePool, session_id: &str, host_id: &str) {
-        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'active')")
-            .bind(session_id)
-            .bind(host_id)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-
-    async fn insert_loop(pool: &SqlitePool, loop_id: &str, session_id: &str) {
-        sqlx::query(
-            "INSERT INTO agentic_loops (id, session_id, tool_name) VALUES (?, ?, 'claude-code')",
-        )
-        .bind(loop_id)
-        .bind(session_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
     async fn insert_memory(
         pool: &SqlitePool,
         id: &str,

@@ -830,7 +830,9 @@ mod tests {
         container.expanded = true;
 
         // Override created_at to force expiry on one toast.
-        container.toasts[0].created_at = Instant::now() - Duration::from_secs(86401);
+        container.toasts[0].created_at = Instant::now()
+            .checked_sub(Duration::from_secs(86401))
+            .expect("Instant supports 86401s subtraction");
 
         let removed = container.tick();
         assert!(removed);

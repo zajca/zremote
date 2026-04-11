@@ -23,7 +23,7 @@
 //! the final authority; we validate locally only to give fast feedback on
 //! obvious mistakes (name empty, shell metachars in tool/arg entries).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -78,7 +78,7 @@ enum TagListKind {
 /// Only printable characters and backspace are routed -- navigation keys are
 /// ignored when an input is active, so the user can still hit Escape to
 /// dismiss the modal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ActiveInput {
     None,
     Name,
@@ -452,6 +452,12 @@ pub struct AgentProfilesTab {
     /// sidebar's shared `Rc<Vec<AgentProfile>>` is rebuilt (e.g. after a
     /// concurrent CRUD refresh on a different profile).
     dirty: bool,
+    /// Per-field inline validation errors. Populated live as the user types
+    /// so each field renders a red border + inline error text below the
+    /// hint line without waiting for a Save click. Keyed by the
+    /// `ActiveInput` whose buffer is currently invalid; chip-list errors
+    /// live under the `NewFoo` variant of the pending-entry buffer.
+    field_errors: HashMap<ActiveInput, String>,
 }
 
 impl EventEmitter<AgentProfilesTabEvent> for AgentProfilesTab {}
@@ -489,6 +495,7 @@ impl AgentProfilesTab {
             saving: false,
             active_input: ActiveInput::None,
             dirty: false,
+            field_errors: HashMap::new(),
         }
     }
 
@@ -533,6 +540,7 @@ impl AgentProfilesTab {
                     .map(EditForm::from_profile)
                     .unwrap_or_default();
             }
+            self.field_errors.clear();
         }
 
         cx.notify();
@@ -543,6 +551,103 @@ impl AgentProfilesTab {
     /// user edits during a background refresh.
     fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /// Re-run the per-field validator for `field` against the current form
+    /// buffer and update `field_errors` accordingly. Invoked from every
+    /// user-mutation path (keystroke, chip add/remove) so the inline red
+    /// border + error text updates in real time without waiting for Save.
+    ///
+    /// `ActiveInput::None` is a no-op -- we only revalidate fields the user
+    /// is actively touching, which keeps this O(1) per keystroke instead
+    /// of rescanning the whole form on each character.
+    fn revalidate_field(&mut self, field: ActiveInput) {
+        let result: Result<(), String> = match field {
+            ActiveInput::None => return,
+            ActiveInput::Name => {
+                if self.edit_form.name.trim().is_empty() {
+                    Err("Name is required".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            ActiveInput::Description => Ok(()),
+            ActiveInput::Model => {
+                if self.edit_form.model.is_empty() {
+                    Ok(())
+                } else {
+                    validate_model(&self.edit_form.model)
+                }
+            }
+            ActiveInput::InitialPrompt => Ok(()),
+            ActiveInput::NewTool => {
+                if self.edit_form.new_tool_input.is_empty() {
+                    Ok(())
+                } else {
+                    validate_allowed_tool(&self.edit_form.new_tool_input)
+                }
+            }
+            ActiveInput::NewArg => {
+                if self.edit_form.new_arg_input.is_empty() {
+                    Ok(())
+                } else {
+                    validate_extra_arg(&self.edit_form.new_arg_input)
+                }
+            }
+            ActiveInput::NewChannel => {
+                if self.edit_form.new_channel_input.is_empty() {
+                    Ok(())
+                } else {
+                    validate_development_channel(&self.edit_form.new_channel_input)
+                }
+            }
+            ActiveInput::NewEnvKey => {
+                if self.edit_form.new_env_key.is_empty() {
+                    Ok(())
+                } else {
+                    validate_env_var_key(&self.edit_form.new_env_key)
+                }
+            }
+            ActiveInput::NewEnvValue => validate_env_var_value(&self.edit_form.new_env_value),
+            ActiveInput::ClaudeOutputFormat => {
+                if self.edit_form.claude_output_format.is_empty() {
+                    Ok(())
+                } else {
+                    validate_output_format(&self.edit_form.claude_output_format)
+                }
+            }
+            ActiveInput::ClaudeCustomFlags => {
+                if self.edit_form.claude_custom_flags.is_empty() {
+                    Ok(())
+                } else {
+                    validate_custom_flags(&self.edit_form.claude_custom_flags)
+                }
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                self.field_errors.remove(&field);
+            }
+            Err(msg) => {
+                self.field_errors.insert(field, msg);
+            }
+        }
+    }
+
+    /// Revalidate every "pending entry" chip/env buffer. Called after a
+    /// chip is committed or removed so the inline error clears when the
+    /// pending-entry buffer (the one just `std::mem::take()`-d) is empty.
+    fn revalidate_list_fields(&mut self) {
+        for f in [
+            ActiveInput::NewTool,
+            ActiveInput::NewArg,
+            ActiveInput::NewChannel,
+            ActiveInput::NewEnvKey,
+            ActiveInput::NewEnvValue,
+        ] {
+            self.revalidate_field(f);
+        }
     }
 
     fn select_profile(&mut self, profile_id: &str, cx: &mut Context<Self>) {
@@ -567,6 +672,7 @@ impl AgentProfilesTab {
             self.save_error = None;
             self.active_input = ActiveInput::None;
             self.dirty = false;
+            self.field_errors.clear();
             cx.notify();
         }
     }
@@ -591,6 +697,7 @@ impl AgentProfilesTab {
         // but flag it only after they first mutate so the save_error guard
         // above works correctly on repeated clicks of "New".
         self.dirty = false;
+        self.field_errors.clear();
         cx.notify();
     }
 
@@ -635,6 +742,7 @@ impl AgentProfilesTab {
                                 this.editor_mode = EditorMode::Edit;
                                 this.save_error = None;
                                 this.dirty = false;
+                                this.field_errors.clear();
                                 cx.emit(AgentProfilesTabEvent::ProfilesChanged);
                             }
                             Err(e) => {
@@ -677,6 +785,7 @@ impl AgentProfilesTab {
                             Ok(_profile) => {
                                 this.save_error = None;
                                 this.dirty = false;
+                                this.field_errors.clear();
                                 cx.emit(AgentProfilesTabEvent::ProfilesChanged);
                             }
                             Err(e) => {
@@ -718,6 +827,7 @@ impl AgentProfilesTab {
                         this.edit_form = EditForm::default();
                         this.save_error = None;
                         this.dirty = false;
+                        this.field_errors.clear();
                         cx.emit(AgentProfilesTabEvent::ProfilesChanged);
                     }
                     Err(e) => {
@@ -805,6 +915,7 @@ impl AgentProfilesTab {
                         this.editor_mode = EditorMode::Edit;
                         this.save_error = None;
                         this.dirty = false;
+                        this.field_errors.clear();
                         cx.emit(AgentProfilesTabEvent::ProfilesChanged);
                     }
                     Err(e) => {
@@ -827,9 +938,17 @@ impl AgentProfilesTab {
             return;
         }
 
-        // Enter on a "new chip" input adds the chip.
+        // Enter on a "new chip" input adds the chip. Enter in the
+        // multi-line Initial prompt buffer inserts a newline. All other
+        // text inputs ignore Enter.
         if key == "enter" {
-            self.commit_chip_on_enter(cx);
+            if self.active_input == ActiveInput::InitialPrompt {
+                self.edit_form.initial_prompt.push('\n');
+                self.mark_dirty();
+                cx.notify();
+            } else {
+                self.commit_chip_on_enter(cx);
+            }
             cx.stop_propagation();
             return;
         }
@@ -837,6 +956,8 @@ impl AgentProfilesTab {
         if key == "backspace" {
             self.active_buffer_mut().pop();
             self.mark_dirty();
+            let active = self.active_input;
+            self.revalidate_field(active);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -852,6 +973,8 @@ impl AgentProfilesTab {
         if let Some(ch) = &event.keystroke.key_char {
             self.active_buffer_mut().push_str(ch);
             self.mark_dirty();
+            let active = self.active_input;
+            self.revalidate_field(active);
             cx.notify();
             cx.stop_propagation();
         }
@@ -895,10 +1018,14 @@ impl AgentProfilesTab {
         if committed {
             self.mark_dirty();
         }
+        self.revalidate_list_fields();
         cx.notify();
     }
 
-    fn remove_tag(&mut self, kind: TagListKind, idx: usize) {
+    /// Removes a chip from the named tag list. Callers do not have to call
+    /// `cx.notify()` -- this method handles the repaint itself so future call
+    /// sites cannot silently drop the update.
+    fn remove_tag(&mut self, kind: TagListKind, idx: usize, cx: &mut Context<Self>) {
         let vec = match kind {
             TagListKind::AllowedTools => &mut self.edit_form.allowed_tools,
             TagListKind::ExtraArgs => &mut self.edit_form.extra_args,
@@ -908,6 +1035,8 @@ impl AgentProfilesTab {
             vec.remove(idx);
             self.dirty = true;
         }
+        self.revalidate_list_fields();
+        cx.notify();
     }
 
     fn active_buffer_mut(&mut self) -> &mut String {
@@ -1185,55 +1314,79 @@ impl AgentProfilesTab {
                 .into_any_element();
         }
 
-        let form = div()
+        // Outer wrapper: a flex column that fills the right pane and owns
+        // two stacked regions.
+        //
+        //   1. A scrollable form body (`flex_1 + min_h_0 + overflow_y_scroll`).
+        //      `min_h_0` is the GPUI/taffy idiom for "inside a flex column,
+        //      allow this child to shrink below its intrinsic height so its
+        //      own overflow clips and scrolls". Without it the child grows
+        //      to fit content and the scrollbar never appears.
+        //   2. A sticky action bar, always rendered *outside* the scroll
+        //      region so the Save/Delete/Duplicate/Set-default/Cancel buttons
+        //      stay visible even when scrolled to the middle of a long form.
+        div()
             .id("profile-editor")
             .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .child(self.render_editor_body(cx))
-            .child(self.render_action_bar(cx));
-
-        form.into_any_element()
+            .child(
+                div()
+                    .id("profile-editor-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.render_editor_body(cx)),
+            )
+            .child(self.render_action_bar(cx))
+            .into_any_element()
     }
 
     fn render_editor_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut body = div().flex().flex_col().p(px(16.0)).gap(px(12.0));
+        let mut body = div().flex().flex_col().p(px(16.0)).gap(px(14.0));
 
-        // Name
-        body =
-            body.child(self.render_text_input("Name", &self.edit_form.name, ActiveInput::Name, cx));
-
-        // Description
+        // --- Basics --------------------------------------------------------
+        body = body.child(Self::render_section_header("Basics"));
+        body = body.child(self.render_text_input(
+            "Name",
+            true,
+            "Unique identifier for this profile (1-255 chars)",
+            &self.edit_form.name,
+            ActiveInput::Name,
+            cx,
+        ));
         body = body.child(self.render_text_input(
             "Description",
+            false,
+            "Optional: brief notes about what this profile does (max 1024 chars)",
             &self.edit_form.description,
             ActiveInput::Description,
             cx,
         ));
 
-        // Agent kind -- read-only in edit mode, dropdown-ish in create mode.
+        // --- Launcher ------------------------------------------------------
+        body = body.child(Self::render_section_header("Launcher"));
         body = body.child(self.render_kind_selector(cx));
-
-        // Model
         body = body.child(self.render_text_input(
             "Model",
+            false,
+            "Optional: e.g., \"claude-opus-4-6\". Only alphanumerics, dots, dashes.",
             &self.edit_form.model,
             ActiveInput::Model,
             cx,
         ));
-
-        // Initial prompt (textarea-styled, same key routing)
         body = body.child(self.render_textarea(
             "Initial prompt",
+            false,
+            "Optional: task or instruction. Press Enter for a new line. Max 64KB.",
             &self.edit_form.initial_prompt,
             ActiveInput::InitialPrompt,
             cx,
         ));
-
-        // Skip permissions
         body = body.child(self.render_checkbox(
             "Skip permissions",
+            Some("When checked, claude runs without asking for tool permissions first."),
             self.edit_form.skip_permissions,
             cx.listener(|this, _: &ClickEvent, _w, cx| {
                 this.edit_form.skip_permissions = !this.edit_form.skip_permissions;
@@ -1242,19 +1395,20 @@ impl AgentProfilesTab {
             }),
         ));
 
-        // Allowed tools
+        // --- Tools ---------------------------------------------------------
+        body = body.child(Self::render_section_header("Tools"));
         body = body.child(self.render_tag_list(
             "Allowed tools",
+            "Restrict which tools claude can call. Syntax: alphanumerics + underscore, colon, asterisk (e.g., \"Read\", \"Bash:*\").",
             &self.edit_form.allowed_tools,
             &self.edit_form.new_tool_input,
             ActiveInput::NewTool,
             TagListKind::AllowedTools,
             cx,
         ));
-
-        // Extra args
         body = body.child(self.render_tag_list(
             "Extra args",
+            "Pass additional CLI flags to claude. Each must start with '-' or '--'. No shell metacharacters.",
             &self.edit_form.extra_args,
             &self.edit_form.new_arg_input,
             ActiveInput::NewArg,
@@ -1262,15 +1416,85 @@ impl AgentProfilesTab {
             cx,
         ));
 
-        // Env vars
+        // --- Environment ---------------------------------------------------
+        body = body.child(Self::render_section_header("Environment"));
         body = body.child(self.render_env_vars_editor(cx));
 
-        // Claude-specific fields
+        // --- Claude-specific fields ----------------------------------------
         if self.edit_form.agent_kind == "claude" {
+            body = body.child(Self::render_section_header("Claude settings"));
             body = body.child(self.render_claude_settings(cx));
         }
 
         body.into_any_element()
+    }
+
+    /// Top-of-section label: 13px semibold text_primary plus a thin bottom
+    /// border that visually segments the form into logical groups (Basics,
+    /// Launcher, Tools, Environment, Claude settings).
+    fn render_section_header(title: &str) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .pt(px(4.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child(title.to_string()),
+            )
+            .child(div().h(px(1.0)).w_full().bg(theme::border()))
+    }
+
+    /// Render a field label row: "<label>" + optional red asterisk for
+    /// required fields. 11px semibold text_secondary, matching the rest
+    /// of the settings modal's label hierarchy.
+    fn render_label(label: &str, required: bool) -> Div {
+        let mut row = div().flex().items_center().gap(px(3.0)).child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::text_secondary())
+                .child(label.to_string()),
+        );
+        if required {
+            row = row.child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::error())
+                    .child("*"),
+            );
+        }
+        row
+    }
+
+    /// Inline hint line shown beneath a field. Tertiary text, 11px, guides
+    /// the user on format/purpose before they trigger server-side errors.
+    fn render_hint(hint: &str) -> Div {
+        div()
+            .text_size(px(11.0))
+            .text_color(theme::text_tertiary())
+            .child(hint.to_string())
+    }
+
+    /// Inline field-level error line: rendered below the hint when the
+    /// field's buffer fails client-side validation. Error color, 11px.
+    fn render_field_error(msg: &str) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(11.0))
+            .text_color(theme::error())
+            .child(
+                icon(Icon::AlertTriangle)
+                    .size(px(11.0))
+                    .text_color(theme::error()),
+            )
+            .child(msg.to_string())
     }
 
     fn render_kind_selector(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1278,12 +1502,11 @@ impl AgentProfilesTab {
         let current_kind = self.edit_form.agent_kind.clone();
         let kinds = self.kinds.clone();
 
-        let mut wrapper = div().flex().flex_col().gap(px(4.0)).child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme::text_secondary())
-                .child("Agent kind"),
-        );
+        let mut wrapper = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(Self::render_label("Agent kind", true));
 
         if is_create {
             // Horizontal pill picker -- each kind is a clickable chip.
@@ -1310,6 +1533,18 @@ impl AgentProfilesTab {
                         .child(kind.display_name.clone())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                             if this.edit_form.agent_kind != kind_id {
+                                // Symmetric reset of claude-specific fields so
+                                // switching kinds never leaves stale hidden
+                                // state behind. Applies both when leaving and
+                                // when returning to "claude".
+                                this.edit_form.claude_development_channels.clear();
+                                this.edit_form.claude_output_format.clear();
+                                this.edit_form.claude_print_mode = false;
+                                this.edit_form.claude_custom_flags.clear();
+                                this.edit_form.new_channel_input.clear();
+                                this.field_errors.remove(&ActiveInput::NewChannel);
+                                this.field_errors.remove(&ActiveInput::ClaudeOutputFormat);
+                                this.field_errors.remove(&ActiveInput::ClaudeCustomFlags);
                                 this.edit_form.agent_kind = kind_id.clone();
                                 this.mark_dirty();
                                 cx.notify();
@@ -1318,6 +1553,9 @@ impl AgentProfilesTab {
                 );
             }
             wrapper = wrapper.child(picker);
+            wrapper = wrapper.child(Self::render_hint(
+                "Which launcher runs the agent. Cannot be changed after creation.",
+            ));
         } else {
             let display = kinds
                 .iter()
@@ -1336,6 +1574,9 @@ impl AgentProfilesTab {
                     .text_color(theme::text_tertiary())
                     .child(display),
             );
+            wrapper = wrapper.child(Self::render_hint(
+                "Launcher kind is fixed once the profile is created.",
+            ));
         }
 
         wrapper.into_any_element()
@@ -1344,29 +1585,29 @@ impl AgentProfilesTab {
     fn render_text_input(
         &self,
         label: &str,
+        required: bool,
+        hint: &str,
         value: &str,
         field: ActiveInput,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = self.active_input == field;
+        let has_error = self.field_errors.contains_key(&field);
         let input_id = SharedString::from(format!("input-{label}"));
-        let border = if is_active {
+        let border = if has_error {
+            theme::error()
+        } else if is_active {
             theme::accent()
         } else {
             theme::border()
         };
         let display_value = value.to_string();
 
-        div()
+        let mut wrapper = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme::text_secondary())
-                    .child(label.to_string()),
-            )
+            .child(Self::render_label(label, required))
             .child(
                 div()
                     .id(input_id)
@@ -1380,6 +1621,7 @@ impl AgentProfilesTab {
                     .text_size(px(12.0))
                     .text_color(theme::text_primary())
                     .min_h(px(28.0))
+                    .hover(|s| s.border_color(theme::accent()))
                     .child(if display_value.is_empty() {
                         div()
                             .text_color(theme::text_tertiary())
@@ -1392,19 +1634,30 @@ impl AgentProfilesTab {
                         this.active_input = field;
                         cx.notify();
                     })),
-            )
-            .into_any_element()
+            );
+        if !hint.is_empty() {
+            wrapper = wrapper.child(Self::render_hint(hint));
+        }
+        if let Some(err) = self.field_errors.get(&field) {
+            wrapper = wrapper.child(Self::render_field_error(err));
+        }
+        wrapper.into_any_element()
     }
 
     fn render_textarea(
         &self,
         label: &str,
+        required: bool,
+        hint: &str,
         value: &str,
         field: ActiveInput,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = self.active_input == field;
-        let border = if is_active {
+        let has_error = self.field_errors.contains_key(&field);
+        let border = if has_error {
+            theme::error()
+        } else if is_active {
             theme::accent()
         } else {
             theme::border()
@@ -1412,16 +1665,11 @@ impl AgentProfilesTab {
         let input_id = SharedString::from(format!("textarea-{label}"));
         let display_value = value.to_string();
 
-        div()
+        let mut wrapper = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme::text_secondary())
-                    .child(label.to_string()),
-            )
+            .child(Self::render_label(label, required))
             .child(
                 div()
                     .id(input_id)
@@ -1435,35 +1683,50 @@ impl AgentProfilesTab {
                     .text_size(px(12.0))
                     .text_color(theme::text_primary())
                     .min_h(px(60.0))
+                    .hover(|s| s.border_color(theme::accent()))
                     .child(if display_value.is_empty() {
                         div()
                             .text_color(theme::text_tertiary())
                             .child("click to edit")
                             .into_any_element()
                     } else {
-                        div()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .child(display_value)
-                            .into_any_element()
+                        // Split on '\n' so multi-line prompts render as
+                        // multiple lines. GPUI does not honor literal
+                        // newlines inside a single text node -- each line
+                        // must be its own child div for wrapping to work.
+                        // An empty trailing line (from a fresh newline)
+                        // still renders as a zero-height row, giving the
+                        // user a visual cue that the cursor moved down.
+                        let mut column = div().flex().flex_col();
+                        for line in display_value.split('\n') {
+                            column = column.child(div().min_h(px(14.0)).child(line.to_string()));
+                        }
+                        column.into_any_element()
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = field;
                         cx.notify();
                     })),
-            )
-            .into_any_element()
+            );
+        if !hint.is_empty() {
+            wrapper = wrapper.child(Self::render_hint(hint));
+        }
+        if let Some(err) = self.field_errors.get(&field) {
+            wrapper = wrapper.child(Self::render_field_error(err));
+        }
+        wrapper.into_any_element()
     }
 
     fn render_checkbox(
         &self,
         label: &str,
+        hint: Option<&str>,
         checked: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
         let label_owned = label.to_string();
         let id = SharedString::from(format!("checkbox-{label}"));
-        div()
+        let row = div()
             .id(id)
             .flex()
             .items_center()
@@ -1499,13 +1762,21 @@ impl AgentProfilesTab {
                     .text_size(px(12.0))
                     .text_color(theme::text_primary())
                     .child(label_owned),
-            )
-            .into_any_element()
+            );
+
+        let mut wrapper = div().flex().flex_col().gap(px(2.0)).child(row);
+        if let Some(h) = hint {
+            // Indent the hint so it aligns under the label, not the checkbox.
+            wrapper = wrapper.child(div().pl(px(22.0)).child(Self::render_hint(h)));
+        }
+        wrapper.into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_tag_list(
         &self,
         label: &str,
+        hint: &str,
         values: &[String],
         new_value: &str,
         new_field: ActiveInput,
@@ -1513,14 +1784,16 @@ impl AgentProfilesTab {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = self.active_input == new_field;
-        let border = if is_active {
+        let has_error = self.field_errors.contains_key(&new_field);
+        let border = if has_error {
+            theme::error()
+        } else if is_active {
             theme::accent()
         } else {
             theme::border()
         };
         let input_id = SharedString::from(format!("taglist-input-{label}"));
         let new_display = new_value.to_string();
-        let label_owned = label.to_string();
 
         let mut chips = div().flex().flex_wrap().gap(px(4.0));
         for (idx, value) in values.iter().enumerate() {
@@ -1547,23 +1820,17 @@ impl AgentProfilesTab {
                             .hover(|s| s.text_color(theme::error()))
                             .child(icon(Icon::X).size(px(10.0)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                                this.remove_tag(kind, idx);
-                                cx.notify();
+                                this.remove_tag(kind, idx, cx);
                             })),
                     ),
             );
         }
 
-        div()
+        let mut wrapper = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme::text_secondary())
-                    .child(label_owned),
-            )
+            .child(Self::render_label(label, false))
             .child(chips)
             .child(
                 div()
@@ -1578,6 +1845,7 @@ impl AgentProfilesTab {
                     .text_size(px(11.0))
                     .text_color(theme::text_primary())
                     .min_h(px(24.0))
+                    .hover(|s| s.border_color(theme::accent()))
                     .child(if new_display.is_empty() {
                         div()
                             .text_color(theme::text_tertiary())
@@ -1590,8 +1858,14 @@ impl AgentProfilesTab {
                         this.active_input = new_field;
                         cx.notify();
                     })),
-            )
-            .into_any_element()
+            );
+        if !hint.is_empty() {
+            wrapper = wrapper.child(Self::render_hint(hint));
+        }
+        if let Some(err) = self.field_errors.get(&new_field) {
+            wrapper = wrapper.child(Self::render_field_error(err));
+        }
+        wrapper.into_any_element()
     }
 
     fn render_env_vars_editor(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1654,12 +1928,18 @@ impl AgentProfilesTab {
             );
         }
 
-        let key_border = if self.active_input == ActiveInput::NewEnvKey {
+        let key_has_error = self.field_errors.contains_key(&ActiveInput::NewEnvKey);
+        let value_has_error = self.field_errors.contains_key(&ActiveInput::NewEnvValue);
+        let key_border = if key_has_error {
+            theme::error()
+        } else if self.active_input == ActiveInput::NewEnvKey {
             theme::accent()
         } else {
             theme::border()
         };
-        let value_border = if self.active_input == ActiveInput::NewEnvValue {
+        let value_border = if value_has_error {
+            theme::error()
+        } else if self.active_input == ActiveInput::NewEnvValue {
             theme::accent()
         } else {
             theme::border()
@@ -1667,16 +1947,11 @@ impl AgentProfilesTab {
         let key_display = self.edit_form.new_env_key.clone();
         let value_display = self.edit_form.new_env_value.clone();
 
-        div()
+        let mut wrapper = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme::text_secondary())
-                    .child("Environment variables"),
-            )
+            .child(Self::render_label("Environment variables", false))
             .child(rows)
             .child(
                 div()
@@ -1696,6 +1971,7 @@ impl AgentProfilesTab {
                             .text_size(px(11.0))
                             .text_color(theme::text_primary())
                             .min_w(px(80.0))
+                            .hover(|s| s.border_color(theme::accent()))
                             .child(if key_display.is_empty() {
                                 div()
                                     .text_color(theme::text_tertiary())
@@ -1711,8 +1987,8 @@ impl AgentProfilesTab {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(theme::text_tertiary())
+                            .text_size(px(12.0))
+                            .text_color(theme::text_secondary())
                             .child("="),
                     )
                     .child(
@@ -1728,6 +2004,7 @@ impl AgentProfilesTab {
                             .border_color(value_border)
                             .text_size(px(11.0))
                             .text_color(theme::text_primary())
+                            .hover(|s| s.border_color(theme::accent()))
                             .child(if value_display.is_empty() {
                                 div()
                                     .text_color(theme::text_tertiary())
@@ -1754,40 +2031,48 @@ impl AgentProfilesTab {
                             .hover(|s| s.text_color(theme::text_primary()))
                             .child("Add")
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                // Only commit if the key buffer is non-empty
+                                // AND free of validation errors. Otherwise we
+                                // would silently swallow the user's input.
+                                if this.edit_form.new_env_key.is_empty()
+                                    || this.field_errors.contains_key(&ActiveInput::NewEnvKey)
+                                    || this.field_errors.contains_key(&ActiveInput::NewEnvValue)
+                                {
+                                    cx.notify();
+                                    return;
+                                }
                                 let k = std::mem::take(&mut this.edit_form.new_env_key);
                                 let v = std::mem::take(&mut this.edit_form.new_env_value);
-                                if !k.is_empty() {
-                                    this.edit_form.env_vars.push((k, v));
-                                    this.mark_dirty();
-                                }
+                                this.edit_form.env_vars.push((k, v));
+                                this.mark_dirty();
+                                this.revalidate_list_fields();
                                 cx.notify();
                             })),
                     ),
             )
-            .into_any_element()
+            .child(Self::render_hint(
+                "POSIX key names: letter or underscore first, then alphanumerics/underscore. Values are exported to the process.",
+            ));
+
+        if let Some(err) = self.field_errors.get(&ActiveInput::NewEnvKey) {
+            wrapper = wrapper.child(Self::render_field_error(err));
+        }
+        if let Some(err) = self.field_errors.get(&ActiveInput::NewEnvValue) {
+            wrapper = wrapper.child(Self::render_field_error(err));
+        }
+        wrapper.into_any_element()
     }
 
     fn render_claude_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .pt(px(8.0))
-            .border_t_1()
-            .border_color(theme::border());
-
-        section = section.child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::text_secondary())
-                .pt(px(8.0))
-                .child("Claude settings"),
-        );
+        // The section header is rendered by `render_editor_body` -- keep this
+        // helper focused on Claude-specific fields so the layout isn't
+        // double-bordered.
+        let mut section = div().flex().flex_col().gap(px(12.0));
 
         // Development channels (tag list)
         section = section.child(self.render_tag_list(
             "Development channels",
+            "Claude Code channels to auto-approve (e.g., \"plugin:zremote@local\"). Colon, slash, dot, dash, at allowed.",
             &self.edit_form.claude_development_channels,
             &self.edit_form.new_channel_input,
             ActiveInput::NewChannel,
@@ -1798,6 +2083,8 @@ impl AgentProfilesTab {
         // Output format
         section = section.child(self.render_text_input(
             "Output format",
+            false,
+            "Optional: e.g., \"stream-json\", \"text\". Alphanumerics, dash, underscore only.",
             &self.edit_form.claude_output_format,
             ActiveInput::ClaudeOutputFormat,
             cx,
@@ -1806,6 +2093,7 @@ impl AgentProfilesTab {
         // Print mode checkbox
         section = section.child(self.render_checkbox(
             "Print mode (-p)",
+            Some("When checked, claude responds once and exits. Useful for automated tasks."),
             self.edit_form.claude_print_mode,
             cx.listener(|this, _: &ClickEvent, _w, cx| {
                 this.edit_form.claude_print_mode = !this.edit_form.claude_print_mode;
@@ -1817,6 +2105,8 @@ impl AgentProfilesTab {
         // Custom flags (free-form)
         section = section.child(self.render_text_input(
             "Custom flags",
+            false,
+            "Optional: free-form flags appended to the command line. No shell metacharacters or backslash.",
             &self.edit_form.claude_custom_flags,
             ActiveInput::ClaudeCustomFlags,
             cx,
@@ -1826,11 +2116,13 @@ impl AgentProfilesTab {
     }
 
     fn render_action_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let can_delete = self.editor_mode == EditorMode::Edit && self.selected_profile_id.is_some();
-        let can_duplicate =
+        // Delete / Duplicate / Set-as-Default all share the same gating
+        // rule: only meaningful when an existing profile is selected.
+        let has_selected_profile =
             self.editor_mode == EditorMode::Edit && self.selected_profile_id.is_some();
-        let can_set_default =
-            self.editor_mode == EditorMode::Edit && self.selected_profile_id.is_some();
+        let can_delete = has_selected_profile;
+        let can_duplicate = has_selected_profile;
+        let can_set_default = has_selected_profile;
         let save_label = match self.editor_mode {
             EditorMode::Create => "Create",
             EditorMode::Edit => "Save",
@@ -2010,6 +2302,7 @@ impl Render for AgentProfilesTab {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .bg(theme::bg_primary())
@@ -2264,10 +2557,7 @@ mod tests {
             "custom_flags must serialize as a JSON string, not an array"
         );
         assert!(
-            settings
-                .get("custom_flags")
-                .map(serde_json::Value::is_array)
-                != Some(true),
+            settings.get("custom_flags").is_none_or(|v| !v.is_array()),
             "custom_flags must NOT be a JSON array"
         );
     }

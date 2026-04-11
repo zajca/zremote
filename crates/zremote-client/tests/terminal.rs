@@ -289,8 +289,14 @@ async fn resize_ws(mut socket: WebSocket) {
             && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text)
             && parsed.get("type").and_then(|t| t.as_str()) == Some("resize")
         {
-            let cols = parsed.get("cols").and_then(|v| v.as_u64()).unwrap_or(0);
-            let rows = parsed.get("rows").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cols = parsed
+                .get("cols")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let rows = parsed
+                .get("rows")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             let response = format!("{cols}x{rows}");
             let mut frame = vec![0x01];
             frame.extend_from_slice(response.as_bytes());
@@ -340,7 +346,8 @@ async fn pane_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 async fn pane_ws(mut socket: WebSocket) {
     // Send a pane output binary frame: [0x02] [pane_id_len] [pane_id] [data]
     let pane_id = b"pane-A";
-    let mut frame = vec![0x02, pane_id.len() as u8];
+    let pane_id_len = u8::try_from(pane_id.len()).expect("pane_id fits in u8");
+    let mut frame = vec![0x02, pane_id_len];
     frame.extend_from_slice(pane_id);
     frame.extend_from_slice(b"pane-output-data");
     let _ = socket.send(Message::Binary(frame.into())).await;

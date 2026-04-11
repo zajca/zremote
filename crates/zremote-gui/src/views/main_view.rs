@@ -1499,6 +1499,7 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("palette-container")
+                                    .occlude()
                                     .w(px(520.0))
                                     .max_h(px(420.0))
                                     .rounded(px(8.0))
@@ -1550,6 +1551,7 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("switcher-container")
+                                    .occlude()
                                     .w(switcher_w)
                                     .h(switcher_h)
                                     .rounded(px(8.0))
@@ -1589,6 +1591,7 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("help-container")
+                                    .occlude()
                                     .w(px(440.0))
                                     .max_h(px(440.0))
                                     .rounded(px(8.0))
@@ -1637,8 +1640,13 @@ impl Render for MainView {
                             .child(
                                 div()
                                     .id("settings-container")
+                                    .occlude()
                                     .w(px(720.0))
-                                    .max_h(px(560.0))
+                                    // Definite height so `flex_1` + `overflow_y_scroll`
+                                    // in the profile editor form resolve against a
+                                    // bounded box -- with `max_h` alone the scroll
+                                    // region had no frame to clip against.
+                                    .h(px(560.0))
                                     .rounded(px(8.0))
                                     .border_1()
                                     .border_color(theme::border())
