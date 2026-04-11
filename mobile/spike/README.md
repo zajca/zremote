@@ -1,9 +1,20 @@
 # Phase 0 — WebSocket spike
 
-A headless Swift executable cross-compiled for `aarch64-unknown-linux-android28`.
-Pushed to an Android device via `adb` and run through `adb shell`. Purpose: verify
-empirically that a Swift client can keep a WebSocket connection alive against a
-real ZRemote agent before we commit to the full RFC Phase 1+.
+> **Status (2026-04-11):** Ran as a **Linux x86_64 native binary** inside the
+> stock `swift:6.3-noble` Docker image, against a local `zremote agent local`.
+> Verdict: 🟡 YELLOW. Full write-up: `RESULTS.md`. Scope was trimmed: the
+> Android cross-compile (originally the whole point of this spike) was dropped
+> because (a) the NDK + Swift Android SDK download would take 3+ hours on the
+> available uplink, and (b) prior research already shows that SkipFoundation
+> wraps OkHttp on Android so the plain swift-corelibs-foundation question is
+> moot for the production path. The `Dockerfile`, `scripts/build-in-docker.sh`,
+> and `../scripts/mobile-spike-ws.sh` stay in tree as a ready recipe for Phase 4
+> on-device validation.
+
+A headless Swift executable that was originally to be cross-compiled for
+`aarch64-unknown-linux-android28`. Purpose: verify empirically that a Swift
+client can keep a WebSocket connection alive against a real ZRemote agent
+before we commit to the full RFC Phase 1+.
 
 This spike is intentionally **not a Skip Fuse app**. It does not contain a UI,
 an `Android/` manifest, or any Skip bridging. We reserve that work for Phase 4,

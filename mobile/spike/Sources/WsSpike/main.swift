@@ -38,7 +38,9 @@ import FoundationNetworking
 
 enum LogLevel: String { case info = "INFO", warn = "WARN", fail = "FAIL", ok = "OK" }
 
-let isoFormatter: ISO8601DateFormatter = {
+// ISO8601DateFormatter is not Sendable, but we only ever call .string(from:)
+// which is internally synchronized in swift-corelibs-foundation. Mark unsafe.
+nonisolated(unsafe) let isoFormatter: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f
@@ -115,11 +117,11 @@ enum ProbeError: Error {
 
 /// URLSessionWebSocketDelegate: track open/close transitions because
 /// `receive()` alone doesn't tell us when the upgrade completed.
-final class WsDelegate: NSObject, URLSessionWebSocketDelegate {
-    let onOpen: (String?) -> Void
-    let onClose: (URLSessionWebSocketTask.CloseCode, Data?) -> Void
-    init(onOpen: @escaping (String?) -> Void,
-         onClose: @escaping (URLSessionWebSocketTask.CloseCode, Data?) -> Void) {
+final class WsDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    let onOpen: @Sendable (String?) -> Void
+    let onClose: @Sendable (URLSessionWebSocketTask.CloseCode, Data?) -> Void
+    init(onOpen: @escaping @Sendable (String?) -> Void,
+         onClose: @escaping @Sendable (URLSessionWebSocketTask.CloseCode, Data?) -> Void) {
         self.onOpen = onOpen
         self.onClose = onClose
     }
@@ -202,9 +204,10 @@ func runZRemoteProbe(_ config: SpikeConfig) async -> Bool {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
+        let attemptSnapshot = attempt
         let delegate = WsDelegate(
             onOpen: { proto in
-                log(.ok, "zremote", "handshake complete (attempt=\(attempt), protocol=\(proto ?? "<none>"))")
+                log(.ok, "zremote", "handshake complete (attempt=\(attemptSnapshot), protocol=\(proto ?? "<none>"))")
             },
             onClose: { code, reason in
                 let r = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "<nil>"

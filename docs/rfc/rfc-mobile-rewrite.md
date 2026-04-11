@@ -383,6 +383,42 @@ Steps:
 
 Only after the spike is green/yellow/red can we delete the spike directory and move on to Phase 1.
 
+### Phase 0 — Result (2026-04-11): 🟡 YELLOW
+
+Full write-up: `mobile/spike/RESULTS.md`.
+
+**Scope adjustment.** The original plan called for a cross-compiled Android build pushed via `adb`. That required an NDK r27 + Swift Android SDK 6.3 download totalling ~860 MB, which on the available 50 KB/s uplink would have been 3+ hours just to download — not counting build time. The spike was pivoted to a native Linux x86_64 Swift build inside the stock `swift:6.3-noble` image, on the basis that earlier research confirmed **SkipFoundation on Android wraps OkHttp**, not libcurl. In other words, the originally-feared libcurl risk does not apply to the real production path (Skip Fuse Android). On-device Android verification is deferred to Phase 4 where it becomes cheap (a real Skip Fuse app is already being built).
+
+**What went green.**
+
+- **Server path.** `zremote agent local` accepts the WebSocket upgrade correctly. Raw `curl -sv` with `Upgrade: websocket` headers against `http://127.0.0.1:3111/ws/events` returns `HTTP/1.1 101 Switching Protocols` and the correct `Sec-WebSocket-Accept` digest. The protocol compat question on the server side is put to bed.
+- **Swift language path.** Swift 6.3 compiles the spike cleanly under strict concurrency once `@Sendable` closures are applied on `WsDelegate` and the shared `ISO8601DateFormatter` is marked `nonisolated(unsafe)`. `#if canImport(FoundationNetworking)` gives a single file that would also work on darwin.
+- **JSON envelope decode.** `struct TaggedEnvelope: Decodable { let type: String }` builds and links against swift-corelibs-foundation on Linux. This is the minimum proof-of-life for the Phase 2 Codable port.
+- **Reconnect loop.** Exponential backoff (4 → 8 → 16 → 30 → 30 s ceiling) and the soak deadline behave exactly as specified in the plan, even when every attempt fails. The logic drops into `ZRemoteClient.EventStream` verbatim in Phase 3.
+
+**What went red (and was expected to).**
+
+- **Linux swift-corelibs-foundation WebSocket runtime.** Every `URLSessionWebSocketTask` connect returns `NSURLErrorDomain Code=-1002` with `NSLocalizedDescription=WebSockets not supported by libcurl`. Confirmed against both `wss://echo.websocket.events` and the local zremote agent. This is exactly the failure mode called out in swiftlang/swift-corelibs-foundation#4730 — swift-corelibs-foundation's URLSession wraps libcurl's ws/wss API, and the swift:6.3 base image's libcurl does not expose it.
+
+**Implications for the rewrite.**
+
+1. **Production mobile paths are not contradicted.** iOS runs native Foundation (no libcurl). Skip Fuse on Android routes URLSession through OkHttp via SkipFoundation (prior research; still needs Phase 4 device validation). The Linux finding does not touch either.
+2. **Phase 3 must introduce a `WebSocketTransport` protocol** in `ZRemoteClient`, with three implementations:
+   - `FoundationWebSocketTransport` — default on iOS and Skip Fuse Android.
+   - `NIOWebSocketTransport` — `swift-nio` + `swift-nio-extras` / `WebSocketKit`, gated behind a SwiftPM trait or `#if os(Linux)`. This is required for `swift test` on Linux CI and for any developer running tests on a pure-Linux host.
+   - `MockWebSocketTransport` — in-memory, used by unit tests to replay fixtures without a server.
+  `ZRemoteClient.ApiClient` must never reach for `URLSessionWebSocketTask` directly.
+3. **Linux CI cannot run WebSocket-backed tests via Foundation.** Either the CI runner is macOS (Xcode) or we wire `NIOWebSocketTransport` in via a SwiftPM trait. Both are acceptable; the choice gets made when Phase 3 CI is wired up.
+4. **Phase 4 Android validation is mandatory.** When the first Skip Fuse Android build is on-device, re-run the echo + `/ws/events` + reconnect battery against a real device. If it fails, fall back to `NIOWebSocketTransport` on Android as well.
+
+**Spike artefacts still in tree** (kept for Phase 4 reuse, not deleted):
+
+- `mobile/spike/Sources/WsSpike/main.swift` — adjusted with Sendable annotations, still matches the original probe design.
+- `mobile/spike/Package.swift` — minimal SwiftPM executable target.
+- `mobile/spike/Dockerfile` + `mobile/spike/scripts/build-in-docker.sh` — the Android cross-compile recipe. Unused right now, but still the documented path for Phase 4.
+- `scripts/mobile-spike-ws.sh` — the adb-push runner. Unused right now.
+- `mobile/spike/RESULTS.md` — this verdict in long form, with raw logs.
+
 ### Phase 1 — Clean slate
 
 1. Write this RFC (done in this PR).
@@ -627,7 +663,8 @@ cd mobile && skip run --device=<android-device-id>
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `URLSessionWebSocketTask` on Skip Fuse Android does not work | Medium | Forces swift-nio fallback | Phase 0 spike; if it fails, fall back to `swift-nio` / `WebSocketKit` via the `WebSocketTransport` abstraction. Known issue: swiftlang/swift-corelibs-foundation#4730. |
+| `URLSessionWebSocketTask` on Skip Fuse Android does not work | Low (was Medium) | Forces swift-nio fallback | Downgraded after Phase 0: prior research confirmed SkipFoundation wraps OkHttp for `URLSessionWebSocketTask` on Android, so libcurl is not in play on the production path. Still needs empirical Phase 4 device validation. |
+| swift-corelibs-foundation on Linux rejects `URLSessionWebSocketTask` | Confirmed | Blocks `swift test` on Linux CI | Confirmed in Phase 0: `NSURLErrorDomain -1002 "WebSockets not supported by libcurl"` against both echo server and local zremote agent. **Mitigation**: Phase 3 introduces a `WebSocketTransport` protocol with `FoundationWebSocketTransport` (iOS + Skip Fuse Android) and `NIOWebSocketTransport` (Linux, behind a SwiftPM trait). Full write-up: `mobile/spike/RESULTS.md`. |
 | SwiftUI `Canvas` performance on Android via Skip | Medium | Slow terminal render | Benchmark in Phase 5. Fallback: `UIViewRepresentable` (iOS) + `AndroidView` bridge (Android) with native text stacks. |
 | Swift Foundation on Android has gaps | Medium | Missing APIs | Skip Fuse docs say "many URLRequest/URLSessionConfiguration properties ignored" — test headers, timeouts, TLS custom CA in Phase 2. |
 | Skip Fuse production readiness (2026-04) | High | Unknown bugs | Track skip.dev Discord, validate regularly against the showcase apps, be ready to upgrade Skip mid-flight. |
@@ -663,4 +700,4 @@ Plan B is a backup. The project owner prefers the pure Swift path, so we pursue 
 
 ## Next Step
 
-Merge this RFC, close PR zajca/zremote#9, start Phase 0 (WebSocket spike). Phase 1 (clean slate deletion) lands immediately after the spike result is in.
+Phase 0 is complete (🟡 YELLOW verdict, see "Phase 0 — Result" above and `mobile/spike/RESULTS.md`). Next up: Phase 1 — clean-slate deletion of `crates/zremote-ffi/`, `android/`, and the related scripts, workflows, and old RFCs. Phase 2 (`ZRemoteProtocol` Codable port) and Phase 3 (`ZRemoteClient` with the `WebSocketTransport` abstraction mandated by Phase 0) follow in sequence.

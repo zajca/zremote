@@ -1,0 +1,6 @@
+# Swift package build artefacts — do not commit.
+.build/
+Package.resolved
+
+# Phase 0 Android cross-compile outputs (unused until Phase 4).
+out/
