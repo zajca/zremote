@@ -133,6 +133,11 @@ pub enum CommandPaletteEvent {
     },
     StartAgent {
         profile_id: String,
+        /// If set together with `working_dir`, `main_view` launches against
+        /// this host/path directly (used by project drill-down).
+        host_id: Option<String>,
+        /// See `host_id`.
+        working_dir: Option<String>,
     },
     ShowSettings,
     Close,

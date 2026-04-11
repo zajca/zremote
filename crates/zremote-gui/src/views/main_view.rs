@@ -1096,48 +1096,59 @@ impl MainView {
                     );
                 }
             }
-            CommandPaletteEvent::StartAgent { profile_id } => {
+            CommandPaletteEvent::StartAgent {
+                profile_id,
+                host_id,
+                working_dir,
+            } => {
                 // Resolve (host_id, project_path) for the launch.
                 //
-                // Strategy (MVP): prefer the currently-selected session's host
-                // + working_dir. If unavailable, try the single online host's
-                // first project. Anything more involved (multi-host picker,
-                // per-kind project chooser) belongs to a follow-up UX pass --
-                // the project-row quick-launch button already provides the
-                // primary entry point with a known project.
+                // Fast path: if the palette already knows host + path (project
+                // drill-down case), use them verbatim. Otherwise fall back to
+                // selected-session / single-host heuristics the same way the
+                // top-level "Agents: ..." actions used to.
                 let profile_id = profile_id.clone();
-                let selected = self
-                    .sidebar
-                    .read(cx)
-                    .selected_session_id()
-                    .map(String::from);
-                let sessions = Rc::clone(self.sidebar.read(cx).sessions_rc());
-                let hosts = Rc::clone(self.sidebar.read(cx).hosts_rc());
-                let projects = Rc::clone(self.sidebar.read(cx).projects_rc());
 
-                let resolved = selected.as_ref().and_then(|sid| {
-                    sessions
-                        .iter()
-                        .find(|s| &s.id == sid)
-                        .and_then(|s| s.working_dir.clone().map(|wd| (s.host_id.clone(), wd)))
-                });
+                let resolved = match (host_id.clone(), working_dir.clone()) {
+                    (Some(h), Some(wd)) => Some((h, wd)),
+                    _ => {
+                        // Read the sidebar once and pull out everything we need
+                        // before the borrow drops — gratuitous re-reads waste
+                        // scan-time and blur the control flow even though GPUI
+                        // reads are single-threaded and cheap.
+                        let sidebar = self.sidebar.read(cx);
+                        let selected = sidebar.selected_session_id().map(String::from);
+                        let sessions = Rc::clone(sidebar.sessions_rc());
+                        let hosts = Rc::clone(sidebar.hosts_rc());
+                        let projects = Rc::clone(sidebar.projects_rc());
 
-                let resolved = resolved.or_else(|| {
-                    let online: Vec<&zremote_client::Host> = hosts
-                        .iter()
-                        .filter(|h| h.status == zremote_client::HostStatus::Online)
-                        .collect();
-                    if let [only_host] = online.as_slice() {
-                        let host_projects: Vec<&zremote_client::Project> = projects
-                            .iter()
-                            .filter(|p| p.host_id == only_host.id)
-                            .collect();
-                        if let Some(first_project) = host_projects.first() {
-                            return Some((only_host.id.clone(), first_project.path.clone()));
-                        }
+                        let from_selected = selected.as_ref().and_then(|sid| {
+                            sessions.iter().find(|s| &s.id == sid).and_then(|s| {
+                                s.working_dir.clone().map(|wd| (s.host_id.clone(), wd))
+                            })
+                        });
+
+                        from_selected.or_else(|| {
+                            let online: Vec<&zremote_client::Host> = hosts
+                                .iter()
+                                .filter(|h| h.status == zremote_client::HostStatus::Online)
+                                .collect();
+                            if let [only_host] = online.as_slice() {
+                                let host_projects: Vec<&zremote_client::Project> = projects
+                                    .iter()
+                                    .filter(|p| p.host_id == only_host.id)
+                                    .collect();
+                                if let Some(first_project) = host_projects.first() {
+                                    return Some((
+                                        only_host.id.clone(),
+                                        first_project.path.clone(),
+                                    ));
+                                }
+                            }
+                            None
+                        })
                     }
-                    None
-                });
+                };
 
                 if let Some((host_id, project_path)) = resolved {
                     self.sidebar.update(cx, |s, cx| {

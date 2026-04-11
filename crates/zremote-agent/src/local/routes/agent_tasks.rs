@@ -54,9 +54,16 @@ pub struct CreateAgentTaskRequest {
 }
 
 /// JSON shape returned by `POST /api/agent-tasks`.
+///
+/// Mirrors `zremote_server::routes::agent_tasks::CreateAgentTaskResponse` so
+/// the shared client type (`zremote_client::StartAgentResponse`) deserializes
+/// against both local and server routes without `#[serde(default)]` hacks.
+/// The local `task_id` is just a fresh UUID — we don't persist a tasks row
+/// in this kind-agnostic path, it exists purely for schema parity.
 #[derive(Debug, serde::Serialize)]
 pub struct CreateAgentTaskResponse {
     pub session_id: String,
+    pub task_id: String,
     pub agent_kind: String,
     pub profile_id: String,
     pub host_id: String,
@@ -202,6 +209,21 @@ pub async fn create_agent_task(
     // consistent between the two routes.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
+    // Log write metadata (length + newline flag) but never the command body —
+    // launcher commands can contain env var values the operator considers
+    // secret. The newline flag is the useful signal for diagnosing "command
+    // pasted but not executed" regressions (missing trailing \n = no exec).
+    //
+    // Kept at `debug!` (not `trace!`) because this is the primary diagnostic
+    // an operator reaches for when quick-launch regressions are reported —
+    // `RUST_LOG=zremote_agent=debug` is the investigation default.
+    tracing::debug!(
+        session_id = %session_id,
+        bytes = launch.command.len(),
+        ends_with_newline = launch.command.ends_with('\n'),
+        "writing launcher command to PTY",
+    );
+
     {
         let mut mgr = state.session_manager.lock().await;
         mgr.write_to(&session_id, launch.command.as_bytes())
@@ -222,10 +244,19 @@ pub async fn create_agent_task(
     let mut context = LauncherContext::Local { state: &state };
     launcher.after_spawn(session_id, &request, &mut context);
 
+    // Local-mode has no per-kind task table, so the "task" and the session
+    // are the same thing. Reuse `session_id_str` for `task_id` so clients
+    // that correlate a launch by task_id can look up the session directly
+    // (and so log greps don't go looking for a UUID that points nowhere).
+    // Server mode mints a distinct task_id because it waits for the agent's
+    // async Started/StartFailed reply — that flow does not exist here.
+    let task_id = session_id_str.clone();
+
     Ok((
         StatusCode::CREATED,
         Json(CreateAgentTaskResponse {
             session_id: session_id_str,
+            task_id,
             agent_kind,
             profile_id,
             host_id,

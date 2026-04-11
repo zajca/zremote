@@ -345,6 +345,8 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
         items.push(ResultItem {
             item: PaletteItem::Action(PaletteAction::StartAgent {
                 profile_id: profile.id.clone(),
+                host_id: None,
+                working_dir: None,
             }),
             title,
             subtitle,
@@ -455,6 +457,35 @@ pub(super) fn build_project_drill_items_from(
         selectable: true,
     });
     action_indices.push(action_start);
+
+    // Agent profile quick-launch entries — one per profile, pre-filled with
+    // the drilled-in project's host_id + path so the launch skips the
+    // main_view resolver. This mirrors what the project-row ⚡ button does.
+    for profile in snapshot.agent_profiles.iter() {
+        let kind_display = snapshot
+            .agent_kinds
+            .iter()
+            .find(|k| k.kind == profile.agent_kind)
+            .map(|k| k.display_name.as_str())
+            .unwrap_or(profile.agent_kind.as_str());
+        let title = format!("{} · {}", kind_display, profile.name);
+        let subtitle = profile
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("Start {kind_display} in {}", project.name));
+        let idx = items.len();
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::StartAgent {
+                profile_id: profile.id.clone(),
+                host_id: Some(project.host_id.clone()),
+                working_dir: Some(project.path.clone()),
+            }),
+            title,
+            subtitle,
+            selectable: true,
+        });
+        action_indices.push(idx);
+    }
 
     // "Pin/Unpin"
     let pin_idx = items.len();
@@ -1014,7 +1045,7 @@ mod tests {
         let start_entries: Vec<(&str, &str, &str)> = items
             .iter()
             .filter_map(|i| match &i.item {
-                PaletteItem::Action(PaletteAction::StartAgent { profile_id }) => {
+                PaletteItem::Action(PaletteAction::StartAgent { profile_id, .. }) => {
                     Some((profile_id.as_str(), i.title.as_str(), i.subtitle.as_str()))
                 }
                 _ => None,
@@ -1163,6 +1194,243 @@ mod tests {
             "should have action items even with no sessions"
         );
         assert!(!results.is_empty());
+    }
+
+    /// Drill-down into a project with agent profiles present must emit a
+    /// `StartAgent` entry per profile, pre-filled with the drilled-in
+    /// project's `host_id` + `path` so the launch skips the main_view
+    /// resolver. This is the Bug 2 regression test: without this the
+    /// command palette only shows "New Session".
+    #[test]
+    fn test_project_drill_includes_agent_profiles() {
+        use std::collections::BTreeMap;
+
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            name: "localhost".to_string(),
+            hostname: "localhost".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }]);
+        let sessions = Rc::new(Vec::new());
+        let projects = Rc::new(vec![Project {
+            id: "proj-1".to_string(),
+            host_id: "host-1".to_string(),
+            path: "/home/user/myproject".to_string(),
+            name: "myproject".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "rust".to_string(),
+            created_at: String::new(),
+            parent_project_id: None,
+            git_branch: None,
+            git_commit_hash: None,
+            git_commit_message: None,
+            git_is_dirty: false,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
+        }]);
+
+        let profiles = Rc::new(vec![
+            AgentProfile {
+                id: "prof-default".to_string(),
+                name: "Default".to_string(),
+                description: Some("Seeded default".to_string()),
+                agent_kind: "claude".to_string(),
+                is_default: true,
+                sort_order: 0,
+                model: None,
+                initial_prompt: None,
+                skip_permissions: false,
+                allowed_tools: Vec::new(),
+                extra_args: Vec::new(),
+                env_vars: BTreeMap::new(),
+                settings: serde_json::Value::Null,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            AgentProfile {
+                id: "prof-review".to_string(),
+                name: "Review".to_string(),
+                // No description -> fall back to "Start {kind} in {project}".
+                description: None,
+                agent_kind: "claude".to_string(),
+                is_default: false,
+                sort_order: 1,
+                model: None,
+                initial_prompt: None,
+                skip_permissions: false,
+                allowed_tools: Vec::new(),
+                extra_args: Vec::new(),
+                env_vars: BTreeMap::new(),
+                settings: serde_json::Value::Null,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            // Profile for an unknown kind -> falls back to the raw kind
+            // string in the title (no entry in `agent_kinds`).
+            AgentProfile {
+                id: "prof-mystery".to_string(),
+                name: "Mystery".to_string(),
+                description: Some("Unknown kind".to_string()),
+                agent_kind: "mystery-agent".to_string(),
+                is_default: false,
+                sort_order: 2,
+                model: None,
+                initial_prompt: None,
+                skip_permissions: false,
+                allowed_tools: Vec::new(),
+                extra_args: Vec::new(),
+                env_vars: BTreeMap::new(),
+                settings: serde_json::Value::Null,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        ]);
+        let kinds = Rc::new(vec![AgentKindInfo {
+            kind: "claude".to_string(),
+            display_name: "Claude".to_string(),
+            description: "Claude Code".to_string(),
+        }]);
+
+        let snapshot = PaletteSnapshot::capture(
+            hosts,
+            sessions,
+            projects,
+            "local".to_string(),
+            None,
+            &[],
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            profiles,
+            kinds,
+        );
+
+        let session_items = build_session_items(&snapshot);
+        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        // Collect StartAgent entries with their pre-filled host/path so we
+        // can assert the drill-down fast-path (no resolver needed).
+        struct StartEntry<'a> {
+            profile_id: &'a str,
+            title: &'a str,
+            subtitle: &'a str,
+            host_id: Option<&'a str>,
+            working_dir: Option<&'a str>,
+        }
+
+        let start_entries: Vec<StartEntry<'_>> = items
+            .iter()
+            .filter_map(|i| match &i.item {
+                PaletteItem::Action(PaletteAction::StartAgent {
+                    profile_id,
+                    host_id,
+                    working_dir,
+                }) => Some(StartEntry {
+                    profile_id: profile_id.as_str(),
+                    title: i.title.as_str(),
+                    subtitle: i.subtitle.as_str(),
+                    host_id: host_id.as_deref(),
+                    working_dir: working_dir.as_deref(),
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            start_entries.len(),
+            3,
+            "should emit one StartAgent per profile",
+        );
+
+        // prof-default: known kind -> "Claude · Default", custom description
+        let prof_default = start_entries
+            .iter()
+            .find(|e| e.profile_id == "prof-default")
+            .expect("prof-default missing");
+        assert_eq!(prof_default.title, "Claude · Default");
+        assert_eq!(prof_default.subtitle, "Seeded default");
+        assert_eq!(prof_default.host_id, Some("host-1"));
+        assert_eq!(prof_default.working_dir, Some("/home/user/myproject"));
+
+        // prof-review: no description -> falls back to "Start {kind} in {project}"
+        let prof_review = start_entries
+            .iter()
+            .find(|e| e.profile_id == "prof-review")
+            .expect("prof-review missing");
+        assert_eq!(prof_review.title, "Claude · Review");
+        assert_eq!(prof_review.subtitle, "Start Claude in myproject");
+        assert_eq!(prof_review.host_id, Some("host-1"));
+        assert_eq!(prof_review.working_dir, Some("/home/user/myproject"));
+
+        // prof-mystery: unknown kind -> title uses raw kind string
+        let prof_mystery = start_entries
+            .iter()
+            .find(|e| e.profile_id == "prof-mystery")
+            .expect("prof-mystery missing");
+        assert_eq!(prof_mystery.title, "mystery-agent · Mystery");
+        assert_eq!(prof_mystery.host_id, Some("host-1"));
+        assert_eq!(prof_mystery.working_dir, Some("/home/user/myproject"));
+
+        // "New Session in myproject" must still be present — agent profiles
+        // add to the drill-down, they don't replace it.
+        assert!(
+            items.iter().any(|i| matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::NewSessionInProject { .. })
+            )),
+            "New Session action must still appear",
+        );
+
+        // All three profile entries must be registered as selectable in the
+        // results so keyboard navigation hits them.
+        assert!(
+            results.selectable_count() >= 4, // 3 profiles + New Session (+ pin)
+            "drill-down must count agent profile entries as selectable, got {}",
+            results.selectable_count()
+        );
+    }
+
+    /// Empty profiles must NOT emit StartAgent entries in drill-down, and
+    /// New Session + Pin must still render. Complements the Bug 2 test by
+    /// guarding the zero-profile edge.
+    #[test]
+    fn test_project_drill_no_profiles_no_start_agent() {
+        let snapshot = test_snapshot(); // empty profiles via Rc::new(Vec::new())
+        let session_items = build_session_items(&snapshot);
+        let (items, _results) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let start_count = items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.item,
+                    PaletteItem::Action(PaletteAction::StartAgent { .. })
+                )
+            })
+            .count();
+        assert_eq!(start_count, 0, "no profiles means no StartAgent entries");
+
+        // New Session must still be there.
+        assert!(
+            items.iter().any(|i| matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::NewSessionInProject { .. })
+            )),
+            "New Session action must still appear with zero profiles",
+        );
     }
 
     #[test]

@@ -33,8 +33,14 @@ pub enum PaletteAction {
     },
     SwitchSession,
     AddProject,
+    /// Launch an agent. If `host_id` + `working_dir` are provided, the launch
+    /// skips the resolver and targets that project directly — used from the
+    /// project drill-down where the target is already known. Otherwise the
+    /// main_view handler resolves a target from the current selection.
     StartAgent {
         profile_id: String,
+        host_id: Option<String>,
+        working_dir: Option<String>,
     },
     ManageAgentProfiles,
 }
@@ -140,9 +146,15 @@ impl CommandPalette {
                 PaletteAction::SwitchSession => {
                     cx.emit(CommandPaletteEvent::OpenSessionSwitcher);
                 }
-                PaletteAction::StartAgent { profile_id } => {
+                PaletteAction::StartAgent {
+                    profile_id,
+                    host_id,
+                    working_dir,
+                } => {
                     cx.emit(CommandPaletteEvent::StartAgent {
                         profile_id: profile_id.clone(),
+                        host_id: host_id.clone(),
+                        working_dir: working_dir.clone(),
                     });
                 }
                 PaletteAction::ManageAgentProfiles => {
