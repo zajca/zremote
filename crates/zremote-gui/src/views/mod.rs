@@ -3,6 +3,7 @@ pub mod command_palette;
 pub mod double_shift;
 pub mod fuzzy;
 pub mod help_modal;
+pub mod key_bindings;
 pub mod main_view;
 pub mod search_overlay;
 pub mod session_switcher;

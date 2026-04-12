@@ -3,7 +3,8 @@
 use gpui::*;
 
 use super::items::is_item_drillable;
-use super::{CommandPalette, CommandPaletteEvent, DrillDownLevel, PaletteTab};
+use super::{CommandPalette, CommandPaletteEvent, DrillDownLevel};
+use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 
 impl CommandPalette {
     pub(super) fn handle_key_down(
@@ -93,35 +94,20 @@ impl CommandPalette {
             return;
         }
 
-        // Toggle shortcuts
-        if key == "k" && mods.control && !mods.shift {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "e" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Sessions {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Sessions, cx);
-            }
-            return;
-        }
-
-        if key == "p" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Projects {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Projects, cx);
-            }
-            return;
-        }
-
-        if key == "a" && mods.control && mods.shift {
-            if self.active_tab == PaletteTab::Actions {
-                self.dismiss(cx);
-            } else {
-                self.switch_tab(PaletteTab::Actions, cx);
+        // Toggle shortcuts via centralized dispatch
+        if let Some(action) = dispatch_global_key(key, mods.control, mods.shift, mods.alt) {
+            match action {
+                KeyAction::OpenCommandPalette(tab) => {
+                    if self.active_tab == tab {
+                        self.dismiss(cx);
+                    } else {
+                        self.switch_tab(tab, cx);
+                    }
+                }
+                _ => {
+                    // Other global shortcuts close the palette
+                    self.dismiss(cx);
+                }
             }
             return;
         }

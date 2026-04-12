@@ -20,6 +20,7 @@ use crate::views::command_palette::{
 };
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
+use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::settings_modal::{SettingsModal, SettingsModalEvent, SettingsTab};
 use crate::views::sidebar::SidebarView;
@@ -884,6 +885,31 @@ impl MainView {
         ]
     }
 
+    // -- Centralized keyboard dispatch -------------------------------------------
+
+    fn handle_global_action(&mut self, action: KeyAction, cx: &mut Context<Self>) {
+        match action {
+            KeyAction::OpenCommandPalette(tab) => self.open_command_palette(tab, cx),
+            KeyAction::OpenSessionSwitcher => self.open_session_switcher(cx),
+            KeyAction::OpenSearch => {
+                // Search is terminal-panel-scoped; no-op when no terminal is focused
+            }
+            KeyAction::OpenHelp => self.open_help_modal(cx),
+            KeyAction::CloseOverlay => {
+                // Close topmost modal
+                if self.command_palette.is_some() {
+                    self.close_command_palette(cx);
+                } else if self.session_switcher.is_some() {
+                    self.close_session_switcher(cx);
+                } else if self.help_modal.is_some() {
+                    self.close_help_modal(cx);
+                } else if self.settings_modal.is_some() {
+                    self.close_settings_modal(cx);
+                }
+            }
+        }
+    }
+
     // -- Command palette ---------------------------------------------------------
 
     fn open_command_palette(&mut self, tab: PaletteTab, cx: &mut Context<Self>) {
@@ -1405,18 +1431,10 @@ impl MainView {
 
                         this.double_shift.on_key_down_during_shift();
 
-                        if mods.control && !mods.shift && key == "tab" {
-                            this.open_session_switcher(cx);
-                        } else if mods.control && !mods.shift && key == "k" {
-                            this.open_command_palette(PaletteTab::All, cx);
-                        } else if mods.control && mods.shift && key == "e" {
-                            this.open_command_palette(PaletteTab::Sessions, cx);
-                        } else if mods.control && mods.shift && key == "p" {
-                            this.open_command_palette(PaletteTab::Projects, cx);
-                        } else if mods.control && mods.shift && key == "a" {
-                            this.open_command_palette(PaletteTab::Actions, cx);
-                        } else if !mods.control && !mods.shift && !mods.alt && key == "f1" {
-                            this.open_help_modal(cx);
+                        if let Some(action) =
+                            dispatch_global_key(key, mods.control, mods.shift, mods.alt)
+                        {
+                            this.handle_global_action(action, cx);
                         }
                     }))
                     .on_modifiers_changed(cx.listener(
