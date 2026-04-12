@@ -67,6 +67,12 @@ pub struct MainView {
     last_viewed_session: Option<(String, String)>,
     /// Maps claude task_id to (session_id, host_id, project_path) for context on ClaudeTaskEnded.
     claude_task_sessions: HashMap<String, (String, String, String)>,
+    /// Owned event polling task — cancelled on drop.
+    _event_poller: Task<()>,
+    /// Owned loop reconciliation task — cancelled on drop.
+    _loop_reconciler: Task<()>,
+    /// Owned toast tick task — cancelled on drop.
+    _toast_ticker: Task<()>,
 }
 
 impl MainView {
@@ -77,10 +83,10 @@ impl MainView {
         cx.subscribe(&sidebar, Self::on_sidebar_event).detach();
 
         // Start polling server events
-        Self::start_event_polling(&app_state, cx);
+        let event_poller = Self::start_event_polling(&app_state, cx);
 
         // Start periodic loop reconciliation (fallback for missed WS events)
-        Self::start_loop_reconciliation(&sidebar, cx);
+        let loop_reconciler = Self::start_loop_reconciliation(&sidebar, cx);
 
         let toasts = cx.new(|_| ToastContainer::new());
 
@@ -96,7 +102,7 @@ impl MainView {
         .detach();
 
         // Start toast tick timer (removes expired toasts every second)
-        Self::start_toast_tick(&toasts, cx);
+        let toast_ticker = Self::start_toast_tick(&toasts, cx);
 
         let focus_handle = cx.focus_handle();
 
@@ -126,6 +132,9 @@ impl MainView {
             pending_waiting_notifications: HashMap::new(),
             last_viewed_session: None,
             claude_task_sessions: HashMap::new(),
+            _event_poller: event_poller,
+            _loop_reconciler: loop_reconciler,
+            _toast_ticker: toast_ticker,
         }
     }
 
@@ -203,7 +212,7 @@ impl MainView {
         cx.notify();
     }
 
-    fn start_event_polling(app_state: &Arc<AppState>, cx: &mut Context<Self>) {
+    fn start_event_polling(app_state: &Arc<AppState>, cx: &mut Context<Self>) -> Task<()> {
         let event_rx = app_state.event_rx.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while let Ok(client_event) = event_rx.recv_async().await {
@@ -231,10 +240,12 @@ impl MainView {
                     );
             }
         })
-        .detach();
     }
 
-    fn start_loop_reconciliation(sidebar: &Entity<SidebarView>, cx: &mut Context<Self>) {
+    fn start_loop_reconciliation(
+        sidebar: &Entity<SidebarView>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let sidebar = sidebar.clone();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
@@ -249,10 +260,9 @@ impl MainView {
                 }
             }
         })
-        .detach();
     }
 
-    fn start_toast_tick(toasts: &Entity<ToastContainer>, cx: &mut Context<Self>) {
+    fn start_toast_tick(toasts: &Entity<ToastContainer>, cx: &mut Context<Self>) -> Task<()> {
         let toasts = toasts.clone();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
@@ -267,7 +277,6 @@ impl MainView {
                 }
             }
         })
-        .detach();
     }
 
     /// Build a [`ToastContext`] by resolving human-readable names from IDs.
