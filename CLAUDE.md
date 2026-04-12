@@ -133,6 +133,13 @@ Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (1
 - All colors from `theme::*()` functions (defined in `theme.rs`). No hardcoded hex in view code.
 - All sizing with `px()`. Typography hierarchy: semibold 14px (titles), 13px (headers), 12px (body), 11px (metadata), 10px (tertiary).
 
+### Render Decomposition Convention
+
+1. **Keep `render()` under ~80 lines.** It should compose named parts, not contain layout logic.
+2. **Extract named helpers** as methods on the same struct: `render_header()`, `render_body()`, `render_footer()`, `render_empty_state()`, `render_loading()`, `render_error()`, `render_list_item()`, `render_modal_overlay()` — only what the view actually needs.
+3. **Each helper returns `impl IntoElement`** (or `Option<AnyElement>` when conditionally rendered) and lives in the same `impl` block.
+4. **Use `.when()` / `.when_some()`** for conditional chaining instead of `if/else` breaking builder chains.
+
 ## Protocol Conventions
 
 - All message enums use `#[serde(tag = "type")]` for tagged JSON serialization.

@@ -1121,23 +1121,17 @@ impl TerminalPanel {
     }
 }
 
-impl Render for TerminalPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.start_output_reader(cx);
-        self.start_cursor_blink(cx);
+// ---------------------------------------------------------------------------
+// Render helpers
+// ---------------------------------------------------------------------------
 
-        // Auto-focus on first render (unless search overlay is open).
-        if !self.focus_handle.is_focused(window) && !self.closed && !self.search_open {
-            self.focus_handle.focus(window);
-        }
-
-        // Compute hovered URL match for the element.
+impl TerminalPanel {
+    fn render_terminal_element(&self) -> TerminalElement {
         let hovered_url_match: Option<Match> = self.hovered_url_idx.get().and_then(|idx| {
             let detector = self.url_detector.borrow();
             detector.cached_match(idx)
         });
 
-        // Clone search state for the element.
         let search_matches = if self.search_open {
             self.search_matches.clone()
         } else {
@@ -1149,7 +1143,7 @@ impl Render for TerminalPanel {
             None
         };
 
-        let terminal_el = TerminalElement::new(
+        TerminalElement::new(
             self.term.clone(),
             self.resize_debounce_tx.clone(),
             self.cursor_visible,
@@ -1161,8 +1155,142 @@ impl Render for TerminalPanel {
             hovered_url_match,
             search_matches,
             search_current_idx,
-        );
+        )
+    }
 
+    fn render_status_overlay(&self) -> Option<AnyElement> {
+        if self.closed {
+            let label = if let Some(ref msg) = self.error_message {
+                format!("[Error: {msg}]")
+            } else {
+                "[Session closed]".to_string()
+            };
+            let color = if self.error_message.is_some() {
+                theme::error()
+            } else {
+                theme::text_tertiary()
+            };
+            Some(
+                div()
+                    .pt(px(8.0))
+                    .text_color(color)
+                    .text_size(px(12.0))
+                    .child(label)
+                    .into_any_element(),
+            )
+        } else if self.disconnected {
+            Some(
+                div()
+                    .pt(px(8.0))
+                    .text_color(theme::warning())
+                    .text_size(px(12.0))
+                    .child("[Disconnected - reconnecting...]")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn render_connection_badge(&self) -> impl IntoElement {
+        let is_bridge = self.handle.is_bridge();
+        let tooltip_text = if is_bridge {
+            "Direct bridge to agent (bypasses server relay)".to_string()
+        } else if self.mode == "local" {
+            "Local WebSocket connection".to_string()
+        } else {
+            "WebSocket relay through server/agent".to_string()
+        };
+        let badge_label = if is_bridge { "Bridge" } else { "WS" };
+        div()
+            .id("connection-indicator")
+            .absolute()
+            .bottom(px(8.0))
+            .right(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(8.0))
+            .bg(gpui::rgba(0x1111_1399))
+            .child(
+                icon(if is_bridge { Icon::Zap } else { Icon::Wifi })
+                    .size(px(10.0))
+                    .text_color(if is_bridge {
+                        theme::success()
+                    } else {
+                        theme::text_tertiary()
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child(badge_label),
+            )
+            .child(div().size(px(6.0)).rounded_full().bg(if self.disconnected {
+                theme::error()
+            } else {
+                theme::success()
+            }))
+            .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into())
+    }
+
+    fn render_cc_metrics_badge(&self) -> Option<AnyElement> {
+        let metrics = self.cc_metrics.as_ref()?;
+        let status = self.cc_status?;
+
+        let mut badge = div()
+            .id("cc-metrics-badge")
+            .absolute()
+            .bottom(px(28.0))
+            .right(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(8.0))
+            .bg(gpui::rgba(0x1111_1399))
+            .child(cc_widgets::cc_bot_icon(status, 10.0));
+
+        if let Some(ref model) = metrics.model {
+            badge = badge.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child(cc_widgets::short_model_name(model)),
+            );
+        }
+
+        badge = badge.child(cc_widgets::render_context_bar(metrics, 50.0, 4.0));
+
+        if let Some(pct) = metrics.context_used_pct {
+            let (_, pct_200k) =
+                cc_widgets::context_usage_200k(pct, metrics.context_window_size.unwrap_or(200_000));
+            badge = badge.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child(format!("{pct_200k:.0}%")),
+            );
+        }
+
+        Some(badge.into_any_element())
+    }
+}
+
+impl Render for TerminalPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_output_reader(cx);
+        self.start_cursor_blink(cx);
+
+        if !self.focus_handle.is_focused(window) && !self.closed && !self.search_open {
+            self.focus_handle.focus(window);
+        }
+
+        let terminal_el = self.render_terminal_element();
         let has_hovered_url = self.hovered_url_idx.get().is_some();
 
         let mut content = div()
@@ -1187,9 +1315,6 @@ impl Render for TerminalPanel {
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
 
-                    // Track key presses during shift hold for double-shift detection.
-                    // GPUI on_key_down only fires for non-modifier keys, so every
-                    // event here means a real key was pressed (not bare shift).
                     double_shift_kd.on_key_down_during_shift();
 
                     // Ctrl+F: open search
@@ -1200,7 +1325,7 @@ impl Render for TerminalPanel {
                         return;
                     }
 
-                    // Ctrl+Tab: session switcher (must be before encode_keystroke)
+                    // Ctrl+Tab: session switcher
                     if mods.control && !mods.shift && !mods.alt && key == "tab" {
                         let _ = entity.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
                             cx.emit(TerminalPanelEvent::OpenSessionSwitcher);
@@ -1268,13 +1393,11 @@ impl Render for TerminalPanel {
                         return;
                     }
 
-                    // Don't send keys to PTY while search is open
                     if search_open {
                         return;
                     }
 
                     // Ctrl+C: copy selection if any, else send SIGINT
-                    // Ctrl+Shift+C: also copy selection
                     if mods.control
                         && !mods.alt
                         && (key == "c" || key.eq_ignore_ascii_case("c") && mods.shift)
@@ -1287,7 +1410,6 @@ impl Render for TerminalPanel {
                             cx.notify(entity_id);
                             return;
                         }
-                        // No selection: Ctrl+C sends SIGINT, Ctrl+Shift+C does nothing
                         if !mods.shift {
                             let _ = input_tx.send(vec![0x03]);
                         }
@@ -1318,18 +1440,12 @@ impl Render for TerminalPanel {
                             let _ = input_tx.send(bytes);
                             return;
                         }
-                        // No text in clipboard — try forwarding clipboard image
-                        // over WebSocket so the agent can set it on the remote
-                        // clipboard before sending Ctrl+V to the PTY.
                         if let Some(ref tx) = image_paste_tx
                             && let Some(b64) = read_clipboard_image_base64()
                         {
                             let _ = tx.send(b64);
                             return;
                         }
-                        // Direct mode or no image: fall through to encode_keystroke
-                        // which sends Ctrl+V (0x16) to the PTY, letting Claude Code
-                        // read the system clipboard itself.
                     }
 
                     if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke) {
@@ -1337,10 +1453,6 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            // Modifier key tracking: double-shift detection + URL hover on ctrl release.
-            // GPUI does NOT fire on_key_down/on_key_up for bare modifier keys (X11 and
-            // Wayland both filter them with keysym.is_modifier_key()). The only event
-            // for modifier state changes is ModifiersChangedEvent.
             .on_modifiers_changed({
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 let entity_id = cx.entity_id();
@@ -1349,13 +1461,11 @@ impl Render for TerminalPanel {
                 move |event: &ModifiersChangedEvent, _window: &mut Window, cx: &mut App| {
                     let mods = &event.modifiers;
 
-                    // Clear URL hover when control is released
                     if !mods.control && hovered_url_idx.get().is_some() {
                         hovered_url_idx.set(None);
                         cx.notify(entity_id);
                     }
 
-                    // Double-shift detection via modifier transitions
                     if double_shift_mc.on_modifiers_changed(
                         mods.shift,
                         mods.control,
@@ -1373,14 +1483,12 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            // Focus on any mouse button press
             .on_any_mouse_down({
                 let focus = self.focus_handle.clone();
                 move |_event: &MouseDownEvent, window: &mut Window, _cx: &mut App| {
                     focus.focus(window);
                 }
             })
-            // Left mouse button: start text selection or open URL
             .on_mouse_down(MouseButton::Left, {
                 let term = self.term.clone();
                 let layout_info = self.layout_info.clone();
@@ -1388,7 +1496,6 @@ impl Render for TerminalPanel {
                 let url_detector = self.url_detector.clone();
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
-                    // Ctrl+click: open hovered URL
                     if event.modifiers.control
                         && let Some(idx) = hovered_url_idx.get()
                     {
@@ -1424,8 +1531,6 @@ impl Render for TerminalPanel {
                             display_offset,
                         );
 
-                        // Double-click: word (semantic) selection
-                        // Triple-click: line selection
                         let selection_type = match event.click_count {
                             2 => SelectionType::Semantic,
                             3 => SelectionType::Lines,
@@ -1439,7 +1544,6 @@ impl Render for TerminalPanel {
                     cx.notify(entity_id);
                 }
             })
-            // Mouse move: selection drag + URL hover detection
             .on_mouse_move({
                 let term = self.term.clone();
                 let layout_info = self.layout_info.clone();
@@ -1448,7 +1552,6 @@ impl Render for TerminalPanel {
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 let content_generation = self.content_generation.clone();
                 move |event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
-                    // Selection drag takes priority
                     if event.pressed_button == Some(MouseButton::Left) {
                         let info = layout_info.get();
                         if info.cell_width == px(0.0) {
@@ -1483,7 +1586,6 @@ impl Render for TerminalPanel {
                         return;
                     }
 
-                    // URL hover detection (Ctrl+hover)
                     if event.modifiers.control {
                         let info = layout_info.get();
                         if info.cell_width == px(0.0) {
@@ -1520,17 +1622,14 @@ impl Render for TerminalPanel {
                     }
                 }
             })
-            // Left mouse up: finalize selection, auto-copy to clipboard
             .on_mouse_up(MouseButton::Left, {
                 let entity_id = cx.entity_id();
                 let term = self.term.clone();
                 move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
                     if let Ok(mut t) = term.lock() {
                         if t.selection.as_ref().is_some_and(|s| s.is_empty()) {
-                            // Clear empty selections (single click without drag)
                             t.selection = None;
                         } else if let Some(text) = t.selection_to_string() {
-                            // Auto-copy non-empty selection to clipboard
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }
                     }
@@ -1551,17 +1650,10 @@ impl Render for TerminalPanel {
                     };
 
                     let is_precise = event.delta.precise();
-
-                    // Both Lines (mouse wheel, already scaled by GPUI) and Pixels
-                    // (touchpad, raw pixel values) need no extra scaling.
                     let multiplier = 1.0_f32;
 
-                    // Following Zed's approach: accumulate pixel deltas and convert to
-                    // whole-line scroll deltas. No sub-pixel rendering offset -- alacritty's
-                    // display_offset always moves by whole lines.
                     let line_delta = match event.touch_phase {
                         TouchPhase::Started => {
-                            // Reset accumulator at gesture start.
                             scroll_px.set(0.0);
                             None
                         }
@@ -1571,7 +1663,6 @@ impl Render for TerminalPanel {
                             let new_scroll_px =
                                 scroll_px.get() + f32::from(pixel_delta.y) * multiplier;
                             let new_offset = (px(new_scroll_px) / cell_h) as i32;
-                            // Keep accumulator bounded to viewport height to avoid overflow.
                             let viewport_h =
                                 f32::from(info.bounds.size.height).max(f32::from(cell_h));
                             scroll_px.set(new_scroll_px % viewport_h);
@@ -1582,12 +1673,6 @@ impl Render for TerminalPanel {
                     };
 
                     if let Some(lines) = line_delta {
-                        // Lines (mouse wheel): positive y = physical "scroll up" = show
-                        // history, matches Scroll::Delta(positive). No negation needed.
-                        //
-                        // Pixels (touchpad): positive y = content moves down (natural
-                        // scrolling) = show newer, opposite of Scroll::Delta(positive).
-                        // Must negate.
                         let scroll_lines = if is_precise { -lines } else { lines };
                         pending_scroll_delta.fetch_add(scroll_lines, Ordering::Relaxed);
                         cx.notify(entity_id);
@@ -1601,139 +1686,21 @@ impl Render for TerminalPanel {
             content = content.cursor(CursorStyle::PointingHand);
         }
 
-        if self.closed {
-            let label = if let Some(ref msg) = self.error_message {
-                format!("[Error: {msg}]")
-            } else {
-                "[Session closed]".to_string()
-            };
-            let color = if self.error_message.is_some() {
-                theme::error()
-            } else {
-                theme::text_tertiary()
-            };
-            content = content.child(
-                div()
-                    .pt(px(8.0))
-                    .text_color(color)
-                    .text_size(px(12.0))
-                    .child(label),
-            );
-        } else if self.disconnected {
-            content = content.child(
-                div()
-                    .pt(px(8.0))
-                    .text_color(theme::warning())
-                    .text_size(px(12.0))
-                    .child("[Disconnected - reconnecting...]"),
-            );
+        if let Some(status_overlay) = self.render_status_overlay() {
+            content = content.child(status_overlay);
         }
 
-        // Connection type indicator (bottom-right pill badge).
-        let is_bridge = self.handle.is_bridge();
-        let tooltip_text = if is_bridge {
-            "Direct bridge to agent (bypasses server relay)".to_string()
-        } else if self.mode == "local" {
-            "Local WebSocket connection".to_string()
-        } else {
-            "WebSocket relay through server/agent".to_string()
-        };
-        let badge_label = if is_bridge { "Bridge" } else { "WS" };
-        let badge = div()
-            .id("connection-indicator")
-            .absolute()
-            .bottom(px(8.0))
-            .right(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .px(px(6.0))
-            .py(px(2.0))
-            .rounded(px(8.0))
-            .bg(gpui::rgba(0x1111_1399))
-            .child(
-                icon(if is_bridge { Icon::Zap } else { Icon::Wifi })
-                    .size(px(10.0))
-                    .text_color(if is_bridge {
-                        theme::success()
-                    } else {
-                        theme::text_tertiary()
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(theme::text_tertiary())
-                    .child(badge_label),
-            )
-            .child(
-                // Connection status dot: green = connected, red = disconnected.
-                div().size(px(6.0)).rounded_full().bg(if self.disconnected {
-                    theme::error()
-                } else {
-                    theme::success()
-                }),
-            )
-            .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into());
-        // CC metrics badge (above connection badge)
-        if let Some(ref metrics) = self.cc_metrics
-            && let Some(status) = self.cc_status
-        {
-            let mut cc_badge = div()
-                .id("cc-metrics-badge")
-                .absolute()
-                .bottom(px(28.0))
-                .right(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(8.0))
-                .bg(gpui::rgba(0x1111_1399));
-
-            // Bot icon
-            cc_badge = cc_badge.child(cc_widgets::cc_bot_icon(status, 10.0));
-
-            // Model name
-            if let Some(ref model) = metrics.model {
-                cc_badge = cc_badge.child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme::text_tertiary())
-                        .child(cc_widgets::short_model_name(model)),
-                );
-            }
-
-            // Context bar
-            cc_badge = cc_badge.child(cc_widgets::render_context_bar(metrics, 50.0, 4.0));
-
-            // Context percentage text
-            if let Some(pct) = metrics.context_used_pct {
-                let (_, pct_200k) = cc_widgets::context_usage_200k(
-                    pct,
-                    metrics.context_window_size.unwrap_or(200_000),
-                );
-                cc_badge = cc_badge.child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme::text_tertiary())
-                        .child(format!("{pct_200k:.0}%")),
-                );
-            }
-
+        if let Some(cc_badge) = self.render_cc_metrics_badge() {
             content = content.child(cc_badge);
         }
 
-        content = content.child(badge);
+        content = content.child(self.render_connection_badge());
 
-        // Wrap in a vertical container with optional search overlay on top.
         let mut wrapper = div().flex().flex_col().size_full();
         if let Some(overlay) = &self.search_overlay {
             wrapper = wrapper.child(overlay.clone());
         }
-        wrapper = wrapper.child(content);
-        wrapper
+        wrapper.child(content)
     }
 }
 

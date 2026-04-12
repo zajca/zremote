@@ -1390,13 +1390,9 @@ impl MainView {
                     ),
             )
     }
-}
 
-impl Render for MainView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Build the content area (terminal or empty state) as a vertical column
-        // so we can prepend the connection banner when disconnected.
-        let content_area = if let Some(terminal) = &self.terminal {
+    fn render_content_area(&self, cx: &mut Context<Self>) -> Div {
+        if let Some(terminal) = &self.terminal {
             div().flex_1().flex().flex_col().child(terminal.clone())
         } else {
             div().flex_1().flex().flex_col().child(
@@ -1438,7 +1434,167 @@ impl Render for MainView {
                     ))
                     .child(Self::render_empty_state(cx)),
             )
-        };
+        }
+    }
+
+    fn render_connection_banner() -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(5.0))
+            .bg(theme::warning_bg())
+            .border_b_1()
+            .border_color(theme::warning_border())
+            .child(
+                icon(Icon::WifiOff)
+                    .size(px(14.0))
+                    .text_color(theme::warning()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme::warning())
+                    .child("Connection lost, reconnecting..."),
+            )
+    }
+
+    /// Render a modal overlay with the standard backdrop+sibling pattern.
+    #[allow(clippy::too_many_arguments)]
+    fn render_modal_overlay(
+        backdrop_id: &str,
+        container_id: &str,
+        top_offset: Pixels,
+        width: Pixels,
+        height: Option<Pixels>,
+        max_height: Option<Pixels>,
+        backdrop_handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        content: AnyElement,
+    ) -> impl IntoElement {
+        let mut container = div()
+            .id(SharedString::from(container_id.to_string()))
+            .occlude()
+            .w(width)
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::bg_secondary())
+            .overflow_hidden()
+            .child(content);
+
+        if let Some(h) = height {
+            container = container.h(h);
+        }
+        if let Some(mh) = max_height {
+            container = container.max_h(mh);
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id(SharedString::from(backdrop_id.to_string()))
+                    .absolute()
+                    .inset_0()
+                    .bg(theme::modal_backdrop())
+                    .on_click(move |event, window, cx| backdrop_handler(event, window, cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .justify_center()
+                    .pt(top_offset)
+                    .child(container),
+            )
+    }
+
+    fn render_command_palette_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let palette = self.command_palette.as_ref()?;
+        Some(Self::render_modal_overlay(
+            "palette-backdrop",
+            "palette-container",
+            px(80.0),
+            px(520.0),
+            None,
+            Some(px(420.0)),
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_command_palette(cx);
+            }),
+            palette.clone().into_any_element(),
+        ))
+    }
+
+    fn render_session_switcher_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let switcher = self.session_switcher.as_ref()?;
+        let viewport = window.viewport_size();
+        let viewport_w = f32::from(viewport.width);
+        let viewport_h = f32::from(viewport.height);
+        let switcher_w = px((viewport_w - 160.0).clamp(760.0, 1200.0));
+        let switcher_h = px((viewport_h - 200.0).clamp(340.0, 640.0));
+
+        Some(Self::render_modal_overlay(
+            "switcher-backdrop",
+            "switcher-container",
+            px(80.0),
+            switcher_w,
+            Some(switcher_h),
+            None,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_session_switcher(cx);
+            }),
+            switcher.clone().into_any_element(),
+        ))
+    }
+
+    fn render_help_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let help = self.help_modal.as_ref()?;
+        Some(Self::render_modal_overlay(
+            "help-backdrop",
+            "help-container",
+            px(80.0),
+            px(440.0),
+            None,
+            Some(px(440.0)),
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_help_modal(cx);
+            }),
+            help.clone().into_any_element(),
+        ))
+    }
+
+    fn render_settings_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let settings = self.settings_modal.as_ref()?;
+        let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
+        let kinds = Rc::clone(self.sidebar.read(cx).agent_kinds_rc());
+        settings.update(cx, |modal, cx| {
+            modal.set_profiles(profiles, kinds, cx);
+        });
+        Some(Self::render_modal_overlay(
+            "settings-backdrop",
+            "settings-container",
+            px(60.0),
+            px(720.0),
+            Some(px(560.0)),
+            None,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_settings_modal(cx);
+            }),
+            settings.clone().into_any_element(),
+        ))
+    }
+}
+
+impl Render for MainView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content_area = self.render_content_area(cx);
 
         let mut root = div()
             .flex()
@@ -1446,233 +1602,31 @@ impl Render for MainView {
             .bg(theme::bg_primary())
             .child(self.sidebar.clone())
             .child(if !self.server_connected && self.ever_connected {
-                // Wrap content area in a column with a connection-lost banner on top.
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(12.0))
-                            .py(px(5.0))
-                            .bg(theme::warning_bg())
-                            .border_b_1()
-                            .border_color(theme::warning_border())
-                            .child(
-                                icon(Icon::WifiOff)
-                                    .size(px(14.0))
-                                    .text_color(theme::warning()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme::warning())
-                                    .child("Connection lost, reconnecting..."),
-                            ),
-                    )
+                    .child(Self::render_connection_banner())
                     .child(content_area)
                     .into_any_element()
             } else {
                 content_area.into_any_element()
             });
 
-        // Command palette overlay: backdrop and palette are SIBLINGS so clicks
-        // on the palette don't propagate to the backdrop's close handler.
-        if let Some(palette) = &self.command_palette {
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    // Backdrop (behind) -- click anywhere on it to dismiss
-                    .child(
-                        div()
-                            .id("palette-backdrop")
-                            .absolute()
-                            .inset_0()
-                            .bg(theme::modal_backdrop())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.close_command_palette(cx);
-                            })),
-                    )
-                    // Palette (on top) -- full-screen flex container, centers the palette
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .justify_center()
-                            .pt(px(80.0))
-                            // This div is transparent and non-interactive -- clicks pass
-                            // through to the backdrop behind it.
-                            .child(
-                                div()
-                                    .id("palette-container")
-                                    .occlude()
-                                    .w(px(520.0))
-                                    .max_h(px(420.0))
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .bg(theme::bg_secondary())
-                                    .overflow_hidden()
-                                    .child(palette.clone()),
-                            ),
-                    ),
-            );
+        if let Some(overlay) = self.render_command_palette_overlay(cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_session_switcher_overlay(window, cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_help_overlay(cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_settings_overlay(cx) {
+            root = root.child(overlay);
         }
 
-        // Session switcher overlay (same backdrop+sibling pattern as command palette)
-        if let Some(switcher) = &self.session_switcher {
-            // Responsive modal size: the preview pane shows live terminal content, so
-            // narrow windows squeeze 80+ column TUIs and make them look scrambled.
-            // Grow with the window while keeping sane bounds.
-            let viewport = window.viewport_size();
-            let viewport_w = f32::from(viewport.width);
-            let viewport_h = f32::from(viewport.height);
-            let switcher_w = px((viewport_w - 160.0).clamp(760.0, 1200.0));
-            // Use an explicit height (not just max_h) so h_full() on inner flex
-            // children resolves to a definite value, keeping the left list's
-            // overflow_y_scroll() active from the first overflowing item.
-            let switcher_h = px((viewport_h - 200.0).clamp(340.0, 640.0));
-
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(
-                        div()
-                            .id("switcher-backdrop")
-                            .absolute()
-                            .inset_0()
-                            .bg(theme::modal_backdrop())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.close_session_switcher(cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .justify_center()
-                            .pt(px(80.0))
-                            .child(
-                                div()
-                                    .id("switcher-container")
-                                    .occlude()
-                                    .w(switcher_w)
-                                    .h(switcher_h)
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .bg(theme::bg_secondary())
-                                    .overflow_hidden()
-                                    .child(switcher.clone()),
-                            ),
-                    ),
-            );
-        }
-
-        // Help modal overlay (same backdrop+sibling pattern)
-        if let Some(help) = &self.help_modal {
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(
-                        div()
-                            .id("help-backdrop")
-                            .absolute()
-                            .inset_0()
-                            .bg(theme::modal_backdrop())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.close_help_modal(cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .justify_center()
-                            .pt(px(80.0))
-                            .child(
-                                div()
-                                    .id("help-container")
-                                    .occlude()
-                                    .w(px(440.0))
-                                    .max_h(px(440.0))
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .bg(theme::bg_secondary())
-                                    .overflow_hidden()
-                                    .child(help.clone()),
-                            ),
-                    ),
-            );
-        }
-
-        // Settings modal overlay. Before rendering, push the sidebar's latest
-        // profile/kind snapshots into the modal so CRUD refreshes flow
-        // transparently without explicit event plumbing between the sidebar
-        // and the modal. The modal/tab short-circuit unchanged Rc pointers
-        // so this is cheap.
-        if let Some(settings) = &self.settings_modal {
-            let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
-            let kinds = Rc::clone(self.sidebar.read(cx).agent_kinds_rc());
-            settings.update(cx, |modal, cx| {
-                modal.set_profiles(profiles, kinds, cx);
-            });
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(
-                        div()
-                            .id("settings-backdrop")
-                            .absolute()
-                            .inset_0()
-                            .bg(theme::modal_backdrop())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.close_settings_modal(cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .justify_center()
-                            .pt(px(60.0))
-                            .child(
-                                div()
-                                    .id("settings-container")
-                                    .occlude()
-                                    .w(px(720.0))
-                                    // Definite height so `flex_1` + `overflow_y_scroll`
-                                    // in the profile editor form resolve against a
-                                    // bounded box -- with `max_h` alone the scroll
-                                    // region had no frame to clip against.
-                                    .h(px(560.0))
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .bg(theme::bg_secondary())
-                                    .overflow_hidden()
-                                    .child(settings.clone()),
-                            ),
-                    ),
-            );
-        }
-
-        // Toast overlay (bottom-right, always on top)
-        root = root.child(self.toasts.clone());
-
-        root
+        root.child(self.toasts.clone())
     }
 }
 

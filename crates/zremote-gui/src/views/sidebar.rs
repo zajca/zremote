@@ -1571,11 +1571,82 @@ impl Render for CcTooltipView {
     }
 }
 
-impl Render for SidebarView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+// ---------------------------------------------------------------------------
+// Render helpers
+// ---------------------------------------------------------------------------
+
+impl SidebarView {
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.0))
+            .py(px(10.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child("ZRemote"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id("settings-button")
+                            .cursor_pointer()
+                            .child(
+                                icon(Icon::Settings)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .hover(|s| s.text_color(theme::text_primary()))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SidebarTextTooltip("Settings".to_string()))
+                                    .into()
+                            })
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                                cx.emit(SidebarEvent::OpenSettings);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("help-button")
+                            .cursor_pointer()
+                            .child(
+                                icon(Icon::CircleHelp)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .hover(|s| s.text_color(theme::text_primary()))
+                            .on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+                                cx.emit(SidebarEvent::OpenHelp);
+                            })),
+                    )
+                    .child(if self.loading {
+                        icon(Icon::Loader)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary())
+                            .into_any_element()
+                    } else {
+                        icon(Icon::Wifi)
+                            .size(px(14.0))
+                            .text_color(theme::success())
+                            .into_any_element()
+                    }),
+            )
+    }
+
+    fn render_host_list(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let is_local = self.app_state.mode == "local";
 
-        let content: Vec<AnyElement> = if self.hosts.is_empty() && !self.loading {
+        if self.hosts.is_empty() && !self.loading {
             vec![
                 div()
                     .px(px(12.0))
@@ -1586,13 +1657,11 @@ impl Render for SidebarView {
                     .into_any_element(),
             ]
         } else if is_local {
-            // Local mode: no dividers, no host headers
             self.hosts
                 .iter()
                 .map(|host| self.render_host_section(host, cx).into_any_element())
                 .collect()
         } else {
-            // Server mode: dividers between hosts
             let mut items: Vec<AnyElement> = Vec::new();
             for (i, host) in self.hosts.iter().enumerate() {
                 if i > 0 {
@@ -1608,7 +1677,82 @@ impl Render for SidebarView {
                 items.push(self.render_host_section(host, cx).into_any_element());
             }
             items
-        };
+        }
+    }
+
+    fn render_footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let is_local = self.app_state.mode == "local";
+        let host = if is_local { self.hosts.first() } else { None };
+        let host = host?;
+
+        let new_host_id = host.id.clone();
+        let has_suspended = self
+            .sessions
+            .iter()
+            .any(|s| s.host_id == host.id && s.status == SessionStatus::Suspended);
+
+        Some(
+            div()
+                .border_t_1()
+                .border_color(theme::border())
+                .px(px(8.0))
+                .py(px(6.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .id("new-session-local")
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .text_color(theme::text_secondary())
+                        .text_size(px(12.0))
+                        .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
+                        .child(icon(Icon::Plus).size(px(14.0)))
+                        .child("New Session")
+                        .on_click({
+                            let host_id = new_host_id.clone();
+                            cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                this.create_session(&host_id, None, cx);
+                            })
+                        }),
+                )
+                .when(has_suspended, |el: Div| {
+                    let cleanup_host_id = new_host_id.clone();
+                    el.child(
+                        div()
+                            .id("cleanup-sessions-local")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_color(theme::text_tertiary())
+                            .text_size(px(12.0))
+                            .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::error()))
+                            .child(icon(Icon::X).size(px(14.0)))
+                            .child("Clean up")
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    this.cleanup_sessions(&cleanup_host_id, cx);
+                                },
+                            )),
+                    )
+                }),
+        )
+    }
+}
+
+impl Render for SidebarView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_host_list(cx);
 
         let mut sidebar = div()
             .flex()
@@ -1618,76 +1762,7 @@ impl Render for SidebarView {
             .bg(theme::bg_secondary())
             .border_r_1()
             .border_color(theme::border())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(
-                        div()
-                            .text_color(theme::text_primary())
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child("ZRemote"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .id("settings-button")
-                                    .cursor_pointer()
-                                    .child(
-                                        icon(Icon::Settings)
-                                            .size(px(14.0))
-                                            .text_color(theme::text_secondary()),
-                                    )
-                                    .hover(|s| s.text_color(theme::text_primary()))
-                                    .tooltip(|_window, cx| {
-                                        cx.new(|_| SidebarTextTooltip("Settings".to_string()))
-                                            .into()
-                                    })
-                                    .on_click(cx.listener(
-                                        |_this, _event: &ClickEvent, _window, cx| {
-                                            cx.emit(SidebarEvent::OpenSettings);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id("help-button")
-                                    .cursor_pointer()
-                                    .child(
-                                        icon(Icon::CircleHelp)
-                                            .size(px(14.0))
-                                            .text_color(theme::text_secondary()),
-                                    )
-                                    .hover(|s| s.text_color(theme::text_primary()))
-                                    .on_click(cx.listener(
-                                        |_this, _event: &ClickEvent, _window, cx| {
-                                            cx.emit(SidebarEvent::OpenHelp);
-                                        },
-                                    )),
-                            )
-                            .child(if self.loading {
-                                icon(Icon::Loader)
-                                    .size(px(14.0))
-                                    .text_color(theme::text_tertiary())
-                                    .into_any_element()
-                            } else {
-                                icon(Icon::Wifi)
-                                    .size(px(14.0))
-                                    .text_color(theme::success())
-                                    .into_any_element()
-                            }),
-                    ),
-            )
+            .child(self.render_header(cx))
             .child(
                 div()
                     .id("sidebar-content")
@@ -1699,70 +1774,8 @@ impl Render for SidebarView {
                     .children(content),
             );
 
-        // Local mode: "New Session" button at bottom of sidebar
-        if is_local && let Some(host) = self.hosts.first() {
-            let new_host_id = host.id.clone();
-            let has_suspended = self
-                .sessions
-                .iter()
-                .any(|s| s.host_id == host.id && s.status == SessionStatus::Suspended);
-
-            sidebar = sidebar.child(
-                div()
-                    .border_t_1()
-                    .border_color(theme::border())
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .id("new-session-local")
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .text_color(theme::text_secondary())
-                            .text_size(px(12.0))
-                            .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::text_primary()))
-                            .child(icon(Icon::Plus).size(px(14.0)))
-                            .child("New Session")
-                            .on_click({
-                                let host_id = new_host_id.clone();
-                                cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                    this.create_session(&host_id, None, cx);
-                                })
-                            }),
-                    )
-                    .when(has_suspended, |el: Div| {
-                        let cleanup_host_id = new_host_id.clone();
-                        el.child(
-                            div()
-                                .id("cleanup-sessions-local")
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .text_color(theme::text_tertiary())
-                                .text_size(px(12.0))
-                                .hover(|s| s.bg(theme::bg_tertiary()).text_color(theme::error()))
-                                .child(icon(Icon::X).size(px(14.0)))
-                                .child("Clean up")
-                                .on_click(cx.listener(
-                                    move |this, _event: &ClickEvent, _window, cx| {
-                                        this.cleanup_sessions(&cleanup_host_id, cx);
-                                    },
-                                )),
-                        )
-                    }),
-            );
+        if let Some(footer) = self.render_footer(cx) {
+            sidebar = sidebar.child(footer);
         }
 
         sidebar
