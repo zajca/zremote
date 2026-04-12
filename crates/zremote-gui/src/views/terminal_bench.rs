@@ -619,30 +619,17 @@ mod tests {
 
     #[test]
     #[ignore = "benchmark: run manually with --ignored"]
-    fn bench_glyph_cache_steady_state() {
+    fn bench_glyph_cache_lookup_latency() {
         let content = generate_ansi_log(10_000);
         let term = create_term_with_content(120, 40, &content);
         let runs = TerminalElement::build_cell_runs(&term);
 
-        // Pre-populate cache (simulating glyphs shaped on first frame)
+        // Measure HashMap lookup latency on an empty cache.
+        // This isolates the cost of key hashing + comparison. In production,
+        // hits add a pointer dereference to retrieve the ShapedLine, but the
+        // HashMap probe cost (measured here) dominates since ShapedLine is
+        // accessed by reference.
         let cache = GlyphCache::new();
-        for run in &runs {
-            let color = run.fg;
-            for ch in run.text.chars() {
-                if ch != ' '
-                    && cache
-                        .get(ch, run.bold, run.italic, run.wide, color)
-                        .is_none()
-                {
-                    // Mark as "shaped" by counting the miss. In real code,
-                    // shape_line() result would be inserted here.
-                    // We cannot insert a real ShapedLine without a text system,
-                    // so we just measure lookup performance.
-                }
-            }
-        }
-
-        // Measure steady-state lookup performance (all hits)
         let iterations = 1000u32;
         let start = Instant::now();
         let mut lookups = 0u64;
@@ -651,8 +638,6 @@ mod tests {
                 let color = run.fg;
                 for ch in run.text.chars() {
                     if ch != ' ' {
-                        // This will be a miss since we couldn't insert real ShapedLines,
-                        // but it measures the HashMap lookup cost which is the same.
                         let _ = cache.get(ch, run.bold, run.italic, run.wide, color);
                         lookups += 1;
                     }
@@ -662,12 +647,15 @@ mod tests {
         let elapsed = start.elapsed();
         let per_lookup = elapsed / lookups as u32;
 
-        println!("=== Glyph Cache: Steady State Lookup ===");
+        println!("=== Glyph Cache: Lookup Latency (empty map) ===");
         println!("  Iterations: {iterations}");
         println!("  Total lookups: {lookups}");
         println!("  Total time:    {elapsed:?}");
         println!("  Per lookup:    {per_lookup:?}");
         println!("  Lookups/frame: {}", lookups / u64::from(iterations));
+        println!();
+        println!("  NOTE: Measures HashMap probe cost (hash + compare).");
+        println!("  Hit-path adds only a pointer deref to retrieve ShapedLine.");
     }
 
     // ── End-to-End Pipeline Benchmarks ────────────────────────────────
