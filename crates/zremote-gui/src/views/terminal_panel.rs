@@ -1342,6 +1342,7 @@ impl Render for TerminalPanel {
                                     KeyAction::CloseOverlay => {}
                                 },
                             );
+                        cx.stop_propagation();
                         return;
                     }
 
