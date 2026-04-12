@@ -140,6 +140,14 @@ Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (1
 3. **Each helper returns `impl IntoElement`** (or `Option<AnyElement>` when conditionally rendered) and lives in the same `impl` block.
 4. **Use `.when()` / `.when_some()`** for conditional chaining instead of `if/else` breaking builder chains.
 
+### Async Task Ownership Convention
+
+- Every long-running async task (polling loop, WebSocket listener, timer, debounce) must be stored as a `Task<()>` field (or `Option<Task<()>>`) on the owning struct. Dropping the struct cancels the task automatically.
+- **No `.detach()` for long-lived work.** Detached tasks leak if the parent entity is dropped before the task's exit condition fires.
+- `.detach()` is OK for: fire-and-forget short work (single API call, show toast, open URL), `cx.subscribe()` results (GPUI manages their lifetime).
+- Use `cx.spawn()` for tasks that touch GPUI entity state. Use `cx.background_spawn()` for pure CPU/IO work (resize debounce, file reads).
+- Replacing a `Task<()>` field with a new task cancels the previous one — use this for reconnect/restart patterns instead of manual cancellation.
+
 ## Protocol Conventions
 
 - All message enums use `#[serde(tag = "type")]` for tagged JSON serialization.

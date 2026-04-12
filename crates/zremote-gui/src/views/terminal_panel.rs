@@ -256,6 +256,10 @@ pub struct TerminalPanel {
     cc_status: Option<AgenticStatus>,
     /// Tokio runtime handle for spawning async tasks (coalescing, etc.).
     tokio_handle: tokio::runtime::Handle,
+    /// Owned resize debounce task — cancelled on drop or reconnect.
+    resize_debounce_task: Option<Task<()>>,
+    /// Owned PTY reader task — cancelled on drop or reconnect.
+    pty_reader_task: Option<Task<()>>,
 }
 
 impl TerminalPanel {
@@ -278,7 +282,7 @@ impl TerminalPanel {
         // tokio task forwards to real resize_tx after 150ms of inactivity.
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
         let real_resize_tx = handle.resize_tx().clone();
-        tokio_handle.spawn(async move {
+        let resize_debounce_task = cx.background_spawn(async move {
             let mut first_resize = true;
             loop {
                 // Wait for first resize event.
@@ -356,6 +360,8 @@ impl TerminalPanel {
             cc_metrics: None,
             cc_status: None,
             tokio_handle: tokio_handle.clone(),
+            resize_debounce_task: Some(resize_debounce_task),
+            pty_reader_task: None, // Set when start_output_reader() is called
         }
     }
 
@@ -475,9 +481,10 @@ impl TerminalPanel {
         self.tokio_handle = tokio_handle.clone();
 
         // Set up new resize debounce pipeline for the new handle.
+        // Replacing the task field cancels the previous debounce task.
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
         let real_resize_tx = self.handle.resize_tx().clone();
-        tokio_handle.spawn(async move {
+        self.resize_debounce_task = Some(cx.background_spawn(async move {
             let mut first_resize = true;
             loop {
                 let Ok(mut dims) = resize_debounce_rx.recv_async().await else {
@@ -510,7 +517,7 @@ impl TerminalPanel {
                     }
                 }
             }
-        });
+        }));
         self.resize_debounce_tx = resize_debounce_tx;
 
         // Trigger immediate resize to sync the new connection with current terminal size.
@@ -530,6 +537,8 @@ impl TerminalPanel {
             return;
         }
         self.reader_started = true;
+        // Replacing the task field cancels any previous reader (e.g. after reconnect).
+        self.pty_reader_task = None;
 
         let output_rx = self.handle.output_rx().clone();
         let term = self.term.clone();
@@ -646,67 +655,68 @@ impl TerminalPanel {
         });
 
         // GPUI task: reads unified signal channel and updates UI accordingly.
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            loop {
-                match gui_rx.recv_async().await {
-                    Ok(GuiSignal::Repaint) => {
-                        let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                            cx.notify();
-                        });
-                    }
-                    Ok(GuiSignal::TitleChanged(new_title)) => {
-                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.terminal_title != new_title {
-                                this.terminal_title = new_title.clone();
-                                cx.emit(TerminalPanelEvent::TitleChanged {
-                                    session_id: this.session_id.clone(),
-                                    title: new_title,
-                                });
-                            }
-                        });
-                    }
-                    Ok(GuiSignal::Event(TerminalEvent::SessionClosed { .. })) => {
-                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            this.closed = true;
-                            cx.notify();
-                        });
-                        break;
-                    }
-                    Ok(GuiSignal::Event(TerminalEvent::ScrollbackEnd { .. })) => {
-                        let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                            cx.notify();
-                        });
-                    }
-                    Ok(GuiSignal::Event(TerminalEvent::Error { message })) => {
-                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.handle.is_bridge() {
-                                let sid = this.session_id.clone();
-                                cx.emit(TerminalPanelEvent::BridgeFailed { session_id: sid });
-                            } else {
-                                this.error_message = Some(message);
+        self.pty_reader_task = Some(cx.spawn(
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    match gui_rx.recv_async().await {
+                        Ok(GuiSignal::Repaint) => {
+                            let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                                cx.notify();
+                            });
+                        }
+                        Ok(GuiSignal::TitleChanged(new_title)) => {
+                            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                                if this.terminal_title != new_title {
+                                    this.terminal_title = new_title.clone();
+                                    cx.emit(TerminalPanelEvent::TitleChanged {
+                                        session_id: this.session_id.clone(),
+                                        title: new_title,
+                                    });
+                                }
+                            });
+                        }
+                        Ok(GuiSignal::Event(TerminalEvent::SessionClosed { .. })) => {
+                            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                                 this.closed = true;
                                 cx.notify();
-                            }
-                        });
-                        // Always break: for bridge errors, reconnect() starts a fresh reader;
-                        // for other errors, the terminal is closed.
-                        break;
+                            });
+                            break;
+                        }
+                        Ok(GuiSignal::Event(TerminalEvent::ScrollbackEnd { .. })) => {
+                            let _ = this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                                cx.notify();
+                            });
+                        }
+                        Ok(GuiSignal::Event(TerminalEvent::Error { message })) => {
+                            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                                if this.handle.is_bridge() {
+                                    let sid = this.session_id.clone();
+                                    cx.emit(TerminalPanelEvent::BridgeFailed { session_id: sid });
+                                } else {
+                                    this.error_message = Some(message);
+                                    this.closed = true;
+                                    cx.notify();
+                                }
+                            });
+                            // Always break: for bridge errors, reconnect() starts a fresh reader;
+                            // for other errors, the terminal is closed.
+                            break;
+                        }
+                        Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
+                            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                                this.disconnected = true;
+                                cx.notify();
+                            });
+                            break;
+                        }
+                        Ok(GuiSignal::Event(_)) => {
+                            // Pane and suspension events not yet handled
+                        }
+                        Err(_) => break,
                     }
-                    Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
-                        let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            this.disconnected = true;
-                            cx.notify();
-                        });
-                        break;
-                    }
-                    Ok(GuiSignal::Event(_)) => {
-                        // Pane and suspension events not yet handled
-                    }
-                    Err(_) => break,
                 }
-            }
-        })
-        .detach();
+            },
+        ));
     }
 
     /// Start the cursor blink timer. Spawns an async loop that toggles
