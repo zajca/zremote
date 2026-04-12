@@ -128,7 +128,13 @@ pub fn run(config: GuiConfig) {
             let _quit_sub = cx.on_app_quit({
                 move |cx: &mut App| {
                     // Try to read window bounds for persistence.
-                    if let Some(win) = cx.windows().first().copied()
+                    //
+                    // The `FlushWaiter` pattern lets us release the outer
+                    // `AppState::persistence` mutex before we block on the
+                    // background worker, so a concurrent access to the
+                    // persistence handle during quit does not stall for up
+                    // to 2 seconds behind a held guard.
+                    let waiter = if let Some(win) = cx.windows().first().copied()
                         && let Ok(bounds) = win
                             .update(cx, |_root: AnyView, window: &mut Window, _cx: &mut App| {
                                 window.bounds()
@@ -139,9 +145,14 @@ pub fn run(config: GuiConfig) {
                             s.window_width = Some(f32::from(bounds.size.width));
                             s.window_height = Some(f32::from(bounds.size.height));
                         });
-                        if let Err(e) = p.save_if_changed() {
-                            tracing::warn!(error = %e, "failed to save GUI state on quit");
-                        }
+                        Some(p.flush_waiter())
+                    } else {
+                        None
+                    };
+                    if let Some(waiter) = waiter
+                        && waiter.wait(Duration::from_secs(2)).is_err()
+                    {
+                        tracing::warn!("timed out waiting for GUI state flush on quit");
                     }
                     async {}
                 }
