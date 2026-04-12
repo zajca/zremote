@@ -256,8 +256,6 @@ pub struct TerminalPanel {
     cc_status: Option<AgenticStatus>,
     /// Tokio runtime handle for spawning async tasks (coalescing, etc.).
     tokio_handle: tokio::runtime::Handle,
-    /// Owned resize debounce task — cancelled on drop or reconnect.
-    resize_debounce_task: Option<Task<()>>,
     /// Owned PTY reader task — cancelled on drop or reconnect.
     pty_reader_task: Option<Task<()>>,
 }
@@ -282,7 +280,9 @@ impl TerminalPanel {
         // tokio task forwards to real resize_tx after 150ms of inactivity.
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
         let real_resize_tx = handle.resize_tx().clone();
-        let resize_debounce_task = cx.background_spawn(async move {
+        // Runs on tokio runtime — requires tokio::time::timeout for debouncing.
+        // Exits naturally when resize_debounce_tx is dropped (channel close).
+        tokio_handle.spawn(async move {
             let mut first_resize = true;
             loop {
                 // Wait for first resize event.
@@ -360,7 +360,6 @@ impl TerminalPanel {
             cc_metrics: None,
             cc_status: None,
             tokio_handle: tokio_handle.clone(),
-            resize_debounce_task: Some(resize_debounce_task),
             pty_reader_task: None, // Set when start_output_reader() is called
         }
     }
@@ -481,10 +480,11 @@ impl TerminalPanel {
         self.tokio_handle = tokio_handle.clone();
 
         // Set up new resize debounce pipeline for the new handle.
-        // Replacing the task field cancels the previous debounce task.
+        // Old debounce task exits via channel close (old resize_debounce_tx dropped below).
         let (resize_debounce_tx, resize_debounce_rx) = flume::bounded::<(u16, u16)>(4);
         let real_resize_tx = self.handle.resize_tx().clone();
-        self.resize_debounce_task = Some(cx.background_spawn(async move {
+        // Runs on tokio runtime — requires tokio::time::timeout for debouncing.
+        tokio_handle.spawn(async move {
             let mut first_resize = true;
             loop {
                 let Ok(mut dims) = resize_debounce_rx.recv_async().await else {
@@ -517,7 +517,7 @@ impl TerminalPanel {
                     }
                 }
             }
-        }));
+        });
         self.resize_debounce_tx = resize_debounce_tx;
 
         // Trigger immediate resize to sync the new connection with current terminal size.
