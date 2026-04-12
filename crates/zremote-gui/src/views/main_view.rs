@@ -170,10 +170,10 @@ impl MainView {
     fn open_terminal(&mut self, session_id: &str, host_id: &str, cx: &mut Context<Self>) {
         let session_id_owned = session_id.to_string();
 
-        // Persist active session.
+        // Persist active session. `update` queues the save via the background
+        // worker; no explicit flush needed at the call site.
         if let Ok(mut p) = self.app_state.persistence.lock() {
             p.update(|s| s.active_session_id = Some(session_id_owned.clone()));
-            let _ = p.save_if_changed();
         }
 
         // Keep sidebar selection in sync (covers command palette, switcher, etc.)
