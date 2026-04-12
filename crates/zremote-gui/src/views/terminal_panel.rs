@@ -61,6 +61,7 @@ use crate::terminal_handle::{InputSender, TerminalHandle};
 use crate::theme;
 use crate::views::command_palette::PaletteTab;
 use crate::views::double_shift::DoubleShiftDetector;
+use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
 use crate::views::url_detector::UrlDetector;
 use zremote_client::{AgenticStatus, TerminalEvent};
@@ -1317,79 +1318,30 @@ impl Render for TerminalPanel {
 
                     double_shift_kd.on_key_down_during_shift();
 
-                    // Ctrl+F: open search
-                    if mods.control && !mods.shift && key == "f" {
-                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            this.open_search(cx);
-                        });
-                        return;
-                    }
-
-                    // Ctrl+Tab: session switcher
-                    if mods.control && !mods.shift && !mods.alt && key == "tab" {
-                        let _ = entity.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                            cx.emit(TerminalPanelEvent::OpenSessionSwitcher);
-                        });
-                        return;
-                    }
-
-                    // Ctrl+K: open command palette (All tab)
-                    if mods.control && !mods.shift && !mods.alt && key == "k" {
-                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.search_open {
-                                this.close_search(cx);
-                            }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
-                                tab: PaletteTab::All,
-                            });
-                        });
-                        return;
-                    }
-
-                    // Ctrl+Shift+E: open command palette (Sessions tab)
-                    if mods.control && mods.shift && !mods.alt && key == "e" {
-                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.search_open {
-                                this.close_search(cx);
-                            }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
-                                tab: PaletteTab::Sessions,
-                            });
-                        });
-                        return;
-                    }
-
-                    // Ctrl+Shift+P: open command palette (Projects tab)
-                    if mods.control && mods.shift && !mods.alt && key == "p" {
-                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.search_open {
-                                this.close_search(cx);
-                            }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
-                                tab: PaletteTab::Projects,
-                            });
-                        });
-                        return;
-                    }
-
-                    // F1: open help modal
-                    if !mods.control && !mods.shift && !mods.alt && key == "f1" {
-                        let _ = entity.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                            cx.emit(TerminalPanelEvent::OpenHelp);
-                        });
-                        return;
-                    }
-
-                    // Ctrl+Shift+A: open command palette (Actions tab)
-                    if mods.control && mods.shift && !mods.alt && key == "a" {
-                        let _ = entity.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                            if this.search_open {
-                                this.close_search(cx);
-                            }
-                            cx.emit(TerminalPanelEvent::OpenCommandPalette {
-                                tab: PaletteTab::Actions,
-                            });
-                        });
+                    // Global shortcuts via centralized dispatch
+                    if let Some(action) =
+                        dispatch_global_key(key, mods.control, mods.shift, mods.alt)
+                    {
+                        let _ =
+                            entity.update(
+                                cx,
+                                |this: &mut Self, cx: &mut Context<Self>| match action {
+                                    KeyAction::OpenSearch => this.open_search(cx),
+                                    KeyAction::OpenSessionSwitcher => {
+                                        cx.emit(TerminalPanelEvent::OpenSessionSwitcher);
+                                    }
+                                    KeyAction::OpenCommandPalette(tab) => {
+                                        if this.search_open {
+                                            this.close_search(cx);
+                                        }
+                                        cx.emit(TerminalPanelEvent::OpenCommandPalette { tab });
+                                    }
+                                    KeyAction::OpenHelp => {
+                                        cx.emit(TerminalPanelEvent::OpenHelp);
+                                    }
+                                    KeyAction::CloseOverlay => {}
+                                },
+                            );
                         return;
                     }
 

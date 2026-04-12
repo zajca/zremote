@@ -17,6 +17,7 @@ use gpui::*;
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 use crate::views::settings::agent_profiles_tab::{AgentProfilesTab, AgentProfilesTabEvent};
 use zremote_client::{AgentKindInfo, AgentProfile};
 
@@ -195,7 +196,11 @@ impl Render for SettingsModal {
             .flex_col()
             .size_full()
             .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+                if let Some(KeyAction::CloseOverlay) =
+                    dispatch_modal_key(key, mods.control, mods.shift, mods.alt)
+                {
                     cx.emit(SettingsModalEvent::Close);
                     cx.stop_propagation();
                 }

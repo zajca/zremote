@@ -3,51 +3,7 @@
 use gpui::*;
 
 use crate::theme;
-
-/// Keyboard shortcut entry for the help modal.
-struct Shortcut {
-    keys: &'static str,
-    description: &'static str,
-}
-
-const SHORTCUTS: &[Shortcut] = &[
-    Shortcut {
-        keys: "Ctrl+K",
-        description: "Command palette",
-    },
-    Shortcut {
-        keys: "Shift Shift",
-        description: "Command palette",
-    },
-    Shortcut {
-        keys: "Ctrl+Tab",
-        description: "Switch session",
-    },
-    Shortcut {
-        keys: "Ctrl+Shift+E",
-        description: "Sessions",
-    },
-    Shortcut {
-        keys: "Ctrl+Shift+P",
-        description: "Projects",
-    },
-    Shortcut {
-        keys: "Ctrl+Shift+A",
-        description: "Actions",
-    },
-    Shortcut {
-        keys: "Ctrl+F",
-        description: "Search in terminal",
-    },
-    Shortcut {
-        keys: "Escape",
-        description: "Close overlay",
-    },
-    Shortcut {
-        keys: "F1",
-        description: "Help",
-    },
-];
+use crate::views::key_bindings::{KeyAction, dispatch_modal_key, help_shortcuts};
 
 /// Help modal showing keyboard shortcuts and version information.
 pub struct HelpModal {
@@ -88,7 +44,7 @@ impl HelpModal {
             .child(title.to_string())
     }
 
-    fn render_shortcut_row(shortcut: &Shortcut) -> Div {
+    fn render_shortcut_row(keys: &str, description: &str) -> Div {
         div()
             .flex()
             .items_center()
@@ -102,13 +58,13 @@ impl HelpModal {
                     .py(px(2.0))
                     .text_size(px(11.0))
                     .text_color(theme::text_primary())
-                    .child(shortcut.keys),
+                    .child(keys.to_string()),
             )
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme::text_secondary())
-                    .child(shortcut.description),
+                    .child(description.to_string()),
             )
     }
 
@@ -152,20 +108,24 @@ impl Render for HelpModal {
             .flex_col()
             .size_full()
             .overflow_y_scroll()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
+            .on_key_down(cx.listener(|_this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+                if let Some(KeyAction::CloseOverlay) =
+                    dispatch_modal_key(key, mods.control, mods.shift, mods.alt)
+                {
                     cx.emit(HelpModalEvent::Close);
                     cx.stop_propagation();
                 }
-                let _ = this;
             }));
 
-        // Keyboard shortcuts section
+        // Keyboard shortcuts section (auto-generated from binding registry)
         let mut shortcuts_section = div().px(px(16.0)).py(px(12.0));
         shortcuts_section =
             shortcuts_section.child(Self::render_section_header("Keyboard Shortcuts"));
-        for shortcut in SHORTCUTS {
-            shortcuts_section = shortcuts_section.child(Self::render_shortcut_row(shortcut));
+        for (keys, description) in help_shortcuts() {
+            shortcuts_section =
+                shortcuts_section.child(Self::render_shortcut_row(keys, description));
         }
         content = content.child(shortcuts_section);
 
