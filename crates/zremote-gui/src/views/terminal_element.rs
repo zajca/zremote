@@ -121,21 +121,21 @@ const CELL_RUN_CACHE_SLOTS: usize = 8;
 
 /// A run of consecutive cells on the same row sharing the same style.
 #[derive(Clone)]
-struct CellRun {
-    text: String,
-    fg: Hsla,
-    bg: Option<Hsla>,
-    bold: bool,
-    italic: bool,
-    dim: bool,
-    underline: bool,
-    wavy_underline: bool,
-    strikethrough: bool,
+pub(crate) struct CellRun {
+    pub(crate) text: String,
+    pub(crate) fg: Hsla,
+    pub(crate) bg: Option<Hsla>,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) dim: bool,
+    pub(crate) underline: bool,
+    pub(crate) wavy_underline: bool,
+    pub(crate) strikethrough: bool,
     /// All characters in this run are double-width (CJK / emoji).
-    wide: bool,
-    col_start: usize,
-    col_count: usize,
-    row: usize,
+    pub(crate) wide: bool,
+    pub(crate) col_start: usize,
+    pub(crate) col_count: usize,
+    pub(crate) row: usize,
 }
 
 /// LRU cache for cell runs, storing the last N (display_offset, content_generation) snapshots.
@@ -146,7 +146,7 @@ pub struct CellRunCache {
     slots: Vec<CellRunCacheEntry>,
 }
 
-struct CellRunCacheEntry {
+pub(crate) struct CellRunCacheEntry {
     display_offset: usize,
     content_generation: u64,
     runs: Vec<CellRun>,
@@ -161,7 +161,7 @@ impl CellRunCache {
 
     /// Look up cached cell runs for the given (display_offset, content_generation).
     /// Returns None on cache miss.
-    fn get(&self, display_offset: usize, content_generation: u64) -> Option<&[CellRun]> {
+    pub(crate) fn get(&self, display_offset: usize, content_generation: u64) -> Option<&[CellRun]> {
         self.slots
             .iter()
             .find(|e| {
@@ -171,7 +171,12 @@ impl CellRunCache {
     }
 
     /// Insert cell runs for the given key. Evicts the oldest entry if at capacity.
-    fn insert(&mut self, display_offset: usize, content_generation: u64, runs: Vec<CellRun>) {
+    pub(crate) fn insert(
+        &mut self,
+        display_offset: usize,
+        content_generation: u64,
+        runs: Vec<CellRun>,
+    ) {
         // Remove existing entry for this key (promote to front).
         self.slots.retain(|e| {
             e.display_offset != display_offset || e.content_generation != content_generation
@@ -198,7 +203,7 @@ impl CellRunCache {
 /// Includes color bits so that the same character with different colors gets
 /// separate cache entries. Without this, whichever color was shaped first
 /// would be used for all occurrences of that character.
-type GlyphCacheKey = (char, bool, bool, bool, u32, u32, u32, u32);
+pub(crate) type GlyphCacheKey = (char, bool, bool, bool, u32, u32, u32, u32);
 
 /// Convert an Hsla color to cache key components (bit patterns of h, s, l, a).
 fn hsla_to_cache_bits(color: Hsla) -> (u32, u32, u32, u32) {
@@ -229,8 +234,14 @@ impl GlyphCache {
         }
     }
 
+    /// Number of entries in the cache.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Look up a shaped single-character line by (char, bold, italic, wide, color).
-    fn get(
+    pub(crate) fn get(
         &self,
         ch: char,
         bold: bool,
@@ -388,7 +399,9 @@ impl TerminalElement {
 
     /// Extract cell runs from the terminal grid, batching adjacent cells with the same style.
     /// Accounts for `display_offset` so scrolled-back content is rendered correctly.
-    fn build_cell_runs(term: &TerminalTerm) -> Vec<CellRun> {
+    pub(crate) fn build_cell_runs<T: alacritty_terminal::event::EventListener>(
+        term: &alacritty_terminal::Term<T>,
+    ) -> Vec<CellRun> {
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_offset = term.grid().display_offset() as i32;
