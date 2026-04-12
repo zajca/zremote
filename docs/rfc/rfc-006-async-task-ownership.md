@@ -15,9 +15,9 @@ The codebase had several long-running async tasks that called `.detach()` instea
 ### Converted (6 tasks)
 
 **TerminalPanel** (`terminal_panel.rs`):
-1. **Resize debounce** (constructor) — `tokio_handle.spawn()` → `cx.background_spawn()` stored as `_resize_debounce_task: Option<Task<()>>`
+1. **Resize debounce** (constructor) — `tokio_handle.spawn()` → `cx.background_spawn()` stored as `resize_debounce_task: Option<Task<()>>`
 2. **Resize debounce** (reconnect) — same pattern, replacing the field cancels the old task
-3. **PTY reader** (`start_output_reader`) — `cx.spawn().detach()` → stored as `_pty_reader_task: Option<Task<()>>`
+3. **PTY reader** (`start_output_reader`) — `cx.spawn().detach()` → stored as `pty_reader_task: Option<Task<()>>`
 
 **MainView** (`main_view.rs`):
 4. **Event polling loop** (`start_event_polling`) — `cx.spawn().detach()` → stored as `_event_poller: Task<()>`
