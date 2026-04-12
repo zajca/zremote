@@ -84,6 +84,8 @@ pub struct GuiState {
     pub window_height: Option<f32>,
     #[serde(default)]
     pub recent_sessions: Vec<RecentSession>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub activity_panel_visible: bool,
 }
 
 impl GuiState {
@@ -93,6 +95,7 @@ impl GuiState {
             && self.window_width.is_none()
             && self.window_height.is_none()
             && self.recent_sessions.is_empty()
+            && !self.activity_panel_visible
     }
 }
 
@@ -975,6 +978,7 @@ mod tests {
                 session_id: "s".to_string(),
                 timestamp: 1_700_000_000,
             }],
+            activity_panel_visible: false,
         };
 
         FileWriter.write(&path, &state).expect("write");

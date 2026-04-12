@@ -29,6 +29,8 @@ pub enum Icon {
     XCircle,
     Info,
     Settings,
+    PanelRight,
+    FileText,
 }
 
 impl Icon {
@@ -61,6 +63,8 @@ impl Icon {
             Self::XCircle => "icons/x-circle.svg",
             Self::Info => "icons/info.svg",
             Self::Settings => "icons/settings.svg",
+            Self::PanelRight => "icons/panel-right.svg",
+            Self::FileText => "icons/file-text.svg",
         }
     }
 }

@@ -63,6 +63,7 @@ pub enum KeyAction {
     OpenSearch,
     OpenHelp,
     CloseOverlay,
+    ToggleActivityPanel,
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,14 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::OpenHelp,
         label: "F1",
         description: "Help",
+    },
+    KeyBinding {
+        key: "i",
+        modifiers: KeyModifiers::new(true, false, false),
+        scope: KeyScope::Global,
+        action: KeyAction::ToggleActivityPanel,
+        label: "Ctrl+I",
+        description: "Toggle activity panel",
     },
     KeyBinding {
         key: "escape",
@@ -268,6 +277,12 @@ mod tests {
     fn dispatch_modal_escape() {
         let action = dispatch_modal_key("escape", false, false, false);
         assert_eq!(action, Some(KeyAction::CloseOverlay));
+    }
+
+    #[test]
+    fn dispatch_global_ctrl_i() {
+        let action = dispatch_global_key("i", true, false, false);
+        assert_eq!(action, Some(KeyAction::ToggleActivityPanel));
     }
 
     #[test]

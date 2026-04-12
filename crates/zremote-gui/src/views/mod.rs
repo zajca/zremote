@@ -1,3 +1,4 @@
+pub mod activity_panel;
 pub mod cc_widgets;
 pub mod command_palette;
 pub mod double_shift;
