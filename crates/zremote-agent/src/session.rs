@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 use zremote_protocol::SessionId;
@@ -31,16 +32,23 @@ pub struct SessionManager {
     shell_integrations: HashMap<SessionId, ShellIntegrationState>,
     output_tx: mpsc::Sender<PtyOutput>,
     backend: PersistenceBackend,
+    /// Scoped socket directory for daemon sessions.
+    socket_dir: PathBuf,
 }
 
 impl SessionManager {
-    pub fn new(output_tx: mpsc::Sender<PtyOutput>, backend: PersistenceBackend) -> Self {
+    pub fn new(
+        output_tx: mpsc::Sender<PtyOutput>,
+        backend: PersistenceBackend,
+        socket_dir: PathBuf,
+    ) -> Self {
         Self {
             sessions: HashMap::new(),
             shell_names: HashMap::new(),
             shell_integrations: HashMap::new(),
             output_tx,
             backend,
+            socket_dir,
         }
     }
 
@@ -76,6 +84,7 @@ impl SessionManager {
                     env,
                     self.output_tx.clone(),
                     shell_config,
+                    &self.socket_dir,
                 )
                 .await?;
                 self.sessions
@@ -258,12 +267,13 @@ impl SessionManager {
             PersistenceBackend::None => Vec::new(),
             PersistenceBackend::Daemon => {
                 // Clean up stale daemon files first
-                crate::daemon::discovery::cleanup_stale_daemons();
+                crate::daemon::discovery::cleanup_stale_daemons(&self.socket_dir);
 
                 let tracked_ids: HashSet<SessionId> = self.sessions.keys().copied().collect();
                 let recovered = crate::daemon::discovery::discover_daemon_sessions(
                     self.output_tx.clone(),
                     &tracked_ids,
+                    &self.socket_dir,
                 )
                 .await;
                 let mut result = Vec::new();
@@ -366,7 +376,11 @@ mod tests {
 
     fn make_manager() -> SessionManager {
         let (tx, _rx) = mpsc::channel(64);
-        SessionManager::new(tx, PersistenceBackend::None)
+        SessionManager::new(
+            tx,
+            PersistenceBackend::None,
+            PathBuf::from("/tmp/zremote-test"),
+        )
     }
 
     #[test]
@@ -419,10 +433,18 @@ mod tests {
     #[test]
     fn supports_persistence_returns_configured_value() {
         let (tx, _rx) = mpsc::channel(64);
-        let mgr_none = SessionManager::new(tx.clone(), PersistenceBackend::None);
+        let mgr_none = SessionManager::new(
+            tx.clone(),
+            PersistenceBackend::None,
+            PathBuf::from("/tmp/zremote-test"),
+        );
         assert!(!mgr_none.supports_persistence());
 
-        let mgr_daemon = SessionManager::new(tx, PersistenceBackend::Daemon);
+        let mgr_daemon = SessionManager::new(
+            tx,
+            PersistenceBackend::Daemon,
+            PathBuf::from("/tmp/zremote-test"),
+        );
         assert!(mgr_daemon.supports_persistence());
     }
 
@@ -497,7 +519,11 @@ mod tests {
     #[test]
     fn new_manager_with_daemon_backend() {
         let (tx, _rx) = mpsc::channel(64);
-        let mgr = SessionManager::new(tx, PersistenceBackend::Daemon);
+        let mgr = SessionManager::new(
+            tx,
+            PersistenceBackend::Daemon,
+            PathBuf::from("/tmp/zremote-test"),
+        );
         assert!(mgr.supports_persistence());
         assert_eq!(mgr.backend(), PersistenceBackend::Daemon);
         assert_eq!(mgr.count(), 0);

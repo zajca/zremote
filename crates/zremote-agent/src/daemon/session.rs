@@ -44,6 +44,7 @@ impl DaemonSession {
         env: Option<&std::collections::HashMap<String, String>>,
         output_tx: mpsc::Sender<PtyOutput>,
         shell_config: Option<&ShellIntegrationConfig>,
+        sock_dir: &std::path::Path,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         // Use current_exe() for binary name detection, but /proc/PID/exe for
         // the actual spawn path on Linux. After recompilation, cargo replaces
@@ -55,8 +56,6 @@ impl DaemonSession {
         } else {
             resolved_exe.clone()
         };
-        let uid = nix::unistd::getuid();
-        let sock_dir = PathBuf::from(format!("/tmp/zremote-pty-{uid}"));
         let socket_path = sock_dir.join(format!("{session_id}.sock"));
         let state_path = sock_dir.join(format!("{session_id}.json"));
         let log_path = sock_dir.join(format!("{session_id}.log"));
@@ -119,7 +118,7 @@ impl DaemonSession {
             let _ = std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(&sock_dir);
+                .create(sock_dir);
         }
 
         // Open per-session log file for daemon stderr (diagnostics)
@@ -513,13 +512,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_dir_contains_uid() {
+    fn socket_dir_contains_uid_and_hash() {
         let uid = nix::unistd::getuid();
-        let dir = super::super::socket_dir();
+        let dir = super::super::socket_dir("test-instance");
+        let s = dir.to_string_lossy();
         assert!(
-            dir.to_string_lossy().contains(&uid.to_string()),
-            "socket dir should contain uid: {}",
-            dir.display()
+            s.contains(&uid.to_string()),
+            "socket dir should contain uid: {s}"
+        );
+        // Should have a hash suffix after the uid
+        assert!(
+            s.starts_with(&format!("/tmp/zremote-pty-{uid}-")),
+            "socket dir should have hash suffix: {s}"
         );
     }
 
