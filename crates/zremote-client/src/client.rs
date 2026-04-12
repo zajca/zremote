@@ -1131,6 +1131,23 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// List execution nodes for a session.
+    pub async fn list_execution_nodes(
+        &self,
+        session_id: &str,
+        limit: Option<i64>,
+    ) -> Result<Vec<super::types::ExecutionNode>, ApiError> {
+        let mut req = self.client.get(format!(
+            "{}/api/sessions/{session_id}/execution-nodes",
+            self.base_url
+        ));
+        if let Some(l) = limit {
+            req = req.query(&[("limit", l)]);
+        }
+        let resp = self.check_response(req.send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
     /// List the agent kinds the server knows how to launch.
     pub async fn list_agent_kinds(&self) -> Result<Vec<AgentKindInfo>, ApiError> {
         let resp = self

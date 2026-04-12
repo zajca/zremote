@@ -42,6 +42,7 @@ pub use types::{
     DirectoryEntry,
     // Constants
     EVENT_CHANNEL_CAPACITY,
+    ExecutionNode,
     ExtractedMemory,
     GitInfo,
     GitRemote,

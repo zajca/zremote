@@ -478,6 +478,28 @@ pub struct ResumeClaudeTaskRequest {
 // ---------------------------------------------------------------------------
 // Agent profiles & tasks (RFC-003)
 // ---------------------------------------------------------------------------
+// Execution nodes
+// ---------------------------------------------------------------------------
+
+/// An execution node as returned by `/api/sessions/:id/execution-nodes`.
+/// Wire-compatible with `zremote_core::queries::execution_nodes::ExecutionNodeRow`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionNode {
+    pub id: i64,
+    pub session_id: String,
+    pub loop_id: Option<String>,
+    pub timestamp: i64,
+    pub kind: String,
+    pub input: Option<String>,
+    pub output_summary: Option<String>,
+    pub exit_code: Option<i32>,
+    pub working_dir: String,
+    pub duration_ms: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Agent profiles
+// ---------------------------------------------------------------------------
 
 /// An agent profile as returned by `/api/agent-profiles`. Wire-compatible with
 /// `zremote_core::queries::agent_profiles::AgentProfile`.

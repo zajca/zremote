@@ -208,6 +208,25 @@ impl MainView {
             )
         });
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
+
+        // Restore activity panel visibility from persistence
+        let visible = self
+            .app_state
+            .persistence
+            .lock()
+            .is_ok_and(|p| p.state().activity_panel_visible);
+        if visible {
+            terminal.update(cx, |panel, cx| {
+                panel.set_activity_panel_visible(true, cx);
+            });
+        }
+
+        // Load historical execution nodes so the panel is populated on open.
+        let api = self.app_state.api.clone();
+        terminal.update(cx, |panel, cx| {
+            panel.load_execution_nodes(api, cx);
+        });
+
         self.terminal = Some(terminal);
         cx.notify();
     }
@@ -554,19 +573,33 @@ impl MainView {
                     rate_limit_5h_pct: *rate_limit_5h_pct,
                     rate_limit_7d_pct: *rate_limit_7d_pct,
                 });
+                panel.sync_activity_metrics(cx);
                 cx.notify();
             });
         }
 
         // Forward agentic loop status to terminal panel
         match event {
-            ServerEvent::LoopDetected { loop_info, .. }
-            | ServerEvent::LoopStatusChanged { loop_info, .. } => {
+            ServerEvent::LoopDetected { loop_info, .. } => {
                 if let Some(terminal) = &self.terminal
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
                         panel.update_cc_status(Some(loop_info.status));
+                        panel.sync_activity_status(cx);
+                        // Auto-show activity panel when a new task starts.
+                        panel.show_activity_panel(cx);
+                        cx.notify();
+                    });
+                }
+            }
+            ServerEvent::LoopStatusChanged { loop_info, .. } => {
+                if let Some(terminal) = &self.terminal
+                    && terminal.read(cx).session_id() == loop_info.session_id.as_str()
+                {
+                    terminal.update(cx, |panel, cx| {
+                        panel.update_cc_status(Some(loop_info.status));
+                        panel.sync_activity_status(cx);
                         cx.notify();
                     });
                 }
@@ -576,12 +609,44 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        panel.clear_cc_state();
+                        panel.clear_cc_state_with_cx(cx);
                         cx.notify();
                     });
                 }
             }
             _ => {}
+        }
+
+        // Forward execution nodes to activity panel
+        if let ServerEvent::ExecutionNodeCreated {
+            session_id,
+            node_id,
+            timestamp,
+            kind,
+            input,
+            output_summary,
+            exit_code,
+            duration_ms,
+            ..
+        } = event
+            && let Some(terminal) = &self.terminal
+            && terminal.read(cx).session_id() == session_id.as_str()
+        {
+            use crate::views::activity_panel::ExecutionNodeItem;
+            terminal.update(cx, |panel, cx| {
+                panel.push_execution_node(
+                    ExecutionNodeItem {
+                        node_id: *node_id,
+                        timestamp: *timestamp,
+                        kind: kind.clone(),
+                        input: input.clone(),
+                        output_summary: output_summary.clone(),
+                        exit_code: *exit_code,
+                        duration_ms: *duration_ms,
+                    },
+                    cx,
+                );
+            });
         }
 
         // Agentic loop notifications
@@ -904,6 +969,13 @@ impl MainView {
                 // Search is terminal-panel-scoped; no-op when no terminal is focused
             }
             KeyAction::OpenHelp => self.open_help_modal(cx),
+            KeyAction::ToggleActivityPanel => {
+                if let Some(terminal) = &self.terminal {
+                    terminal.update(cx, |panel, cx| {
+                        panel.toggle_activity_panel(cx);
+                    });
+                }
+            }
             KeyAction::CloseOverlay => {
                 // Close topmost modal
                 if self.command_palette.is_some() {
@@ -1001,6 +1073,11 @@ impl MainView {
                     sidebar.set_terminal_title(session_id.clone(), title.clone());
                     cx.notify();
                 });
+            }
+            TerminalPanelEvent::ActivityPanelToggled(visible) => {
+                if let Ok(mut p) = self.app_state.persistence.lock() {
+                    p.update(|s| s.activity_panel_visible = *visible);
+                }
             }
         }
     }
