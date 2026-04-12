@@ -1461,10 +1461,11 @@ impl MainView {
     }
 
     /// Render a modal overlay with the standard backdrop+sibling pattern.
+    // 8 params are all distinct modal dimensions/identifiers — a builder would be heavier than the args.
     #[allow(clippy::too_many_arguments)]
     fn render_modal_overlay(
-        backdrop_id: &str,
-        container_id: &str,
+        backdrop_id: &'static str,
+        container_id: &'static str,
         top_offset: Pixels,
         width: Pixels,
         height: Option<Pixels>,
@@ -1473,7 +1474,7 @@ impl MainView {
         content: AnyElement,
     ) -> impl IntoElement {
         let mut container = div()
-            .id(SharedString::from(container_id.to_string()))
+            .id(container_id)
             .occlude()
             .w(width)
             .rounded(px(8.0))
@@ -1495,7 +1496,7 @@ impl MainView {
             .inset_0()
             .child(
                 div()
-                    .id(SharedString::from(backdrop_id.to_string()))
+                    .id(backdrop_id)
                     .absolute()
                     .inset_0()
                     .bg(theme::modal_backdrop())

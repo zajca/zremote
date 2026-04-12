@@ -1673,6 +1673,7 @@ impl Render for TerminalPanel {
                     };
 
                     if let Some(lines) = line_delta {
+                        // precise = touchpad natural scroll: negate; wheel already correct direction
                         let scroll_lines = if is_precise { -lines } else { lines };
                         pending_scroll_delta.fetch_add(scroll_lines, Ordering::Relaxed);
                         cx.notify(entity_id);
