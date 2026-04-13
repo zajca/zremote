@@ -18,15 +18,44 @@ use zremote_client::AgenticStatus;
 const MAX_NODES: usize = 200;
 
 /// A single execution node displayed in the activity feed.
+///
+/// Display strings are pre-computed at creation time to avoid per-frame
+/// allocations in the render path (200 nodes x 60 Hz = 12k calls/s).
 #[derive(Clone)]
 pub struct ExecutionNodeItem {
     pub node_id: i64,
     pub timestamp: i64,
-    pub kind: String,
-    pub input: Option<String>,
-    pub output_summary: Option<String>,
     pub exit_code: Option<i32>,
-    pub duration_ms: i64,
+    // Pre-computed display fields
+    pub display_icon: Icon,
+    pub display_label: String,
+    pub display_duration: String,
+    pub display_input: Option<String>,
+    pub display_summary: Option<String>,
+}
+
+impl ExecutionNodeItem {
+    /// Create a new node item, pre-computing all display strings.
+    pub fn new(
+        node_id: i64,
+        timestamp: i64,
+        kind: &str,
+        input: Option<&str>,
+        output_summary: Option<&str>,
+        exit_code: Option<i32>,
+        duration_ms: i64,
+    ) -> Self {
+        Self {
+            node_id,
+            timestamp,
+            exit_code,
+            display_icon: kind_icon(kind),
+            display_label: truncate_str(kind_label(kind), 20),
+            display_duration: format_duration(duration_ms),
+            display_input: input.map(|s| truncate_str(s, 60)),
+            display_summary: output_summary.map(|s| truncate_str(s, 80)),
+        }
+    }
 }
 
 /// Activity panel showing CC execution progress (execution nodes, status, metrics).
@@ -245,11 +274,7 @@ impl ActivityPanel {
     }
 
     fn render_node_item(&self, node: &ExecutionNodeItem, _index: usize) -> impl IntoElement {
-        let node_icon = kind_icon(&node.kind);
-        let duration = format_duration(node.duration_ms);
-        let label = kind_label(&node.kind).to_string();
-        let input_text = node.input.as_deref().map(|s| truncate_str(s, 60));
-        let summary_text = node.output_summary.as_deref().map(|s| truncate_str(s, 80));
+        let node_icon = node.display_icon;
         let exit_code = node.exit_code;
         let node_id = node.node_id;
 
@@ -282,31 +307,31 @@ impl ActivityPanel {
                 .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::text_primary())
-                .child(label),
+                .child(node.display_label.clone()),
         );
 
-        if let Some(input) = input_text {
+        if let Some(ref input) = node.display_input {
             first_line = first_line.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme::text_secondary())
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(input),
+                    .child(input.clone()),
             );
         }
 
         middle = middle.child(first_line);
 
         // Output summary on second line
-        if let Some(summary) = summary_text {
+        if let Some(ref summary) = node.display_summary {
             middle = middle.child(
                 div()
                     .text_size(px(10.0))
                     .text_color(theme::text_tertiary())
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(summary),
+                    .child(summary.clone()),
             );
         }
 
@@ -319,7 +344,7 @@ impl ActivityPanel {
             div()
                 .text_size(px(10.0))
                 .text_color(theme::text_tertiary())
-                .child(duration),
+                .child(node.display_duration.clone()),
         );
 
         if let Some(code) = exit_code {
@@ -395,7 +420,7 @@ fn status_label(status: AgenticStatus) -> &'static str {
         AgenticStatus::WaitingForInput => "Waiting for input",
         AgenticStatus::Error => "Error",
         AgenticStatus::Completed => "Completed",
-        _ => "Idle",
+        AgenticStatus::Unknown => "Idle",
     }
 }
 
@@ -442,33 +467,32 @@ fn format_duration(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, kind_icon, truncate_str};
+    use super::{
+        ExecutionNodeItem, MAX_NODES, format_duration, kind_icon, kind_label, status_label,
+        truncate_str,
+    };
     use crate::icons::Icon;
+    use std::collections::VecDeque;
+    use zremote_client::AgenticStatus;
 
     #[test]
-    fn truncate_short_string() {
+    fn truncate_str_cases() {
         assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+        assert_eq!(truncate_str("", 10), "");
         let result = truncate_str("hello world this is long", 10);
         assert_eq!(result.chars().count(), 10);
         assert!(result.ends_with('\u{2026}'));
     }
 
     #[test]
-    fn format_duration_ms() {
+    fn format_duration_ranges() {
+        assert_eq!(format_duration(0), "0ms");
         assert_eq!(format_duration(500), "500ms");
-    }
-
-    #[test]
-    fn format_duration_seconds() {
+        assert_eq!(format_duration(999), "999ms");
+        assert_eq!(format_duration(1000), "1.0s");
         assert_eq!(format_duration(1500), "1.5s");
-    }
-
-    #[test]
-    fn format_duration_minutes() {
+        assert_eq!(format_duration(60_000), "1.0m");
         assert_eq!(format_duration(90_000), "1.5m");
     }
 
@@ -478,5 +502,76 @@ mod tests {
         assert!(matches!(kind_icon("read"), Icon::FileText));
         assert!(matches!(kind_icon("tool_call"), Icon::Bot));
         assert!(matches!(kind_icon("unknown"), Icon::Zap));
+    }
+
+    #[test]
+    fn kind_label_mapping() {
+        assert_eq!(kind_label("bash"), "Bash");
+        assert_eq!(kind_label("read"), "Read");
+        assert_eq!(kind_label("edit"), "Edit");
+        assert_eq!(kind_label("write"), "Write");
+        assert_eq!(kind_label("tool_call"), "Tool");
+        assert_eq!(kind_label("agent"), "Agent");
+        assert_eq!(kind_label("custom_thing"), "custom_thing");
+    }
+
+    #[test]
+    fn status_label_all_variants() {
+        assert_eq!(status_label(AgenticStatus::Working), "Working");
+        assert_eq!(
+            status_label(AgenticStatus::RequiresAction),
+            "Requires action"
+        );
+        assert_eq!(
+            status_label(AgenticStatus::WaitingForInput),
+            "Waiting for input"
+        );
+        assert_eq!(status_label(AgenticStatus::Error), "Error");
+        assert_eq!(status_label(AgenticStatus::Completed), "Completed");
+        assert_eq!(status_label(AgenticStatus::Unknown), "Idle");
+    }
+
+    #[test]
+    fn node_item_precomputes_display() {
+        let node = ExecutionNodeItem::new(1, 0, "bash", None, None, None, 500);
+        assert_eq!(node.display_label, "Bash");
+        assert_eq!(node.display_duration, "500ms");
+        assert!(matches!(node.display_icon, Icon::SquareTerminal));
+        assert!(node.display_input.is_none());
+
+        // Truncation
+        let long = "a".repeat(100);
+        let node2 = ExecutionNodeItem::new(2, 0, "read", Some(&long), Some(&long), None, 0);
+        assert!(node2.display_input.as_ref().unwrap().chars().count() <= 60);
+        assert!(node2.display_summary.as_ref().unwrap().chars().count() <= 80);
+
+        // Unknown kind label truncation
+        let long_kind = "very_long_custom_kind_name_that_exceeds_twenty_chars";
+        let node3 = ExecutionNodeItem::new(3, 0, long_kind, None, None, None, 0);
+        assert!(node3.display_label.chars().count() <= 20);
+    }
+
+    #[test]
+    fn vec_deque_cap_and_order() {
+        // Cap test
+        let mut nodes: VecDeque<ExecutionNodeItem> = VecDeque::new();
+        for i in 0..=MAX_NODES {
+            nodes.push_front(ExecutionNodeItem::new(
+                i as i64, 0, "bash", None, None, None, 0,
+            ));
+            if nodes.len() > MAX_NODES {
+                nodes.truncate(MAX_NODES);
+            }
+        }
+        assert_eq!(nodes.len(), MAX_NODES);
+        assert_eq!(nodes.front().unwrap().node_id, MAX_NODES as i64);
+
+        // Reverse order test (simulates load_nodes)
+        let items: Vec<ExecutionNodeItem> = (0..5)
+            .map(|i| ExecutionNodeItem::new(i, 0, "bash", None, None, None, 0))
+            .collect();
+        let ordered: VecDeque<ExecutionNodeItem> = items.into_iter().rev().collect();
+        assert_eq!(ordered.front().unwrap().node_id, 4);
+        assert_eq!(ordered.back().unwrap().node_id, 0);
     }
 }

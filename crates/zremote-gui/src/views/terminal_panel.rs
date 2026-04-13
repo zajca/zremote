@@ -254,6 +254,10 @@ pub struct TerminalPanel {
     cc_metrics: Option<CcMetrics>,
     /// Claude Code agentic status for the current session.
     cc_status: Option<AgenticStatus>,
+    /// Claude Code task name for the current session.
+    cc_task_name: Option<String>,
+    /// Cached API client for reloading execution nodes on reconnect.
+    api_client: Option<zremote_client::ApiClient>,
     /// Tokio runtime handle for spawning async tasks (coalescing, etc.).
     tokio_handle: tokio::runtime::Handle,
     /// Owned PTY reader task — cancelled on drop or reconnect.
@@ -365,6 +369,8 @@ impl TerminalPanel {
             terminal_title: None,
             cc_metrics: None,
             cc_status: None,
+            cc_task_name: None,
+            api_client: None,
             tokio_handle: tokio_handle.clone(),
             pty_reader_task: None, // Set when start_output_reader() is called
             activity_panel: None,
@@ -482,16 +488,36 @@ impl TerminalPanel {
         }
     }
 
+    /// Update Claude Code task name.
+    pub fn update_cc_task_name(&mut self, name: Option<String>) {
+        self.cc_task_name = name;
+    }
+
+    /// Forward CC task name to the activity panel.
+    pub fn sync_activity_task_name(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.activity_panel {
+            let name = self.cc_task_name.clone();
+            panel.update(cx, |p, cx| p.update_task_name(name, cx));
+        }
+    }
+
+    /// Whether CC status is idle (no active loop).
+    pub fn is_cc_idle(&self) -> bool {
+        self.cc_status.is_none()
+    }
+
     /// Clear Claude Code state (e.g., on session close).
     pub fn clear_cc_state(&mut self) {
         self.cc_metrics = None;
         self.cc_status = None;
+        self.cc_task_name = None;
     }
 
     /// Clear CC state and forward to activity panel.
     pub fn clear_cc_state_with_cx(&mut self, cx: &mut Context<Self>) {
         self.cc_metrics = None;
         self.cc_status = None;
+        self.cc_task_name = None;
         if let Some(panel) = &self.activity_panel {
             panel.update(cx, |p, cx| p.clear(cx));
         }
@@ -572,8 +598,9 @@ impl TerminalPanel {
     /// Load historical execution nodes for this session from the API.
     /// Fire-and-forget: spawns once per panel creation, delivers results back via cx.spawn.
     pub fn load_execution_nodes(&mut self, api: zremote_client::ApiClient, cx: &mut Context<Self>) {
+        self.api_client = Some(api.clone());
         self.ensure_activity_panel(cx);
-        let Some(panel) = self.activity_panel.clone() else {
+        let Some(panel) = self.activity_panel.as_ref().map(Entity::downgrade) else {
             return;
         };
         let session_id = self.session_id.clone();
@@ -588,17 +615,21 @@ impl TerminalPanel {
             use super::activity_panel::ExecutionNodeItem;
             let items: Vec<ExecutionNodeItem> = nodes
                 .into_iter()
-                .map(|n| ExecutionNodeItem {
-                    node_id: n.id,
-                    timestamp: n.timestamp,
-                    kind: n.kind,
-                    input: n.input,
-                    output_summary: n.output_summary,
-                    exit_code: n.exit_code,
-                    duration_ms: n.duration_ms,
+                .map(|n| {
+                    ExecutionNodeItem::new(
+                        n.id,
+                        n.timestamp,
+                        &n.kind,
+                        n.input.as_deref(),
+                        n.output_summary.as_deref(),
+                        n.exit_code,
+                        n.duration_ms,
+                    )
                 })
                 .collect();
-            let _ = panel.update(cx, |p, cx| p.load_nodes(items, cx));
+            if let Some(panel) = panel.upgrade() {
+                let _ = panel.update(cx, |p, cx| p.load_nodes(items, cx));
+            }
         })
         .detach();
     }
@@ -661,6 +692,11 @@ impl TerminalPanel {
             }
         });
         self.resize_debounce_tx = resize_debounce_tx;
+
+        // Reload execution nodes to fill any gap from the disconnect window.
+        if let Some(api) = self.api_client.clone() {
+            self.load_execution_nodes(api, cx);
+        }
 
         // Trigger immediate resize to sync the new connection with current terminal size.
         if let Ok(term) = self.term.lock() {

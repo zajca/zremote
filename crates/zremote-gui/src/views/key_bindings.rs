@@ -130,10 +130,10 @@ pub static BINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         key: "i",
-        modifiers: KeyModifiers::new(true, false, false),
+        modifiers: KeyModifiers::new(true, true, false),
         scope: KeyScope::Global,
         action: KeyAction::ToggleActivityPanel,
-        label: "Ctrl+I",
+        label: "Ctrl+Shift+I",
         description: "Toggle activity panel",
     },
     KeyBinding {
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn dispatch_global_ctrl_i() {
-        let action = dispatch_global_key("i", true, false, false);
+        let action = dispatch_global_key("i", true, true, false);
         assert_eq!(action, Some(KeyAction::ToggleActivityPanel));
     }
 
