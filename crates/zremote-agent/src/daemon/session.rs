@@ -115,10 +115,52 @@ impl DaemonSession {
         // Ensure socket directory exists before opening log file
         {
             use std::os::unix::fs::DirBuilderExt;
-            let _ = std::fs::DirBuilder::new()
+            use std::os::unix::fs::MetadataExt;
+            if let Err(e) = std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(sock_dir);
+                .create(sock_dir)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+            {
+                return Err(format!(
+                    "failed to create socket directory {}: {e}",
+                    sock_dir.display()
+                )
+                .into());
+            }
+
+            // Verify the directory is safe: not a symlink and owned by us
+            let meta = std::fs::symlink_metadata(sock_dir).map_err(|e| {
+                format!(
+                    "failed to stat socket directory {}: {e}",
+                    sock_dir.display()
+                )
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "socket directory {} is a symlink — refusing to use it \
+                     (possible symlink attack)",
+                    sock_dir.display()
+                )
+                .into());
+            }
+            let uid = nix::unistd::getuid();
+            if meta.uid() != uid.as_raw() {
+                return Err(format!(
+                    "socket directory {} is owned by uid {}, expected {} — \
+                     refusing to use it",
+                    sock_dir.display(),
+                    meta.uid(),
+                    uid
+                )
+                .into());
+            }
         }
 
         // Open per-session log file for daemon stderr (diagnostics)

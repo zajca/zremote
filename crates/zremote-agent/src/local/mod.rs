@@ -102,7 +102,11 @@ pub async fn run_local(
     }
 
     // Compute scoped socket directory from canonical DB path
-    let canonical_db = std::fs::canonicalize(&db_file).unwrap_or_else(|_| db_file.clone());
+    let canonical_db = db_file
+        .parent()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|p| db_file.file_name().map(|name| p.join(name)))
+        .unwrap_or_else(|| db_file.clone());
     let socket_dir = crate::daemon::socket_dir(&canonical_db.display().to_string());
 
     // Warn about legacy global socket directory (pre-scoping)
