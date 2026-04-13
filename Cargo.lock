@@ -9060,6 +9060,7 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "dotenvy",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "zremote-agent",

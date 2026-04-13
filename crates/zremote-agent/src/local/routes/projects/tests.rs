@@ -67,6 +67,7 @@ async fn test_state() -> Arc<LocalAppState> {
         shutdown,
         crate::config::PersistenceBackend::None,
         std::path::PathBuf::from("/tmp/zremote-test"),
+        Uuid::new_v4(),
     )
 }
 

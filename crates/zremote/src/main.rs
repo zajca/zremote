@@ -199,21 +199,124 @@ fn ensure_local_agent(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     Err("local agent did not become healthy within 5 seconds".into())
 }
 
-/// Quick synchronous health check via a blocking TCP connect + HTTP GET.
+/// Quick synchronous health check: TCP connect + HTTP GET `/health`, then
+/// verify the JSON body contains `"service": "zremote-agent"`.
 #[cfg(feature = "gui")]
 fn check_health(url: &str) -> bool {
-    // Use a simple TCP connect to check if the port is open.
-    // We avoid pulling in reqwest/blocking here to keep the facade lightweight.
-    let addr = url
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let Some(addr_str) = url
         .strip_prefix("http://")
         .and_then(|rest| rest.strip_suffix("/health"))
-        .unwrap_or("127.0.0.1:3000");
+    else {
+        return false;
+    };
 
-    std::net::TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 3000))),
-        std::time::Duration::from_millis(200),
-    )
-    .is_ok()
+    let Ok(addr) = addr_str.parse::<SocketAddr>() else {
+        return false;
+    };
+
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+        return false;
+    };
+
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let request = format!("GET /health HTTP/1.1\r\nHost: {addr_str}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut buf = vec![0u8; 4096];
+    let mut total = 0;
+    loop {
+        match stream.read(&mut buf[total..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                total += n;
+                if total >= buf.len() {
+                    break;
+                }
+            }
+        }
+    }
+
+    parse_health_response(&buf[..total])
+}
+
+/// Parse an HTTP response and check that the JSON body contains
+/// `"service": "zremote-agent"`.
+#[cfg(feature = "gui")]
+fn parse_health_response(response: &[u8]) -> bool {
+    let Ok(response_str) = std::str::from_utf8(response) else {
+        return false;
+    };
+
+    // Verify HTTP 200 status
+    if !response_str.starts_with("HTTP/1.1 200") && !response_str.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+
+    // Find end of headers
+    let Some(pos) = response_str.find("\r\n\r\n") else {
+        return false;
+    };
+    let body = &response_str[pos + 4..];
+
+    // Parse JSON and check service field
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    json.get("service").and_then(|v| v.as_str()) == Some("zremote-agent")
+}
+
+#[cfg(all(test, feature = "gui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_zremote_response() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+            {\"status\":\"ok\",\"mode\":\"local\",\"hostname\":\"box\",\"service\":\"zremote-agent\",\"version\":\"0.12.6\"}";
+        assert!(parse_health_response(response));
+    }
+
+    #[test]
+    fn parse_missing_service_field() {
+        let response = b"HTTP/1.1 200 OK\r\n\r\n{\"status\":\"ok\",\"mode\":\"local\"}";
+        assert!(!parse_health_response(response));
+    }
+
+    #[test]
+    fn parse_wrong_service_value() {
+        let response = b"HTTP/1.1 200 OK\r\n\r\n{\"service\":\"something-else\"}";
+        assert!(!parse_health_response(response));
+    }
+
+    #[test]
+    fn parse_non_json_body() {
+        let response = b"HTTP/1.1 200 OK\r\n\r\nHello World";
+        assert!(!parse_health_response(response));
+    }
+
+    #[test]
+    fn parse_empty_response() {
+        assert!(!parse_health_response(b""));
+    }
+
+    #[test]
+    fn parse_no_header_separator() {
+        let response = b"HTTP/1.1 200 OK";
+        assert!(!parse_health_response(response));
+    }
+
+    #[test]
+    fn parse_non_200_status() {
+        let response = b"HTTP/1.1 503 Service Unavailable\r\n\r\n{\"service\":\"zremote-agent\"}";
+        assert!(!parse_health_response(response));
+    }
 }

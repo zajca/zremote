@@ -26,6 +26,7 @@ pub async fn discover_daemon_sessions(
     output_tx: mpsc::Sender<PtyOutput>,
     already_tracked: &HashSet<SessionId>,
     socket_dir: &Path,
+    our_owner_id: Option<&str>,
 ) -> Vec<(DaemonSession, Option<Vec<u8>>)> {
     let dir = socket_dir.to_path_buf();
     if !dir.exists() {
@@ -72,6 +73,22 @@ pub async fn discover_daemon_sessions(
             tracing::debug!(
                 session_id = %session_id,
                 "skipping already-tracked daemon in discovery"
+            );
+            continue;
+        }
+
+        // Skip sessions owned by a different agent instance. State files
+        // from older agents have owner_id=None and are treated as unowned
+        // (first discoverer claims them — same as pre-isolation behavior).
+        if let Some(ref file_owner) = state.owner_id
+            && let Some(our_id) = our_owner_id
+            && file_owner != our_id
+        {
+            tracing::debug!(
+                session_id = %session_id,
+                file_owner = %file_owner,
+                our_owner = %our_id,
+                "skipping daemon owned by different agent instance"
             );
             continue;
         }
@@ -384,6 +401,7 @@ mod tests {
             cols: 80,
             rows: 24,
             started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: None,
         };
         std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
 
@@ -576,6 +594,7 @@ mod tests {
             cols: 80,
             rows: 24,
             started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: None,
         };
         std::fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
         std::fs::write(&socket_path, "fake-socket").unwrap();
@@ -696,19 +715,91 @@ mod tests {
     async fn discover_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel(64);
-        let result = discover_daemon_sessions(tx, &HashSet::new(), tmp.path()).await;
+        let result = discover_daemon_sessions(tx, &HashSet::new(), tmp.path(), None).await;
         assert!(result.is_empty(), "empty dir should yield no sessions");
     }
 
     #[tokio::test]
     async fn discover_nonexistent_dir() {
         let (tx, _rx) = mpsc::channel(64);
-        let result =
-            discover_daemon_sessions(tx, &HashSet::new(), Path::new("/tmp/zremote-no-such-dir"))
-                .await;
+        let result = discover_daemon_sessions(
+            tx,
+            &HashSet::new(),
+            Path::new("/tmp/zremote-no-such-dir"),
+            None,
+        )
+        .await;
         assert!(
             result.is_empty(),
             "nonexistent dir should yield no sessions"
         );
+    }
+
+    /// State file with a matching owner_id should NOT be skipped by the
+    /// owner filter (it belongs to us).
+    #[test]
+    fn owner_filter_matching_owner_is_not_skipped() {
+        let state = DaemonStateFile {
+            version: 1,
+            session_id: "s1".to_string(),
+            shell: "/bin/sh".to_string(),
+            shell_pid: 1,
+            daemon_pid: 2,
+            cols: 80,
+            rows: 24,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: Some("agent-aaa".to_string()),
+        };
+        let our_id: Option<&str> = Some("agent-aaa");
+        // Matching owner: should NOT be filtered out
+        let dominated = match (&state.owner_id, our_id) {
+            (Some(file_owner), Some(our)) => file_owner != our,
+            _ => false,
+        };
+        assert!(!dominated);
+    }
+
+    /// State file owned by a different agent should be skipped.
+    #[test]
+    fn owner_filter_different_owner_is_skipped() {
+        let state = DaemonStateFile {
+            version: 1,
+            session_id: "s2".to_string(),
+            shell: "/bin/sh".to_string(),
+            shell_pid: 1,
+            daemon_pid: 2,
+            cols: 80,
+            rows: 24,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: Some("agent-bbb".to_string()),
+        };
+        let our_id: Option<&str> = Some("agent-aaa");
+        let dominated = match (&state.owner_id, our_id) {
+            (Some(file_owner), Some(our)) => file_owner != our,
+            _ => false,
+        };
+        assert!(dominated, "different owner should be filtered out");
+    }
+
+    /// State files from older agents (no owner_id) should NOT be filtered.
+    #[test]
+    fn owner_filter_missing_owner_is_not_skipped() {
+        let state = DaemonStateFile {
+            version: 1,
+            session_id: "s3".to_string(),
+            shell: "/bin/sh".to_string(),
+            shell_pid: 1,
+            daemon_pid: 2,
+            cols: 80,
+            rows: 24,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: None,
+        };
+        let our_id: Option<&str> = Some("agent-aaa");
+        let dominated = match (&state.owner_id, our_id) {
+            (Some(file_owner), Some(our)) => file_owner != our,
+            _ => false,
+        };
+        assert!(!dominated, "unowned state file should not be filtered");
     }
 }

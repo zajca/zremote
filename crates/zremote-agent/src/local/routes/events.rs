@@ -37,6 +37,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let mut rx = state.events.subscribe();

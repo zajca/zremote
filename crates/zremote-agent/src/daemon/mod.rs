@@ -32,6 +32,10 @@ pub struct DaemonStateFile {
     pub cols: u16,
     pub rows: u16,
     pub started_at: String,
+    /// Agent instance UUID that owns this daemon. `None` for state files
+    /// written by older agent versions (treated as unowned during discovery).
+    #[serde(default)]
+    pub owner_id: Option<String>,
 }
 
 /// Return a scoped socket directory for the current user and agent instance.
@@ -72,6 +76,7 @@ pub async fn run_pty_daemon(
     working_dir: Option<PathBuf>,
     extra_env: std::collections::HashMap<String, String>,
     shell_config: Option<ShellIntegrationConfig>,
+    owner_id: Option<String>,
 ) {
     // 1. Ignore SIGHUP (safe, no unsafe block)
     let mut sighup = tokio::signal::unix::signal(SignalKind::hangup())
@@ -241,6 +246,7 @@ pub async fn run_pty_daemon(
         cols,
         rows,
         started_at: started_at.clone(),
+        owner_id,
     };
 
     if let Err(e) = write_state_file_atomic(&state_file_path, &state) {
@@ -524,6 +530,7 @@ mod tests {
             cols: 80,
             rows: 24,
             started_at: "2026-03-25T10:00:00Z".to_string(),
+            owner_id: Some("test-owner-id".to_string()),
         }
     }
 
@@ -723,5 +730,31 @@ mod tests {
         // Verify it round-trips through pretty format
         let decoded: DaemonStateFile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.version, 1);
+    }
+
+    #[test]
+    fn state_file_owner_id_round_trip() {
+        let state = sample_state();
+        assert_eq!(state.owner_id.as_deref(), Some("test-owner-id"));
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: DaemonStateFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.owner_id.as_deref(), Some("test-owner-id"));
+    }
+
+    #[test]
+    fn state_file_missing_owner_id_defaults_to_none() {
+        // Simulates state files written by older agent versions
+        let json = r#"{
+            "version": 1,
+            "session_id": "abc-123",
+            "shell": "/bin/bash",
+            "shell_pid": 100,
+            "daemon_pid": 101,
+            "cols": 80,
+            "rows": 24,
+            "started_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let decoded: DaemonStateFile = serde_json::from_str(json).unwrap();
+        assert!(decoded.owner_id.is_none());
     }
 }

@@ -34,6 +34,10 @@ pub struct SessionManager {
     backend: PersistenceBackend,
     /// Scoped socket directory for daemon sessions.
     socket_dir: PathBuf,
+    /// Per-process instance UUID, used as owner marker in daemon state files
+    /// so that multiple agents sharing the same socket directory do not steal
+    /// each other's sessions.
+    agent_instance_id: uuid::Uuid,
 }
 
 impl SessionManager {
@@ -41,6 +45,7 @@ impl SessionManager {
         output_tx: mpsc::Sender<PtyOutput>,
         backend: PersistenceBackend,
         socket_dir: PathBuf,
+        agent_instance_id: uuid::Uuid,
     ) -> Self {
         Self {
             sessions: HashMap::new(),
@@ -49,6 +54,7 @@ impl SessionManager {
             output_tx,
             backend,
             socket_dir,
+            agent_instance_id,
         }
     }
 
@@ -85,6 +91,7 @@ impl SessionManager {
                     self.output_tx.clone(),
                     shell_config,
                     &self.socket_dir,
+                    Some(&self.agent_instance_id.to_string()),
                 )
                 .await?;
                 self.sessions
@@ -270,10 +277,12 @@ impl SessionManager {
                 crate::daemon::discovery::cleanup_stale_daemons(&self.socket_dir);
 
                 let tracked_ids: HashSet<SessionId> = self.sessions.keys().copied().collect();
+                let owner_id_str = self.agent_instance_id.to_string();
                 let recovered = crate::daemon::discovery::discover_daemon_sessions(
                     self.output_tx.clone(),
                     &tracked_ids,
                     &self.socket_dir,
+                    Some(&owner_id_str),
                 )
                 .await;
                 let mut result = Vec::new();
@@ -380,6 +389,7 @@ mod tests {
             tx,
             PersistenceBackend::None,
             PathBuf::from("/tmp/zremote-test"),
+            uuid::Uuid::new_v4(),
         )
     }
 
@@ -437,6 +447,7 @@ mod tests {
             tx.clone(),
             PersistenceBackend::None,
             PathBuf::from("/tmp/zremote-test"),
+            uuid::Uuid::new_v4(),
         );
         assert!(!mgr_none.supports_persistence());
 
@@ -444,6 +455,7 @@ mod tests {
             tx,
             PersistenceBackend::Daemon,
             PathBuf::from("/tmp/zremote-test"),
+            uuid::Uuid::new_v4(),
         );
         assert!(mgr_daemon.supports_persistence());
     }
@@ -523,6 +535,7 @@ mod tests {
             tx,
             PersistenceBackend::Daemon,
             PathBuf::from("/tmp/zremote-test"),
+            uuid::Uuid::new_v4(),
         );
         assert!(mgr.supports_persistence());
         assert_eq!(mgr.backend(), PersistenceBackend::Daemon);

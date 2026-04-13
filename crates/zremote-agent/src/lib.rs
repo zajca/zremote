@@ -139,6 +139,9 @@ pub enum Commands {
         /// Force SIGWINCH on zsh startup
         #[arg(long)]
         force_sigwinch: bool,
+        /// Agent instance UUID that owns this daemon
+        #[arg(long)]
+        owner_id: Option<String>,
     },
 }
 
@@ -180,6 +183,7 @@ pub fn run(command: Option<Commands>) {
         disable_autosuggestions,
         export_env_vars,
         force_sigwinch,
+        owner_id,
     }) = command
     {
         // Validate session_id as UUID to prevent path traversal (e.g. "../")
@@ -249,6 +253,7 @@ pub fn run(command: Option<Commands>) {
             working_dir,
             extra_env,
             shell_config,
+            owner_id,
         ));
         return;
     }
@@ -404,7 +409,10 @@ async fn run_agent() {
         );
     }
 
-    let mut session_manager = session::SessionManager::new(pty_output_tx, backend, socket_dir);
+    let agent_instance_id = uuid::Uuid::new_v4();
+    tracing::info!(%agent_instance_id, "agent instance started");
+    let mut session_manager =
+        session::SessionManager::new(pty_output_tx, backend, socket_dir, agent_instance_id);
     let mut agentic_manager = agentic::manager::AgenticLoopManager::new();
     let session_mapper = hooks::mapper::SessionMapper::new();
     let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(

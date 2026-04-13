@@ -19,6 +19,8 @@ pub async fn health(State(state): State<Arc<LocalAppState>>) -> Json<serde_json:
         "status": "ok",
         "mode": "local",
         "hostname": state.hostname,
+        "service": "zremote-agent",
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 
@@ -44,6 +46,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         )
     }
 
@@ -98,5 +101,8 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["mode"], "local");
         assert_eq!(json["hostname"], "test-host");
+        assert_eq!(json["service"], "zremote-agent");
+        assert!(json["version"].is_string());
+        assert!(!json["version"].as_str().unwrap().is_empty());
     }
 }

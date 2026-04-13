@@ -141,6 +141,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         )
     }
 

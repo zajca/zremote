@@ -1488,6 +1488,7 @@ mod tests {
             pty_tx,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            uuid::Uuid::new_v4(),
         );
         let agentic_manager = AgenticLoopManager::new();
         let project_scanner = ProjectScanner::new();

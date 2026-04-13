@@ -121,6 +121,12 @@ pub async fn run_local(
         );
     }
 
+    // Generate a per-process instance ID so daemon state files record which
+    // agent owns them. Prevents multiple agents sharing the same socket
+    // directory from stealing each other's PTY sessions during discovery.
+    let agent_instance_id = Uuid::new_v4();
+    tracing::info!(%agent_instance_id, "agent instance started");
+
     // Create application state
     let state = LocalAppState::new(
         pool.clone(),
@@ -129,6 +135,7 @@ pub async fn run_local(
         shutdown.clone(),
         backend,
         socket_dir,
+        agent_instance_id,
     );
 
     // === Session recovery ===
@@ -421,6 +428,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let router = build_router(state).unwrap();
@@ -451,6 +459,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let router = build_router(state).unwrap();
@@ -485,6 +494,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let router = build_router(state).unwrap();
@@ -521,6 +531,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let router = build_router(state).unwrap();

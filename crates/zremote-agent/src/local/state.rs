@@ -57,13 +57,15 @@ impl LocalAppState {
         shutdown: CancellationToken,
         backend: crate::config::PersistenceBackend,
         socket_dir: PathBuf,
+        agent_instance_id: Uuid,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
         let agentic_loops = AgenticLoopStore::default();
 
         let (pty_output_tx, pty_output_rx) = mpsc::channel(4096);
-        let session_manager = SessionManager::new(pty_output_tx, backend, socket_dir);
+        let session_manager =
+            SessionManager::new(pty_output_tx, backend, socket_dir, agent_instance_id);
 
         let agentic_manager = AgenticLoopManager::new();
         let session_mapper = SessionMapper::new();
@@ -114,6 +116,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         assert_eq!(state.hostname, "test-host");
@@ -132,6 +135,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         // Session store should be empty
@@ -154,6 +158,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         let mut rx = state.events.subscribe();
@@ -179,6 +184,7 @@ mod tests {
             shutdown,
             crate::config::PersistenceBackend::None,
             std::path::PathBuf::from("/tmp/zremote-test"),
+            Uuid::new_v4(),
         );
 
         // Agentic manager should be accessible

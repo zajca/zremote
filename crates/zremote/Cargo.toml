@@ -8,7 +8,7 @@ workspace = true
 
 [features]
 default = ["gui", "agent", "cli"]
-gui = ["dep:zremote-gui"]
+gui = ["dep:zremote-gui", "dep:serde_json"]
 agent = ["dep:zremote-agent"]
 cli = ["dep:zremote-cli"]
 
@@ -16,6 +16,7 @@ cli = ["dep:zremote-cli"]
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 dotenvy = "0.15"
+serde_json = { workspace = true, optional = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zremote-gui = { workspace = true, optional = true }

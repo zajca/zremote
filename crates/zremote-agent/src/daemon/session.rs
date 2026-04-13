@@ -45,6 +45,7 @@ impl DaemonSession {
         output_tx: mpsc::Sender<PtyOutput>,
         shell_config: Option<&ShellIntegrationConfig>,
         sock_dir: &std::path::Path,
+        owner_id: Option<&str>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         // Use current_exe() for binary name detection, but /proc/PID/exe for
         // the actual spawn path on Linux. After recompilation, cargo replaces
@@ -110,6 +111,11 @@ impl DaemonSession {
             if config.force_sigwinch {
                 args.push("--force-sigwinch".to_string());
             }
+        }
+
+        if let Some(id) = owner_id {
+            args.push("--owner-id".to_string());
+            args.push(id.to_string());
         }
 
         // Ensure socket directory exists before opening log file
@@ -580,6 +586,7 @@ mod tests {
             cols: 80,
             rows: 24,
             started_at: "2026-03-25T10:00:00Z".to_string(),
+            owner_id: None,
         };
 
         let json = serde_json::to_string(&state).unwrap();
@@ -615,6 +622,7 @@ mod tests {
             cols: 80,
             rows: 24,
             started_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: None,
         };
 
         // Write state file before calling wait
@@ -644,6 +652,7 @@ mod tests {
                 cols: 100,
                 rows: 30,
                 started_at: "2026-03-25T12:00:00Z".to_string(),
+                owner_id: None,
             };
             let json = serde_json::to_string(&state).unwrap();
             std::fs::write(&path_clone, json).unwrap();
@@ -677,6 +686,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 started_at: "2026-03-25T13:00:00Z".to_string(),
+                owner_id: None,
             };
             let json = serde_json::to_string(&state).unwrap();
             std::fs::write(&path_clone, json).unwrap();
