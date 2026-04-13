@@ -9,8 +9,8 @@ use zremote_client::{
     AgentKindInfo, AgentProfile, AgenticStatus, Host, HostStatus, Project, Session, SessionStatus,
 };
 
-use crate::persistence::RecentSession;
-use crate::views::fuzzy::FuzzyMatch;
+use crate::persistence::{RecentAction, RecentSession};
+use crate::views::fuzzy::{FuzzyMatch, MatchTier};
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,12 @@ pub(crate) struct ScoredEntry {
     pub(super) index: usize,
     pub(super) source: ItemSource,
     pub(super) fuzzy_match: FuzzyMatch,
+    pub(super) tier: MatchTier,
+    /// 0 = most recent action, u32::MAX = not a recent action.
+    pub(super) recent_rank: u32,
+    /// 0 = active session/project, 1 = same host, u32::MAX = unrelated.
+    pub(super) context_rank: u32,
+    pub(super) title_len: u32,
 }
 
 pub(crate) enum PaletteResults {
@@ -126,6 +132,7 @@ pub struct PaletteSnapshot {
     pub(super) recent_set: HashSet<String>,
     pub(super) cc_states: HashMap<String, CcState>,
     pub(super) cc_metrics: HashMap<String, CcMetrics>,
+    pub(super) recent_action_keys: Vec<String>,
 }
 
 impl PaletteSnapshot {
@@ -137,6 +144,7 @@ impl PaletteSnapshot {
         mode: String,
         active_session_id: Option<String>,
         recent_sessions: &[RecentSession],
+        recent_actions: &[RecentAction],
         cc_states: HashMap<String, CcState>,
         cc_metrics: HashMap<String, CcMetrics>,
         agent_profiles: Rc<Vec<AgentProfile>>,
@@ -158,6 +166,10 @@ impl PaletteSnapshot {
             .iter()
             .map(|r| r.session_id.clone())
             .collect();
+        let recent_action_keys: Vec<String> = recent_actions
+            .iter()
+            .map(|r| r.action_key.clone())
+            .collect();
         Self {
             hosts,
             sessions,
@@ -172,6 +184,7 @@ impl PaletteSnapshot {
             recent_set,
             cc_states,
             cc_metrics,
+            recent_action_keys,
         }
     }
 
@@ -798,6 +811,7 @@ mod tests {
             "local".to_string(),
             Some("sess-1".to_string()),
             &[],
+            &[],
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             Rc::new(Vec::new()),
@@ -1033,6 +1047,7 @@ mod tests {
             "local".to_string(),
             None,
             &[],
+            &[],
             HashMap::new(),
             HashMap::new(),
             profiles,
@@ -1176,6 +1191,7 @@ mod tests {
             "local".to_string(),
             None,
             &[],
+            &[],
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             Rc::new(Vec::new()),
@@ -1311,6 +1327,7 @@ mod tests {
             projects,
             "local".to_string(),
             None,
+            &[],
             &[],
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
@@ -1554,6 +1571,7 @@ mod tests {
             "server".to_string(),
             None,
             &[],
+            &[],
             HashMap::new(),
             HashMap::new(),
             Rc::new(Vec::new()),
@@ -1627,6 +1645,7 @@ mod tests {
             projects,
             "server".to_string(),
             None,
+            &[],
             &[],
             HashMap::new(),
             HashMap::new(),

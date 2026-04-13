@@ -61,8 +61,16 @@ pub struct RecentSession {
     pub timestamp: i64,
 }
 
-/// Current format version.
-const FORMAT_VERSION: u32 = 1;
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecentAction {
+    pub action_key: String,
+    /// Unix timestamp in seconds.
+    pub timestamp: i64,
+}
+
+/// Current format version. Informational only — written on save but not checked
+/// on load. New fields use `#[serde(default)]` for backward compatibility.
+const FORMAT_VERSION: u32 = 2;
 
 /// Default debounce window for the production worker.
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -84,6 +92,8 @@ pub struct GuiState {
     pub window_height: Option<f32>,
     #[serde(default)]
     pub recent_sessions: Vec<RecentSession>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_actions: Vec<RecentAction>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub activity_panel_visible: bool,
 }
@@ -95,6 +105,7 @@ impl GuiState {
             && self.window_width.is_none()
             && self.window_height.is_none()
             && self.recent_sessions.is_empty()
+            && self.recent_actions.is_empty()
             && !self.activity_panel_visible
     }
 }
@@ -341,6 +352,36 @@ impl Persistence {
                 },
             );
             state.recent_sessions.truncate(10);
+        });
+    }
+
+    /// Record a palette action usage. Deduplicates by key, moves to front,
+    /// caps at 20. Save is queued automatically via `update`.
+    pub fn record_action_usage(&mut self, action_key: &str) {
+        self.update(|state| {
+            state.recent_actions.retain(|r| r.action_key != action_key);
+            state.recent_actions.insert(
+                0,
+                RecentAction {
+                    action_key: action_key.to_string(),
+                    timestamp: i64::try_from(
+                        SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                    )
+                    .unwrap_or(0),
+                },
+            );
+            if state.recent_actions.len() > 20 {
+                state.recent_actions.truncate(20);
+            }
+        });
+    }
+
+    /// Clear all recent palette actions (used from settings UI).
+    pub fn clear_recent_actions(&mut self) {
+        self.update(|state| {
+            state.recent_actions.clear();
         });
     }
 
@@ -978,6 +1019,7 @@ mod tests {
                 session_id: "s".to_string(),
                 timestamp: 1_700_000_000,
             }],
+            recent_actions: vec![],
             activity_panel_visible: false,
         };
 
@@ -986,5 +1028,55 @@ mod tests {
 
         let expected = "{\n  \"version\": 1,\n  \"server_url\": \"http://a:1\",\n  \"active_session_id\": \"s\",\n  \"window_width\": 800.0,\n  \"window_height\": 600.0,\n  \"recent_sessions\": [\n    {\n      \"session_id\": \"s\",\n      \"timestamp\": 1700000000\n    }\n  ]\n}";
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_record_action_usage() {
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("record-action");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        p.record_action_usage("NewSession");
+        p.record_action_usage("SearchInTerminal");
+        p.record_action_usage("NewSession"); // duplicate — should move to front
+
+        let actions = &p.state().recent_actions;
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action_key, "NewSession");
+        assert_eq!(actions[1].action_key, "SearchInTerminal");
+    }
+
+    #[test]
+    fn test_record_action_usage_cap() {
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("record-action-cap");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        for i in 0..25 {
+            p.record_action_usage(&format!("Action{i}"));
+        }
+        assert_eq!(p.state().recent_actions.len(), 20);
+        assert_eq!(p.state().recent_actions[0].action_key, "Action24");
+    }
+
+    #[test]
+    fn test_clear_recent_actions() {
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("clear-actions");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        p.record_action_usage("NewSession");
+        p.record_action_usage("Search");
+        assert_eq!(p.state().recent_actions.len(), 2);
+
+        p.clear_recent_actions();
+        assert!(p.state().recent_actions.is_empty());
+    }
+
+    #[test]
+    fn test_backward_compat_v1() {
+        let v1_json = r#"{"version":1,"recent_sessions":[]}"#;
+        let state: GuiState = serde_json::from_str(v1_json).unwrap();
+        assert!(state.recent_actions.is_empty());
     }
 }

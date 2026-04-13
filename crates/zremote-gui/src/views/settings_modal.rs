@@ -24,14 +24,20 @@ use zremote_client::{AgentKindInfo, AgentProfile};
 /// Which tab is currently active in the settings modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
+    General,
     AgentProfiles,
 }
 
 impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
+            Self::General => "General",
             Self::AgentProfiles => "Agent Profiles",
         }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::General, Self::AgentProfiles]
     }
 }
 
@@ -48,6 +54,8 @@ pub enum SettingsModalEvent {
     /// A CRUD mutation succeeded in one of the tabs. `MainView` re-fetches
     /// the shared sidebar caches in response.
     ProfilesChanged,
+    /// User clicked "Clear Recent Actions" in the General tab.
+    ClearRecentActions,
 }
 
 impl EventEmitter<SettingsModalEvent> for SettingsModal {}
@@ -94,6 +102,64 @@ impl SettingsModal {
         });
     }
 
+    fn render_general_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text_primary())
+                            .child("Command Palette"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::text_secondary())
+                            .child(
+                                "Recently used actions are tracked and boosted in palette results.",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("clear-recent-actions")
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(4.0))
+                            .bg(theme::bg_tertiary())
+                            .hover(|s| s.bg(theme::border()))
+                            .child(
+                                icon(Icon::Clock)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_secondary()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme::text_primary())
+                                    .child("Clear Recent Actions"),
+                            )
+                            .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {
+                                cx.emit(SettingsModalEvent::ClearRecentActions);
+                            })),
+                    ),
+            )
+    }
+
     fn render_tab_button(&self, tab: SettingsTab, cx: &mut Context<Self>) -> impl IntoElement {
         let is_active = self.active_tab == tab;
         let id = SharedString::from(format!("settings-tab-{}", tab.label()));
@@ -129,22 +195,23 @@ impl Focusable for SettingsModal {
 
 impl Render for SettingsModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Delegate focus to the active tab so its keyboard routing receives
-        // printable chars for the text fields. Only take focus if nothing in
-        // the modal's focus tree currently holds it -- otherwise we would
-        // steal focus back from the tab every frame and break typing.
-        //
-        // FIXME: when a second tab is introduced, this check must inspect
-        // **every** tab's focus handle (not just the active one). Otherwise,
-        // switching tabs while an inactive tab's input still has focus will
-        // cause the active tab to steal it on the next frame, breaking typing
-        // in the background tab. Today only `AgentProfiles` exists, so the
-        // single-tab check is sufficient.
-        let tab_focus = self.agent_profiles_tab.read(cx).focus_handle(cx);
-        if !tab_focus.contains_focused(window, cx)
-            && !self.focus_handle.contains_focused(window, cx)
-        {
-            tab_focus.focus(window);
+        // Delegate focus to the active tab's focus handle so keyboard routing
+        // reaches text fields. For tabs without their own focus (General), the
+        // modal keeps focus itself.
+        match self.active_tab {
+            SettingsTab::AgentProfiles => {
+                let tab_focus = self.agent_profiles_tab.read(cx).focus_handle(cx);
+                if !tab_focus.contains_focused(window, cx)
+                    && !self.focus_handle.contains_focused(window, cx)
+                {
+                    tab_focus.focus(window);
+                }
+            }
+            SettingsTab::General => {
+                if !self.focus_handle.contains_focused(window, cx) {
+                    self.focus_handle.focus(window);
+                }
+            }
         }
 
         let header = div()
@@ -170,11 +237,11 @@ impl Render for SettingsModal {
                     .child("Settings"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px(px(8.0))
-                    .child(self.render_tab_button(SettingsTab::AgentProfiles, cx)),
+                div().flex().items_center().px(px(8.0)).children(
+                    SettingsTab::all()
+                        .iter()
+                        .map(|&tab| self.render_tab_button(tab, cx).into_any_element()),
+                ),
             );
 
         // `min_h_0` on the body is the first link in a chain that lets the
@@ -182,6 +249,7 @@ impl Render for SettingsModal {
         // 560px height. Without it, the body grows to fit its child's
         // intrinsic height and the scroll region never gets a bounded frame.
         let body = match self.active_tab {
+            SettingsTab::General => self.render_general_tab(cx).into_any_element(),
             SettingsTab::AgentProfiles => div()
                 .flex_1()
                 .min_h_0()
