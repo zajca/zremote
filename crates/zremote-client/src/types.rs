@@ -485,15 +485,21 @@ pub struct ResumeClaudeTaskRequest {
 /// Wire-compatible with `zremote_core::queries::execution_nodes::ExecutionNodeRow`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionNode {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub session_id: String,
     pub loop_id: Option<String>,
+    #[serde(default)]
     pub timestamp: i64,
+    #[serde(default)]
     pub kind: String,
     pub input: Option<String>,
     pub output_summary: Option<String>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
     pub working_dir: String,
+    #[serde(default)]
     pub duration_ms: i64,
 }
 

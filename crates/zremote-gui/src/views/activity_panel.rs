@@ -3,6 +3,8 @@
 //! Shows a live feed of execution nodes (commands, tool calls, file operations)
 //! alongside the terminal for print mode tasks.
 
+use std::collections::VecDeque;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
@@ -30,7 +32,7 @@ pub struct ExecutionNodeItem {
 /// Activity panel showing CC execution progress (execution nodes, status, metrics).
 pub struct ActivityPanel {
     session_id: String,
-    nodes: Vec<ExecutionNodeItem>,
+    nodes: VecDeque<ExecutionNodeItem>,
     cc_status: Option<AgenticStatus>,
     cc_metrics: Option<CcMetrics>,
     task_name: Option<String>,
@@ -48,7 +50,7 @@ impl ActivityPanel {
     pub fn new(session_id: String) -> Self {
         Self {
             session_id,
-            nodes: Vec::new(),
+            nodes: VecDeque::new(),
             cc_status: None,
             cc_metrics: None,
             task_name: None,
@@ -62,7 +64,7 @@ impl ActivityPanel {
 
     /// Prepend a node to the feed (newest first), capping at `MAX_NODES`.
     pub fn push_node(&mut self, node: ExecutionNodeItem, cx: &mut Context<Self>) {
-        self.nodes.insert(0, node);
+        self.nodes.push_front(node);
         if self.nodes.len() > MAX_NODES {
             self.nodes.truncate(MAX_NODES);
         }
@@ -70,9 +72,8 @@ impl ActivityPanel {
     }
 
     /// Load historical nodes (oldest-first from API, reversed to newest-first).
-    pub fn load_nodes(&mut self, mut nodes: Vec<ExecutionNodeItem>, cx: &mut Context<Self>) {
-        nodes.reverse();
-        self.nodes = nodes;
+    pub fn load_nodes(&mut self, nodes: Vec<ExecutionNodeItem>, cx: &mut Context<Self>) {
+        self.nodes = nodes.into_iter().rev().collect();
         if self.nodes.len() > MAX_NODES {
             self.nodes.truncate(MAX_NODES);
         }
