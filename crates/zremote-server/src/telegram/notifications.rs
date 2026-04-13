@@ -105,6 +105,23 @@ fn format_event(event: &ServerEvent) -> Option<String> {
             hostname,
             loop_info.end_reason.as_deref().unwrap_or("unknown"),
         )),
+        ServerEvent::ClaudeTaskEnded {
+            task_id,
+            status: zremote_protocol::ClaudeTaskStatus::Suspended,
+            task_name,
+            project_path,
+            ..
+        } => {
+            let label = task_name.as_deref().unwrap_or(task_id.as_str());
+            let project_line = project_path
+                .as_deref()
+                .map(|p| format!("\nProject: <code>{}</code>", format::escape_html(p)))
+                .unwrap_or_default();
+            Some(format::truncate_message(&format!(
+                "\u{26a0}\u{fe0f} <b>Task Suspended</b>\nTask <code>{}</code> suspended \u{2014} agent disconnected{project_line}",
+                format::escape_html(label),
+            )))
+        }
         // Other events don't trigger Telegram notifications
         _ => None,
     }
@@ -271,5 +288,89 @@ mod tests {
             exit_code: Some(0),
         };
         assert!(format_event(&event).is_none());
+    }
+
+    #[test]
+    fn task_suspended_notifies() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "t1".to_string(),
+            status: zremote_protocol::ClaudeTaskStatus::Suspended,
+            summary: None,
+            session_id: Some("s1".to_string()),
+            host_id: Some("h1".to_string()),
+            project_path: Some("/home/user/project".to_string()),
+            task_name: Some("fix bug #42".to_string()),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("Task Suspended"));
+        assert!(text.contains("fix bug #42"));
+        assert!(text.contains("/home/user/project"));
+        assert!(text.contains("agent disconnected"));
+    }
+
+    #[test]
+    fn task_suspended_without_name_uses_id() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "task-abc-123".to_string(),
+            status: zremote_protocol::ClaudeTaskStatus::Suspended,
+            summary: None,
+            session_id: None,
+            host_id: None,
+            project_path: None,
+            task_name: None,
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("task-abc-123"));
+        assert!(!text.contains("Project:"));
+    }
+
+    #[test]
+    fn task_completed_does_not_notify() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "t1".to_string(),
+            status: zremote_protocol::ClaudeTaskStatus::Completed,
+            summary: Some("done".to_string()),
+            session_id: Some("s1".to_string()),
+            host_id: Some("h1".to_string()),
+            project_path: Some("/home/user/project".to_string()),
+            task_name: Some("fix bug".to_string()),
+        };
+        assert!(format_event(&event).is_none());
+    }
+
+    #[test]
+    fn task_error_does_not_notify() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "t1".to_string(),
+            status: zremote_protocol::ClaudeTaskStatus::Error,
+            summary: None,
+            session_id: None,
+            host_id: None,
+            project_path: None,
+            task_name: None,
+        };
+        assert!(format_event(&event).is_none());
+    }
+
+    #[test]
+    fn task_suspended_escapes_html_in_name() {
+        let event = ServerEvent::ClaudeTaskEnded {
+            task_id: "t1".to_string(),
+            status: zremote_protocol::ClaudeTaskStatus::Suspended,
+            summary: None,
+            session_id: None,
+            host_id: None,
+            project_path: Some("/home/<user>/project".to_string()),
+            task_name: Some("fix <script> bug".to_string()),
+        };
+        let result = format_event(&event);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("fix &lt;script&gt; bug"));
+        assert!(text.contains("&lt;user&gt;"));
     }
 }

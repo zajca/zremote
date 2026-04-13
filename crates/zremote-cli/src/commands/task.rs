@@ -96,6 +96,14 @@ pub enum TaskCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Manually resolve a suspended or errored task
+    Resolve {
+        /// Task ID to resolve
+        task_id: String,
+        /// Summary for the resolution
+        #[arg(long)]
+        summary: Option<String>,
+    },
     /// Show task output
     Log {
         /// Task ID
@@ -148,6 +156,15 @@ pub async fn run(
         TaskCommand::Get { task_id } => match client.get_claude_task(&task_id).await {
             Ok(task) => {
                 println!("{}", fmt.task(&task));
+                if let Some(ref reason) = task.disconnect_reason {
+                    println!("disconnect_reason: {reason}");
+                    if let Some(cost) = task.total_cost_usd {
+                        println!("  cost at disconnect: ${cost:.4}");
+                    }
+                    if task.loop_id.is_some() {
+                        println!("  loop was active at disconnect");
+                    }
+                }
                 0
             }
             Err(e) => {
@@ -292,6 +309,24 @@ pub async fn run(
             match client.cancel_claude_task(&task_id, force).await {
                 Ok(()) => {
                     println!("Task {task_id} cancelled");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        TaskCommand::Resolve { task_id, summary } => {
+            match client
+                .resolve_claude_task(&task_id, summary.as_deref())
+                .await
+            {
+                Ok(task) => {
+                    println!("Task {task_id} resolved successfully");
+                    if let Some(ref s) = task.summary {
+                        println!("Summary: {s}");
+                    }
                     0
                 }
                 Err(e) => {

@@ -189,6 +189,8 @@ pub struct ClaudeTask {
     pub created_at: String,
     #[serde(default)]
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub disconnect_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

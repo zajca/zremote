@@ -117,6 +117,9 @@ impl Formatter for PlainFormatter {
         if let Some(ref err) = t.error_message {
             let _ = write!(result, "\nerror: {err}");
         }
+        if let Some(ref reason) = t.disconnect_reason {
+            let _ = write!(result, "\ndisconnect_reason: {reason}");
+        }
         result
     }
 
