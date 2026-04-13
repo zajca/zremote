@@ -12,6 +12,9 @@ pub enum ClaudeTaskStatus {
     Completed,
     Error,
     Suspended,
+    /// Forward-compatibility: unknown status from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Discovered Claude Code session info (for resume).
@@ -168,6 +171,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ClaudeTaskStatus>(r#""suspended""#).unwrap(),
             ClaudeTaskStatus::Suspended
+        );
+        assert_eq!(
+            serde_json::from_str::<ClaudeTaskStatus>(r#""some_future_status""#).unwrap(),
+            ClaudeTaskStatus::Unknown
         );
     }
 

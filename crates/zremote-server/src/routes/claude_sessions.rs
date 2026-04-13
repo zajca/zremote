@@ -404,7 +404,9 @@ pub async fn cancel_claude_task(
         .parse()
         .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
 
-    // If not force and channel might be available, try graceful abort
+    // For suspended tasks the agent is likely disconnected, so the graceful abort
+    // is best-effort (get_sender returns None when offline). Closing the session
+    // below prevents recovery on future agent reconnect.
     if !force && let Some(sender) = state.connections.get_sender(&host_id).await {
         let abort_msg = ServerMessage::ChannelAction(
             zremote_protocol::channel::ChannelServerAction::ChannelSend {
@@ -441,6 +443,16 @@ pub async fn cancel_claude_task(
     {
         tracing::warn!(task_id = %task_id, "failed to update task status on cancel: {e}");
     }
+
+    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+        task_id: task_id.clone(),
+        status: zremote_protocol::ClaudeTaskStatus::Error,
+        summary: Some("cancelled by user".to_string()),
+        session_id: Some(task.session_id.clone()),
+        host_id: Some(task.host_id.clone()),
+        project_path: Some(task.project_path.clone()),
+        task_name: task.task_name.clone(),
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -507,6 +519,16 @@ pub async fn resolve_claude_task(
     .execute(&state.db)
     .await
     .map_err(|e| AppError::Internal(format!("failed to resolve task: {e}")))?;
+
+    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+        task_id: task_id.clone(),
+        status: zremote_protocol::ClaudeTaskStatus::Completed,
+        summary: Some(summary.clone()),
+        session_id: Some(task.session_id.clone()),
+        host_id: Some(task.host_id.clone()),
+        project_path: Some(task.project_path.clone()),
+        task_name: task.task_name.clone(),
+    });
 
     let task = q::get_claude_task(&state.db, &task_id).await?;
     Ok((StatusCode::OK, Json(task)))
