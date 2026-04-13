@@ -31,6 +31,7 @@ pub enum Icon {
     Settings,
     PanelRight,
     FileText,
+    Clock,
 }
 
 impl Icon {
@@ -65,6 +66,7 @@ impl Icon {
             Self::Settings => "icons/settings.svg",
             Self::PanelRight => "icons/panel-right.svg",
             Self::FileText => "icons/file-text.svg",
+            Self::Clock => "icons/clock.svg",
         }
     }
 }

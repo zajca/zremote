@@ -36,7 +36,7 @@ use items::{
     is_item_drillable, session_title,
 };
 
-use super::fuzzy::{FuzzyMatch, fuzzy_match_item};
+use super::fuzzy::{FuzzyMatch, tiered_match_item};
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -140,6 +140,9 @@ pub enum CommandPaletteEvent {
         working_dir: Option<String>,
     },
     ShowSettings,
+    RecordRecentAction {
+        action_key: String,
+    },
     Close,
 }
 
@@ -427,18 +430,36 @@ impl CommandPalette {
             if !item.selectable {
                 continue;
             }
-            if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+            if let Some(tm) = tiered_match_item(&self.query, &item.title, &item.subtitle) {
                 scored.push(ScoredEntry {
                     index: i,
                     source: ItemSource::Action,
-                    fuzzy_match: fm,
+                    fuzzy_match: FuzzyMatch {
+                        score: tm.score,
+                        matched_indices: tm.matched_indices,
+                    },
+                    tier: tm.tier,
+                    recent_rank: self.recent_action_rank(&item.item),
+                    context_rank: u32::MAX,
+                    title_len: item.title.chars().count() as u32,
                 });
             }
         }
-        scored.sort_by(|a, b| b.fuzzy_match.score.cmp(&a.fuzzy_match.score));
+        scored.sort_by(|a, b| {
+            a.tier
+                .cmp(&b.tier)
+                .then(a.recent_rank.cmp(&b.recent_rank))
+                .then(b.fuzzy_match.score.cmp(&a.fuzzy_match.score))
+                .then(a.title_len.cmp(&b.title_len))
+        });
         PaletteResults::Scored(scored)
     }
 
+    /// Build grouped results for the empty-query view.
+    ///
+    /// Context ranking is intentionally NOT applied here: the grouped view
+    /// uses explicit categories (Recent/Active/Suspended/Pinned) that already
+    /// provide meaningful ordering. Actions are sorted by recent usage instead.
     fn compute_grouped(&self) -> PaletteResults {
         let mut groups: Vec<CategoryGroup> = Vec::new();
 
@@ -471,11 +492,14 @@ impl CommandPalette {
                     });
                 }
 
-                // Actions
+                // Actions (recently used first)
                 if !self.action_items.is_empty() {
+                    let mut action_indices: Vec<usize> = (0..self.action_items.len()).collect();
+                    action_indices
+                        .sort_by_key(|&i| self.recent_action_rank(&self.action_items[i].item));
                     groups.push(CategoryGroup {
                         category: PaletteCategory::Actions,
-                        indices: (0..self.action_items.len()).collect(),
+                        indices: action_indices,
                         source: ItemSource::Action,
                     });
                 }
@@ -511,9 +535,12 @@ impl CommandPalette {
             }
             PaletteTab::Actions => {
                 if !self.action_items.is_empty() {
+                    let mut action_indices: Vec<usize> = (0..self.action_items.len()).collect();
+                    action_indices
+                        .sort_by_key(|&i| self.recent_action_rank(&self.action_items[i].item));
                     groups.push(CategoryGroup {
                         category: PaletteCategory::Actions,
-                        indices: (0..self.action_items.len()).collect(),
+                        indices: action_indices,
                         source: ItemSource::Action,
                     });
                 }
@@ -565,6 +592,74 @@ impl CommandPalette {
         }
     }
 
+    /// Return the recent-action rank for an item (0 = most recent, u32::MAX = not recent).
+    fn recent_action_rank(&self, item: &PaletteItem) -> u32 {
+        match item {
+            PaletteItem::Action(action) => {
+                let key = action.action_key();
+                self.snapshot
+                    .recent_action_keys
+                    .iter()
+                    .position(|k| k == key)
+                    .map_or(u32::MAX, |pos| pos as u32)
+            }
+            _ => u32::MAX,
+        }
+    }
+
+    /// Context relevance rank: 0 = directly active, 1 = same host, u32::MAX = unrelated.
+    fn context_rank(&self, item: &PaletteItem) -> u32 {
+        let active_session_id = self.snapshot.active_session_id.as_deref();
+        let active_session =
+            active_session_id.and_then(|sid| self.snapshot.sessions.iter().find(|s| s.id == sid));
+        let active_host_id = active_session.map(|s| s.host_id.as_str());
+        let active_project_id = active_session.and_then(|s| s.project_id.as_deref());
+
+        match item {
+            PaletteItem::Session { session_idx } => {
+                let s = &self.snapshot.sessions[*session_idx];
+                if Some(s.id.as_str()) == active_session_id {
+                    return 0;
+                }
+                if Some(s.host_id.as_str()) == active_host_id {
+                    return 1;
+                }
+                u32::MAX
+            }
+            PaletteItem::Project { project_idx } => {
+                let p = &self.snapshot.projects[*project_idx];
+                if Some(p.id.as_str()) == active_project_id {
+                    return 0;
+                }
+                if Some(p.host_id.as_str()) == active_host_id {
+                    return 1;
+                }
+                u32::MAX
+            }
+            PaletteItem::Action(action) => match action {
+                PaletteAction::NewSessionInProject { host_id, .. }
+                | PaletteAction::StartAgent {
+                    host_id: Some(host_id),
+                    ..
+                } => {
+                    if Some(host_id.as_str()) == active_host_id {
+                        1
+                    } else {
+                        u32::MAX
+                    }
+                }
+                PaletteAction::SwitchToSession { session_id, .. } => {
+                    if Some(session_id.as_str()) == active_session_id {
+                        0
+                    } else {
+                        u32::MAX
+                    }
+                }
+                _ => u32::MAX,
+            },
+        }
+    }
+
     fn compute_scored(&self) -> PaletteResults {
         let mut scored: Vec<ScoredEntry> = Vec::new();
 
@@ -577,39 +672,67 @@ impl CommandPalette {
 
         if include_sessions {
             for (i, item) in self.session_items.iter().enumerate() {
-                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                if let Some(tm) = tiered_match_item(&self.query, &item.title, &item.subtitle) {
                     scored.push(ScoredEntry {
                         index: i,
                         source: ItemSource::Session,
-                        fuzzy_match: fm,
+                        fuzzy_match: FuzzyMatch {
+                            score: tm.score,
+                            matched_indices: tm.matched_indices,
+                        },
+                        tier: tm.tier,
+                        recent_rank: u32::MAX,
+                        context_rank: self.context_rank(&item.item),
+                        title_len: item.title.chars().count() as u32,
                     });
                 }
             }
         }
         if include_projects {
             for (i, item) in self.project_items.iter().enumerate() {
-                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                if let Some(tm) = tiered_match_item(&self.query, &item.title, &item.subtitle) {
                     scored.push(ScoredEntry {
                         index: i,
                         source: ItemSource::Project,
-                        fuzzy_match: fm,
+                        fuzzy_match: FuzzyMatch {
+                            score: tm.score,
+                            matched_indices: tm.matched_indices,
+                        },
+                        tier: tm.tier,
+                        recent_rank: u32::MAX,
+                        context_rank: self.context_rank(&item.item),
+                        title_len: item.title.chars().count() as u32,
                     });
                 }
             }
         }
         if include_actions {
             for (i, item) in self.action_items.iter().enumerate() {
-                if let Some(fm) = fuzzy_match_item(&self.query, &item.title, &item.subtitle) {
+                if let Some(tm) = tiered_match_item(&self.query, &item.title, &item.subtitle) {
                     scored.push(ScoredEntry {
                         index: i,
                         source: ItemSource::Action,
-                        fuzzy_match: fm,
+                        fuzzy_match: FuzzyMatch {
+                            score: tm.score,
+                            matched_indices: tm.matched_indices,
+                        },
+                        tier: tm.tier,
+                        recent_rank: self.recent_action_rank(&item.item),
+                        context_rank: self.context_rank(&item.item),
+                        title_len: item.title.chars().count() as u32,
                     });
                 }
             }
         }
 
-        scored.sort_by(|a, b| b.fuzzy_match.score.cmp(&a.fuzzy_match.score));
+        scored.sort_by(|a, b| {
+            a.tier
+                .cmp(&b.tier)
+                .then(a.recent_rank.cmp(&b.recent_rank))
+                .then(a.context_rank.cmp(&b.context_rank))
+                .then(b.fuzzy_match.score.cmp(&a.fuzzy_match.score))
+                .then(a.title_len.cmp(&b.title_len))
+        });
 
         PaletteResults::Scored(scored)
     }
@@ -704,7 +827,49 @@ impl CommandPalette {
             row = row.child(pill);
         }
 
+        // Context chip: show active host / project when a session is selected.
+        if let Some(chip) = self.render_context_chip() {
+            row = row.child(div().flex_1()).child(chip);
+        }
+
         row
+    }
+
+    fn render_context_chip(&self) -> Option<Div> {
+        let session_id = self.snapshot.active_session_id.as_deref()?;
+        let session = self.snapshot.sessions.iter().find(|s| s.id == session_id)?;
+        let host_name = self.snapshot.host_name(&session.host_id);
+        let project_name = session
+            .project_id
+            .as_deref()
+            .and_then(|pid| self.snapshot.project_name(pid));
+
+        let label: SharedString = match project_name {
+            Some(proj) => format!("{host_name} / {proj}").into(),
+            None => host_name.into(),
+        };
+
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .bg(theme::bg_tertiary())
+                .text_size(px(10.0))
+                .text_color(theme::text_secondary())
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .max_w(px(180.0))
+                .child(
+                    icon(Icon::Server)
+                        .size(px(10.0))
+                        .text_color(theme::text_tertiary()),
+                )
+                .child(label),
+        )
     }
 
     fn render_input_bar(&self) -> impl IntoElement {
@@ -1101,10 +1266,26 @@ impl CommandPalette {
             PaletteAction::SwitchSession => Some("Ctrl+Tab"),
             _ => None,
         };
+        let is_recent = self
+            .snapshot
+            .recent_action_keys
+            .iter()
+            .any(|k| k == action.action_key());
 
-        div().when_some(shortcut, |s: Div, shortcut| {
-            s.child(render_key_pill(shortcut))
-        })
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .when(is_recent, |s: Div| {
+                s.child(
+                    icon(Icon::Clock)
+                        .size(px(12.0))
+                        .text_color(theme::text_tertiary()),
+                )
+            })
+            .when_some(shortcut, |s: Div, shortcut| {
+                s.child(render_key_pill(shortcut))
+            })
     }
 
     fn render_footer(&self) -> impl IntoElement {

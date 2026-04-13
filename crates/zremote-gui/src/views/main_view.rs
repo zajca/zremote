@@ -1018,12 +1018,15 @@ impl MainView {
 
         // Build snapshot from sidebar + persistence (Rc::clone = O(1), no data copying)
         let snapshot = self.sidebar.read(cx);
-        let recent_sessions = self
+        let (recent_sessions, recent_actions) = self
             .app_state
             .persistence
             .lock()
             .ok()
-            .map(|p| p.state().recent_sessions.clone())
+            .map(|p| {
+                let state = p.state();
+                (state.recent_sessions.clone(), state.recent_actions.clone())
+            })
             .unwrap_or_default();
         let cc_states = snapshot.cc_states().clone();
         let cc_metrics = snapshot.cc_metrics().clone();
@@ -1034,6 +1037,7 @@ impl MainView {
             self.app_state.mode.clone(),
             snapshot.selected_session_id().map(String::from),
             &recent_sessions,
+            &recent_actions,
             cc_states,
             cc_metrics,
             Rc::clone(snapshot.agent_profiles_rc()),
@@ -1279,6 +1283,11 @@ impl MainView {
                     );
                 }
             }
+            CommandPaletteEvent::RecordRecentAction { action_key } => {
+                if let Ok(mut p) = self.app_state.persistence.lock() {
+                    p.record_action_usage(action_key);
+                }
+            }
             CommandPaletteEvent::ShowSettings => {
                 // Handled directly here (not via `SidebarEvent::OpenSettings`)
                 // because the modal is owned by `MainView`, not the sidebar --
@@ -1441,6 +1450,11 @@ impl MainView {
                     this.sidebar.update(cx, |sidebar, cx| {
                         sidebar.refresh_agent_profiles(cx);
                     });
+                }
+                SettingsModalEvent::ClearRecentActions => {
+                    if let Ok(mut p) = this.app_state.persistence.lock() {
+                        p.clear_recent_actions();
+                    }
                 }
             },
         )
