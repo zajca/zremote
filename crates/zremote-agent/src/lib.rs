@@ -390,7 +390,21 @@ async fn run_agent() {
     // when full rather than blocking. With 4KB chunks this buffers ~16MB before
     // dropping, enough for most reconnect windows (backoff up to 300s).
     let (pty_output_tx, mut pty_output_rx) = tokio::sync::mpsc::channel::<session::PtyOutput>(4096);
-    let mut session_manager = session::SessionManager::new(pty_output_tx, backend);
+    let socket_dir = daemon::socket_dir(config.server_url.as_str());
+
+    // Warn about legacy global socket directory (pre-scoping)
+    let legacy_dir = daemon::legacy_socket_dir();
+    if legacy_dir.exists() && !socket_dir.exists() {
+        tracing::warn!(
+            legacy_dir = %legacy_dir.display(),
+            scoped_dir = %socket_dir.display(),
+            "found legacy global PTY socket directory; sessions from a previous \
+             agent version will not be recovered automatically — they will be \
+             cleaned up when those daemon processes exit"
+        );
+    }
+
+    let mut session_manager = session::SessionManager::new(pty_output_tx, backend, socket_dir);
     let mut agentic_manager = agentic::manager::AgenticLoopManager::new();
     let session_mapper = hooks::mapper::SessionMapper::new();
     let sent_cc_session_ids = std::sync::Arc::new(tokio::sync::RwLock::new(

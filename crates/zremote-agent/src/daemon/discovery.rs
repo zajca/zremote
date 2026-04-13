@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -8,8 +8,6 @@ use zremote_protocol::SessionId;
 use super::DaemonStateFile;
 use super::session::DaemonSession;
 use crate::session::PtyOutput;
-
-use super::socket_dir;
 
 /// Maximum number of reconnect attempts per daemon session during discovery.
 const RECONNECT_MAX_ATTEMPTS: u32 = 3;
@@ -27,8 +25,9 @@ const RECONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 pub async fn discover_daemon_sessions(
     output_tx: mpsc::Sender<PtyOutput>,
     already_tracked: &HashSet<SessionId>,
+    socket_dir: &Path,
 ) -> Vec<(DaemonSession, Option<Vec<u8>>)> {
-    let dir = socket_dir();
+    let dir = socket_dir.to_path_buf();
     if !dir.exists() {
         return Vec::new();
     }
@@ -170,8 +169,8 @@ pub async fn discover_daemon_sessions(
 ///
 /// Removes files for daemons that are no longer running, with a 24-hour
 /// staleness threshold to avoid removing files from very recently started daemons.
-pub fn cleanup_stale_daemons() {
-    let dir = socket_dir();
+pub fn cleanup_stale_daemons(socket_dir: &Path) {
+    let dir = socket_dir.to_path_buf();
     if !dir.exists() {
         return;
     }
@@ -359,10 +358,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_dir_format() {
-        let dir = socket_dir();
+    fn socket_dir_is_scoped_by_instance_key() {
         let uid = nix::unistd::getuid();
-        assert_eq!(dir, PathBuf::from(format!("/tmp/zremote-pty-{uid}")));
+        let dir = super::super::socket_dir("test-key");
+        let s = dir.to_string_lossy();
+        assert!(s.starts_with(&format!("/tmp/zremote-pty-{uid}-")));
     }
 
     #[test]
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn cleanup_stale_daemons_no_dir() {
         // Should not panic when directory doesn't exist
-        cleanup_stale_daemons();
+        cleanup_stale_daemons(Path::new("/tmp/zremote-no-such-dir"));
     }
 
     #[test]
@@ -694,22 +694,21 @@ mod tests {
 
     #[tokio::test]
     async fn discover_empty_dir() {
-        // Create a temp dir and override socket_dir logic by directly testing
-        // that discover returns empty when the socket dir has no state files.
         let tmp = tempfile::tempdir().unwrap();
-        // Verify no .json files yields empty results
-        let entries = std::fs::read_dir(tmp.path()).unwrap();
-        let json_count = entries
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .count();
-        assert_eq!(json_count, 0, "temp dir should have no json files");
-
-        // The actual discover_daemon_sessions uses a fixed socket_dir(),
-        // so we just verify it doesn't panic with whatever state exists.
         let (tx, _rx) = mpsc::channel(64);
-        let result = discover_daemon_sessions(tx, &HashSet::new()).await;
-        // Result depends on environment, but must not panic
-        drop(result);
+        let result = discover_daemon_sessions(tx, &HashSet::new(), tmp.path()).await;
+        assert!(result.is_empty(), "empty dir should yield no sessions");
+    }
+
+    #[tokio::test]
+    async fn discover_nonexistent_dir() {
+        let (tx, _rx) = mpsc::channel(64);
+        let result =
+            discover_daemon_sessions(tx, &HashSet::new(), Path::new("/tmp/zremote-no-such-dir"))
+                .await;
+        assert!(
+            result.is_empty(),
+            "nonexistent dir should yield no sessions"
+        );
     }
 }

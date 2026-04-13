@@ -101,6 +101,26 @@ pub async fn run_local(
         }
     }
 
+    // Compute scoped socket directory from canonical DB path
+    let canonical_db = db_file
+        .parent()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|p| db_file.file_name().map(|name| p.join(name)))
+        .unwrap_or_else(|| db_file.clone());
+    let socket_dir = crate::daemon::socket_dir(&canonical_db.display().to_string());
+
+    // Warn about legacy global socket directory (pre-scoping)
+    let legacy_dir = crate::daemon::legacy_socket_dir();
+    if legacy_dir.exists() && !socket_dir.exists() {
+        tracing::warn!(
+            legacy_dir = %legacy_dir.display(),
+            scoped_dir = %socket_dir.display(),
+            "found legacy global PTY socket directory; sessions from a previous \
+             agent version will not be recovered automatically — they will be \
+             cleaned up when those daemon processes exit"
+        );
+    }
+
     // Create application state
     let state = LocalAppState::new(
         pool.clone(),
@@ -108,6 +128,7 @@ pub async fn run_local(
         host_id,
         shutdown.clone(),
         backend,
+        socket_dir,
     );
 
     // === Session recovery ===
@@ -399,6 +420,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         let router = build_router(state).unwrap();
@@ -428,6 +450,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         let router = build_router(state).unwrap();
@@ -461,6 +484,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         let router = build_router(state).unwrap();
@@ -496,6 +520,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         let router = build_router(state).unwrap();

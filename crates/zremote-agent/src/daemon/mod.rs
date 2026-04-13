@@ -34,8 +34,26 @@ pub struct DaemonStateFile {
     pub started_at: String,
 }
 
-/// Return the socket directory for the current user.
-pub fn socket_dir() -> PathBuf {
+/// Return a scoped socket directory for the current user and agent instance.
+///
+/// The directory name includes a hash of `instance_key` (the canonical DB path
+/// in local mode, or the server URL in server mode) so that two agent instances
+/// on the same machine use separate socket namespaces and never collide.
+pub fn socket_dir(instance_key: &str) -> PathBuf {
+    let uid = nix::unistd::getuid();
+    let hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, instance_key.as_bytes());
+    let b = hash.as_bytes();
+    let short = format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+    );
+    PathBuf::from(format!("/tmp/zremote-pty-{uid}-{short}"))
+}
+
+/// Return the legacy (pre-scoping) socket directory path.
+///
+/// Used only for migration warnings when upgrading from an older agent version.
+pub fn legacy_socket_dir() -> PathBuf {
     let uid = nix::unistd::getuid();
     PathBuf::from(format!("/tmp/zremote-pty-{uid}"))
 }
@@ -623,10 +641,76 @@ mod tests {
     }
 
     #[test]
-    fn socket_dir_format() {
+    fn socket_dir_is_scoped_by_instance_key() {
         let uid = nix::unistd::getuid();
-        let dir = socket_dir();
+        let dir = socket_dir("test-key");
+        let s = dir.to_string_lossy();
+        assert!(s.starts_with(&format!("/tmp/zremote-pty-{uid}-")));
+        // Hash suffix should be 16 hex chars (8 bytes)
+        let suffix = s.strip_prefix(&format!("/tmp/zremote-pty-{uid}-")).unwrap();
+        assert_eq!(suffix.len(), 16, "hash suffix should be 16 hex chars");
+    }
+
+    #[test]
+    fn socket_dir_different_keys_produce_different_dirs() {
+        let dir_a = socket_dir("key-a");
+        let dir_b = socket_dir("key-b");
+        assert_ne!(dir_a, dir_b);
+    }
+
+    #[test]
+    fn socket_dir_same_key_is_deterministic() {
+        let dir1 = socket_dir("same-key");
+        let dir2 = socket_dir("same-key");
+        assert_eq!(dir1, dir2);
+    }
+
+    #[test]
+    fn socket_dir_db_path_key() {
+        let dir = socket_dir("/home/user/.zremote/local.db");
+        let uid = nix::unistd::getuid();
+        assert!(
+            dir.to_string_lossy()
+                .starts_with(&format!("/tmp/zremote-pty-{uid}-"))
+        );
+    }
+
+    #[test]
+    fn socket_dir_server_url_key() {
+        let dir = socket_dir("ws://myserver:3000/ws/agent");
+        let uid = nix::unistd::getuid();
+        assert!(
+            dir.to_string_lossy()
+                .starts_with(&format!("/tmp/zremote-pty-{uid}-"))
+        );
+    }
+
+    #[test]
+    fn socket_dir_path_under_macos_limit() {
+        // Longest realistic instance key
+        let long_key = "a".repeat(500);
+        let dir = socket_dir(&long_key);
+        // Socket path = dir + "/" + uuid + ".sock" ≈ dir + 42 chars
+        let socket_path = dir.join("00000000-0000-0000-0000-000000000000.sock");
+        assert!(
+            socket_path.to_string_lossy().len() < 104,
+            "socket path must be < 104 bytes (macOS sun_path limit), got {}",
+            socket_path.to_string_lossy().len()
+        );
+    }
+
+    #[test]
+    fn legacy_socket_dir_has_no_hash() {
+        let uid = nix::unistd::getuid();
+        let dir = legacy_socket_dir();
         assert_eq!(dir, PathBuf::from(format!("/tmp/zremote-pty-{uid}")));
+    }
+
+    #[test]
+    fn legacy_and_scoped_differ() {
+        let legacy = legacy_socket_dir();
+        let scoped = socket_dir("any-key");
+        assert_ne!(legacy, scoped);
     }
 
     #[test]

@@ -1484,7 +1484,11 @@ mod tests {
         std::collections::HashMap<SessionId, OutputAnalyzer>,
     ) {
         let (pty_tx, _pty_rx) = mpsc::channel(16);
-        let session_manager = SessionManager::new(pty_tx, crate::config::PersistenceBackend::None);
+        let session_manager = SessionManager::new(
+            pty_tx,
+            crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
+        );
         let agentic_manager = AgenticLoopManager::new();
         let project_scanner = ProjectScanner::new();
         let (outbound_tx, outbound_rx) = mpsc::channel(16);
