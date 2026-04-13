@@ -1138,8 +1138,9 @@ impl ApiClient {
         limit: Option<i64>,
     ) -> Result<Vec<super::types::ExecutionNode>, ApiError> {
         let mut req = self.client.get(format!(
-            "{}/api/sessions/{session_id}/execution-nodes",
-            self.base_url
+            "{}/api/sessions/{}/execution-nodes",
+            self.base_url,
+            encode_path(session_id)
         ));
         if let Some(l) = limit {
             req = req.query(&[("limit", l)]);

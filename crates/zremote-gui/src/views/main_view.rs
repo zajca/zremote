@@ -219,13 +219,12 @@ impl MainView {
             terminal.update(cx, |panel, cx| {
                 panel.set_activity_panel_visible(true, cx);
             });
+            // Only load historical nodes when the panel will actually be shown.
+            let api = self.app_state.api.clone();
+            terminal.update(cx, |panel, cx| {
+                panel.load_execution_nodes(api, cx);
+            });
         }
-
-        // Load historical execution nodes so the panel is populated on open.
-        let api = self.app_state.api.clone();
-        terminal.update(cx, |panel, cx| {
-            panel.load_execution_nodes(api, cx);
-        });
 
         self.terminal = Some(terminal);
         cx.notify();
@@ -585,10 +584,15 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
+                        let was_idle = panel.is_cc_idle();
                         panel.update_cc_status(Some(loop_info.status));
+                        panel.update_cc_task_name(loop_info.task_name.clone());
                         panel.sync_activity_status(cx);
-                        // Auto-show activity panel when a new task starts.
-                        panel.show_activity_panel(cx);
+                        panel.sync_activity_task_name(cx);
+                        // Auto-show activity panel only on first detection (idle -> active).
+                        if was_idle {
+                            panel.show_activity_panel(cx);
+                        }
                         cx.notify();
                     });
                 }
@@ -599,7 +603,9 @@ impl MainView {
                 {
                     terminal.update(cx, |panel, cx| {
                         panel.update_cc_status(Some(loop_info.status));
+                        panel.update_cc_task_name(loop_info.task_name.clone());
                         panel.sync_activity_status(cx);
+                        panel.sync_activity_task_name(cx);
                         cx.notify();
                     });
                 }
@@ -635,15 +641,15 @@ impl MainView {
             use crate::views::activity_panel::ExecutionNodeItem;
             terminal.update(cx, |panel, cx| {
                 panel.push_execution_node(
-                    ExecutionNodeItem {
-                        node_id: *node_id,
-                        timestamp: *timestamp,
-                        kind: kind.clone(),
-                        input: input.clone(),
-                        output_summary: output_summary.clone(),
-                        exit_code: *exit_code,
-                        duration_ms: *duration_ms,
-                    },
+                    ExecutionNodeItem::new(
+                        *node_id,
+                        *timestamp,
+                        kind,
+                        input.as_deref(),
+                        output_summary.as_deref(),
+                        *exit_code,
+                        *duration_ms,
+                    ),
                     cx,
                 );
             });
