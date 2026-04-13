@@ -1413,6 +1413,27 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Manually resolve a suspended or errored Claude task.
+    pub async fn resolve_claude_task(
+        &self,
+        task_id: &str,
+        summary: Option<&str>,
+    ) -> Result<ClaudeTask, ApiError> {
+        let body = serde_json::json!({ "summary": summary });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/claude-tasks/{}/resolve",
+                self.base_url,
+                encode_path(task_id)
+            ))
+            .json(&body)
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Get task log (scrollback output).
     pub async fn get_task_log(&self, task_id: &str) -> Result<String, ApiError> {
         let resp = self

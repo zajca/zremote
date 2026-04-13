@@ -387,7 +387,7 @@ pub async fn cancel_claude_task(
 ) -> Result<impl IntoResponse, AppError> {
     let task = q::get_claude_task(&state.db, &task_id).await?;
 
-    if task.status != "starting" && task.status != "active" {
+    if task.status != "starting" && task.status != "active" && task.status != "suspended" {
         return Err(AppError::Conflict(format!(
             "cannot cancel task with status '{}'",
             task.status
@@ -404,7 +404,9 @@ pub async fn cancel_claude_task(
         .parse()
         .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
 
-    // If not force and channel might be available, try graceful abort
+    // For suspended tasks the agent is likely disconnected, so the graceful abort
+    // is best-effort (get_sender returns None when offline). Closing the session
+    // below prevents recovery on future agent reconnect.
     if !force && let Some(sender) = state.connections.get_sender(&host_id).await {
         let abort_msg = ServerMessage::ChannelAction(
             zremote_protocol::channel::ChannelServerAction::ChannelSend {
@@ -430,15 +432,27 @@ pub async fn cancel_claude_task(
     }
 
     // Update task status to error with cancel reason
+    let now = chrono::Utc::now().to_rfc3339();
     if let Err(e) = sqlx::query(
-        "UPDATE claude_sessions SET status = 'error', error_message = 'cancelled by user' WHERE id = ?",
+        "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'cancelled by user', disconnect_reason = NULL WHERE id = ?",
     )
+    .bind(&now)
     .bind(&task_id)
     .execute(&state.db)
     .await
     {
         tracing::warn!(task_id = %task_id, "failed to update task status on cancel: {e}");
     }
+
+    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+        task_id: task_id.clone(),
+        status: zremote_protocol::ClaudeTaskStatus::Error,
+        summary: Some("cancelled by user".to_string()),
+        session_id: Some(task.session_id.clone()),
+        host_id: Some(task.host_id.clone()),
+        project_path: Some(task.project_path.clone()),
+        task_name: task.task_name.clone(),
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -469,6 +483,55 @@ pub async fn get_task_log(
     // Strip ANSI escape codes
     let stripped = strip_ansi_escapes(&output);
     Ok(stripped)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveTaskBody {
+    pub summary: Option<String>,
+}
+
+/// `POST /api/claude-tasks/:task_id/resolve` - Manually resolve a suspended or errored task.
+pub async fn resolve_claude_task(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    body: Option<Json<ResolveTaskBody>>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+
+    if task.status != "error" && task.status != "suspended" {
+        return Err(AppError::Conflict(format!(
+            "can only resolve tasks with status 'error' or 'suspended', got '{}'",
+            task.status
+        )));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let summary = body
+        .and_then(|Json(b)| b.summary)
+        .unwrap_or_else(|| "manually resolved".to_string());
+
+    sqlx::query(
+        "UPDATE claude_sessions SET status = 'completed', ended_at = ?, summary = ?, disconnect_reason = NULL WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(&summary)
+    .bind(&task_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| AppError::Internal(format!("failed to resolve task: {e}")))?;
+
+    let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+        task_id: task_id.clone(),
+        status: zremote_protocol::ClaudeTaskStatus::Completed,
+        summary: Some(summary.clone()),
+        session_id: Some(task.session_id.clone()),
+        host_id: Some(task.host_id.clone()),
+        project_path: Some(task.project_path.clone()),
+        task_name: task.task_name.clone(),
+    });
+
+    let task = q::get_claude_task(&state.db, &task_id).await?;
+    Ok((StatusCode::OK, Json(task)))
 }
 
 /// Strip ANSI escape sequences from a string.
@@ -555,6 +618,14 @@ mod tests {
             .route(
                 "/api/claude-tasks/{task_id}/resume",
                 post(resume_claude_task),
+            )
+            .route(
+                "/api/claude-tasks/{task_id}/cancel",
+                post(cancel_claude_task),
+            )
+            .route(
+                "/api/claude-tasks/{task_id}/resolve",
+                post(resolve_claude_task),
             )
             .route(
                 "/api/hosts/{host_id}/claude-tasks/discover",
@@ -980,5 +1051,202 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // --- resolve_claude_task tests ---
+
+    /// Helper: create a task and return its ID.
+    async fn create_test_task(state: &Arc<AppState>, host_id: Uuid) -> String {
+        let body = serde_json::json!({
+            "host_id": host_id.to_string(),
+            "project_path": "/proj",
+        });
+        let app = build_router(Arc::clone(state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn resolve_error_task_to_completed() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let task_id = create_test_task(&state, host_id).await;
+
+        // Mark as error
+        sqlx::query("UPDATE claude_sessions SET status = 'error', error_message = 'agent crashed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resolve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["summary"], "manually resolved");
+    }
+
+    #[tokio::test]
+    async fn resolve_suspended_task_to_completed() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let task_id = create_test_task(&state, host_id).await;
+
+        // Mark as suspended
+        sqlx::query("UPDATE claude_sessions SET status = 'suspended', disconnect_reason = 'agent disconnected' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resolve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "completed");
+        // disconnect_reason should be cleared
+        assert!(json["disconnect_reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_completed_task() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let task_id = create_test_task(&state, host_id).await;
+
+        // Mark as completed
+        sqlx::query("UPDATE claude_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resolve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn resolve_with_custom_summary() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let task_id = create_test_task(&state, host_id).await;
+
+        // Mark as error
+        sqlx::query("UPDATE claude_sessions SET status = 'error' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let resolve_body = serde_json::json!({ "summary": "resolved after manual investigation" });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resolve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&resolve_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["summary"], "resolved after manual investigation");
+    }
+
+    // --- cancel_claude_task for suspended ---
+
+    #[tokio::test]
+    async fn cancel_suspended_task() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        insert_host(&state, &host_id.to_string()).await;
+        let mut _rx = register_host_connection(&state, host_id).await;
+
+        let task_id = create_test_task(&state, host_id).await;
+
+        // Mark as suspended
+        sqlx::query("UPDATE claude_sessions SET status = 'suspended' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let cancel_body = serde_json::json!({ "force": false });
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/cancel"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&cancel_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify status changed to error
+        let updated = q::get_claude_task(&state.db, &task_id).await.unwrap();
+        assert_eq!(updated.status, "error");
     }
 }

@@ -841,6 +841,18 @@ pub(super) async fn handle_sessions_recovered(
             pid = recovered.pid,
             "session resumed after agent reconnection"
         );
+
+        // Resume linked claude_sessions that were suspended during disconnect
+        if let Err(e) = sqlx::query(
+            "UPDATE claude_sessions SET status = 'active', disconnect_reason = NULL \
+             WHERE session_id = ? AND status = 'suspended'",
+        )
+        .bind(recovered.session_id.to_string())
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(session_id = %recovered.session_id, error = %e, "failed to resume claude session on reconnect");
+        }
     }
 
     // Suspend sessions that were NOT recovered by the agent
@@ -1039,7 +1051,7 @@ pub(super) async fn handle_agentic_message(
 
             // Link loop to claude_session if one exists, or auto-create one for manually-started sessions
             let link_result = sqlx::query(
-                "UPDATE claude_sessions SET loop_id = ?, status = 'active' WHERE session_id = ? AND status = 'starting'",
+                "UPDATE claude_sessions SET loop_id = ?, status = 'active', disconnect_reason = NULL WHERE session_id = ? AND status IN ('starting', 'suspended', 'active') AND loop_id IS NULL",
             )
             .bind(&loop_id_str)
             .bind(&session_id_str)
@@ -2638,5 +2650,268 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.0, "active");
+    }
+
+    // ── claude_sessions resilience ──
+
+    async fn insert_test_claude_session(
+        state: &AppState,
+        id: &str,
+        session_id: &str,
+        host_id: &str,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status) VALUES (?, ?, ?, '/tmp/project', ?)",
+        )
+        .bind(id)
+        .bind(session_id)
+        .bind(host_id)
+        .bind(status)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_persistent_agent_suspends_claude_tasks() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "persist-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+        insert_test_claude_session(
+            &state,
+            &task_id.to_string(),
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        // Add session to in-memory store
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut s = zremote_core::state::SessionState::new(session_id, host_id);
+            s.status = SessionStatus::Active;
+            sessions.insert(session_id, s);
+        }
+
+        // Register as persistent
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (_, generation) = state
+            .connections
+            .register(host_id, "persist-host".to_string(), tx, true)
+            .await;
+
+        cleanup_agent(&state, &host_id, generation).await;
+
+        // Claude task should be suspended (not error)
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, disconnect_reason FROM claude_sessions WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0, "suspended",
+            "persistent agent should suspend claude tasks"
+        );
+        assert_eq!(row.1.as_deref(), Some("agent_disconnected"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_non_persistent_agent_errors_claude_tasks() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "non-persist-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+        insert_test_claude_session(
+            &state,
+            &task_id.to_string(),
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        // Add session to in-memory store
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut s = zremote_core::state::SessionState::new(session_id, host_id);
+            s.status = SessionStatus::Active;
+            sessions.insert(session_id, s);
+        }
+
+        // Register as non-persistent
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (_, generation) = state
+            .connections
+            .register(host_id, "non-persist-host".to_string(), tx, false)
+            .await;
+
+        cleanup_agent(&state, &host_id, generation).await;
+
+        // Claude task should be error (not suspended)
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, error_message, disconnect_reason FROM claude_sessions WHERE id = ?",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, "error",
+            "non-persistent agent should mark claude tasks as error"
+        );
+        assert_eq!(
+            row.1.as_deref(),
+            Some("agent disconnected while task was running")
+        );
+        assert_eq!(row.2.as_deref(), Some("agent_disconnected"));
+    }
+
+    #[tokio::test]
+    async fn loop_detected_links_to_suspended_task() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "test-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        // Insert a suspended claude_session (simulating post-disconnect state)
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status, disconnect_reason) \
+             VALUES (?, ?, ?, '/tmp/project', 'suspended', 'agent_disconnected')",
+        )
+        .bind(task_id.to_string())
+        .bind(session_id.to_string())
+        .bind(host_id.to_string())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Register connection so get_hostname works
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "test-host".to_string(), tx, true)
+            .await;
+
+        let msg = AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/tmp/project".to_string(),
+            tool_name: "bash".to_string(),
+        };
+
+        handle_agentic_message(&state, host_id, msg).await.unwrap();
+
+        // Claude task should now be active with loop linked and disconnect_reason cleared
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, loop_id, disconnect_reason FROM claude_sessions WHERE id = ?",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, "active",
+            "suspended task should become active on LoopDetected"
+        );
+        assert_eq!(
+            row.1.as_deref(),
+            Some(&loop_id.to_string()[..]),
+            "loop_id should be linked"
+        );
+        assert_eq!(row.2, None, "disconnect_reason should be cleared");
+    }
+
+    #[tokio::test]
+    async fn session_recovery_resumes_suspended_claude_tasks() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "recover-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "suspended",
+        )
+        .await;
+
+        // Insert a suspended claude task linked to the session
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status, disconnect_reason) \
+             VALUES (?, ?, ?, '/tmp/project', 'suspended', 'agent_disconnected')",
+        )
+        .bind(task_id.to_string())
+        .bind(session_id.to_string())
+        .bind(host_id.to_string())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Add session to in-memory store as suspended
+        {
+            let mut sessions = state.sessions.write().await;
+            let mut s = zremote_core::state::SessionState::new(session_id, host_id);
+            s.status = SessionStatus::Suspended;
+            sessions.insert(session_id, s);
+        }
+
+        // Recover the session
+        let recovered = vec![zremote_protocol::RecoveredSession {
+            session_id,
+            shell: "/bin/bash".to_string(),
+            pid: 1234,
+        }];
+
+        super::handle_sessions_recovered(&state, host_id, recovered).await;
+
+        // Claude task should now be active with disconnect_reason cleared
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, disconnect_reason FROM claude_sessions WHERE id = ?")
+                .bind(task_id.to_string())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0, "active",
+            "suspended claude task should be resumed on session recovery"
+        );
+        assert_eq!(
+            row.1, None,
+            "disconnect_reason should be cleared on recovery"
+        );
     }
 }
