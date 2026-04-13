@@ -8,6 +8,7 @@ use axum::extract::ws::{Message, WebSocket};
 use chrono::Utc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use zremote_protocol::claude::ClaudeTaskStatus;
 use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 
@@ -327,6 +328,39 @@ pub(super) async fn cleanup_agent(state: &AppState, host_id: &HostId, generation
             tracing::info!(host_id = %host_id, count = suspended_session_ids.len(), "suspended sessions for disconnected agent (persistent)");
         }
 
+        // Suspend claude tasks (may recover on reconnect)
+        if let Err(e) = sqlx::query(
+            "UPDATE claude_sessions SET status = 'suspended', disconnect_reason = 'agent_disconnected' \
+             WHERE host_id = ? AND status IN ('starting', 'active')",
+        )
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(host_id = %host_id, error = %e, "failed to suspend claude sessions on disconnect");
+        }
+
+        // Emit ClaudeTaskEnded events for suspended tasks
+        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT id, project_path, task_name FROM claude_sessions WHERE host_id = ? AND status = 'suspended'",
+        )
+        .bind(&host_id_str)
+        .fetch_all(&state.db)
+        .await
+        {
+            for (task_id, project_path, task_name) in rows {
+                let _ = state.events.send(ServerEvent::ClaudeTaskEnded {
+                    task_id,
+                    status: ClaudeTaskStatus::Suspended,
+                    summary: Some("agent disconnected".to_string()),
+                    session_id: None,
+                    host_id: Some(host_id_str.clone()),
+                    project_path,
+                    task_name,
+                });
+            }
+        }
+
         // Do NOT clean agentic loops or close sessions -- agent may reconnect
     } else {
         // Standard behavior: close all sessions
@@ -400,19 +434,20 @@ pub(super) async fn cleanup_agent(state: &AppState, host_id: &HostId, generation
         if !closed_session_ids.is_empty() {
             tracing::info!(host_id = %host_id, count = closed_session_ids.len(), "closed sessions for disconnected agent");
         }
-    }
 
-    // Mark starting/active claude_sessions for this host as error
-    if let Err(e) = sqlx::query(
-        "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'agent disconnected while task was running' \
-         WHERE host_id = ? AND status IN ('starting', 'active')",
-    )
-    .bind(&now)
-    .bind(&host_id_str)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(host_id = %host_id, error = %e, "failed to mark claude sessions as error on disconnect");
+        // Mark starting/active claude_sessions for this host as error
+        if let Err(e) = sqlx::query(
+            "UPDATE claude_sessions SET status = 'error', ended_at = ?, error_message = 'agent disconnected while task was running', \
+             disconnect_reason = 'agent_disconnected' \
+             WHERE host_id = ? AND status IN ('starting', 'active')",
+        )
+        .bind(&now)
+        .bind(&host_id_str)
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(host_id = %host_id, error = %e, "failed to mark claude sessions as error on disconnect");
+        }
     }
 
     // Mark host offline in DB

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
@@ -55,13 +56,14 @@ impl LocalAppState {
         host_id: Uuid,
         shutdown: CancellationToken,
         backend: crate::config::PersistenceBackend,
+        socket_dir: PathBuf,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
         let agentic_loops = AgenticLoopStore::default();
 
         let (pty_output_tx, pty_output_rx) = mpsc::channel(4096);
-        let session_manager = SessionManager::new(pty_output_tx, backend);
+        let session_manager = SessionManager::new(pty_output_tx, backend, socket_dir);
 
         let agentic_manager = AgenticLoopManager::new();
         let session_mapper = SessionMapper::new();
@@ -111,6 +113,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         assert_eq!(state.hostname, "test-host");
@@ -128,6 +131,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         // Session store should be empty
@@ -149,6 +153,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         let mut rx = state.events.subscribe();
@@ -173,6 +178,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         );
 
         // Agentic manager should be accessible

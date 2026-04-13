@@ -43,6 +43,7 @@ mod tests {
             host_id,
             shutdown,
             crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-test"),
         )
     }
 

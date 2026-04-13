@@ -292,6 +292,10 @@ fn create_router(state: Arc<AppState>) -> Router {
             post(routes::claude_sessions::cancel_claude_task),
         )
         .route(
+            "/api/claude-tasks/{task_id}/resolve",
+            post(routes::claude_sessions::resolve_claude_task),
+        )
+        .route(
             "/api/claude-tasks/{task_id}/log",
             get(routes::claude_sessions::get_task_log),
         )
@@ -481,6 +485,30 @@ fn spawn_pending_request_cleanup(state: Arc<AppState>, shutdown: CancellationTok
                     let removed = state.cleanup_stale_requests(std::time::Duration::from_secs(120));
                     if removed > 0 {
                         tracing::info!(removed, "cleaned up stale pending requests");
+                    }
+
+                    // Expire tasks suspended for more than 1 hour
+                    let now = chrono::Utc::now();
+                    let threshold = (now - chrono::Duration::hours(1)).to_rfc3339();
+                    let now_str = now.to_rfc3339();
+                    match sqlx::query(
+                        "UPDATE claude_sessions SET status = 'error', ended_at = ?, \
+                         error_message = 'agent did not reconnect within timeout' \
+                         WHERE status = 'suspended' AND disconnect_reason = 'agent_disconnected' \
+                         AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = claude_sessions.session_id AND s.suspended_at < ?)",
+                    )
+                    .bind(&now_str)
+                    .bind(&threshold)
+                    .execute(&state.db)
+                    .await
+                    {
+                        Ok(result) if result.rows_affected() > 0 => {
+                            tracing::info!(count = result.rows_affected(), "expired stale suspended claude tasks");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to expire stale suspended claude tasks");
+                        }
                     }
                 }
                 () = shutdown.cancelled() => break,

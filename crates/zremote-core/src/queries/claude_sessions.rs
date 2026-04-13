@@ -34,13 +34,14 @@ pub struct ClaudeTaskRow {
     pub lines_removed: Option<i64>,
     pub cc_version: Option<String>,
     pub error_message: Option<String>,
+    pub disconnect_reason: Option<String>,
 }
 
 const TASK_COLUMNS: &str = "id, session_id, host_id, project_path, project_id, model, initial_prompt, \
      claude_session_id, resume_from, status, options_json, loop_id, started_at, ended_at, \
      total_cost_usd, total_tokens_in, total_tokens_out, summary, task_name, created_at, \
      context_used_pct, context_window_size, rate_limit_5h_pct, rate_limit_7d_pct, \
-     lines_added, lines_removed, cc_version, error_message";
+     lines_added, lines_removed, cc_version, error_message, disconnect_reason";
 
 pub struct ListClaudeTasksFilter {
     pub host_id: Option<String>,
