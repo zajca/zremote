@@ -61,6 +61,12 @@ pub struct ToastContext {
 
 impl ToastContext {
     /// Format a compact subtitle string for display.
+    ///
+    /// Acts as a location breadcrumb (host / project / session). `task_name`
+    /// is intentionally omitted — it is already rendered as the toast message
+    /// prefix, so repeating it here produces a visible duplicate. `session_name`
+    /// is suppressed when it equals `task_name` (handles the agentic
+    /// auto-population of `session.name` from the transcript slug).
     pub fn subtitle(&self) -> Option<String> {
         let mut parts: Vec<&str> = Vec::new();
         if let Some(h) = &self.host_name {
@@ -69,11 +75,10 @@ impl ToastContext {
         if let Some(p) = &self.project_name {
             parts.push(p.as_str());
         }
-        if let Some(s) = &self.session_name {
+        if let Some(s) = &self.session_name
+            && self.task_name.as_deref() != Some(s.as_str())
+        {
             parts.push(s.as_str());
-        }
-        if let Some(t) = &self.task_name {
-            parts.push(t.as_str());
         }
         if parts.is_empty() {
             None
@@ -608,8 +613,30 @@ mod tests {
         };
         assert_eq!(
             ctx.subtitle().as_deref(),
-            Some("server1 / myproject / main-shell / fix bug")
+            Some("server1 / myproject / main-shell")
         );
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn subtitle_skips_session_when_equals_task() {
+        let ctx = ToastContext {
+            host_name: Some("server1".into()),
+            project_name: Some("myproject".into()),
+            session_name: Some("sorted-conjuring-wren".into()),
+            task_name: Some("sorted-conjuring-wren".into()),
+            ..Default::default()
+        };
+        assert_eq!(ctx.subtitle().as_deref(), Some("server1 / myproject"));
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn subtitle_omits_task_name_only() {
+        let ctx = ToastContext {
+            host_name: Some("server1".into()),
+            task_name: Some("sorted-conjuring-wren".into()),
+            ..Default::default()
+        };
+        assert_eq!(ctx.subtitle().as_deref(), Some("server1"));
     }
 
     #[core::prelude::rust_2021::test]
