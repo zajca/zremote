@@ -413,6 +413,10 @@ pub struct CreateWorktreeRequest {
     pub path: Option<String>,
     #[serde(default)]
     pub new_branch: bool,
+    /// Optional base ref (commit SHA, branch, or tag) to create the new
+    /// branch from. Only meaningful when `new_branch` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
 }
 
 /// Request body for setting a config value.

@@ -4,6 +4,7 @@ mod info;
 mod linear;
 mod prompts;
 mod settings;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -14,3 +15,4 @@ pub use info::*;
 pub use linear::*;
 pub use prompts::*;
 pub use settings::*;
+pub use worktree::*;

@@ -34,6 +34,38 @@ pub struct GitRemote {
     pub url: String,
 }
 
+/// A single branch (local or remote) with ahead/behind counts against the
+/// currently checked-out branch. Remote branches surface as `origin/foo`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Branch {
+    pub name: String,
+    /// True only for the branch currently checked out in the inspected repo.
+    /// Always false for remote branches.
+    pub is_current: bool,
+    /// Commits this branch has that the current branch does not.
+    #[serde(default)]
+    pub ahead: u32,
+    /// Commits this branch is missing compared to the current branch.
+    #[serde(default)]
+    pub behind: u32,
+}
+
+/// Sorted branch listing for a repo. `current` is the short name (no
+/// `refs/heads/`) of the currently checked-out branch, or an empty string
+/// when HEAD is detached.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchList {
+    pub local: Vec<Branch>,
+    pub remote: Vec<Branch>,
+    pub current: String,
+    /// True when the agent skipped per-branch ahead/behind computation for
+    /// remote branches because the total count exceeded the safety cap. The
+    /// entries are still present (names only); `ahead` and `behind` default
+    /// to zero. Older clients that predate this field treat it as `false`.
+    #[serde(default)]
+    pub remote_truncated: bool,
+}
+
 /// Information about a git worktree.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeInfo {

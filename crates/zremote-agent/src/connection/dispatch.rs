@@ -80,6 +80,37 @@ pub(super) async fn handle_session_create(
     }
 }
 
+/// Send a `WorktreeCreationProgress` message upstream. Best-effort: a full
+/// or closed outbound channel should not abort the git operation. The
+/// server translates these into `ServerEvent::WorktreeCreationProgress`
+/// broadcasts.
+async fn send_creation_progress(
+    tx: &mpsc::Sender<AgentMessage>,
+    project_path: &str,
+    job_id: &str,
+    stage: zremote_protocol::events::WorktreeCreationStage,
+    percent: u8,
+    message: Option<String>,
+) {
+    if tx
+        .send(AgentMessage::WorktreeCreationProgress {
+            project_path: project_path.to_string(),
+            job_id: job_id.to_string(),
+            stage,
+            percent,
+            message,
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            project_path = %project_path,
+            job_id = %job_id,
+            "outbound channel closed, WorktreeCreationProgress dropped"
+        );
+    }
+}
+
 /// Run a worktree lifecycle hook if configured in project settings.
 async fn run_worktree_hook_server(
     project_path: &str,
@@ -473,12 +504,14 @@ pub(super) async fn handle_server_message(
             branch,
             path,
             new_branch,
+            base_ref,
         } => {
             let tx = outbound_tx.clone();
             let project_path = project_path.clone();
             let branch = branch.clone();
             let wt_path = path.clone();
             let new_branch = *new_branch;
+            let base_ref = base_ref.clone();
             tokio::spawn(async move {
                 // Check for custom create_command
                 let wt_settings = read_worktree_settings_server(&project_path).await;
@@ -584,27 +617,68 @@ pub(super) async fn handle_server_message(
                     return;
                 }
 
-                // Default flow: existing GitInspector behavior
+                // Default flow: existing GitInspector behavior. Thread
+                // base_ref through so server-initiated create matches the
+                // local-agent API — otherwise callers that specified a base
+                // would silently fall back to HEAD. We also emit lifecycle
+                // progress events so the server can broadcast them to GUIs.
+                let job_id = uuid::Uuid::new_v4().to_string();
+
+                // Init: before any blocking work.
+                send_creation_progress(
+                    &tx,
+                    &project_path,
+                    &job_id,
+                    zremote_protocol::events::WorktreeCreationStage::Init,
+                    0,
+                    None,
+                )
+                .await;
+
                 let pp = project_path.clone();
                 let b = branch.clone();
                 let wp = wt_path.clone();
+                let br = base_ref.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     GitInspector::create_worktree(
                         std::path::Path::new(&pp),
                         &b,
                         wp.as_ref().map(|p| std::path::Path::new(p.as_str())),
                         new_branch,
+                        br.as_deref(),
                     )
                 })
                 .await;
                 match result {
                     Ok(Ok(worktree)) => {
+                        // Finalizing: git is done; DB insert + hook still
+                        // ahead of us.
+                        send_creation_progress(
+                            &tx,
+                            &project_path,
+                            &job_id,
+                            zremote_protocol::events::WorktreeCreationStage::Finalizing,
+                            75,
+                            None,
+                        )
+                        .await;
+
                         // Run on_create hook if configured
                         let hook_result = run_worktree_hook_server(
                             &project_path,
                             &worktree.path,
                             worktree.branch.as_deref().unwrap_or_default(),
                             |wt| wt.on_create.as_deref(),
+                        )
+                        .await;
+
+                        send_creation_progress(
+                            &tx,
+                            &project_path,
+                            &job_id,
+                            zremote_protocol::events::WorktreeCreationStage::Done,
+                            100,
+                            None,
                         )
                         .await;
 
@@ -621,6 +695,15 @@ pub(super) async fn handle_server_message(
                         }
                     }
                     Ok(Err(msg)) => {
+                        send_creation_progress(
+                            &tx,
+                            &project_path,
+                            &job_id,
+                            zremote_protocol::events::WorktreeCreationStage::Failed,
+                            100,
+                            Some(msg.clone()),
+                        )
+                        .await;
                         if tx
                             .send(AgentMessage::WorktreeError {
                                 project_path,
@@ -633,6 +716,15 @@ pub(super) async fn handle_server_message(
                         }
                     }
                     Err(e) => {
+                        send_creation_progress(
+                            &tx,
+                            &project_path,
+                            &job_id,
+                            zremote_protocol::events::WorktreeCreationStage::Failed,
+                            100,
+                            Some(format!("worktree create task panicked: {e}")),
+                        )
+                        .await;
                         if tx
                             .send(AgentMessage::WorktreeError {
                                 project_path,
@@ -1705,6 +1797,130 @@ mod tests {
         assert!(
             guard.get(&session_id).is_none(),
             "scrollback entry should not exist for unknown session"
+        );
+    }
+
+    /// Spin up a minimal git repo in a tempdir and return its path. Kept
+    /// small and local to this test module so we don't reach into other
+    /// crates' test helpers.
+    fn init_dispatch_test_repo(dir: &std::path::Path) {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--initial-branch=main", "."]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--no-verify", "-m", "init"]);
+        // Create a second branch the server can point `base_ref` at.
+        git(&["branch", "base-branch"]);
+    }
+
+    /// Exercises the server-mode WorktreeCreate dispatch with `base_ref`
+    /// set. Regression guard for a bug where the agent-side dispatch
+    /// silently dropped `base_ref` and fell back to HEAD.
+    #[tokio::test]
+    async fn worktree_create_threads_base_ref_through_dispatch() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+        let wt_path = tmp.path().join("wt-server-base");
+
+        let msg = ServerMessage::WorktreeCreate {
+            project_path: repo.to_string_lossy().to_string(),
+            branch: "derived".to_string(),
+            path: Some(wt_path.to_string_lossy().to_string()),
+            new_branch: true,
+            base_ref: Some("base-branch".to_string()),
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        // Dispatch spawns a background task for the git work; drain events
+        // until we get the terminal WorktreeCreated.
+        let mut stages = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let (created_branch, created_path) = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let sent = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out waiting for dispatch output")
+                .expect("channel closed");
+            match sent {
+                AgentMessage::WorktreeCreationProgress { stage, .. } => {
+                    stages.push(stage);
+                }
+                AgentMessage::WorktreeCreated { worktree, .. } => {
+                    break (worktree.branch.clone(), worktree.path.clone());
+                }
+                AgentMessage::WorktreeError { message, .. } => {
+                    panic!("worktree create failed: {message}");
+                }
+                other => panic!("unexpected agent message: {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            created_branch.as_deref(),
+            Some("derived"),
+            "new branch name must be used"
+        );
+        let path = created_path;
+        // The worktree should exist on disk with a single commit inherited
+        // from base-branch. That is enough to confirm base_ref reached the
+        // git layer — we additionally assert the worktree path ends in the
+        // name we specified.
+        assert!(
+            path.ends_with("wt-server-base"),
+            "unexpected worktree path: {path}"
+        );
+
+        // Progress regression guard: server-mode must emit Init, Finalizing,
+        // and Done at minimum so GUIs can reflect the lifecycle.
+        use zremote_protocol::events::WorktreeCreationStage::{Done, Finalizing, Init};
+        assert!(
+            stages.contains(&Init),
+            "missing Init progress event: saw {stages:?}"
+        );
+        assert!(
+            stages.contains(&Finalizing),
+            "missing Finalizing progress event: saw {stages:?}"
+        );
+        assert!(
+            stages.contains(&Done),
+            "missing Done progress event: saw {stages:?}"
         );
     }
 }

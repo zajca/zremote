@@ -110,6 +110,10 @@ pub(crate) fn build_router(
             post(routes::projects::trigger_git_refresh),
         )
         .route(
+            "/api/projects/{project_id}/git/branches",
+            get(routes::projects::list_branches),
+        )
+        .route(
             "/api/projects/{project_id}/worktrees",
             get(routes::projects::list_worktrees).post(routes::projects::create_worktree),
         )

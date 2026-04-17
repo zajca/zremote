@@ -31,6 +31,10 @@ pub struct CreateWorktreeRequest {
     pub branch: String,
     pub path: Option<String>,
     pub new_branch: Option<bool>,
+    /// Optional base ref (commit SHA, branch, or tag). Only meaningful when
+    /// `new_branch` is `true`; ignored otherwise. Forwarded to the agent.
+    #[serde(default)]
+    pub base_ref: Option<String>,
 }
 
 /// `POST /api/projects/:project_id/worktrees` - request worktree creation.
@@ -61,6 +65,7 @@ pub async fn create_worktree(
             branch: body.branch,
             path: body.path,
             new_branch: body.new_branch.unwrap_or(false),
+            base_ref: body.base_ref,
         })
         .await
         .map_err(|_| AppError::Conflict("failed to send worktree create to agent".to_string()))?;

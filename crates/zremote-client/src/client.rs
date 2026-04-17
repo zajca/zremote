@@ -563,6 +563,29 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// List local and remote branches for a project with ahead/behind counts.
+    ///
+    /// The agent returns a `BranchList` with `local`, `remote`, `current`,
+    /// and `remote_truncated` fields. When `remote_truncated` is true the
+    /// remote branch list had its per-entry ahead/behind skipped because
+    /// the remote set exceeded the agent-side cap.
+    pub async fn list_branches(
+        &self,
+        project_id: &str,
+    ) -> Result<zremote_protocol::project::BranchList, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/projects/{}/git/branches",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Delete a worktree.
     pub async fn delete_worktree(
         &self,

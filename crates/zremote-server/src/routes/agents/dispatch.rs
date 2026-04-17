@@ -562,6 +562,26 @@ pub(super) async fn handle_agent_message(
                 message,
             });
         }
+        AgentMessage::WorktreeCreationProgress {
+            project_path,
+            job_id,
+            stage,
+            percent,
+            message,
+        } => {
+            // Forward the in-flight progress event to every subscriber.
+            // project_id is emitted as the project_path here because the
+            // server does not have a stable UUID for the in-flight job
+            // (agent picks its own job_id); GUIs correlate by job_id +
+            // project_path.
+            let _ = state.events.send(ServerEvent::WorktreeCreationProgress {
+                project_id: project_path,
+                job_id,
+                stage,
+                percent,
+                message,
+            });
+        }
         AgentMessage::WorktreeHookResult {
             project_path,
             worktree_path,

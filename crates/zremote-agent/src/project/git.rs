@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zremote_protocol::project::{GitInfo, GitRemote, WorktreeInfo};
+use zremote_protocol::project::{Branch, BranchList, GitInfo, GitRemote, WorktreeInfo};
 
 /// Maximum wall time for any individual git subprocess. Kills the child on
 /// expiry so a hung command (network, file-lock, misconfigured credential
@@ -187,6 +187,26 @@ pub fn enrich_worktrees(worktrees: &mut [WorktreeInfo]) {
     }
 }
 
+/// Compute (ahead, behind) of `target` relative to `base`. Both are branch
+/// names (short form — `main`, `origin/main`, etc). Returns `None` when git
+/// refuses the comparison (missing ref, no common ancestor, empty repo).
+fn ahead_behind(path: &Path, base: &str, target: &str) -> Option<(u32, u32)> {
+    let spec = format!("{base}...{target}");
+    let output = run_git(path, &["rev-list", "--left-right", "--count", &spec]).ok()?;
+    let parts: Vec<&str> = output.split_whitespace().collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    // `git rev-list --left-right --count A...B` prints "<left>\t<right>":
+    //   * left  = commits reachable from A but not B = how far B is *behind* A
+    //   * right = commits reachable from B but not A = how far B is *ahead*  of A
+    // We invoke this with A = `base` and B = `target`, so parts[0] is the
+    // behind count and parts[1] is the ahead count from target's perspective.
+    let behind = parts[0].parse().ok()?;
+    let ahead = parts[1].parse().ok()?;
+    Some((ahead, behind))
+}
+
 /// Git inspector for collecting repository metadata and managing worktrees.
 pub struct GitInspector;
 
@@ -310,11 +330,16 @@ impl GitInspector {
     }
 
     /// Create a new worktree.
+    ///
+    /// When `new_branch` is true, `base_ref` (if provided) is used as the
+    /// starting point for the new branch. For existing branches, `base_ref`
+    /// is ignored — git uses the branch itself.
     pub fn create_worktree(
         repo_path: &Path,
         branch: &str,
         worktree_path: Option<&Path>,
         new_branch: bool,
+        base_ref: Option<&str>,
     ) -> Result<WorktreeInfo, String> {
         let default_path = repo_path.parent().unwrap_or(repo_path).join(format!(
             "{}-{}",
@@ -326,13 +351,25 @@ impl GitInspector {
         ));
         let wt_path = worktree_path.unwrap_or(&default_path);
 
+        let wt_path_str = wt_path.to_str().ok_or("invalid worktree path")?;
+
+        // Defence in depth against argument injection (CWE-88): insert a `--`
+        // separator before the first user-controlled positional so git treats
+        // every subsequent token as a positional, not a flag. The API
+        // boundary already rejects leading-dash values; this is belt-and-braces
+        // in case a future caller reaches this helper through another path.
         let mut args = vec!["worktree", "add"];
         if new_branch {
             args.push("-b");
             args.push(branch);
-            args.push(wt_path.to_str().ok_or("invalid worktree path")?);
+        }
+        args.push("--");
+        args.push(wt_path_str);
+        if new_branch {
+            if let Some(base) = base_ref {
+                args.push(base);
+            }
         } else {
-            args.push(wt_path.to_str().ok_or("invalid worktree path")?);
             args.push(branch);
         }
 
@@ -360,6 +397,115 @@ impl GitInspector {
             is_locked: false,
             is_dirty,
             commit_message,
+        })
+    }
+
+    /// List local and remote branches for a repo, with ahead/behind counts
+    /// against the current branch. Returns empty lists (and empty `current`)
+    /// for empty or brand-new repos without any commits.
+    ///
+    /// Both the local and remote ref listings are capped at
+    /// `BRANCH_LIST_CAP` entries so a pathological repo cannot pin the
+    /// calling thread forever. When the remote set is larger than
+    /// `REMOTE_AHEAD_BEHIND_CAP` we skip the per-branch `rev-list` call —
+    /// each remote branch still appears in the output (name only, zeroed
+    /// counts) but `BranchList.remote_truncated` is set so clients can
+    /// surface the degraded state.
+    pub fn list_branches(path: &Path) -> Result<BranchList, String> {
+        /// Hard ceiling on refs emitted by `for-each-ref`. Chosen to match
+        /// the largest realistic monorepo while still bounding memory.
+        const BRANCH_LIST_CAP: &str = "--count=500";
+        /// Above this many remote branches we skip per-branch ahead/behind
+        /// to avoid running hundreds of `git rev-list` processes on every
+        /// request.
+        const REMOTE_AHEAD_BEHIND_CAP: usize = 50;
+
+        // Verify this is a git repo. Consistent with inspect() we treat this
+        // as a hard error (caller should check) rather than silently empty.
+        run_git(path, &["rev-parse", "--is-inside-work-tree"])?;
+
+        // The "current" short name — empty string when HEAD is detached or the
+        // repo has no commits yet.
+        let current = run_git(path, &["branch", "--show-current"]).unwrap_or_default();
+
+        // Local branches. `%(refname:short)` gives "main" not "refs/heads/main".
+        let local_output = run_git(
+            path,
+            &[
+                "for-each-ref",
+                BRANCH_LIST_CAP,
+                "--format=%(refname:short)",
+                "refs/heads",
+            ],
+        )
+        .unwrap_or_default();
+
+        let local = local_output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|name| {
+                let is_current = name == current;
+                // Ahead/behind only make sense relative to a different branch.
+                // For the current branch itself both are zero.
+                let (ahead, behind) = if is_current || current.is_empty() {
+                    (0, 0)
+                } else {
+                    ahead_behind(path, &current, name).unwrap_or((0, 0))
+                };
+                Branch {
+                    name: name.to_string(),
+                    is_current,
+                    ahead,
+                    behind,
+                }
+            })
+            .collect();
+
+        // Remote branches (e.g. "origin/main"). Filter HEAD symrefs which
+        // for-each-ref emits as "origin/HEAD -> origin/main" artefacts.
+        let remote_output = run_git(
+            path,
+            &[
+                "for-each-ref",
+                BRANCH_LIST_CAP,
+                "--format=%(refname:short)",
+                "refs/remotes",
+            ],
+        )
+        .unwrap_or_default();
+
+        let remote_names: Vec<&str> = remote_output
+            .lines()
+            .filter(|l| !l.is_empty() && !l.ends_with("/HEAD"))
+            .collect();
+
+        // If the remote set is large, skip the O(N) rev-list calls and just
+        // return names with zeroed counts. Clients observe the degraded mode
+        // via `BranchList.remote_truncated`.
+        let remote_truncated = remote_names.len() > REMOTE_AHEAD_BEHIND_CAP;
+
+        let remote = remote_names
+            .into_iter()
+            .map(|name| {
+                let (ahead, behind) = if remote_truncated || current.is_empty() {
+                    (0, 0)
+                } else {
+                    ahead_behind(path, &current, name).unwrap_or((0, 0))
+                };
+                Branch {
+                    name: name.to_string(),
+                    is_current: false,
+                    ahead,
+                    behind,
+                }
+            })
+            .collect();
+
+        Ok(BranchList {
+            local,
+            remote,
+            current,
+            remote_truncated,
         })
     }
 
@@ -624,8 +770,9 @@ upstream\tgit@github.com:org/repo.git (push)
         init_git_repo(&repo_path);
 
         let wt_path = tmp.path().join("test-worktree");
-        let wt = GitInspector::create_worktree(&repo_path, "test-branch", Some(&wt_path), true)
-            .expect("create worktree");
+        let wt =
+            GitInspector::create_worktree(&repo_path, "test-branch", Some(&wt_path), true, None)
+                .expect("create worktree");
 
         assert_eq!(wt.path, wt_path.to_string_lossy());
         assert_eq!(wt.branch.as_deref(), Some("test-branch"));
@@ -655,9 +802,14 @@ upstream\tgit@github.com:org/repo.git (push)
         run_git(&repo_path, &["branch", "existing-branch"]).unwrap();
 
         let wt_path = tmp.path().join("existing-wt");
-        let wt =
-            GitInspector::create_worktree(&repo_path, "existing-branch", Some(&wt_path), false)
-                .expect("create worktree from existing branch");
+        let wt = GitInspector::create_worktree(
+            &repo_path,
+            "existing-branch",
+            Some(&wt_path),
+            false,
+            None,
+        )
+        .expect("create worktree from existing branch");
 
         assert_eq!(wt.branch.as_deref(), Some("existing-branch"));
     }
@@ -669,7 +821,7 @@ upstream\tgit@github.com:org/repo.git (push)
         fs::create_dir_all(&repo_path).unwrap();
         init_git_repo(&repo_path);
 
-        let wt = GitInspector::create_worktree(&repo_path, "auto-branch", None, true)
+        let wt = GitInspector::create_worktree(&repo_path, "auto-branch", None, true, None)
             .expect("create worktree with auto path");
 
         assert!(wt.path.contains("myrepo-auto-branch"));
@@ -767,6 +919,103 @@ upstream\tgit@github.com:org/repo.git (push)
 
         let info = GitInspector::inspect_fast(tmp.path()).expect("should detect dirty repo");
         assert!(info.is_dirty);
+    }
+
+    #[test]
+    fn list_branches_returns_local_remote_and_current() {
+        let tmp = TempDir::new().unwrap();
+        // upstream plays the role of "origin".
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir_all(&upstream).unwrap();
+        init_git_repo(&upstream);
+
+        // Clone so the clone has remote-tracking refs ("origin/...").
+        let clone = tmp.path().join("clone");
+        let status = std::process::Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&upstream)
+            .arg(&clone)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CEILING_DIRECTORIES", tmp.path())
+            .status()
+            .expect("git clone");
+        assert!(status.success());
+
+        run_git(&clone, &["config", "user.email", "c@c.com"]).unwrap();
+        run_git(&clone, &["config", "user.name", "c"]).unwrap();
+        run_git(&clone, &["config", "commit.gpgsign", "false"]).unwrap();
+
+        // Create a second local branch so local list has >1 entry.
+        run_git(&clone, &["branch", "feature"]).unwrap();
+
+        let list = GitInspector::list_branches(&clone).expect("list branches");
+        assert!(!list.current.is_empty(), "current should be set");
+        let local_names: Vec<&str> = list.local.iter().map(|b| b.name.as_str()).collect();
+        assert!(local_names.contains(&list.current.as_str()));
+        assert!(local_names.contains(&"feature"));
+
+        // Current branch reports itself as is_current=true with 0/0.
+        let cur = list.local.iter().find(|b| b.is_current).unwrap();
+        assert_eq!(cur.ahead, 0);
+        assert_eq!(cur.behind, 0);
+
+        // Remote list has at least one origin/* entry, none marked is_current.
+        assert!(!list.remote.is_empty());
+        assert!(list.remote.iter().all(|b| !b.is_current));
+        assert!(list.remote.iter().any(|b| b.name.starts_with("origin/")));
+        // HEAD symref should be filtered out.
+        assert!(list.remote.iter().all(|b| !b.name.ends_with("/HEAD")));
+    }
+
+    #[test]
+    fn list_branches_empty_repo_returns_empty_lists() {
+        let tmp = TempDir::new().unwrap();
+        // Bare init, no commits. list_branches should succeed but return
+        // empty local/remote and empty current.
+        run_git(tmp.path(), &["init"]).expect("git init");
+        run_git(tmp.path(), &["config", "user.email", "x@x.com"]).unwrap();
+        run_git(tmp.path(), &["config", "user.name", "x"]).unwrap();
+
+        let list = GitInspector::list_branches(tmp.path()).expect("list branches");
+        // Empty repo: no refs at all, so both local and remote lists must be
+        // empty. `current` may be the init-default branch name (git prints
+        // "main"/"master" even when no commit has been made) — so we don't
+        // assert on it, only that the listing succeeds and returns no refs.
+        assert!(list.local.is_empty());
+        assert!(list.remote.is_empty());
+    }
+
+    #[test]
+    fn list_branches_non_git_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(GitInspector::list_branches(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn list_branches_caps_at_500_branches() {
+        // Create a repo with more than 500 local branches and confirm we
+        // never return more than the cap. We verify the cap is honoured by
+        // asserting the returned length is exactly BRANCH_LIST_CAP value.
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+
+        // Create 520 lightweight branches (each points at HEAD).
+        for i in 0..520 {
+            let name = format!("b{i:04}");
+            run_git(tmp.path(), &["branch", &name]).unwrap();
+        }
+
+        let list = GitInspector::list_branches(tmp.path()).expect("list branches");
+        // Default branch (main) + 520 created - but cap is 500.
+        assert_eq!(
+            list.local.len(),
+            500,
+            "expected --count=500 cap to be honoured, got {} entries",
+            list.local.len()
+        );
+        assert!(!list.remote_truncated, "no remotes configured in this repo");
     }
 
     #[test]

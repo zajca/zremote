@@ -795,10 +795,63 @@ async fn create_worktree_sends_post() {
         branch: "feature-2".to_string(),
         path: None,
         new_branch: false,
+        base_ref: None,
     };
     let wt = client.create_worktree("p-1", &req).await.unwrap();
 
     assert_eq!(wt["branch"], "feature-2");
+}
+
+#[tokio::test]
+async fn list_branches_parses_response() {
+    let router = Router::new().route(
+        "/api/projects/{id}/git/branches",
+        get(|| async {
+            Json(serde_json::json!({
+                "local": [
+                    {"name": "main", "is_current": true, "ahead": 0, "behind": 0},
+                    {"name": "feature", "is_current": false, "ahead": 3, "behind": 1}
+                ],
+                "remote": [
+                    {"name": "origin/main", "is_current": false, "ahead": 0, "behind": 2}
+                ],
+                "current": "main",
+                "remote_truncated": false
+            }))
+        }),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let list = client.list_branches("p-1").await.unwrap();
+
+    assert_eq!(list.current, "main");
+    assert_eq!(list.local.len(), 2);
+    assert_eq!(list.remote.len(), 1);
+    assert!(!list.remote_truncated);
+    let current = list.local.iter().find(|b| b.is_current).unwrap();
+    assert_eq!(current.name, "main");
+}
+
+#[tokio::test]
+async fn list_branches_accepts_missing_remote_truncated_for_backcompat() {
+    // Older agents (pre-M3) don't send `remote_truncated`. The client must
+    // still accept the payload and default the field to false.
+    let router = Router::new().route(
+        "/api/projects/{id}/git/branches",
+        get(|| async {
+            Json(serde_json::json!({
+                "local": [],
+                "remote": [],
+                "current": ""
+            }))
+        }),
+    );
+
+    let (url, _handle) = setup_server(router).await;
+    let client = ApiClient::new(&url).unwrap();
+    let list = client.list_branches("p-1").await.unwrap();
+    assert!(!list.remote_truncated);
 }
 
 #[tokio::test]

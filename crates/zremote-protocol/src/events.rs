@@ -4,6 +4,29 @@ use crate::AgenticStatus;
 use crate::claude::ClaudeTaskStatus;
 use crate::status::{HostStatus, SessionStatus};
 
+/// Lifecycle stage of a worktree creation job. Emitted at least once per
+/// stage — clients treat absent intermediate stages as "skipped fast".
+///
+/// `Done` and `Failed` are terminal; every job emits exactly one terminal
+/// stage. `percent` accompanies each event but is advisory only — stages are
+/// the source of truth for UI state.
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeCreationStage {
+    Init,
+    /// Reserved for a future remote-clone / async-fetch workflow (Phase 5+).
+    /// The Phase 2 implementation does not emit this stage; it is kept here
+    /// so the protocol is forward-compatible when the agent gains support.
+    Fetching,
+    Creating,
+    Finalizing,
+    Done,
+    Failed,
+    /// Forward-compat placeholder for stages added in future agent versions.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Loop information for server events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopInfo {
@@ -140,6 +163,19 @@ pub enum ServerEvent {
         host_id: String,
         project_path: String,
         message: String,
+    },
+    #[serde(rename = "worktree_creation_progress")]
+    WorktreeCreationProgress {
+        project_id: String,
+        job_id: String,
+        stage: WorktreeCreationStage,
+        /// Advisory completion percentage (0..=100). UI should prefer `stage`
+        /// for state transitions and treat `percent` as an animation hint.
+        #[serde(default)]
+        percent: u8,
+        /// Optional human-readable status line (e.g. "fetching origin").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     #[serde(rename = "claude_task_started")]
     ClaudeTaskStarted {
@@ -499,6 +535,72 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+    }
+
+    #[test]
+    fn worktree_progress_event_serialization_round_trip() {
+        let events = vec![
+            ServerEvent::WorktreeCreationProgress {
+                project_id: "p1".to_string(),
+                job_id: "job-abc".to_string(),
+                stage: WorktreeCreationStage::Init,
+                percent: 0,
+                message: None,
+            },
+            ServerEvent::WorktreeCreationProgress {
+                project_id: "p1".to_string(),
+                job_id: "job-abc".to_string(),
+                stage: WorktreeCreationStage::Creating,
+                percent: 50,
+                message: Some("running git worktree add".to_string()),
+            },
+            ServerEvent::WorktreeCreationProgress {
+                project_id: "p1".to_string(),
+                job_id: "job-abc".to_string(),
+                stage: WorktreeCreationStage::Done,
+                percent: 100,
+                message: None,
+            },
+            ServerEvent::WorktreeCreationProgress {
+                project_id: "p1".to_string(),
+                job_id: "job-abc".to_string(),
+                stage: WorktreeCreationStage::Failed,
+                percent: 50,
+                message: Some("branch exists".to_string()),
+            },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+        }
+
+        // Stages serialize as snake_case.
+        let json = serde_json::to_value(&WorktreeCreationStage::Fetching).unwrap();
+        assert_eq!(json, serde_json::json!("fetching"));
+    }
+
+    #[test]
+    fn worktree_progress_unknown_stage_deserializes_as_unknown() {
+        let stage: WorktreeCreationStage =
+            serde_json::from_value(serde_json::json!("some_future_stage")).unwrap();
+        assert_eq!(stage, WorktreeCreationStage::Unknown);
+    }
+
+    #[test]
+    fn worktree_progress_percent_defaults_and_message_skipped() {
+        // Older agent omits percent and message.
+        let json = r#"{"type":"worktree_creation_progress","project_id":"p1","job_id":"j","stage":"init"}"#;
+        let event: ServerEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ServerEvent::WorktreeCreationProgress {
+                percent, message, ..
+            } => {
+                assert_eq!(percent, 0);
+                assert!(message.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

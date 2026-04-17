@@ -18,6 +18,71 @@ use crate::project::git::GitInspector;
 
 use super::ProjectResponse;
 use super::parse_project_id;
+use zremote_protocol::events::WorktreeCreationStage;
+use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
+
+/// Maximum wall time for the blocking git worktree add call. Chosen to
+/// tolerate large-repo worktree creation (where git's staged checkout can
+/// legitimately take tens of seconds) while still putting a hard ceiling on
+/// the request so the client isn't left hanging forever.
+const WORKTREE_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Reject user-controlled git inputs that start with `-`. Without this guard
+/// a caller could smuggle additional git options through the worktree
+/// endpoint (CWE-88) — for example, passing `--upload-pack=evil` as a branch
+/// name. Enforced at the API boundary so the check is centralised and the
+/// git layer can assume its arguments are safe.
+fn reject_leading_dash(field: &str, value: &str) -> Result<(), WorktreeError> {
+    if value.starts_with('-') {
+        return Err(WorktreeError::new(
+            WorktreeErrorCode::InvalidRef,
+            format!("{field} must not start with '-'"),
+            format!("rejected {field}: leading dash not allowed"),
+        ));
+    }
+    Ok(())
+}
+
+/// Emit a `WorktreeCreationProgress` event for the given job/stage. Broadcast
+/// is best-effort — a full broadcast channel should not abort the operation.
+fn emit_progress(
+    state: &LocalAppState,
+    project_id: &str,
+    job_id: &str,
+    stage: WorktreeCreationStage,
+    percent: u8,
+    message: Option<String>,
+) {
+    let _ = state.events.send(ServerEvent::WorktreeCreationProgress {
+        project_id: project_id.to_string(),
+        job_id: job_id.to_string(),
+        stage,
+        percent,
+        message,
+    });
+}
+
+/// Map a `WorktreeErrorCode` to the HTTP status that best conveys the class of
+/// failure. We keep 500 for true internal errors so monitoring/alerting can
+/// still distinguish them, but use 4xx for issues the caller can correct.
+fn status_for_code(code: &WorktreeErrorCode) -> StatusCode {
+    match code {
+        WorktreeErrorCode::BranchExists | WorktreeErrorCode::PathCollision => StatusCode::CONFLICT,
+        WorktreeErrorCode::DetachedHead
+        | WorktreeErrorCode::Locked
+        | WorktreeErrorCode::Unmerged
+        | WorktreeErrorCode::InvalidRef => StatusCode::BAD_REQUEST,
+        WorktreeErrorCode::Internal | WorktreeErrorCode::Unknown => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Build a JSON response body for a structured worktree error.
+fn worktree_error_response(err: WorktreeError) -> axum::response::Response {
+    let status = status_for_code(&err.code);
+    (status, Json(err)).into_response()
+}
 
 /// `GET /api/projects/:project_id/worktrees` - list worktree children.
 pub async fn list_worktrees(
@@ -35,6 +100,11 @@ pub struct CreateWorktreeRequest {
     pub branch: String,
     pub path: Option<String>,
     pub new_branch: Option<bool>,
+    /// Optional base ref (commit SHA, branch, or tag) to create the new branch
+    /// from. Only meaningful when `new_branch` is `true`. When `None`, git
+    /// uses the current HEAD of the repo.
+    #[serde(default)]
+    pub base_ref: Option<String>,
 }
 
 /// `POST /api/projects/:project_id/worktrees` - create worktree directly.
@@ -187,23 +257,131 @@ pub async fn create_worktree(
             .into_response());
     }
 
-    // Default flow: existing GitInspector behavior
+    // Default flow: existing GitInspector behavior, wrapped in a 60s timeout
+    // and bracketed by progress events so the GUI can show a pending spinner
+    // for large-repo creations.
     let branch = body.branch.clone();
     let wt_path = body.path.clone();
     let new_branch = body.new_branch.unwrap_or(false);
+    let base_ref = body.base_ref.clone();
     let repo_path = project_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
+    // Validate user-controlled git inputs at the API boundary. Leading-dash
+    // values would otherwise be interpreted as additional git options
+    // (CWE-88). Rejected inputs never reach the blocking task.
+    if let Err(err) = reject_leading_dash("branch", &branch) {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref p) = wt_path
+        && let Err(err) = reject_leading_dash("path", p)
+    {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref b) = base_ref
+        && let Err(err) = reject_leading_dash("base_ref", b)
+    {
+        return Ok(worktree_error_response(err));
+    }
+
+    let job_id = Uuid::new_v4().to_string();
+    emit_progress(
+        &state,
+        &project_id,
+        &job_id,
+        WorktreeCreationStage::Init,
+        0,
+        None,
+    );
+
+    // Emit Creating from *inside* the blocking task so the event fires when
+    // git actually starts running, not at the moment we scheduled it. That
+    // gives the GUI a progress signal that reflects reality under load.
+    let events_for_task = state.events.clone();
+    let project_id_for_task = project_id.clone();
+    let job_id_for_task = job_id.clone();
+
+    let mut handle = tokio::task::spawn_blocking(move || {
+        // Best-effort broadcast: a full channel must not abort the git call.
+        let _ = events_for_task.send(ServerEvent::WorktreeCreationProgress {
+            project_id: project_id_for_task,
+            job_id: job_id_for_task,
+            stage: WorktreeCreationStage::Creating,
+            percent: 25,
+            message: Some("running git worktree add".to_string()),
+        });
         GitInspector::create_worktree(
             Path::new(&repo_path),
             &branch,
             wt_path.as_deref().map(Path::new),
             new_branch,
+            base_ref.as_deref(),
         )
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("worktree create task failed: {e}")))?
-    .map_err(|e| AppError::Internal(format!("failed to create worktree: {e}")))?;
+    });
+
+    // Passing `&mut handle` keeps ownership of the JoinHandle so we can abort
+    // the task if the timeout fires; otherwise the handle would be moved into
+    // the timeout future and we would leak the spawned task on timeout.
+    let join_result = match tokio::time::timeout(WORKTREE_CREATE_TIMEOUT, &mut handle).await {
+        Ok(res) => {
+            res.map_err(|e| AppError::Internal(format!("worktree create task failed: {e}")))?
+        }
+        Err(_) => {
+            // Timeout fired: tell tokio to drop the blocking task (it will
+            // exit on next yield; synchronous git cannot be preempted, but
+            // the HTTP caller gets a prompt structured error either way).
+            handle.abort();
+            tracing::warn!(
+                job_id = %job_id,
+                timeout_secs = WORKTREE_CREATE_TIMEOUT.as_secs(),
+                "worktree create timed out"
+            );
+            emit_progress(
+                &state,
+                &project_id,
+                &job_id,
+                WorktreeCreationStage::Failed,
+                100,
+                Some(format!(
+                    "timed out after {}s",
+                    WORKTREE_CREATE_TIMEOUT.as_secs()
+                )),
+            );
+            return Ok(worktree_error_response(WorktreeError::new(
+                WorktreeErrorCode::Internal,
+                "Worktree creation timed out — the repository may be very large or git may be stuck.",
+                format!("timed out after {}s", WORKTREE_CREATE_TIMEOUT.as_secs()),
+            )));
+        }
+    };
+
+    let result = match join_result {
+        Ok(info) => info,
+        Err(stderr) => {
+            tracing::warn!(error = %stderr, job_id = %job_id, "worktree create failed");
+            let err = WorktreeError::from_git_stderr(&stderr);
+            emit_progress(
+                &state,
+                &project_id,
+                &job_id,
+                WorktreeCreationStage::Failed,
+                100,
+                Some(err.message.clone()),
+            );
+            return Ok(worktree_error_response(err));
+        }
+    };
+
+    // git has returned successfully; the work left is DB insert + on_create
+    // hook. Surface that as Finalizing so the GUI can show a "wrapping up"
+    // state distinct from the active git call.
+    emit_progress(
+        &state,
+        &project_id,
+        &job_id,
+        WorktreeCreationStage::Finalizing,
+        75,
+        None,
+    );
 
     // Insert worktree as a child project
     let wt_id = Uuid::new_v4().to_string();
@@ -260,6 +438,15 @@ pub async fn create_worktree(
             "duration_ms": hr.duration_ms,
         });
     }
+
+    emit_progress(
+        &state,
+        &project_id,
+        &job_id,
+        WorktreeCreationStage::Done,
+        100,
+        None,
+    );
 
     Ok((StatusCode::CREATED, Json(project)).into_response())
 }

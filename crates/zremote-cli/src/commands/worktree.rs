@@ -66,6 +66,7 @@ pub async fn run(
                 branch,
                 path,
                 new_branch,
+                base_ref: None,
             };
             match client.create_worktree(&project_id, &req).await {
                 Ok(resp) => {

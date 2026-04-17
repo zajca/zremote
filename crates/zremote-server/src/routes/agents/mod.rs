@@ -126,6 +126,7 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
     "ClaudeAction",
     "GitStatusUpdate",
     "WorktreeCreated",
+    "WorktreeCreationProgress",
     "WorktreeDeleted",
     "WorktreeError",
     "SessionsRecovered",

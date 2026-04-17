@@ -91,6 +91,10 @@ fn build_test_router(state: Arc<LocalAppState>) -> Router {
             post(trigger_git_refresh),
         )
         .route(
+            "/api/projects/{project_id}/git/branches",
+            get(list_branches),
+        )
+        .route(
             "/api/projects/{project_id}/worktrees",
             get(list_worktrees).post(create_worktree),
         )
@@ -1139,6 +1143,200 @@ async fn trigger_git_refresh_nonexistent_project() {
 }
 
 #[tokio::test]
+async fn list_branches_endpoint_returns_branch_list() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{project_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["local"].is_array());
+    assert!(json["remote"].is_array());
+    assert!(json["current"].is_string());
+    // init_isolated_git_repo makes a commit on "main".
+    assert_eq!(json["current"], "main");
+    assert!(
+        json["local"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["name"] == "main" && b["is_current"] == true)
+    );
+}
+
+#[tokio::test]
+async fn list_branches_endpoint_project_not_found() {
+    let state = test_state().await;
+    let app = build_test_router(state);
+    let project_id = Uuid::new_v4().to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{project_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_branches_returns_504_on_timeout() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    // Drive the handler directly with a zero-duration timeout so the
+    // outer timeout fires before the blocking task can finish. This
+    // verifies the 504 response shape without having to hang real git.
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    let response = super::git::list_branches_with_timeout(
+        state,
+        project_id,
+        std::time::Duration::from_millis(0),
+    )
+    .await
+    .expect("handler returns Ok(Response)")
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "timeout");
+    assert!(
+        json["hint"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("timed out"),
+        "hint should mention timeout: {}",
+        json["hint"]
+    );
+}
+
+#[tokio::test]
+async fn create_worktree_rejects_base_ref_with_leading_dash() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "branch": "ok-branch",
+                        "new_branch": true,
+                        "base_ref": "--upload-pack=evil",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Leading-dash values are rejected at the API boundary before git runs.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "invalid_ref");
+    assert!(
+        json["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("must not start with"),
+        "hint should explain the rule: {}",
+        json["hint"]
+    );
+}
+
+#[tokio::test]
+async fn create_worktree_rejects_branch_with_leading_dash() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"-evil","new_branch":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "invalid_ref");
+}
+
+#[tokio::test]
 async fn create_worktree_on_non_git_project() {
     let state = test_state().await;
     let host_id = state.host_id.to_string();
@@ -1168,6 +1366,268 @@ async fn create_worktree_on_non_git_project() {
 
     // Should fail because dir is not a git repo
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Structured WorktreeError body: { code, hint, message }
+    assert!(json.get("code").is_some());
+    assert!(json.get("hint").is_some());
+}
+
+#[tokio::test]
+async fn create_worktree_emits_progress_events() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    // Subscribe to events before triggering the handler so we don't miss the
+    // Init event.
+    let mut rx = state.events.subscribe();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt-prog").to_string_lossy().to_string();
+
+    let app = build_test_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "branch": "progress-branch",
+                        "path": wt_path,
+                        "new_branch": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Drain the channel and collect the stages we saw for this project.
+    let mut stages: Vec<zremote_protocol::events::WorktreeCreationStage> = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let zremote_core::state::ServerEvent::WorktreeCreationProgress {
+            project_id: pid,
+            stage,
+            ..
+        } = event
+            && pid == project_id
+        {
+            stages.push(stage);
+        }
+    }
+
+    use zremote_protocol::events::WorktreeCreationStage::{Creating, Done, Finalizing, Init};
+    assert!(stages.contains(&Init), "missing Init: saw {stages:?}");
+    assert!(
+        stages.contains(&Creating),
+        "missing Creating: saw {stages:?}"
+    );
+    assert!(
+        stages.contains(&Finalizing),
+        "missing Finalizing: saw {stages:?}"
+    );
+    assert!(stages.contains(&Done), "missing Done: saw {stages:?}");
+
+    // Creating is emitted from inside the blocking task, so it must land
+    // after Init and before Finalizing. Done is the terminal stage. Assert
+    // the ordering to catch regressions that re-emit stages synchronously.
+    let pos_init = stages.iter().position(|s| s == &Init).unwrap();
+    let pos_creating = stages.iter().position(|s| s == &Creating).unwrap();
+    let pos_finalizing = stages.iter().position(|s| s == &Finalizing).unwrap();
+    let pos_done = stages.iter().position(|s| s == &Done).unwrap();
+    assert!(pos_init < pos_creating, "Creating must follow Init");
+    assert!(
+        pos_creating < pos_finalizing,
+        "Finalizing must follow Creating"
+    );
+    assert!(pos_finalizing < pos_done, "Done must follow Finalizing");
+}
+
+#[tokio::test]
+async fn create_worktree_with_base_ref_round_trip() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    // Resolve the current HEAD sha so we can pass it as base_ref.
+    // Use the same env hardening as init_isolated_git_repo so the call
+    // doesn't pick up the parent repo's config or block on credentials.
+    let head_sha = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git rev-parse")
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt-base").to_string_lossy().to_string();
+
+    let body = serde_json::json!({
+        "branch": "feature-from-sha",
+        "path": wt_path,
+        "new_branch": true,
+        "base_ref": head_sha,
+    });
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn create_worktree_invalid_base_ref_returns_structured_error() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir
+        .path()
+        .join("wt-invalid")
+        .to_string_lossy()
+        .to_string();
+
+    let body = serde_json::json!({
+        "branch": "feature",
+        "path": wt_path,
+        "new_branch": true,
+        "base_ref": "refs/heads/does-not-exist-42",
+    });
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "invalid_ref");
+    assert!(!json["hint"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_worktree_branch_exists_returns_structured_error() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    // Create the branch up-front so the create_worktree call collides.
+    let output = std::process::Command::new("git")
+        .args(["branch", "already-there"])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("git branch");
+    assert!(output.status.success());
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir
+        .path()
+        .join("wt-existing")
+        .to_string_lossy()
+        .to_string();
+
+    let body = serde_json::json!({
+        "branch": "already-there",
+        "path": wt_path,
+        "new_branch": true,
+    });
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "branch_exists");
+    assert!(!json["hint"].as_str().unwrap().is_empty());
 }
 
 #[test]
@@ -1508,15 +1968,25 @@ fn create_worktree_request_deserialize_minimal() {
     assert_eq!(req.branch, "feature");
     assert!(req.path.is_none());
     assert!(req.new_branch.is_none());
+    assert!(req.base_ref.is_none());
 }
 
 #[test]
 fn create_worktree_request_deserialize_full() {
-    let json = r#"{"branch": "feature", "path": "/tmp/wt", "new_branch": true}"#;
+    let json = r#"{"branch": "feature", "path": "/tmp/wt", "new_branch": true, "base_ref": "origin/main"}"#;
     let req: CreateWorktreeRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.branch, "feature");
     assert_eq!(req.path.as_deref(), Some("/tmp/wt"));
     assert_eq!(req.new_branch, Some(true));
+    assert_eq!(req.base_ref.as_deref(), Some("origin/main"));
+}
+
+#[test]
+fn create_worktree_request_base_ref_defaults_to_none() {
+    // Older clients that don't send base_ref still deserialize cleanly.
+    let json = r#"{"branch": "feature", "new_branch": true}"#;
+    let req: CreateWorktreeRequest = serde_json::from_str(json).unwrap();
+    assert!(req.base_ref.is_none());
 }
 
 #[test]

@@ -86,6 +86,19 @@ pub enum AgentMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hook_result: Option<HookResultInfo>,
     },
+    /// Lifecycle progress for an in-flight `WorktreeCreate` request. The
+    /// server converts these into `ServerEvent::WorktreeCreationProgress`
+    /// broadcasts so GUIs see stages as they happen. Older servers that
+    /// predate this variant will ignore it (unknown message type).
+    WorktreeCreationProgress {
+        project_path: String,
+        job_id: String,
+        stage: crate::events::WorktreeCreationStage,
+        #[serde(default)]
+        percent: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     WorktreeHookResult {
         project_path: String,
         worktree_path: String,
@@ -196,6 +209,12 @@ pub enum ServerMessage {
         branch: String,
         path: Option<String>,
         new_branch: bool,
+        /// Optional base ref (commit SHA, branch, or tag) to create the new
+        /// branch from. Only meaningful when `new_branch` is `true`. Older
+        /// servers that predate this field will deserialize their outbound
+        /// message with `base_ref: None` and fall back to HEAD.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
     },
     WorktreeDelete {
         project_path: String,
@@ -567,6 +586,25 @@ mod tests {
     }
 
     #[test]
+    fn worktree_creation_progress_roundtrip() {
+        use crate::events::WorktreeCreationStage;
+        roundtrip_agent(&AgentMessage::WorktreeCreationProgress {
+            project_path: "/home/user/repo".to_string(),
+            job_id: "job-1".to_string(),
+            stage: WorktreeCreationStage::Creating,
+            percent: 25,
+            message: Some("running git worktree add".to_string()),
+        });
+        roundtrip_agent(&AgentMessage::WorktreeCreationProgress {
+            project_path: "/home/user/repo".to_string(),
+            job_id: "job-1".to_string(),
+            stage: WorktreeCreationStage::Done,
+            percent: 100,
+            message: None,
+        });
+    }
+
+    #[test]
     fn worktree_deleted_roundtrip() {
         roundtrip_agent(&AgentMessage::WorktreeDeleted {
             project_path: "/home/user/repo".to_string(),
@@ -596,13 +634,29 @@ mod tests {
             branch: "feature/new".to_string(),
             path: Some("/home/user/repo-feature".to_string()),
             new_branch: true,
+            base_ref: Some("main".to_string()),
         });
         roundtrip_server(&ServerMessage::WorktreeCreate {
             project_path: "/home/user/repo".to_string(),
             branch: "existing-branch".to_string(),
             path: None,
             new_branch: false,
+            base_ref: None,
         });
+    }
+
+    #[test]
+    fn worktree_create_accepts_missing_base_ref_for_backcompat() {
+        // Older servers (pre-Phase 2) send WorktreeCreate without base_ref.
+        // The new agent must still accept those messages and default to None.
+        let json = r#"{"type":"WorktreeCreate","payload":{"project_path":"/r","branch":"b","path":null,"new_branch":true}}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ServerMessage::WorktreeCreate { base_ref, .. } => {
+                assert!(base_ref.is_none(), "missing base_ref must default to None");
+            }
+            other => panic!("expected WorktreeCreate, got {other:?}"),
+        }
     }
 
     #[test]

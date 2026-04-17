@@ -69,6 +69,7 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::IndexingProgress { .. } => "indexing_progress",
         ServerEvent::MemoryExtracted { .. } => "memory_extracted",
         ServerEvent::WorktreeError { .. } => "worktree_error",
+        ServerEvent::WorktreeCreationProgress { .. } => "worktree_creation_progress",
         ServerEvent::ClaudeTaskStarted { .. } => "claude_task_started",
         ServerEvent::ClaudeTaskUpdated { .. } => "claude_task_updated",
         ServerEvent::ClaudeTaskEnded { .. } => "claude_task_ended",
