@@ -45,6 +45,7 @@
 //! blocking, or failing writers through [`Persistence::with_writer`] without
 //! touching the real filesystem.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -96,6 +97,13 @@ pub struct GuiState {
     pub recent_actions: Vec<RecentAction>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub activity_panel_visible: bool,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub expanded_projects: HashSet<String>,
+    /// Projects the user has explicitly force-collapsed. Wins over
+    /// `expanded_projects` and the default heuristic so a user who wants
+    /// a <4-worktree parent hidden can make it stay hidden across restarts.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub collapsed_projects: HashSet<String>,
 }
 
 impl GuiState {
@@ -107,6 +115,8 @@ impl GuiState {
             && self.recent_sessions.is_empty()
             && self.recent_actions.is_empty()
             && !self.activity_panel_visible
+            && self.expanded_projects.is_empty()
+            && self.collapsed_projects.is_empty()
     }
 }
 
@@ -385,6 +395,48 @@ impl Persistence {
         });
     }
 
+    /// Record an explicit user override for whether a parent project's
+    /// worktree children are shown in the sidebar. `default_expanded` is the
+    /// value computed from the auto-heuristic before the click — we only
+    /// persist the *opposite* of the default so that future changes to the
+    /// heuristic (e.g. lowering the collapse threshold) are respected unless
+    /// the user has actively pushed back. The two sets are mutually exclusive:
+    /// writing to one always clears the matching id from the other.
+    ///
+    /// Rotation when the user keeps clicking:
+    ///   default → explicit-opposite → default (no override) → explicit-opposite → …
+    pub fn toggle_project_expanded(&mut self, project_id: &str, default_expanded: bool) {
+        self.update(|state| {
+            let had_explicit = state.expanded_projects.remove(project_id)
+                || state.collapsed_projects.remove(project_id);
+            if had_explicit {
+                // Returning to default heuristic on this click.
+                return;
+            }
+            // First click on a project in default state: store the opposite.
+            if default_expanded {
+                state.collapsed_projects.insert(project_id.to_string());
+            } else {
+                state.expanded_projects.insert(project_id.to_string());
+            }
+        });
+    }
+
+    /// Mark a project as explicitly expanded (clears any force-collapse
+    /// override for it). Used by auto-expand-on-activity paths where we want
+    /// to persist the new expanded state regardless of prior user choice.
+    pub fn set_project_expanded(&mut self, project_id: &str, expanded: bool) {
+        self.update(|state| {
+            if expanded {
+                state.collapsed_projects.remove(project_id);
+                state.expanded_projects.insert(project_id.to_string());
+            } else {
+                state.expanded_projects.remove(project_id);
+                state.collapsed_projects.insert(project_id.to_string());
+            }
+        });
+    }
+
     /// Block the current thread until every mutation up to `self.data_version`
     /// is on disk, or `timeout` elapses. Returns [`FlushTimeout`] on timeout
     /// or if the worker has already shut down with unpersisted state.
@@ -554,13 +606,56 @@ fn run_worker(shared: &Arc<SharedSaver>) {
     tracing::debug!("persistence worker exiting");
 }
 
+/// Upper bound on entries kept in any project-id HashSet loaded from disk.
+/// A corrupt or malicious state file that lists millions of ids would
+/// otherwise bloat memory and slow down every `lookup` on the render path.
+const PROJECT_SET_CAP: usize = 10_000;
+
+/// Upper bound on the length of a single project id. Anything longer is a
+/// corruption signal, not a legitimate uuid/path-derived id. Entries past
+/// this bound are dropped silently (one-shot warn) during load.
+const PROJECT_ID_MAX_LEN: usize = 64;
+
+/// Sanitize a HashSet of project ids loaded from disk: strips entries
+/// longer than [`PROJECT_ID_MAX_LEN`] and truncates to [`PROJECT_SET_CAP`]
+/// entries. Logs once per load if either limit triggered.
+fn sanitize_project_id_set(set: &mut HashSet<String>, field: &'static str) {
+    let before = set.len();
+    set.retain(|id| id.len() <= PROJECT_ID_MAX_LEN);
+    let after_length_filter = set.len();
+    if after_length_filter < before {
+        tracing::warn!(
+            field,
+            dropped = before - after_length_filter,
+            "persistence: project ids exceeded max length, dropped",
+        );
+    }
+    if set.len() > PROJECT_SET_CAP {
+        // Iteration order on HashSet is unspecified; arbitrary truncation
+        // is acceptable because the sets are hints, not authoritative data.
+        let retained: HashSet<String> = set.iter().take(PROJECT_SET_CAP).cloned().collect();
+        let dropped = set.len() - retained.len();
+        *set = retained;
+        tracing::warn!(
+            field,
+            dropped,
+            cap = PROJECT_SET_CAP,
+            "persistence: project-id set exceeded cap, truncated",
+        );
+    }
+}
+
 fn load_state_from_disk(path: &Path) -> GuiState {
     if !path.exists() {
         return GuiState::default();
     }
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str::<GuiState>(&contents) {
-            Ok(state) => state,
+            Ok(mut state) => {
+                sanitize_project_id_set(&mut state.expanded_projects, "expanded_projects");
+                sanitize_project_id_set(&mut state.collapsed_projects, "collapsed_projects");
+                state
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -1021,6 +1116,8 @@ mod tests {
             }],
             recent_actions: vec![],
             activity_panel_visible: false,
+            expanded_projects: HashSet::new(),
+            collapsed_projects: HashSet::new(),
         };
 
         FileWriter.write(&path, &state).expect("write");
@@ -1078,5 +1175,155 @@ mod tests {
         let v1_json = r#"{"version":1,"recent_sessions":[]}"#;
         let state: GuiState = serde_json::from_str(v1_json).unwrap();
         assert!(state.recent_actions.is_empty());
+    }
+
+    #[test]
+    fn test_backward_compat_without_collapsed_projects() {
+        // State written before collapsed_projects was added must still load.
+        let legacy_json = r#"{"version":2,"recent_sessions":[],"expanded_projects":["pa"]}"#;
+        let state: GuiState = serde_json::from_str(legacy_json).unwrap();
+        assert!(state.expanded_projects.contains("pa"));
+        assert!(state.collapsed_projects.is_empty());
+    }
+
+    #[test]
+    fn test_toggle_project_expanded_rotation() {
+        // With default_expanded = true (heuristic says "show"), first click
+        // overrides to collapsed, second click clears the override
+        // (returning to default = expanded), third click overrides to
+        // collapsed again. Symmetric when the default is false.
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("toggle-rotation");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        // Start: no override recorded anywhere.
+        assert!(!p.state().expanded_projects.contains("pa"));
+        assert!(!p.state().collapsed_projects.contains("pa"));
+
+        // Default = expanded: first toggle should stash `pa` into collapsed.
+        p.toggle_project_expanded("pa", true);
+        assert!(p.state().collapsed_projects.contains("pa"));
+        assert!(!p.state().expanded_projects.contains("pa"));
+
+        // Second toggle: clears the override entirely (back to default).
+        p.toggle_project_expanded("pa", true);
+        assert!(!p.state().collapsed_projects.contains("pa"));
+        assert!(!p.state().expanded_projects.contains("pa"));
+
+        // Third toggle: same as first — record the opposite of default.
+        p.toggle_project_expanded("pa", true);
+        assert!(p.state().collapsed_projects.contains("pa"));
+
+        // Flip the default: now the toggle should write to expanded.
+        p.toggle_project_expanded("pb", false);
+        assert!(p.state().expanded_projects.contains("pb"));
+        assert!(!p.state().collapsed_projects.contains("pb"));
+    }
+
+    #[test]
+    fn test_toggle_project_expanded_clears_opposing_set() {
+        // Explicitly expanded then toggled with default=true should clear
+        // the expanded entry, not add it to collapsed as well. The two
+        // sets must stay mutually exclusive.
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("toggle-exclusive");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        p.set_project_expanded("pa", true);
+        assert!(p.state().expanded_projects.contains("pa"));
+        assert!(!p.state().collapsed_projects.contains("pa"));
+
+        // Toggling with default=true should clear the expanded entry
+        // (had_explicit branch) without ever touching collapsed.
+        p.toggle_project_expanded("pa", true);
+        assert!(!p.state().expanded_projects.contains("pa"));
+        assert!(!p.state().collapsed_projects.contains("pa"));
+    }
+
+    #[test]
+    fn test_set_project_expanded_keeps_sets_mutually_exclusive() {
+        let (writer, _, _) = counting_writer();
+        let path = temp_path("set-exclusive");
+        let mut p = Persistence::with_writer(path, writer, Duration::from_millis(10));
+
+        // Force collapsed, then force expanded — collapsed must be cleared.
+        p.set_project_expanded("pa", false);
+        assert!(p.state().collapsed_projects.contains("pa"));
+        assert!(!p.state().expanded_projects.contains("pa"));
+
+        p.set_project_expanded("pa", true);
+        assert!(!p.state().collapsed_projects.contains("pa"));
+        assert!(p.state().expanded_projects.contains("pa"));
+
+        // And back the other way.
+        p.set_project_expanded("pa", false);
+        assert!(p.state().collapsed_projects.contains("pa"));
+        assert!(!p.state().expanded_projects.contains("pa"));
+    }
+
+    #[test]
+    fn test_load_truncates_oversized_project_set() {
+        // A state file with >10_000 ids should be truncated to the cap on
+        // load; the exact retained entries are unspecified because HashSet
+        // iteration order is random, so we only verify the cap.
+        let mut big = HashSet::new();
+        for i in 0..(PROJECT_SET_CAP + 250) {
+            big.insert(format!("id-{i:06}"));
+        }
+        let state = GuiState {
+            expanded_projects: big,
+            ..GuiState::default()
+        };
+        let tmp = temp_path("oversized-set");
+        FileWriter.write(&tmp, &state).unwrap();
+        let loaded = load_state_from_disk(&tmp);
+        assert_eq!(loaded.expanded_projects.len(), PROJECT_SET_CAP);
+    }
+
+    #[test]
+    fn test_load_drops_overlong_ids() {
+        // Ids longer than PROJECT_ID_MAX_LEN must be stripped at load time.
+        let mut ids = HashSet::new();
+        ids.insert("short".to_string());
+        ids.insert("x".repeat(PROJECT_ID_MAX_LEN + 1));
+        let state = GuiState {
+            collapsed_projects: ids,
+            ..GuiState::default()
+        };
+        let tmp = temp_path("overlong-ids");
+        FileWriter.write(&tmp, &state).unwrap();
+        let loaded = load_state_from_disk(&tmp);
+        assert_eq!(loaded.collapsed_projects.len(), 1);
+        assert!(loaded.collapsed_projects.contains("short"));
+    }
+
+    #[test]
+    fn test_toggle_project_expanded_persists() {
+        // End-to-end: toggle once and confirm the worker wrote the
+        // override to disk by loading the file back into a fresh state.
+        let (writer, calls, _) = counting_writer();
+        let path = temp_path("toggle-persists");
+        {
+            let mut p = Persistence::with_writer(path.clone(), writer, Duration::from_millis(10));
+            p.toggle_project_expanded("pa", true);
+            p.flush_blocking(Duration::from_secs(1))
+                .expect("flush after toggle");
+        }
+        assert!(calls.load(Ordering::Relaxed) >= 1);
+        // Using the counting writer the file itself isn't written, so
+        // also exercise the FileWriter round-trip separately for full
+        // persistence coverage.
+        let path2 = temp_path("toggle-persists-fs");
+        {
+            let mut p = Persistence::with_writer(
+                path2.clone(),
+                Box::new(FileWriter),
+                Duration::from_millis(10),
+            );
+            p.toggle_project_expanded("pa", true);
+            p.flush_blocking(Duration::from_secs(1)).expect("flush");
+        }
+        let reloaded = load_state_from_disk(&path2);
+        assert!(reloaded.collapsed_projects.contains("pa"));
     }
 }

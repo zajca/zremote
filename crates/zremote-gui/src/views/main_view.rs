@@ -168,6 +168,34 @@ impl MainView {
                     }
                 }
             }
+            SidebarEvent::ProjectSelected { project_id, .. } => {
+                // If the currently-open terminal session belongs to a
+                // different project than the one the user just selected,
+                // drop it. The sidebar's click handler will either emit
+                // `SessionSelected` (restoring an existing session of the
+                // new project) or kick off an async `create_session` that
+                // fires `SessionSelected` when it resolves — either way
+                // the empty state is a short-lived transition state, not
+                // a stuck UI. Sidebar owns the selection itself (stored
+                // in AppState), so the breadcrumb re-renders via notify.
+                if let Some(pid) = project_id.as_deref()
+                    && let Some(terminal) = &self.terminal
+                {
+                    let current_session_id = terminal.read(cx).session_id().to_string();
+                    let still_matches = self
+                        .sidebar
+                        .read(cx)
+                        .sessions_rc()
+                        .iter()
+                        .find(|s| s.id == current_session_id)
+                        .and_then(|s| s.project_id.as_deref())
+                        == Some(pid);
+                    if !still_matches {
+                        self.terminal = None;
+                    }
+                }
+                cx.notify();
+            }
             SidebarEvent::OpenHelp => {
                 self.open_help_modal(cx);
             }
@@ -1561,6 +1589,84 @@ impl MainView {
         }
     }
 
+    /// Render the breadcrumb shown above the terminal when a project is
+    /// selected. `parent ▸ branch` for worktrees (parent clickable to reset
+    /// to the root), plain project name for non-worktree projects, nothing
+    /// when selection is empty.
+    fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let selected_id = self
+            .app_state
+            .selected_project_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())?;
+
+        let projects = {
+            let sidebar = self.sidebar.read(cx);
+            sidebar.projects_rc().clone()
+        };
+        let selected = projects.iter().find(|p| p.id == selected_id)?.clone();
+
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(5.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .bg(theme::bg_secondary())
+            .text_size(px(12.0));
+
+        if let Some(parent_id) = selected.parent_project_id.clone() {
+            let parent = projects.iter().find(|p| p.id == parent_id).cloned();
+            if let Some(parent) = parent {
+                let parent_id_for_click = parent.id.clone();
+                let parent_host = parent.host_id.clone();
+                row = row.child(
+                    div()
+                        .id("breadcrumb-parent")
+                        .cursor_pointer()
+                        .text_color(theme::text_secondary())
+                        .hover(|s| s.text_color(theme::text_primary()))
+                        .child(parent.name.clone())
+                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                            this.sidebar.update(cx, |sidebar, cx| {
+                                sidebar.set_selected_project(
+                                    Some(parent_id_for_click.clone()),
+                                    Some(parent_host.clone()),
+                                    cx,
+                                );
+                            });
+                        })),
+                );
+                row = row.child(div().text_color(theme::text_tertiary()).child("▸"));
+                let branch_label = selected
+                    .git_branch
+                    .clone()
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or_else(|| selected.name.clone());
+                row = row.child(
+                    div()
+                        .text_color(theme::text_primary())
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(branch_label),
+                );
+                return Some(row);
+            }
+        }
+
+        // Non-worktree project: render its name as the only breadcrumb
+        // segment. No click target (already selected).
+        row = row.child(
+            div()
+                .text_color(theme::text_primary())
+                .font_weight(FontWeight::MEDIUM)
+                .child(selected.name.clone()),
+        );
+        Some(row)
+    }
+
     fn render_connection_banner() -> impl IntoElement {
         div()
             .flex()
@@ -1720,23 +1826,31 @@ impl MainView {
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content_area = self.render_content_area(cx);
+        let show_banner = !self.server_connected && self.ever_connected;
+        let right_column: AnyElement = {
+            let breadcrumb: Option<AnyElement> = self
+                .render_breadcrumb(cx)
+                .map(IntoElement::into_any_element);
+            if show_banner || breadcrumb.is_some() {
+                let mut col = div().flex_1().flex().flex_col();
+                if show_banner {
+                    col = col.child(Self::render_connection_banner());
+                }
+                if let Some(bc) = breadcrumb {
+                    col = col.child(bc);
+                }
+                col.child(content_area).into_any_element()
+            } else {
+                content_area.into_any_element()
+            }
+        };
 
         let mut root = div()
             .flex()
             .size_full()
             .bg(theme::bg_primary())
             .child(self.sidebar.clone())
-            .child(if !self.server_connected && self.ever_connected {
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .child(Self::render_connection_banner())
-                    .child(content_area)
-                    .into_any_element()
-            } else {
-                content_area.into_any_element()
-            });
+            .child(right_column);
 
         if let Some(overlay) = self.render_command_palette_overlay(cx) {
             root = root.child(overlay);
@@ -1834,8 +1948,20 @@ fn read_bridge_host_id() -> Option<String> {
 
 /// Events emitted by the sidebar for the main view to handle.
 pub enum SidebarEvent {
-    SessionSelected { session_id: String, host_id: String },
-    SessionClosed { session_id: String },
+    SessionSelected {
+        session_id: String,
+        host_id: String,
+    },
+    SessionClosed {
+        session_id: String,
+    },
+    /// User selected a project (root or worktree). `None` means selection
+    /// cleared (e.g. breadcrumb reset). `host_id` is carried so the main
+    /// view can restore a terminal in that project's host context.
+    ProjectSelected {
+        project_id: Option<String>,
+        host_id: Option<String>,
+    },
     OpenHelp,
     OpenSettings,
 }

@@ -108,6 +108,7 @@ pub fn run(config: GuiConfig) {
         mode,
         server_version,
         persistence: Mutex::new(persistence),
+        selected_project_id: Mutex::new(None),
     });
 
     let exit_after = config.exit_after;

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zremote_core::processing::AgenticProcessor;
@@ -46,6 +47,27 @@ pub struct LocalAppState {
     /// `ServerMessage::AgentAction`. Shared (Arc) so the REST layer and the
     /// WS dispatch layer hold the same instance.
     pub launcher_registry: Arc<crate::agents::LauncherRegistry>,
+    /// Handle for the periodic git refresh task. Populated by `run_local`
+    /// after the state is built; stored on the state so the task is owned by
+    /// the agent lifetime and aborted when the state is finally dropped.
+    /// Cancellation during normal shutdown is driven by `self.shutdown`.
+    pub git_refresh_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for LocalAppState {
+    fn drop(&mut self) {
+        // Defensive abort path that should not normally be reached —
+        // `run_local` cancels the shutdown token before the last Arc is
+        // dropped, which lets the refresh task exit cleanly through its
+        // own select-on-cancellation branch. This Drop only triggers in
+        // abnormal teardown (test failures, panics during startup) so the
+        // task doesn't outlive the DB pool it borrows.
+        if let Ok(mut slot) = self.git_refresh_task.try_lock()
+            && let Some(handle) = slot.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 impl LocalAppState {
@@ -96,6 +118,7 @@ impl LocalAppState {
             knowledge_tx: None,
             channel_dialog_detectors: Mutex::new(HashMap::new()),
             launcher_registry: Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            git_refresh_task: Mutex::new(None),
         })
     }
 }

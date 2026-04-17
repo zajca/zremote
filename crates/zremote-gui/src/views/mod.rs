@@ -11,6 +11,7 @@ pub mod session_switcher;
 pub mod settings;
 pub mod settings_modal;
 pub mod sidebar;
+mod sidebar_items;
 #[cfg(test)]
 mod terminal_bench;
 pub mod terminal_element;

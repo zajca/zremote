@@ -279,6 +279,20 @@ pub async fn run_local(
     // Spawn periodic agentic tool detection loop
     spawn_agentic_detection_loop(state.clone());
 
+    // Spawn periodic git refresh loop (keeps sidebar badges fresh between
+    // full filesystem scans). Handle is stored on state so it shares the
+    // agent's lifetime; cancellation happens via `state.shutdown`.
+    {
+        let handle = crate::project::git_refresh::spawn_git_refresh_loop(
+            state.db.clone(),
+            host_id.to_string(),
+            state.events.clone(),
+            state.shutdown.clone(),
+        );
+        let mut slot = state.git_refresh_task.lock().await;
+        *slot = Some(handle);
+    }
+
     // Start ccline Unix socket listener for Claude Code status line data
     {
         let sink = crate::ccline::listener::CclineSink::Local {

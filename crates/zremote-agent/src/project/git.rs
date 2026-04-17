@@ -3,10 +3,18 @@ use std::process::Command;
 
 use zremote_protocol::project::{GitInfo, GitRemote, WorktreeInfo};
 
-/// Run a git command in the given directory with a 5-second timeout.
-/// Returns stdout as a trimmed String on success, or an error message.
+/// Maximum wall time for any individual git subprocess. Kills the child on
+/// expiry so a hung command (network, file-lock, misconfigured credential
+/// helper) cannot wedge the scanner/refresh loop.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a git command in the given directory with a 5-second wall-clock
+/// timeout. Returns stdout as a trimmed String on success, or an error
+/// message. Disables every interactive credential prompt path (terminal +
+/// GUI askpass) so a repo with a broken remote can't block the caller
+/// waiting for human input.
 fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
-    let child = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(path)
         // Prevent parent repo or env vars from interfering
@@ -15,13 +23,45 @@ fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
         .env_remove("GIT_INDEX_FILE")
         // Prevent git from discovering repos above the target path
         .env("GIT_CEILING_DIRECTORIES", path)
+        // Disable every interactive credential prompt path. Without these
+        // git happily blocks on a TTY prompt (or pops a desktop askpass)
+        // when a remote needs auth — which would deadlock the scanner.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("SSH_ASKPASS", "/bin/false")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn git: {e}"))?;
 
-    let result = child.wait_with_output();
-    match result {
+    // Poll until the child exits or the deadline passes. On timeout we kill
+    // the child and report the failure up. `wait_with_output` is called
+    // after the poll confirms the child is gone, so the OS has buffered
+    // stdout/stderr for us to drain.
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    // Collect the process so we don't leak a zombie. Ignore
+                    // any read errors — we only care that it's reaped.
+                    let _ = child.wait_with_output();
+                    return Err(format!(
+                        "git {args:?} timed out after {}s",
+                        GIT_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("git wait failed: {e}")),
+        }
+    }
+
+    match child.wait_with_output() {
         Ok(output) => {
             if output.status.success() {
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -215,6 +255,58 @@ impl GitInspector {
         };
 
         Some((git_info, worktrees))
+    }
+
+    /// Fast-path git inspection used by the periodic refresh loop.
+    ///
+    /// Collects only the fields that change frequently during normal work —
+    /// branch, dirty flag, ahead/behind — and skips the slower bits that the
+    /// full `inspect` path does (remote resolution, worktree listing,
+    /// commit-message lookup). Returns `None` when the path is not a git
+    /// repo or git itself is unavailable; a repo without an upstream still
+    /// yields `Some` with `ahead = 0`, `behind = 0`.
+    ///
+    /// Leaves `commit_hash`, `commit_message`, and `remotes` unset — callers
+    /// that need those fields must use the full `inspect` path.
+    pub fn inspect_fast(path: &Path) -> Option<GitInfo> {
+        if run_git(path, &["rev-parse", "--is-inside-work-tree"]).is_err() {
+            return None;
+        }
+
+        let branch = run_git(path, &["branch", "--show-current"])
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let is_dirty = run_git(path, &["status", "--porcelain"])
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        let (ahead, behind) = run_git(
+            path,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        )
+        .ok()
+        .and_then(|s| {
+            let parts: Vec<&str> = s.split('\t').collect();
+            if parts.len() == 2 {
+                let behind = parts[0].parse().unwrap_or(0);
+                let ahead = parts[1].parse().unwrap_or(0);
+                Some((ahead, behind))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0));
+
+        Some(GitInfo {
+            branch,
+            commit_hash: None,
+            commit_message: None,
+            is_dirty,
+            ahead,
+            behind,
+            remotes: Vec::new(),
+        })
     }
 
     /// Create a new worktree.
@@ -637,5 +729,83 @@ upstream\tgit@github.com:org/repo.git (push)
         let sub = tmp.path().join("sub");
         fs::create_dir_all(&sub).unwrap();
         assert!(main_repo_path_for_worktree(&sub).is_none());
+    }
+
+    #[test]
+    fn inspect_fast_returns_none_for_non_git_dir() {
+        let tmp = TempDir::new().unwrap();
+        assert!(GitInspector::inspect_fast(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn inspect_fast_returns_none_for_missing_path() {
+        let missing = Path::new("/nonexistent/path/zremote-inspect-fast-test");
+        assert!(GitInspector::inspect_fast(missing).is_none());
+    }
+
+    #[test]
+    fn inspect_fast_clean_repo_has_zero_ahead_behind() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+
+        let info = GitInspector::inspect_fast(tmp.path()).expect("should detect git repo");
+        assert!(info.branch.is_some());
+        assert!(!info.is_dirty);
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 0);
+        // Fast path intentionally skips these fields.
+        assert!(info.commit_hash.is_none());
+        assert!(info.commit_message.is_none());
+        assert!(info.remotes.is_empty());
+    }
+
+    #[test]
+    fn inspect_fast_detects_dirty_working_tree() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        fs::write(tmp.path().join("dirty.txt"), "edit").unwrap();
+
+        let info = GitInspector::inspect_fast(tmp.path()).expect("should detect dirty repo");
+        assert!(info.is_dirty);
+    }
+
+    #[test]
+    fn inspect_fast_reports_ahead_commits() {
+        let tmp = TempDir::new().unwrap();
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir_all(&upstream).unwrap();
+        init_git_repo(&upstream);
+
+        // Clone so the clone has a proper upstream tracking ref.
+        let clone = tmp.path().join("clone");
+        let status = std::process::Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&upstream)
+            .arg(&clone)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CEILING_DIRECTORIES", tmp.path())
+            .status()
+            .expect("spawn git clone");
+        assert!(status.success(), "git clone failed");
+
+        // Set identity on the clone so commits work.
+        run_git(&clone, &["config", "user.email", "c@c.com"]).unwrap();
+        run_git(&clone, &["config", "user.name", "c"]).unwrap();
+        run_git(&clone, &["config", "commit.gpgsign", "false"]).unwrap();
+
+        // Create two local commits so we are ahead of upstream.
+        fs::write(clone.join("one.txt"), "1").unwrap();
+        run_git(&clone, &["add", "."]).unwrap();
+        run_git(&clone, &["commit", "--no-verify", "-m", "one"]).unwrap();
+        fs::write(clone.join("two.txt"), "2").unwrap();
+        run_git(&clone, &["add", "."]).unwrap();
+        run_git(&clone, &["commit", "--no-verify", "-m", "two"]).unwrap();
+
+        let info = GitInspector::inspect_fast(&clone).expect("should detect clone");
+        assert_eq!(info.ahead, 2);
+        assert_eq!(info.behind, 0);
+        assert!(!info.is_dirty);
     }
 }

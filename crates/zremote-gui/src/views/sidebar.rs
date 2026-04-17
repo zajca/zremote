@@ -54,17 +54,23 @@ struct ClaudeTaskInfo {
     ended_at: Option<std::time::Instant>,
 }
 
-/// A project with its associated sessions.
-struct ProjectNode {
-    project: Project,
-    sessions: Vec<Session>,
+use super::sidebar_items::{
+    HostItems, ProjectNode, RowKind, compute_items, display_name_for_row, render_branch_label,
+    render_status_badges, selected_project_id,
+};
+
+/// Indent schedule for a host section — keeps render helpers below 7 args.
+#[derive(Clone, Copy)]
+struct Indents {
+    project: f32,
+    worktree: f32,
+    session: f32,
+    worktree_session: f32,
 }
 
-/// Computed layout items for a single host.
-struct HostItems {
-    project_nodes: Vec<ProjectNode>,
-    orphan_sessions: Vec<Session>,
-}
+/// Default-collapse threshold — when a parent has this many worktrees or
+/// more, start collapsed (D2 in RFC-007).
+const DEFAULT_COLLAPSE_THRESHOLD: usize = 4;
 
 /// Sidebar view: hosts list with projects and sessions.
 pub struct SidebarView {
@@ -128,6 +134,171 @@ impl SidebarView {
         }
         self.selected_session_id = Some(session_id.to_string());
         cx.notify();
+    }
+
+    /// Set the currently selected project in app state. Emits
+    /// [`SidebarEvent::ProjectSelected`] so `MainView` can restore the
+    /// terminal session for the chosen project (D1). Idempotent: re-selecting
+    /// the same project is a no-op.
+    pub fn set_selected_project(
+        &mut self,
+        project_id: Option<String>,
+        host_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if let Ok(mut guard) = self.app_state.selected_project_id.lock() {
+            if *guard == project_id {
+                false
+            } else {
+                *guard = project_id.clone();
+                true
+            }
+        } else {
+            false
+        };
+        if !changed {
+            return;
+        }
+        cx.emit(SidebarEvent::ProjectSelected {
+            project_id,
+            host_id,
+        });
+        cx.notify();
+    }
+
+    /// True when the parent project's worktrees should be rendered.
+    /// Tri-state: explicit persisted overrides win over the auto-expand-on-
+    /// activity rule, which wins over the default-collapse heuristic.
+    ///
+    /// Order of checks:
+    /// 1. `collapsed_projects` set → forced collapsed.
+    /// 2. `expanded_projects` set → forced expanded.
+    /// 3. Any worktree has an active session or running agentic loop
+    ///    (auto-expand from D2).
+    /// 4. Fewer than [`DEFAULT_COLLAPSE_THRESHOLD`] worktrees → expanded.
+    ///    Otherwise collapsed so monorepos with many branches do not flood
+    ///    the sidebar.
+    fn is_project_expanded(&self, node: &ProjectNode) -> bool {
+        if let Some((is_collapsed, is_expanded)) = self.persisted_override(&node.project.id) {
+            if is_collapsed {
+                return false;
+            }
+            if is_expanded {
+                return true;
+            }
+        }
+
+        // Auto-expand when any child has activity the user cares about.
+        let has_active_session = node
+            .worktrees
+            .iter()
+            .any(|w| w.sessions.iter().any(|s| s.status == SessionStatus::Active));
+        let has_running_loop = node.worktrees.iter().any(|w| {
+            w.sessions.iter().any(|s| {
+                self.cc_states.get(&s.id).is_some_and(|cc| {
+                    matches!(
+                        cc.status,
+                        AgenticStatus::Working | AgenticStatus::WaitingForInput
+                    )
+                })
+            })
+        });
+        if has_active_session || has_running_loop {
+            return true;
+        }
+
+        node.worktrees.len() < DEFAULT_COLLAPSE_THRESHOLD
+    }
+
+    /// Read the tri-state override slot for a project from persistence.
+    /// Returns `Some((is_collapsed, is_expanded))` — at most one of the two
+    /// is true at a time. `None` means the mutex was poisoned (treated as
+    /// "no override" to avoid panicking in a render-hot path).
+    fn persisted_override(&self, project_id: &str) -> Option<(bool, bool)> {
+        let guard = self.app_state.persistence.lock().ok()?;
+        let state = guard.state();
+        Some((
+            state.collapsed_projects.contains(project_id),
+            state.expanded_projects.contains(project_id),
+        ))
+    }
+
+    /// Toggle persisted expansion for a parent project. `default_expanded`
+    /// is the value `is_project_expanded` would return without any override —
+    /// the persistence layer stores the opposite so the heuristic can still
+    /// move the default later without stranding a stale override.
+    fn toggle_project_expanded(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // Recompute the default *without* the persisted override so we can
+        // rotate back to the heuristic's choice on the next click.
+        let default_expanded = self
+            .find_project_node(project_id)
+            .map(|node| self.default_expanded(&node))
+            .unwrap_or(true);
+        if let Ok(mut p) = self.app_state.persistence.lock() {
+            p.toggle_project_expanded(project_id, default_expanded);
+        }
+        cx.notify();
+    }
+
+    /// Default-heuristic result for [`is_project_expanded`], ignoring the
+    /// persisted override slots. Extracted so `toggle_project_expanded` can
+    /// recover the heuristic's answer when rotating the override.
+    fn default_expanded(&self, node: &ProjectNode) -> bool {
+        let has_active_session = node
+            .worktrees
+            .iter()
+            .any(|w| w.sessions.iter().any(|s| s.status == SessionStatus::Active));
+        let has_running_loop = node.worktrees.iter().any(|w| {
+            w.sessions.iter().any(|s| {
+                self.cc_states.get(&s.id).is_some_and(|cc| {
+                    matches!(
+                        cc.status,
+                        AgenticStatus::Working | AgenticStatus::WaitingForInput
+                    )
+                })
+            })
+        });
+        if has_active_session || has_running_loop {
+            return true;
+        }
+        node.worktrees.len() < DEFAULT_COLLAPSE_THRESHOLD
+    }
+
+    /// Rebuild the [`ProjectNode`] for a parent project using the current
+    /// `projects`/`sessions` snapshots. Returns `None` if the project no
+    /// longer exists in the in-memory snapshot (e.g. deleted between the
+    /// click event and the handler firing).
+    fn find_project_node(&self, project_id: &str) -> Option<ProjectNode> {
+        let parent = self.projects.iter().find(|p| p.id == project_id)?.clone();
+        let sessions: Vec<Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.project_id.as_deref() == Some(project_id))
+            .cloned()
+            .collect();
+        let worktrees: Vec<ProjectNode> = self
+            .projects
+            .iter()
+            .filter(|p| p.parent_project_id.as_deref() == Some(project_id))
+            .map(|w| {
+                let w_sessions = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.project_id.as_deref() == Some(&w.id))
+                    .cloned()
+                    .collect();
+                ProjectNode {
+                    project: w.clone(),
+                    sessions: w_sessions,
+                    worktrees: Vec::new(),
+                }
+            })
+            .collect();
+        Some(ProjectNode {
+            project: parent,
+            sessions,
+            worktrees,
+        })
     }
 
     pub fn cc_states(&self) -> &HashMap<String, CcState> {
@@ -851,75 +1022,17 @@ impl SidebarView {
         .detach();
     }
 
-    /// Compute the hierarchical layout for a host.
+    /// Thin wrapper around [`sidebar_items::compute_items`] that reads the
+    /// current selection from app state. The pure logic lives in
+    /// `sidebar_items` so it stays unit-testable without GPUI.
     fn compute_items(&self, host_id: &str) -> HostItems {
-        let active_sessions: Vec<Session> = self
-            .sessions
-            .iter()
-            .filter(|s| s.host_id == host_id && s.status != SessionStatus::Closed)
-            .cloned()
-            .collect();
-
-        let host_projects: Vec<&Project> = self
-            .projects
-            .iter()
-            .filter(|p| p.host_id == host_id)
-            .collect();
-
-        // Sessions grouped by project_id
-        let mut sessions_by_project: std::collections::HashMap<String, Vec<Session>> =
-            std::collections::HashMap::new();
-        let mut orphan_sessions = Vec::new();
-
-        for session in active_sessions {
-            if let Some(ref pid) = session.project_id {
-                sessions_by_project
-                    .entry(pid.clone())
-                    .or_default()
-                    .push(session);
-            } else {
-                orphan_sessions.push(session);
-            }
-        }
-
-        // Build project nodes: pinned roots + roots with sessions, worktrees only with sessions
-        let mut pinned_roots = Vec::new();
-        let mut active_roots = Vec::new();
-        let mut worktrees = Vec::new();
-
-        for project in &host_projects {
-            let sessions = sessions_by_project.remove(&project.id).unwrap_or_default();
-            let is_worktree = project.parent_project_id.is_some();
-
-            if is_worktree {
-                if !sessions.is_empty() {
-                    worktrees.push(ProjectNode {
-                        project: (*project).clone(),
-                        sessions,
-                    });
-                }
-            } else if project.pinned {
-                pinned_roots.push(ProjectNode {
-                    project: (*project).clone(),
-                    sessions,
-                });
-            } else if !sessions.is_empty() {
-                active_roots.push(ProjectNode {
-                    project: (*project).clone(),
-                    sessions,
-                });
-            }
-        }
-
-        let mut project_nodes = Vec::new();
-        project_nodes.append(&mut pinned_roots);
-        project_nodes.append(&mut active_roots);
-        project_nodes.append(&mut worktrees);
-
-        HostItems {
-            project_nodes,
-            orphan_sessions,
-        }
+        let selected_pid = selected_project_id(&self.app_state);
+        compute_items(
+            &self.sessions,
+            &self.projects,
+            host_id,
+            selected_pid.as_deref(),
+        )
     }
 
     fn render_host_section(&self, host: &Host, cx: &mut Context<Self>) -> impl IntoElement {
@@ -930,32 +1043,26 @@ impl SidebarView {
         let items = self.compute_items(&host_id);
         let has_projects = !items.project_nodes.is_empty();
         let has_orphans = !items.orphan_sessions.is_empty();
-        let is_empty = !has_projects && !has_orphans;
+        let has_hidden = !items.hidden_sessions.is_empty();
+        let is_empty = !has_projects && !has_orphans && !has_hidden;
 
-        // Indentation depends on mode
-        let project_indent = 12.0_f32;
-        let session_indent = 28.0_f32;
+        let indents = Indents {
+            project: 12.0,
+            worktree: 24.0,
+            session: 28.0,
+            worktree_session: 40.0,
+        };
         let orphan_indent = if is_local { 16.0 } else { 20.0 };
 
         let mut children: Vec<AnyElement> = Vec::new();
 
-        // Project nodes
         for node in &items.project_nodes {
-            let is_worktree = node.project.parent_project_id.is_some();
             children.push(
-                self.render_project_item(
-                    node,
-                    is_worktree,
-                    &host_id,
-                    project_indent,
-                    session_indent,
-                    cx,
-                )
-                .into_any_element(),
+                self.render_parent_row(node, &host_id, indents, cx)
+                    .into_any_element(),
             );
         }
 
-        // Separator before orphan sessions (only if we have both projects and orphans)
         if has_projects && has_orphans {
             children.push(
                 div()
@@ -967,7 +1074,6 @@ impl SidebarView {
             );
         }
 
-        // Orphan sessions
         for session in &items.orphan_sessions {
             children.push(
                 self.render_session_item(session, &host_id, px(orphan_indent), cx)
@@ -975,7 +1081,18 @@ impl SidebarView {
             );
         }
 
-        // Empty state
+        if has_hidden {
+            children.push(
+                self.render_hidden_sessions_footer(
+                    &items.hidden_sessions,
+                    &host_id,
+                    px(orphan_indent),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+
         if is_empty && is_online {
             children.push(
                 div()
@@ -989,16 +1106,10 @@ impl SidebarView {
         }
 
         let mut container = div().flex().flex_col().w_full();
-
-        // Host header only in server mode
         if !is_local {
             container = container.child(self.render_host_header(host, cx));
         }
-
-        // Content
-        container = container.child(div().flex().flex_col().children(children));
-
-        container
+        container.child(div().flex().flex_col().children(children))
     }
 
     #[allow(clippy::unused_self)]
@@ -1185,28 +1296,103 @@ impl SidebarView {
             )
     }
 
-    fn render_project_item(
+    /// Render a non-worktree project (or a root with linked worktrees). Lays
+    /// out: [chevron (when has worktrees)] [name] [branch] [badges] on the
+    /// left, [action buttons] on the right. Worktree children and the
+    /// parent's own sessions are stacked below when the node is expanded.
+    fn render_parent_row(
         &self,
         node: &ProjectNode,
-        is_worktree: bool,
         host_id: &str,
-        project_indent: f32,
-        session_indent: f32,
+        indents: Indents,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let project = &node.project;
+        let project_id = node.project.id.clone();
+        let has_worktrees = !node.worktrees.is_empty();
+        let expanded = self.is_project_expanded(node);
+        let selected_pid = selected_project_id(&self.app_state);
+        let is_selected = selected_pid.as_deref() == Some(project_id.as_str());
+
+        let row = self.render_project_row(
+            &node.project,
+            host_id,
+            indents.project,
+            RowKind::Parent {
+                has_worktrees,
+                expanded,
+            },
+            is_selected,
+            cx,
+        );
+
+        let mut container = div().flex().flex_col().w_full().child(row);
+
+        // Parent's own sessions appear directly below the parent row.
+        for session in &node.sessions {
+            container = container.child(
+                self.render_session_item(session, host_id, px(indents.session), cx)
+                    .into_any_element(),
+            );
+        }
+
+        // Worktree children render only when the parent is expanded.
+        if expanded {
+            for wt in &node.worktrees {
+                container = container.child(
+                    self.render_worktree_row(wt, host_id, indents, cx)
+                        .into_any_element(),
+                );
+            }
+        }
+
+        container
+    }
+
+    fn render_worktree_row(
+        &self,
+        node: &ProjectNode,
+        host_id: &str,
+        indents: Indents,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project_id = node.project.id.clone();
+        let selected_pid = selected_project_id(&self.app_state);
+        let is_selected = selected_pid.as_deref() == Some(project_id.as_str());
+
+        let row = self.render_project_row(
+            &node.project,
+            host_id,
+            indents.worktree,
+            RowKind::Worktree,
+            is_selected,
+            cx,
+        );
+        let mut container = div().flex().flex_col().w_full().child(row);
+        for session in &node.sessions {
+            container = container.child(
+                self.render_session_item(session, host_id, px(indents.worktree_session), cx)
+                    .into_any_element(),
+            );
+        }
+        container
+    }
+
+    fn render_project_row(
+        &self,
+        project: &Project,
+        host_id: &str,
+        indent: f32,
+        kind: RowKind,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let project_id = project.id.clone();
+        let host_id_owned = host_id.to_string();
+        // D7 stale detection intentionally disabled — see `is_stale` for
+        // the reason. Opacity is a constant until Phase 4 lands the
+        // dedicated `git_last_commit_at` column.
+        let opacity: f32 = 1.0;
 
-        // Git info
-        let branch_text = project.git_branch.clone().unwrap_or_default();
-        let dirty_indicator = if project.git_is_dirty { " *" } else { "" };
-        let git_display = if branch_text.is_empty() {
-            String::new()
-        } else {
-            format!("{branch_text}{dirty_indicator}")
-        };
-
-        // Left side: prefix icon + name + git info
         let mut left = div()
             .flex()
             .items_center()
@@ -1214,8 +1400,12 @@ impl SidebarView {
             .min_w(px(0.0))
             .overflow_hidden();
 
-        // Worktree: folder-git icon
-        if is_worktree {
+        if let Some(chev) = self.render_chevron_slot(&project_id, kind, cx) {
+            left = left.child(chev);
+        }
+
+        // Prefix icon: folder-git for worktrees; parents rely on their chevron.
+        if matches!(kind, RowKind::Worktree) {
             left = left.child(
                 icon(Icon::FolderGit)
                     .size(px(12.0))
@@ -1231,94 +1421,255 @@ impl SidebarView {
                 .font_weight(FontWeight::MEDIUM)
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .child(project.name.clone()),
+                .child(display_name_for_row(project, kind)),
         );
 
-        if !git_display.is_empty() {
-            let git_color = if project.git_is_dirty {
-                theme::warning()
-            } else {
-                theme::text_tertiary()
-            };
-            left = left.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .overflow_hidden()
-                    .child(
-                        icon(Icon::GitBranch)
-                            .size(px(10.0))
-                            .flex_shrink_0()
-                            .text_color(git_color),
-                    )
-                    .child(
-                        div()
-                            .text_color(git_color)
-                            .text_size(px(10.0))
-                            .truncate()
-                            .child(git_display),
-                    ),
-            );
+        if let Some(branch_label) = render_branch_label(project, kind) {
+            left = left.child(branch_label);
         }
 
-        let row = div()
-            .id(SharedString::from(format!("project-{project_id}")))
+        let badges = render_status_badges(project);
+        if !badges.is_empty() {
+            let mut badge_row = div().flex().items_center().gap(px(4.0)).flex_shrink_0();
+            for b in badges {
+                badge_row = badge_row.child(b);
+            }
+            left = left.child(badge_row);
+        }
+
+        let bg = if is_selected {
+            theme::bg_tertiary()
+        } else {
+            theme::bg_secondary()
+        };
+
+        let row_id = SharedString::from(format!("project-{project_id}"));
+        let pid_for_click = project_id.clone();
+        let host_for_click = host_id_owned.clone();
+
+        div()
+            .id(row_id)
             .group("project-row")
             .flex()
             .items_center()
             .justify_between()
-            .pl(px(project_indent))
+            .pl(px(indent))
             .pr(px(8.0))
             .h(px(24.0))
             .mx(px(4.0))
             .rounded(px(4.0))
             .cursor_pointer()
             .overflow_hidden()
+            .opacity(opacity)
+            .bg(bg)
             .hover(|s| s.bg(theme::bg_tertiary()))
+            .on_click(cx.listener(
+                move |this, _event: &ClickEvent, _window, cx: &mut Context<Self>| {
+                    this.on_project_row_click(&pid_for_click, &host_for_click, cx);
+                },
+            ))
             .child(left)
-            .child(
+            .child(self.render_row_actions(&project_id, host_id, &project.path, cx))
+    }
+
+    /// Chevron toggle slot for a project row. Returns `Some` for parent rows
+    /// (a real toggle when it has worktrees, an empty 14 px placeholder
+    /// otherwise so parent names align with worktree names below), and
+    /// `None` for worktree rows, which sit under the parent's chevron.
+    fn render_chevron_slot(
+        &self,
+        project_id: &str,
+        kind: RowKind,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let RowKind::Parent {
+            has_worktrees,
+            expanded,
+        } = kind
+        else {
+            return None;
+        };
+
+        if !has_worktrees {
+            return Some(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .when_some(
-                        self.default_profile_for_kind("claude").cloned(),
-                        |el, profile| {
-                            let kind_display = self
-                                .agent_kinds
-                                .iter()
-                                .find(|k| k.kind == profile.agent_kind)
-                                .map(|k| k.display_name.clone())
-                                .unwrap_or_else(|| "Claude".to_string());
-                            el.child(self.render_project_agent_button(
-                                &project_id,
-                                host_id,
-                                &project.path,
-                                &profile,
-                                kind_display,
-                                cx,
-                            ))
-                        },
-                    )
-                    .child(self.render_project_new_session_button(
-                        &project_id,
-                        host_id,
-                        &project.path,
-                        cx,
-                    )),
-            );
-
-        let mut container = div().flex().flex_col().w_full().child(row);
-
-        for session in &node.sessions {
-            container = container.child(
-                self.render_session_item(session, host_id, px(session_indent), cx)
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_shrink_0()
                     .into_any_element(),
             );
         }
 
-        container
+        let chev_icon = if expanded {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        };
+        let pid_for_toggle = project_id.to_string();
+        Some(
+            div()
+                .id(SharedString::from(format!("chev-{project_id}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex_shrink_0()
+                .cursor_pointer()
+                .rounded(px(3.0))
+                .hover(|s| s.bg(theme::bg_tertiary()))
+                .child(
+                    icon(chev_icon)
+                        .size(px(10.0))
+                        .text_color(theme::text_tertiary()),
+                )
+                .on_click(cx.listener(
+                    move |this, _event: &ClickEvent, _window, cx: &mut Context<Self>| {
+                        // Don't also fire the row-level click handler —
+                        // toggling collapse is not a project selection.
+                        cx.stop_propagation();
+                        this.toggle_project_expanded(&pid_for_toggle, cx);
+                    },
+                ))
+                .into_any_element(),
+        )
+    }
+
+    /// Right-side action cluster for a project row: agent launcher (if a
+    /// default Claude profile exists) and the "New session" button.
+    fn render_row_actions(
+        &self,
+        project_id: &str,
+        host_id: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .when_some(
+                self.default_profile_for_kind("claude").cloned(),
+                |el, profile| {
+                    let kind_display = self
+                        .agent_kinds
+                        .iter()
+                        .find(|k| k.kind == profile.agent_kind)
+                        .map(|k| k.display_name.clone())
+                        .unwrap_or_else(|| "Claude".to_string());
+                    el.child(self.render_project_agent_button(
+                        project_id,
+                        host_id,
+                        project_path,
+                        &profile,
+                        kind_display,
+                        cx,
+                    ))
+                },
+            )
+            .child(self.render_project_new_session_button(project_id, host_id, project_path, cx))
+    }
+
+    /// Handle a click on a project row: select the project, then either
+    /// restore the most recent active session for that project, or — if
+    /// the project has no open sessions at all — kick off a new session
+    /// in the project's working directory (D1: "restore last terminal, or
+    /// open new if none"). `create_session` is async; the resulting
+    /// `SessionSelected` event arrives and swaps the terminal once the
+    /// backend responds.
+    fn on_project_row_click(&mut self, project_id: &str, host_id: &str, cx: &mut Context<Self>) {
+        self.set_selected_project(Some(project_id.to_string()), Some(host_id.to_string()), cx);
+
+        // Pick the most recently created active session for this project;
+        // fall back to any non-closed session.
+        let restore_target = self
+            .sessions
+            .iter()
+            .filter(|s| s.project_id.as_deref() == Some(project_id))
+            .filter(|s| s.status == SessionStatus::Active)
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .filter(|s| s.project_id.as_deref() == Some(project_id))
+                    .find(|s| s.status != SessionStatus::Closed)
+            });
+
+        if let Some(session) = restore_target {
+            let session_id = session.id.clone();
+            let host = session.host_id.clone();
+            self.selected_session_id = Some(session_id.clone());
+            cx.emit(SidebarEvent::SessionSelected {
+                session_id,
+                host_id: host,
+            });
+            cx.notify();
+            return;
+        }
+
+        // No existing session for this project — auto-create one rooted at
+        // the project's path. `create_session` runs async and emits
+        // `SessionSelected` when the backend responds; the terminal panel
+        // will swap in on that event. Until then, the main view shows its
+        // empty state (triggered by the `ProjectSelected` handler that
+        // clears the stale terminal when it no longer belongs to the
+        // selected project).
+        let project_path = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.path.clone());
+        if let Some(path) = project_path {
+            self.create_session(host_id, Some(path), cx);
+        }
+        cx.notify();
+    }
+
+    /// Footer row that surfaces sessions from non-selected projects behind a
+    /// collapsed dropdown. Count is clickable to clear the selection so all
+    /// sessions become visible again.
+    fn render_hidden_sessions_footer(
+        &self,
+        hidden: &[Session],
+        host_id: &str,
+        indent: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let count = hidden.len();
+        let host_id_owned = host_id.to_string();
+        div()
+            .id(SharedString::from(format!(
+                "hidden-sessions-{host_id_owned}"
+            )))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .pl(indent)
+            .pr(px(12.0))
+            .py(px(4.0))
+            .mx(px(4.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_tertiary()))
+            .child(
+                icon(Icon::ChevronRight)
+                    .size(px(10.0))
+                    .text_color(theme::text_tertiary()),
+            )
+            .child(
+                div()
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(11.0))
+                    .child(format!("Hidden ({count})")),
+            )
+            .on_click(cx.listener(
+                move |this, _event: &ClickEvent, _window, cx: &mut Context<Self>| {
+                    // Clicking the hidden bucket clears selection so every
+                    // session becomes visible again. Simple escape hatch
+                    // until phase 3 adds a dedicated overflow modal.
+                    this.set_selected_project(None, None, cx);
+                },
+            ))
     }
 
     fn render_session_item(
