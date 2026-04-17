@@ -69,6 +69,13 @@ pub async fn run_local(
             )
         })?;
 
+    // One-time idempotent backfill: re-link any orphan worktree rows whose
+    // main repo is registered but wasn't linked (pre-worktree-aware data).
+    // Don't fail startup on error — log and continue.
+    if let Err(e) = crate::project::repair::repair_orphaned_worktrees(&pool).await {
+        tracing::warn!(error = %e, "repair_orphaned_worktrees failed, continuing startup");
+    }
+
     // Generate deterministic host_id from hostname
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())

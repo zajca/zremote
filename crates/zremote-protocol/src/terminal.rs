@@ -69,6 +69,8 @@ pub enum AgentMessage {
         #[serde(default)]
         has_zremote_config: bool,
         project_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        main_repo_path: Option<String>,
     },
     ProjectList {
         projects: Vec<ProjectInfo>,
@@ -449,6 +451,15 @@ mod tests {
             has_claude_config: true,
             has_zremote_config: false,
             project_type: "rust".to_string(),
+            main_repo_path: None,
+        });
+        roundtrip_agent(&AgentMessage::ProjectDiscovered {
+            path: "/home/user/myproject-wt".to_string(),
+            name: "myproject-wt".to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "worktree".to_string(),
+            main_repo_path: Some("/home/user/myproject".to_string()),
         });
     }
 
@@ -469,6 +480,7 @@ mod tests {
                     architecture: None,
                     conventions: vec![],
                     package_manager: None,
+                    main_repo_path: None,
                 },
                 ProjectInfo {
                     path: "/home/user/project-b".to_string(),
@@ -482,6 +494,7 @@ mod tests {
                     architecture: None,
                     conventions: vec![],
                     package_manager: None,
+                    main_repo_path: None,
                 },
             ],
         });

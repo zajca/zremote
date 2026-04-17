@@ -1667,6 +1667,228 @@ async fn resolve_action_inputs_success() {
     assert_eq!(options.len(), 2);
 }
 
+/// Init main git repo + `git worktree add` a linked worktree under `main_path/../wt_name`.
+/// Returns (main_path, worktree_path) with both containing a Cargo.toml marker.
+fn init_main_and_worktree(
+    parent: &std::path::Path,
+    main_name: &str,
+    wt_name: &str,
+    branch: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let main = parent.join(main_name);
+    std::fs::create_dir_all(&main).unwrap();
+    init_isolated_git_repo(&main);
+    std::fs::write(main.join("Cargo.toml"), "[package]\nname = \"main\"").unwrap();
+
+    let wt = parent.join(wt_name);
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "-b", branch, wt.to_str().unwrap()])
+        .current_dir(&main)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &main)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("git worktree add");
+    assert!(
+        output.status.success(),
+        "git worktree add failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(wt.join("Cargo.toml"), "[package]\nname = \"wt\"").unwrap();
+
+    (main, wt)
+}
+
+async fn post_add_project(app: &Router, host_id: &str, path: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/hosts/{host_id}/projects"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({ "path": path })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn add_worktree_links_to_existing_parent() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let (main, wt) = init_main_and_worktree(tmp.path(), "main", "wt", "feature");
+    let main_path = std::fs::canonicalize(&main)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wt_path = std::fs::canonicalize(&wt)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let app = build_test_router(state.clone());
+
+    let r = post_add_project(&app, &host_id, &main_path).await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let parent = q::get_project_by_host_and_path(&state.db, &host_id, &main_path)
+        .await
+        .unwrap();
+
+    let r = post_add_project(&app, &host_id, &wt_path).await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["parent_project_id"], parent.id);
+    assert_eq!(json["project_type"], "worktree");
+}
+
+#[tokio::test]
+async fn add_worktree_auto_registers_parent() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let (main, wt) = init_main_and_worktree(tmp.path(), "main", "wt", "feature");
+    let main_path = std::fs::canonicalize(&main)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wt_path = std::fs::canonicalize(&wt)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let app = build_test_router(state.clone());
+
+    // Register ONLY the worktree; parent must be auto-created.
+    let r = post_add_project(&app, &host_id, &wt_path).await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let parent = q::get_project_by_host_and_path(&state.db, &host_id, &main_path)
+        .await
+        .expect("parent should be auto-registered");
+    let wt_row = q::get_project_by_host_and_path(&state.db, &host_id, &wt_path)
+        .await
+        .unwrap();
+    assert_eq!(
+        wt_row.parent_project_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    assert_eq!(wt_row.project_type, "worktree");
+}
+
+#[tokio::test]
+async fn add_regular_project_still_works() {
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"plain\"").unwrap();
+    let path = dir.to_string_lossy().to_string();
+
+    let app = build_test_router(state.clone());
+    let r = post_add_project(&app, &host_id, &path).await;
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let row = q::get_project_by_host_and_path(&state.db, &host_id, &path)
+        .await
+        .unwrap();
+    assert!(row.parent_project_id.is_none());
+    assert_eq!(row.project_type, "rust");
+}
+
+#[tokio::test]
+async fn scan_links_worktrees_to_main_repos() {
+    // Exercise the same ordering/linking logic the /scan handler uses, without
+    // mutating process env (Rust 2024 marks std::env::set_var as unsafe and
+    // the workspace denies unsafe_code).
+    use crate::project::metadata;
+    use crate::project::scanner::ProjectScanner;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (main, wt) = init_main_and_worktree(tmp.path(), "main", "wt", "feature");
+    let main_path = std::fs::canonicalize(&main)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wt_path = std::fs::canonicalize(&wt)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+
+    let main_info =
+        ProjectScanner::detect_at(std::path::Path::new(&main_path)).expect("detect main repo");
+    let wt_info =
+        ProjectScanner::detect_at(std::path::Path::new(&wt_path)).expect("detect worktree");
+
+    // Same ordering as trigger_scan: main repos first, then worktrees.
+    let main_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{}:{}", host_id, main_info.path).as_bytes(),
+    )
+    .to_string();
+    q::insert_project(
+        &state.db,
+        &main_id,
+        &host_id,
+        &main_info.path,
+        &main_info.name,
+    )
+    .await
+    .unwrap();
+    metadata::update_from_info(&state.db, &main_id, &main_info)
+        .await
+        .unwrap();
+
+    let wt_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{}:{}", host_id, wt_info.path).as_bytes(),
+    )
+    .to_string();
+    let parent = q::get_project_by_host_and_path(
+        &state.db,
+        &host_id,
+        wt_info.main_repo_path.as_deref().unwrap(),
+    )
+    .await
+    .expect("parent resolvable");
+    q::insert_project_with_parent(
+        &state.db,
+        &wt_id,
+        &host_id,
+        &wt_info.path,
+        &wt_info.name,
+        Some(&parent.id),
+        "worktree",
+    )
+    .await
+    .unwrap();
+    metadata::update_from_info(&state.db, &wt_id, &wt_info)
+        .await
+        .unwrap();
+
+    let wt_row = q::get_project_by_host_and_path(&state.db, &host_id, &wt_path)
+        .await
+        .unwrap();
+    assert_eq!(
+        wt_row.parent_project_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    assert_eq!(wt_row.project_type, "worktree");
+    assert!(wt_info.main_repo_path.is_some());
+}
+
 #[tokio::test]
 async fn run_action_with_custom_inputs() {
     let state = test_state().await;

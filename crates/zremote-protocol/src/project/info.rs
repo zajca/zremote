@@ -62,4 +62,7 @@ pub struct ProjectInfo {
     pub conventions: Vec<Convention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_manager: Option<String>,
+    /// Absolute path to the main repo if this is a linked git worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_repo_path: Option<String>,
 }

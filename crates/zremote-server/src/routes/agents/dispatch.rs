@@ -326,16 +326,103 @@ pub(super) async fn handle_agent_message(
             has_claude_config,
             has_zremote_config,
             project_type,
+            main_repo_path,
         } => {
             let host_id_str = host_id.to_string();
             let project_id = Uuid::new_v4().to_string();
+
+            let parent_project_id = if let Some(ref main_path) = main_repo_path {
+                match zremote_core::queries::projects::get_project_by_host_and_path(
+                    &state.db,
+                    &host_id_str,
+                    main_path,
+                )
+                .await
+                {
+                    Ok(parent) => Some(parent.id),
+                    Err(crate::error::AppError::Database(sqlx::Error::RowNotFound)) => {
+                        // Main repo not yet registered. Mirror `apply_project_list`
+                        // and create a stub parent row so the worktree is still
+                        // linkable — otherwise a user registering a worktree
+                        // directly (via `ServerMessage::ProjectRegister`) leaves
+                        // a permanent orphan.
+                        let stub_id = Uuid::new_v4().to_string();
+                        let stub_name = main_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string();
+                        match zremote_core::queries::projects::insert_project(
+                            &state.db,
+                            &stub_id,
+                            &host_id_str,
+                            main_path,
+                            &stub_name,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                // Re-resolve canonical id (INSERT OR IGNORE may
+                                // have skipped on concurrent insert).
+                                match zremote_core::queries::projects::get_project_by_host_and_path(
+                                    &state.db,
+                                    &host_id_str,
+                                    main_path,
+                                )
+                                .await
+                                {
+                                    Ok(row) => Some(row.id),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            host_id = %host_id,
+                                            main_repo_path = %main_path,
+                                            error = %e,
+                                            "failed to resolve stubbed parent id"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    host_id = %host_id,
+                                    main_repo_path = %main_path,
+                                    error = %e,
+                                    "failed to stub parent project for worktree"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            host_id = %host_id,
+                            path = %path,
+                            main_repo_path = %main_path,
+                            error = %e,
+                            "transient error resolving parent for worktree"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let effective_type = if parent_project_id.is_some() {
+                "worktree"
+            } else {
+                project_type.as_str()
+            };
+
             if let Err(e) = sqlx::query(
-                "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type, parent_project_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(host_id, path) DO UPDATE SET \
                  name = excluded.name, has_claude_config = excluded.has_claude_config, \
                  has_zremote_config = excluded.has_zremote_config, \
-                 project_type = excluded.project_type",
+                 project_type = excluded.project_type, \
+                 parent_project_id = COALESCE(excluded.parent_project_id, projects.parent_project_id)",
             )
             .bind(&project_id)
             .bind(&host_id_str)
@@ -343,7 +430,8 @@ pub(super) async fn handle_agent_message(
             .bind(&name)
             .bind(has_claude_config)
             .bind(has_zremote_config)
-            .bind(&project_type)
+            .bind(effective_type)
+            .bind(parent_project_id.as_deref())
             .execute(&state.db)
             .await
             {
@@ -496,78 +584,7 @@ pub(super) async fn handle_agent_message(
             }
         }
         AgentMessage::ProjectList { projects } => {
-            let host_id_str = host_id.to_string();
-            tracing::info!(host_id = %host_id, count = projects.len(), "received project list");
-            let now = chrono::Utc::now().to_rfc3339();
-            for project in &projects {
-                let project_id = Uuid::new_v4().to_string();
-                let remotes_json = project
-                    .git_info
-                    .as_ref()
-                    .map(|gi| serde_json::to_string(&gi.remotes).unwrap_or_default());
-                let git_updated = project.git_info.as_ref().map(|_| now.clone());
-                let frameworks_json =
-                    serde_json::to_string(&project.frameworks).unwrap_or_default();
-                let architecture_str = project
-                    .architecture
-                    .as_ref()
-                    .and_then(|a| serde_json::to_value(a).ok())
-                    .and_then(|v| v.as_str().map(String::from));
-                let conventions_json =
-                    serde_json::to_string(&project.conventions).unwrap_or_default();
-                if let Err(e) = sqlx::query(
-                    "INSERT INTO projects (id, host_id, path, name, has_claude_config, has_zremote_config, project_type, \
-                     git_branch, git_commit_hash, git_commit_message, git_is_dirty, \
-                     git_ahead, git_behind, git_remotes, git_updated_at, \
-                     frameworks, architecture, conventions, package_manager) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                     ON CONFLICT(host_id, path) DO UPDATE SET \
-                     name = excluded.name, has_claude_config = excluded.has_claude_config, \
-                     has_zremote_config = excluded.has_zremote_config, \
-                     project_type = excluded.project_type, \
-                     git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash, \
-                     git_commit_message = excluded.git_commit_message, git_is_dirty = excluded.git_is_dirty, \
-                     git_ahead = excluded.git_ahead, git_behind = excluded.git_behind, \
-                     git_remotes = excluded.git_remotes, git_updated_at = excluded.git_updated_at, \
-                     frameworks = excluded.frameworks, architecture = excluded.architecture, \
-                     conventions = excluded.conventions, package_manager = excluded.package_manager",
-                )
-                .bind(&project_id)
-                .bind(&host_id_str)
-                .bind(&project.path)
-                .bind(&project.name)
-                .bind(project.has_claude_config)
-                .bind(project.has_zremote_config)
-                .bind(&project.project_type)
-                .bind(project.git_info.as_ref().and_then(|gi| gi.branch.as_deref()))
-                .bind(project.git_info.as_ref().and_then(|gi| gi.commit_hash.as_deref()))
-                .bind(project.git_info.as_ref().and_then(|gi| gi.commit_message.as_deref()))
-                .bind(project.git_info.as_ref().is_some_and(|gi| gi.is_dirty))
-                .bind(project.git_info.as_ref().map_or(0, |gi| gi.ahead))
-                .bind(project.git_info.as_ref().map_or(0, |gi| gi.behind))
-                .bind(&remotes_json)
-                .bind(&git_updated)
-                .bind(&frameworks_json)
-                .bind(&architecture_str)
-                .bind(&conventions_json)
-                .bind(&project.package_manager)
-                .execute(&state.db)
-                .await
-                {
-                    tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to upsert project");
-                }
-
-                // Upsert worktree children
-                if !project.worktrees.is_empty() {
-                    upsert_worktree_children(
-                        state,
-                        &host_id_str,
-                        &project.path,
-                        &project.worktrees,
-                    )
-                    .await;
-                }
-            }
+            apply_project_list(state, host_id, &projects).await;
             let _ = state.events.send(ServerEvent::ProjectsUpdated {
                 host_id: host_id.to_string(),
             });
@@ -910,6 +927,172 @@ pub(super) async fn handle_sessions_recovered(
                 });
 
             tracing::info!(session_id = %sid, "suspended unrecovered session (daemon may still be alive)");
+        }
+    }
+}
+
+/// Apply an agent-reported `ProjectList` to the server DB.
+///
+/// Partitions into main repos and linked worktrees (by `main_repo_path`).
+/// Main repos are inserted first so worktrees can resolve their
+/// `parent_project_id`. If a worktree's main repo isn't reported in the same
+/// batch, a stub parent row is created.
+///
+/// Extracted from `handle_agent_message` for testability (no WebSocket required).
+pub(super) async fn apply_project_list(
+    state: &AppState,
+    host_id: HostId,
+    projects: &[zremote_protocol::ProjectInfo],
+) {
+    let host_id_str = host_id.to_string();
+    tracing::info!(host_id = %host_id, count = projects.len(), "received project list");
+
+    let (worktrees, main_repos): (Vec<_>, Vec<_>) = projects
+        .iter()
+        .partition(|info| info.main_repo_path.is_some());
+
+    for project in &main_repos {
+        let project_id = Uuid::new_v4().to_string();
+        if let Err(e) = zremote_core::queries::projects::insert_project(
+            &state.db,
+            &project_id,
+            &host_id_str,
+            &project.path,
+            &project.name,
+        )
+        .await
+        {
+            tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to insert main project");
+            continue;
+        }
+        match zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            &project.path,
+        )
+        .await
+        {
+            Ok(row) => {
+                if let Err(e) = zremote_core::queries::projects::update_project_metadata_from_info(
+                    &state.db, &row.id, project,
+                )
+                .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to update project metadata");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to resolve main project row");
+            }
+        }
+
+        // Legacy path: agents that still ship worktrees inside the parent's
+        // `worktrees` array (without main_repo_path on sibling entries).
+        if !project.worktrees.is_empty() {
+            upsert_worktree_children(state, &host_id_str, &project.path, &project.worktrees).await;
+        }
+    }
+
+    for project in &worktrees {
+        let Some(main_path) = project.main_repo_path.as_deref() else {
+            continue;
+        };
+        let parent_id = match zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            main_path,
+        )
+        .await
+        {
+            Ok(row) => row.id,
+            Err(crate::error::AppError::Database(sqlx::Error::RowNotFound)) => {
+                let stub_id = Uuid::new_v4().to_string();
+                let stub_name = main_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+                if let Err(e) = zremote_core::queries::projects::insert_project(
+                    &state.db,
+                    &stub_id,
+                    &host_id_str,
+                    main_path,
+                    &stub_name,
+                )
+                .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %main_path, error = %e, "failed to stub parent project");
+                    continue;
+                }
+                match zremote_core::queries::projects::get_project_by_host_and_path(
+                    &state.db,
+                    &host_id_str,
+                    main_path,
+                )
+                .await
+                {
+                    Ok(row) => row.id,
+                    Err(e) => {
+                        tracing::warn!(host_id = %host_id, path = %main_path, error = %e, "failed to resolve stubbed parent");
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(host_id = %host_id, path = %main_path, error = %e, "failed to resolve parent for worktree");
+                continue;
+            }
+        };
+
+        let wt_id = Uuid::new_v4().to_string();
+        if let Err(e) = zremote_core::queries::projects::insert_project_with_parent(
+            &state.db,
+            &wt_id,
+            &host_id_str,
+            &project.path,
+            &project.name,
+            Some(&parent_id),
+            "worktree",
+        )
+        .await
+        {
+            tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to insert worktree project");
+            continue;
+        }
+
+        // Resolve canonical id (may be a pre-existing row) and ensure parent
+        // linkage + metadata.
+        match zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            &project.path,
+        )
+        .await
+        {
+            Ok(row) => {
+                // Only set the parent linkage when the row has none yet. This
+                // avoids silently re-linking a worktree row whose parent was
+                // set deliberately (manual fix, upsert_worktree_children path,
+                // or a previous scan) to a different project.
+                if row.parent_project_id.is_none()
+                    && let Err(e) = zremote_core::queries::projects::set_parent_project_id(
+                        &state.db, &row.id, &parent_id, "worktree",
+                    )
+                    .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to link worktree parent");
+                }
+                if let Err(e) = zremote_core::queries::projects::update_project_metadata_from_info(
+                    &state.db, &row.id, project,
+                )
+                .await
+                {
+                    tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to update worktree metadata");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(host_id = %host_id, path = %project.path, error = %e, "failed to resolve worktree row");
+            }
         }
     }
 }
@@ -2913,5 +3096,154 @@ mod tests {
             row.1, None,
             "disconnect_reason should be cleared on recovery"
         );
+    }
+
+    // ── apply_project_list (T7: worktree parent linking) ──
+
+    fn make_project_info(
+        path: &str,
+        name: &str,
+        main_repo_path: Option<&str>,
+    ) -> zremote_protocol::ProjectInfo {
+        zremote_protocol::ProjectInfo {
+            path: path.to_string(),
+            name: name.to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: "rust".to_string(),
+            git_info: None,
+            worktrees: vec![],
+            frameworks: vec![],
+            architecture: None,
+            conventions: vec![],
+            package_manager: None,
+            main_repo_path: main_repo_path.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_add_worktree_links_to_existing_parent() {
+        let state = test_state().await;
+        let host_uuid = Uuid::new_v4();
+        let host_id_str = host_uuid.to_string();
+        insert_test_host(&state, &host_id_str, "testhost").await;
+
+        // Pre-register the parent main repo.
+        let parent_id = Uuid::new_v4().to_string();
+        zremote_core::queries::projects::insert_project(
+            &state.db,
+            &parent_id,
+            &host_id_str,
+            "/home/user/repo",
+            "repo",
+        )
+        .await
+        .unwrap();
+
+        // Send a ProjectList with the main repo and a worktree that points to it.
+        let projects = vec![
+            make_project_info("/home/user/repo", "repo", None),
+            make_project_info("/home/user/repo-wt", "repo-wt", Some("/home/user/repo")),
+        ];
+        super::apply_project_list(&state, host_uuid, &projects).await;
+
+        let parent = zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            "/home/user/repo",
+        )
+        .await
+        .unwrap();
+        let wt = zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            "/home/user/repo-wt",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(wt.parent_project_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(wt.project_type, "worktree");
+    }
+
+    #[tokio::test]
+    async fn server_add_worktree_auto_registers_parent() {
+        let state = test_state().await;
+        let host_uuid = Uuid::new_v4();
+        let host_id_str = host_uuid.to_string();
+        insert_test_host(&state, &host_id_str, "testhost").await;
+
+        // ProjectList contains ONLY the worktree — parent isn't reported in
+        // this batch. The server should stub-register the parent so the
+        // worktree is still linkable.
+        let projects = vec![make_project_info(
+            "/home/user/repo-wt",
+            "repo-wt",
+            Some("/home/user/repo"),
+        )];
+        super::apply_project_list(&state, host_uuid, &projects).await;
+
+        let parent = zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            "/home/user/repo",
+        )
+        .await
+        .unwrap();
+        let wt = zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            "/home/user/repo-wt",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(parent.name, "repo");
+        assert_eq!(wt.parent_project_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(wt.project_type, "worktree");
+    }
+
+    #[tokio::test]
+    async fn server_scan_links_worktrees_to_main_repos() {
+        let state = test_state().await;
+        let host_uuid = Uuid::new_v4();
+        let host_id_str = host_uuid.to_string();
+        insert_test_host(&state, &host_id_str, "testhost").await;
+
+        // Simulate a scan batch: one main repo + two worktrees referencing it.
+        let projects = vec![
+            make_project_info("/home/user/proj", "proj", None),
+            make_project_info(
+                "/home/user/proj-feature-a",
+                "feature-a",
+                Some("/home/user/proj"),
+            ),
+            make_project_info(
+                "/home/user/proj-feature-b",
+                "feature-b",
+                Some("/home/user/proj"),
+            ),
+        ];
+        super::apply_project_list(&state, host_uuid, &projects).await;
+
+        let parent = zremote_core::queries::projects::get_project_by_host_and_path(
+            &state.db,
+            &host_id_str,
+            "/home/user/proj",
+        )
+        .await
+        .unwrap();
+        let children = zremote_core::queries::projects::list_worktrees(&state.db, &parent.id)
+            .await
+            .unwrap();
+        assert_eq!(children.len(), 2, "both worktrees should link to parent");
+
+        for child in &children {
+            assert_eq!(child.parent_project_id.as_deref(), Some(parent.id.as_str()));
+            assert_eq!(child.project_type, "worktree");
+        }
+
+        // project_type on main repo should reflect detected language, not worktree.
+        assert_eq!(parent.project_type, "rust");
     }
 }

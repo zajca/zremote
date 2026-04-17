@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use zremote_protocol::project::{GitInfo, GitRemote, WorktreeInfo};
@@ -287,6 +287,83 @@ impl GitInspector {
     }
 }
 
+/// If `path` is a linked git worktree, return the absolute path of its main
+/// repository (top-level of the main worktree). Returns None if not a linked
+/// worktree, if it's a submodule, or if git inspection fails.
+pub fn main_repo_path_for_worktree(path: &Path) -> Option<PathBuf> {
+    let git_entry = path.join(".git");
+    // A main repo has `.git` as a directory; a linked worktree has `.git` as a file.
+    if !git_entry.is_file() {
+        return None;
+    }
+
+    // Cap the read to 4 KiB — legitimate `.git` pointer files are ~70 bytes.
+    // Prevents a malicious large regular file from driving memory pressure.
+    let mut buf = [0u8; 4096];
+    let n = {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&git_entry).ok()?;
+        f.read(&mut buf).ok()?
+    };
+    let contents = std::str::from_utf8(&buf[..n]).ok()?;
+    let gitdir_line = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:").map(str::trim))?;
+
+    // Submodules: gitdir points into `.git/modules/<name>`. Not a worktree.
+    if gitdir_line.contains("/modules/") {
+        return None;
+    }
+
+    // Linked worktrees: gitdir ends with `/.git/worktrees/<name>`.
+    if !gitdir_line.contains("/worktrees/") {
+        return None;
+    }
+
+    // Resolve the gitdir path (may be relative to the worktree dir).
+    let gitdir_path = Path::new(gitdir_line);
+    let absolute_gitdir = if gitdir_path.is_absolute() {
+        gitdir_path.to_path_buf()
+    } else {
+        path.join(gitdir_path)
+    };
+
+    // Try canonicalizing first; fall back to lexical cleanup if that fails
+    // (e.g., the worktree metadata moved but the main repo still exists).
+    let gitdir_resolved = std::fs::canonicalize(&absolute_gitdir).unwrap_or(absolute_gitdir);
+
+    // Strip trailing `/worktrees/<name>` → `<something>/.git`.
+    let dot_git = gitdir_resolved
+        .parent()
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)?;
+
+    // Defense in depth: `gitdir:` content is user-controlled (any file the
+    // scanner walks). A crafted `gitdir: /etc/worktrees/x` passes the
+    // `/worktrees/` filter above; verify that the stripped path actually
+    // ends in a `.git` component before treating it as a real repo root.
+    if dot_git.file_name().and_then(|n| n.to_str()) != Some(".git") {
+        return None;
+    }
+
+    // Strip trailing `.git` → main repo working tree.
+    let main_repo = dot_git.parent().map(Path::to_path_buf)?;
+
+    let canonical_main = std::fs::canonicalize(&main_repo).unwrap_or(main_repo);
+
+    if !canonical_main.is_dir() {
+        return None;
+    }
+
+    // Make sure the main repo isn't the same directory as `path`.
+    let canonical_self = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if canonical_main == canonical_self {
+        return None;
+    }
+
+    Some(canonical_main)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +590,52 @@ upstream\tgit@github.com:org/repo.git (push)
     fn run_git_nonexistent_path() {
         let result = run_git(Path::new("/nonexistent/path/xyz"), &["status"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn main_repo_path_for_worktree_returns_main_for_linked_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        init_git_repo(&main);
+
+        let wt = tmp.path().join("wt");
+        run_git(
+            &main,
+            &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+        )
+        .expect("git worktree add");
+
+        let result = main_repo_path_for_worktree(&wt).expect("should detect main repo");
+        let expected = fs::canonicalize(&main).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn main_repo_path_for_worktree_returns_none_for_main_repo() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        assert!(main_repo_path_for_worktree(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn main_repo_path_for_worktree_returns_none_for_non_git_dir() {
+        let tmp = TempDir::new().unwrap();
+        assert!(main_repo_path_for_worktree(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn main_repo_path_for_worktree_returns_none_for_submodule() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".git"), "gitdir: ../../.git/modules/foo\n").unwrap();
+        assert!(main_repo_path_for_worktree(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn main_repo_path_for_worktree_returns_none_for_missing_git_entry() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert!(main_repo_path_for_worktree(&sub).is_none());
     }
 }
