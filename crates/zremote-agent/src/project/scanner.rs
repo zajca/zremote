@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::git::GitInspector;
+use super::git::{self, GitInspector};
 use super::intelligence;
 use zremote_protocol::ProjectInfo;
 
@@ -157,16 +157,18 @@ impl ProjectScanner {
         let is_git_root = git_entry.is_dir();
         let is_linked_worktree = git_entry.is_file();
 
-        // Linked worktree without language marker = skip (parent project owns it)
-        if project_type.is_none() && is_linked_worktree {
-            return None;
-        }
-        // No git and no language marker = not a project
-        if project_type.is_none() && !is_git_root {
+        let main_repo_path = if is_linked_worktree {
+            git::main_repo_path_for_worktree(dir)
+        } else {
+            None
+        };
+
+        // No language marker: only keep linked worktrees whose main repo we can resolve.
+        if project_type.is_none() && !is_git_root && main_repo_path.is_none() {
             return None;
         }
 
-        // Collect git info for repo roots
+        // Collect git info for repo roots only; linked worktrees are enriched via the main repo.
         let (git_info, worktrees) = if is_git_root {
             GitInspector::inspect(dir)
                 .map(|(info, wts)| (Some(info), wts))
@@ -198,6 +200,7 @@ impl ProjectScanner {
             architecture: intel.architecture,
             conventions: intel.conventions,
             package_manager: intel.package_manager,
+            main_repo_path: main_repo_path.map(|p| p.to_string_lossy().to_string()),
         })
     }
 }
@@ -476,5 +479,104 @@ mod tests {
         let myapp = projects.iter().find(|p| p.name == "myapp").unwrap();
         assert!(myapp.has_claude_config);
         assert_eq!(myapp.project_type, "rust");
+    }
+
+    /// Initialize a minimal git repo at `dir` with a single commit.
+    fn init_git_repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_CEILING_DIRECTORIES", dir)
+                .output()
+                .expect("spawn git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        fs::write(dir.join("README.md"), "# Test").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "--no-verify", "-m", "initial commit"]);
+    }
+
+    fn add_worktree(repo: &Path, wt: &Path, branch: &str) {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["worktree", "add", "-b", branch, wt.to_str().unwrap()])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CEILING_DIRECTORIES", repo)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn detect_linked_worktree_sets_main_repo_path() {
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        init_git_repo(&main);
+        fs::write(main.join("Cargo.toml"), "[package]\nname = \"main\"").unwrap();
+
+        let wt = tmp.path().join("wt");
+        add_worktree(&main, &wt, "feature");
+        fs::write(wt.join("Cargo.toml"), "[package]\nname = \"wt\"").unwrap();
+
+        let info = ProjectScanner::detect_project(&wt).expect("should detect linked worktree");
+        assert_eq!(info.project_type, "rust");
+        let expected = fs::canonicalize(&main)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(info.main_repo_path.as_deref(), Some(expected.as_str()));
+        // Linked worktrees skip the full GitInspector pass.
+        assert!(info.git_info.is_none());
+        assert!(info.worktrees.is_empty());
+    }
+
+    #[test]
+    fn detect_linked_worktree_without_language_marker_returns_info_when_main_resolvable() {
+        let tmp = TempDir::new().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        init_git_repo(&main);
+
+        let wt = tmp.path().join("wt");
+        add_worktree(&main, &wt, "feature");
+        // Intentionally do NOT place a language marker in the worktree.
+
+        let info = ProjectScanner::detect_project(&wt)
+            .expect("linked worktree with resolvable main should be detected");
+        assert_eq!(info.project_type, "unknown");
+        let expected = fs::canonicalize(&main)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(info.main_repo_path.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn detect_main_repo_has_no_main_repo_path() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"m\"").unwrap();
+
+        let info = ProjectScanner::detect_project(tmp.path()).expect("should detect main repo");
+        assert!(info.main_repo_path.is_none());
     }
 }

@@ -337,6 +337,7 @@ pub(super) async fn handle_server_message(
                         has_claude_config: info.has_claude_config,
                         has_zremote_config: info.has_zremote_config,
                         project_type: info.project_type,
+                        main_repo_path: info.main_repo_path,
                     })
                     .is_err()
                 {

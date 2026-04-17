@@ -110,15 +110,15 @@ pub async fn create_worktree(
                                             .next()
                                             .unwrap_or("worktree")
                                             .to_string();
-                                        let _ = sqlx::query(
-                                            "INSERT OR IGNORE INTO projects (id, host_id, path, name, parent_project_id, project_type) VALUES (?, ?, ?, ?, ?, 'worktree')"
+                                        let _ = q::insert_project_with_parent(
+                                            &db,
+                                            &wt_id,
+                                            &hid,
+                                            &wt.path,
+                                            &wt_name,
+                                            Some(&pid),
+                                            "worktree",
                                         )
-                                        .bind(&wt_id)
-                                        .bind(&hid)
-                                        .bind(&wt.path)
-                                        .bind(&wt_name)
-                                        .bind(&pid)
-                                        .execute(&db)
                                         .await;
 
                                         let _ = sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
@@ -214,18 +214,16 @@ pub async fn create_worktree(
         .unwrap_or("worktree")
         .to_string();
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO projects (id, host_id, path, name, parent_project_id, project_type) \
-         VALUES (?, ?, ?, ?, ?, 'worktree')",
+    q::insert_project_with_parent(
+        &state.db,
+        &wt_id,
+        &host_id_str,
+        &result.path,
+        &wt_name,
+        Some(&project_id),
+        "worktree",
     )
-    .bind(&wt_id)
-    .bind(&host_id_str)
-    .bind(&result.path)
-    .bind(&wt_name)
-    .bind(&project_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    .await?;
 
     // Update git info on the new worktree
     sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")

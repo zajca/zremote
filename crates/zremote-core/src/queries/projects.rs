@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use zremote_protocol::ProjectInfo;
 
 use crate::error::AppError;
 
@@ -100,6 +101,50 @@ pub async fn insert_project(
     Ok(result.rows_affected() > 0)
 }
 
+/// Insert a project with optional `parent_project_id` and `project_type`.
+/// Returns true if a new row was inserted, false on duplicate path.
+pub async fn insert_project_with_parent(
+    pool: &SqlitePool,
+    project_id: &str,
+    host_id: &str,
+    path: &str,
+    name: &str,
+    parent_project_id: Option<&str>,
+    project_type: &str,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(project_id)
+    .bind(host_id)
+    .bind(path)
+    .bind(name)
+    .bind(parent_project_id)
+    .bind(project_type)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Update an existing project row's `parent_project_id` and `project_type`.
+/// Used by the orphaned-worktree repair step.
+pub async fn set_parent_project_id(
+    pool: &SqlitePool,
+    project_id: &str,
+    parent_project_id: &str,
+    project_type: &str,
+) -> Result<u64, AppError> {
+    let result =
+        sqlx::query("UPDATE projects SET parent_project_id = ?, project_type = ? WHERE id = ?")
+            .bind(parent_project_id)
+            .bind(project_type)
+            .bind(project_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn get_project_host_and_path(
     pool: &SqlitePool,
     project_id: &str,
@@ -170,6 +215,74 @@ pub async fn set_project_pinned(
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+/// Update a project row with detected metadata from `ProjectInfo`.
+/// Shared by agent (manual registration, scan, backfill) and server
+/// (agent `ProjectList` dispatch) so the metadata UPDATE SQL lives in exactly
+/// one place. Preserves the "worktree" `project_type` marker set at insert time —
+/// it encodes structural role, not language, and must not be clobbered by the
+/// detected language type (e.g. "rust" from a Cargo.toml inside the worktree).
+pub async fn update_project_metadata_from_info(
+    pool: &SqlitePool,
+    project_id: &str,
+    info: &ProjectInfo,
+) -> Result<(), AppError> {
+    // Fall back to an empty JSON array rather than an empty string when
+    // serialization fails — downstream readers parse these columns as JSON
+    // and an empty string is not valid JSON.
+    let remotes_json = info
+        .git_info
+        .as_ref()
+        .map(|g| serde_json::to_string(&g.remotes).unwrap_or_else(|_| "[]".to_string()));
+    let now = chrono::Utc::now().to_rfc3339();
+    let frameworks_json =
+        serde_json::to_string(&info.frameworks).unwrap_or_else(|_| "[]".to_string());
+    let architecture_str = info
+        .architecture
+        .as_ref()
+        .and_then(|a| serde_json::to_value(a).ok())
+        .and_then(|v| v.as_str().map(String::from));
+    let conventions_json =
+        serde_json::to_string(&info.conventions).unwrap_or_else(|_| "[]".to_string());
+
+    sqlx::query(
+        "UPDATE projects SET \
+         project_type = CASE WHEN project_type = 'worktree' THEN project_type ELSE ? END, \
+         has_claude_config = ?, has_zremote_config = ?, \
+         git_branch = ?, git_commit_hash = ?, git_commit_message = ?, \
+         git_is_dirty = ?, git_ahead = ?, git_behind = ?, git_remotes = ?, git_updated_at = ?, \
+         frameworks = ?, architecture = ?, conventions = ?, package_manager = ? \
+         WHERE id = ?",
+    )
+    .bind(&info.project_type)
+    .bind(info.has_claude_config)
+    .bind(info.has_zremote_config)
+    .bind(info.git_info.as_ref().and_then(|g| g.branch.as_deref()))
+    .bind(
+        info.git_info
+            .as_ref()
+            .and_then(|g| g.commit_hash.as_deref()),
+    )
+    .bind(
+        info.git_info
+            .as_ref()
+            .and_then(|g| g.commit_message.as_deref()),
+    )
+    .bind(info.git_info.as_ref().is_some_and(|g| g.is_dirty))
+    .bind(info.git_info.as_ref().map_or(0, |g| g.ahead))
+    .bind(info.git_info.as_ref().map_or(0, |g| g.behind))
+    .bind(&remotes_json)
+    .bind(&now)
+    .bind(&frameworks_json)
+    .bind(&architecture_str)
+    .bind(&conventions_json)
+    .bind(&info.package_manager)
+    .bind(project_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -465,6 +578,107 @@ mod tests {
             Some(r#"[{"kind":"testing","value":"jest"}]"#)
         );
         assert_eq!(project.package_manager.as_deref(), Some("npm"));
+    }
+
+    #[tokio::test]
+    async fn insert_project_with_parent_sets_fields() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+
+        let inserted = super::insert_project_with_parent(
+            &pool,
+            "wt1",
+            "h1",
+            "/home/user/proj-wt",
+            "proj-wt",
+            Some("p1"),
+            "worktree",
+        )
+        .await
+        .unwrap();
+        assert!(inserted);
+
+        let project = get_project(&pool, "wt1").await.unwrap();
+        assert_eq!(project.parent_project_id.as_deref(), Some("p1"));
+        assert_eq!(project.project_type, "worktree");
+    }
+
+    #[tokio::test]
+    async fn insert_project_with_parent_none_parent_is_top_level() {
+        let pool = setup_db().await;
+
+        let inserted = super::insert_project_with_parent(
+            &pool,
+            "p1",
+            "h1",
+            "/home/user/proj",
+            "proj",
+            None,
+            "rust",
+        )
+        .await
+        .unwrap();
+        assert!(inserted);
+
+        let project = get_project(&pool, "p1").await.unwrap();
+        assert!(project.parent_project_id.is_none());
+        assert_eq!(project.project_type, "rust");
+    }
+
+    #[tokio::test]
+    async fn insert_project_with_parent_ignores_duplicate_path() {
+        let pool = setup_db().await;
+
+        let first = super::insert_project_with_parent(
+            &pool,
+            "p1",
+            "h1",
+            "/home/user/proj",
+            "proj",
+            None,
+            "rust",
+        )
+        .await
+        .unwrap();
+        assert!(first);
+
+        let second = super::insert_project_with_parent(
+            &pool,
+            "p2",
+            "h1",
+            "/home/user/proj",
+            "proj-dup",
+            None,
+            "rust",
+        )
+        .await
+        .unwrap();
+        assert!(!second);
+    }
+
+    #[tokio::test]
+    async fn set_parent_project_id_updates_row() {
+        let pool = setup_db().await;
+        insert_project(&pool, "p1", "h1", "/home/user/proj", "proj").await;
+        insert_project(&pool, "wt1", "h1", "/home/user/proj-wt", "proj-wt").await;
+
+        let affected = super::set_parent_project_id(&pool, "wt1", "p1", "worktree")
+            .await
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let project = get_project(&pool, "wt1").await.unwrap();
+        assert_eq!(project.parent_project_id.as_deref(), Some("p1"));
+        assert_eq!(project.project_type, "worktree");
+    }
+
+    #[tokio::test]
+    async fn set_parent_project_id_nonexistent_returns_zero() {
+        let pool = setup_db().await;
+        let affected = super::set_parent_project_id(&pool, "nonexistent", "p1", "worktree")
+            .await
+            .unwrap();
+        assert_eq!(affected, 0);
     }
 
     #[tokio::test]

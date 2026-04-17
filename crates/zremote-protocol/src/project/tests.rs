@@ -16,6 +16,7 @@ fn project_info_roundtrip() {
         architecture: None,
         conventions: vec![],
         package_manager: None,
+        main_repo_path: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
     let parsed: ProjectInfo = serde_json::from_str(&json).expect("deserialize");
@@ -36,6 +37,7 @@ fn project_info_without_claude_config() {
         architecture: None,
         conventions: vec![],
         package_manager: None,
+        main_repo_path: None,
     };
     let json = serde_json::to_value(&info).unwrap();
     assert_eq!(json["has_claude_config"], false);
@@ -97,6 +99,7 @@ fn project_info_with_git_info_roundtrip() {
             config_file: Some("clippy.toml".to_string()),
         }],
         package_manager: Some("cargo".to_string()),
+        main_repo_path: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
     let parsed: ProjectInfo = serde_json::from_str(&json).expect("deserialize");
