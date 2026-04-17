@@ -69,13 +69,6 @@ pub async fn run_local(
             )
         })?;
 
-    // One-time idempotent backfill: re-link any orphan worktree rows whose
-    // main repo is registered but wasn't linked (pre-worktree-aware data).
-    // Don't fail startup on error — log and continue.
-    if let Err(e) = crate::project::repair::repair_orphaned_worktrees(&pool).await {
-        tracing::warn!(error = %e, "repair_orphaned_worktrees failed, continuing startup");
-    }
-
     // Generate deterministic host_id from hostname
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -128,10 +121,11 @@ pub async fn run_local(
         );
     }
 
-    // Generate a per-process instance ID so daemon state files record which
-    // agent owns them. Prevents multiple agents sharing the same socket
-    // directory from stealing each other's PTY sessions during discovery.
-    let agent_instance_id = Uuid::new_v4();
+    // Persistent instance ID: stored in the scoped socket_dir so an upgraded
+    // or restarted agent re-adopts its previously-spawned PTY daemons instead
+    // of being filtered out by the owner-id check in discovery. Still scopes
+    // ownership across concurrent agents (different socket_dir per instance).
+    let agent_instance_id = crate::daemon::load_or_create_instance_id(&socket_dir);
     tracing::info!(%agent_instance_id, "agent instance started");
 
     // Create application state
