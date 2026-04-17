@@ -596,7 +596,7 @@ impl TerminalPanel {
     }
 
     /// Load historical execution nodes for this session from the API.
-    /// Fire-and-forget: spawns once per panel creation, delivers results back via cx.spawn.
+    /// Fire-and-forget: HTTP request runs on tokio runtime, results delivered back via cx.spawn.
     pub fn load_execution_nodes(&mut self, api: zremote_client::ApiClient, cx: &mut Context<Self>) {
         self.api_client = Some(api.clone());
         self.ensure_activity_panel(cx);
@@ -604,11 +604,16 @@ impl TerminalPanel {
             return;
         };
         let session_id = self.session_id.clone();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let nodes = api
-                .list_execution_nodes(&session_id, Some(200))
+        // Run the HTTP request on tokio runtime (reqwest needs tokio for timeouts).
+        let fetch = self.tokio_handle.spawn(async move {
+            api.list_execution_nodes(&session_id, Some(200))
                 .await
-                .unwrap_or_default();
+                .unwrap_or_default()
+        });
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Ok(nodes) = fetch.await else {
+                return;
+            };
             if nodes.is_empty() {
                 return;
             }
