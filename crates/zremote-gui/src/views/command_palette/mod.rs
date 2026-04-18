@@ -140,6 +140,10 @@ pub enum CommandPaletteEvent {
         working_dir: Option<String>,
     },
     ShowSettings,
+    NewWorktree {
+        parent_project_id: Option<String>,
+        host_id: Option<String>,
+    },
     RecordRecentAction {
         action_key: String,
     },
@@ -1066,6 +1070,7 @@ impl CommandPalette {
                 PaletteAction::AddProject => Icon::Folder,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
+                PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
             },
         };
 
@@ -2111,6 +2116,7 @@ impl CommandPalette {
                 PaletteAction::AddProject => Icon::Folder,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
+                PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
             },
         };
 
@@ -2203,6 +2209,7 @@ impl CommandPalette {
                 PaletteAction::AddProject => Icon::Folder,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
+                PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
             },
         };
 

@@ -1125,6 +1125,7 @@ pub enum TerminalPanelEvent {
     },
     OpenSessionSwitcher,
     OpenHelp,
+    OpenNewWorktree,
     BridgeFailed {
         session_id: String,
     },
@@ -1562,6 +1563,9 @@ impl Render for TerminalPanel {
                                     }
                                     KeyAction::ToggleActivityPanel => {
                                         this.toggle_activity_panel(cx);
+                                    }
+                                    KeyAction::OpenNewWorktree => {
+                                        cx.emit(TerminalPanelEvent::OpenNewWorktree);
                                     }
                                     KeyAction::CloseOverlay => {}
                                 },

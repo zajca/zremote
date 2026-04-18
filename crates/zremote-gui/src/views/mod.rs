@@ -18,3 +18,4 @@ pub mod terminal_element;
 pub mod terminal_panel;
 pub mod toast;
 pub mod url_detector;
+pub mod worktree_create_modal;

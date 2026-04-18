@@ -569,13 +569,26 @@ pub(super) async fn handle_agent_message(
             percent,
             message,
         } => {
-            // Forward the in-flight progress event to every subscriber.
-            // project_id is emitted as the project_path here because the
-            // server does not have a stable UUID for the in-flight job
-            // (agent picks its own job_id); GUIs correlate by job_id +
-            // project_path.
+            // Resolve the project's UUID for this host so GUIs can match
+            // the event against the open modal's `parent_project_id`
+            // (which is always a UUID). Falls back to `project_path`
+            // only when the project row doesn't exist yet — e.g., early
+            // `Init` before the row is upserted. This fallback still
+            // won't match in the GUI but keeps the event flowing for
+            // debugging / future path-aware consumers.
+            let host_id_str = host_id.to_string();
+            let project_id: String = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM projects WHERE host_id = ? AND path = ?",
+            )
+            .bind(&host_id_str)
+            .bind(&project_path)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(project_path);
             let _ = state.events.send(ServerEvent::WorktreeCreationProgress {
-                project_id: project_path,
+                project_id,
                 job_id,
                 stage,
                 percent,

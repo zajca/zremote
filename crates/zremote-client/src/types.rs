@@ -12,9 +12,10 @@ pub use zremote_protocol::{
         SearchResult, SearchTier,
     },
     project::{
-        ActionScope, ActionsResponse, AgenticSettings, ClaudeDefaults, DirectoryEntry, GitInfo,
-        GitRemote, LinearSettings, ProjectAction, ProjectInfo, ProjectSettings, PromptBody,
-        PromptTemplate, WorktreeInfo, WorktreeSettings,
+        ActionScope, ActionsResponse, AgenticSettings, Branch, BranchList, ClaudeDefaults,
+        DirectoryEntry, GitInfo, GitRemote, LinearSettings, ProjectAction, ProjectInfo,
+        ProjectSettings, PromptBody, PromptTemplate, WorktreeError, WorktreeErrorCode,
+        WorktreeInfo, WorktreeSettings,
     },
     status::{HostStatus, SessionStatus},
 };
@@ -206,7 +207,9 @@ pub struct LoopInfoLite {
     pub task_name: Option<String>,
 }
 
-pub use zremote_protocol::events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
+pub use zremote_protocol::events::{
+    HostInfo, LoopInfo, ServerEvent, SessionInfo, WorktreeCreationStage,
+};
 
 // ---------------------------------------------------------------------------
 // Terminal WebSocket types
@@ -660,4 +663,33 @@ pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<MemoryCategory>,
+}
+
+/// Error returned by [`crate::ApiClient::create_worktree_structured`].
+///
+/// `Structured` carries the machine-readable `code`/`hint`/`message` payload
+/// emitted by the agent's worktree endpoints; `Api` is the fall-through for
+/// transport or non-structured responses (e.g. 500 without a JSON body).
+#[derive(Debug)]
+pub enum WorktreeCreateError {
+    Structured(WorktreeError),
+    Api(crate::error::ApiError),
+}
+
+impl std::fmt::Display for WorktreeCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Structured(e) => write!(f, "{} ({:?})", e.hint, e.code),
+            Self::Api(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for WorktreeCreateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Structured(_) => None,
+            Self::Api(e) => Some(e),
+        }
+    }
 }

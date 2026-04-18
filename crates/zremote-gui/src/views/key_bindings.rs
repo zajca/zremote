@@ -64,6 +64,10 @@ pub enum KeyAction {
     OpenHelp,
     CloseOverlay,
     ToggleActivityPanel,
+    /// Open the new-worktree creation modal for the current-parent context.
+    /// Phase 2 ships a single-step shortcut; the D4 leader chord (`Cmd+K, n`)
+    /// lands once the leader dispatch infrastructure is in place (Phase 3).
+    OpenNewWorktree,
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +139,14 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::ToggleActivityPanel,
         label: "Ctrl+Shift+I",
         description: "Toggle activity panel",
+    },
+    KeyBinding {
+        key: "n",
+        modifiers: KeyModifiers::new(true, true, false),
+        scope: KeyScope::Global,
+        action: KeyAction::OpenNewWorktree,
+        label: "Ctrl+Shift+N",
+        description: "New worktree",
     },
     KeyBinding {
         key: "escape",

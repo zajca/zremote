@@ -307,6 +307,18 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
         selectable: true,
     });
 
+    // "New Worktree" — main_view resolves the parent project from the
+    // currently selected project at execute time.
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::NewWorktree {
+            parent_project_id: None,
+            host_id: None,
+        }),
+        title: "New Worktree".to_string(),
+        subtitle: String::new(),
+        selectable: true,
+    });
+
     if let Some(ref sid) = snapshot.active_session_id {
         items.push(ResultItem {
             item: PaletteItem::Action(PaletteAction::CloseCurrentSession {

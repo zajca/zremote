@@ -1296,6 +1296,50 @@ impl SidebarView {
             )
     }
 
+    /// Hover-visible "New worktree" button rendered only on parent project
+    /// rows. Emits [`SidebarEvent::OpenNewWorktree`] — the main view resolves
+    /// the parent and opens the creation modal.
+    #[allow(clippy::unused_self)]
+    fn render_new_worktree_button(
+        &self,
+        project_id: &str,
+        host_id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project_id = project_id.to_string();
+        let host_id = host_id.to_string();
+        div()
+            .invisible()
+            .group_hover("project-row", |mut s| {
+                s.visibility = Some(gpui::Visibility::Visible);
+                s
+            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("new-wt-{project_id}")))
+                    .p(px(2.0))
+                    .rounded(px(3.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::bg_tertiary()))
+                    .child(
+                        icon(Icon::GitBranchPlus)
+                            .size(px(14.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| SidebarTextTooltip("New worktree…".to_string()))
+                            .into()
+                    })
+                    .on_click(cx.listener(move |_this, _event: &ClickEvent, _w, cx| {
+                        cx.stop_propagation();
+                        cx.emit(SidebarEvent::OpenNewWorktree {
+                            parent_project_id: project_id.clone(),
+                            host_id: host_id.clone(),
+                        });
+                    })),
+            )
+    }
+
     /// Render a non-worktree project (or a root with linked worktrees). Lays
     /// out: [chevron (when has worktrees)] [name] [branch] [badges] on the
     /// left, [action buttons] on the right. Worktree children and the
@@ -1468,8 +1512,24 @@ impl SidebarView {
                     this.on_project_row_click(&pid_for_click, &host_for_click, cx);
                 },
             ))
+            .when(matches!(kind, RowKind::Parent { .. }), |d| {
+                // Parent projects support worktree creation via right-click.
+                // Worktree rows and non-git projects do not; scope the handler
+                // so we don't fire on stray right-clicks elsewhere in the tree.
+                let pid_rmb = project_id.clone();
+                let host_rmb = host_id_owned.clone();
+                d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |_this, _event: &MouseDownEvent, _w, cx| {
+                        cx.emit(SidebarEvent::OpenNewWorktree {
+                            parent_project_id: pid_rmb.clone(),
+                            host_id: host_rmb.clone(),
+                        });
+                    }),
+                )
+            })
             .child(left)
-            .child(self.render_row_actions(&project_id, host_id, &project.path, cx))
+            .child(self.render_row_actions(&project_id, host_id, &project.path, kind, cx))
     }
 
     /// Chevron toggle slot for a project row. Returns `Some` for parent rows
@@ -1536,18 +1596,24 @@ impl SidebarView {
     }
 
     /// Right-side action cluster for a project row: agent launcher (if a
-    /// default Claude profile exists) and the "New session" button.
+    /// default Claude profile exists), the "New session" button, and, for
+    /// parent projects, a "New worktree" hover action.
     fn render_row_actions(
         &self,
         project_id: &str,
         host_id: &str,
         project_path: &str,
+        kind: RowKind,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let is_parent = matches!(kind, RowKind::Parent { .. });
         div()
             .flex()
             .items_center()
             .gap(px(2.0))
+            .when(is_parent, |el| {
+                el.child(self.render_new_worktree_button(project_id, host_id, cx))
+            })
             .when_some(
                 self.default_profile_for_kind("claude").cloned(),
                 |el, profile| {

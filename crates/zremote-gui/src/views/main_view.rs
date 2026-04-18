@@ -28,6 +28,7 @@ use crate::views::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use crate::views::toast::{
     ToastAction, ToastContainer, ToastContainerEvent, ToastContext, ToastKind, ToastLevel,
 };
+use crate::views::worktree_create_modal::{WorktreeCreateModal, WorktreeCreateModalEvent};
 
 /// How long to wait before showing a WaitingForInput notification.
 /// Suppresses noise from brief pauses between tool calls — a genuine wait
@@ -44,6 +45,7 @@ pub struct MainView {
     session_switcher: Option<Entity<SessionSwitcher>>,
     help_modal: Option<Entity<HelpModal>>,
     settings_modal: Option<Entity<SettingsModal>>,
+    worktree_create_modal: Option<Entity<WorktreeCreateModal>>,
     double_shift: DoubleShiftDetector,
     toasts: Entity<ToastContainer>,
     /// Whether the OS window is currently focused/active.
@@ -121,6 +123,7 @@ impl MainView {
             session_switcher: None,
             help_modal: None,
             settings_modal: None,
+            worktree_create_modal: None,
             double_shift: DoubleShiftDetector::new(),
             toasts,
             window_active: window.is_window_active(),
@@ -201,6 +204,12 @@ impl MainView {
             }
             SidebarEvent::OpenSettings => {
                 self.open_settings_modal(cx);
+            }
+            SidebarEvent::OpenNewWorktree {
+                parent_project_id,
+                host_id,
+            } => {
+                self.open_worktree_create_modal(parent_project_id.clone(), host_id.clone(), cx);
             }
         }
     }
@@ -472,6 +481,22 @@ impl MainView {
                     });
                 }
             }
+        }
+
+        // WorktreeCreationProgress → route into the open creation modal so
+        // the user sees per-stage progress instead of a spinner.
+        if let ServerEvent::WorktreeCreationProgress {
+            project_id,
+            job_id: _,
+            stage,
+            percent,
+            message,
+        } = event
+            && let Some(modal) = &self.worktree_create_modal
+        {
+            modal.update(cx, |m, cx| {
+                m.on_progress_event(project_id, stage, *percent, message.as_deref(), cx);
+            });
         }
 
         // WorktreeError: show error toast
@@ -1003,6 +1028,7 @@ impl MainView {
                 // Search is terminal-panel-scoped; no-op when no terminal is focused
             }
             KeyAction::OpenHelp => self.open_help_modal(cx),
+            KeyAction::OpenNewWorktree => self.trigger_new_worktree_for_selection(cx),
             KeyAction::ToggleActivityPanel => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |panel, cx| {
@@ -1012,7 +1038,9 @@ impl MainView {
             }
             KeyAction::CloseOverlay => {
                 // Close topmost modal
-                if self.command_palette.is_some() {
+                if self.worktree_create_modal.is_some() {
+                    self.close_worktree_create_modal(cx);
+                } else if self.command_palette.is_some() {
                     self.close_command_palette(cx);
                 } else if self.session_switcher.is_some() {
                     self.close_session_switcher(cx);
@@ -1097,6 +1125,9 @@ impl MainView {
             }
             TerminalPanelEvent::OpenHelp => {
                 self.open_help_modal(cx);
+            }
+            TerminalPanelEvent::OpenNewWorktree => {
+                self.trigger_new_worktree_for_selection(cx);
             }
             TerminalPanelEvent::BridgeFailed { session_id } => {
                 tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
@@ -1323,6 +1354,15 @@ impl MainView {
                 // entity lock during the emit for no gain.
                 self.open_settings_modal(cx);
             }
+            CommandPaletteEvent::NewWorktree {
+                parent_project_id,
+                host_id,
+            } => match (parent_project_id, host_id) {
+                (Some(pid), Some(hid)) => {
+                    self.open_worktree_create_modal(pid.clone(), hid.clone(), cx);
+                }
+                _ => self.trigger_new_worktree_for_selection(cx),
+            },
             CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);
@@ -1489,6 +1529,166 @@ impl MainView {
         .detach();
         self.settings_modal = Some(modal);
         cx.notify();
+    }
+
+    /// Resolve the parent git project from the current selection (selected
+    /// project, or the parent of a selected worktree) and open the creation
+    /// modal. No-ops when no project is selected or the selection is on a
+    /// non-git project.
+    fn trigger_new_worktree_for_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_id) = self
+            .app_state
+            .selected_project_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        else {
+            tracing::warn!("new worktree triggered with no project selected");
+            self.show_toast(
+                "Select a project first to create a worktree",
+                ToastLevel::Warning,
+                Some(Icon::GitBranch),
+                ToastContext::default(),
+                cx,
+            );
+            return;
+        };
+        let sidebar = self.sidebar.read(cx);
+        let projects = sidebar.projects_rc();
+        let Some(project) = projects.iter().find(|p| p.id == selected_id).cloned() else {
+            tracing::warn!(project_id = %selected_id, "selected project not in sidebar snapshot");
+            self.show_toast(
+                "Selected project is no longer available",
+                ToastLevel::Warning,
+                Some(Icon::GitBranch),
+                ToastContext::default(),
+                cx,
+            );
+            return;
+        };
+        let parent = if let Some(parent_id) = project.parent_project_id.clone() {
+            projects
+                .iter()
+                .find(|p| p.id == parent_id)
+                .cloned()
+                .unwrap_or(project)
+        } else {
+            project
+        };
+        let _ = sidebar;
+        self.open_worktree_create_modal(parent.id, parent.host_id, cx);
+    }
+
+    fn open_worktree_create_modal(
+        &mut self,
+        parent_project_id: String,
+        host_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+        if self.worktree_create_modal.is_some() {
+            // Toggle: pressing the trigger twice dismisses.
+            self.close_worktree_create_modal(cx);
+            return;
+        }
+
+        let sidebar = self.sidebar.read(cx);
+        let projects = sidebar.projects_rc();
+        // Resolve the parent project — if the caller passed a worktree id,
+        // walk up to the root so the modal always targets the repo root.
+        let target = projects
+            .iter()
+            .find(|p| p.id == parent_project_id)
+            .and_then(|p| {
+                match &p.parent_project_id {
+                    Some(pid) => {
+                        // Caller passed a worktree id; resolve to the root
+                        // repo. If the root is no longer in the snapshot (it
+                        // was removed between sidebar render and modal open)
+                        // bail instead of silently opening the modal against
+                        // the worktree itself.
+                        match projects.iter().find(|q| q.id == *pid) {
+                            Some(root) => Some(root.clone()),
+                            None => {
+                                tracing::warn!(
+                                    project_id = %parent_project_id,
+                                    parent_id = %pid,
+                                    "worktree create: root repo not in sidebar snapshot, aborting",
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => Some(p.clone()),
+                }
+            });
+        let _ = sidebar;
+
+        let Some(parent) = target else {
+            tracing::warn!(
+                project_id = %parent_project_id,
+                "worktree create: parent project not found in sidebar snapshot",
+            );
+            return;
+        };
+
+        let app_state = self.app_state.clone();
+        let parent_project_id = parent.id.clone();
+        let parent_name = parent.name.clone();
+        let parent_path = parent.path.clone();
+        let parent_host = host_id;
+        let modal = cx.new(|cx| {
+            WorktreeCreateModal::new(
+                app_state,
+                parent_project_id,
+                parent_name,
+                parent_path,
+                parent_host,
+                cx,
+            )
+        });
+        cx.subscribe(&modal, Self::on_worktree_create_event)
+            .detach();
+        self.worktree_create_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_worktree_create_modal(&mut self, cx: &mut Context<Self>) {
+        self.worktree_create_modal = None;
+        cx.notify();
+    }
+
+    fn on_worktree_create_event(
+        &mut self,
+        _emitter: Entity<WorktreeCreateModal>,
+        event: &WorktreeCreateModalEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            WorktreeCreateModalEvent::Close => {
+                self.close_worktree_create_modal(cx);
+            }
+            WorktreeCreateModalEvent::Created {
+                project_id: _,
+                host_id,
+                path,
+                start_session,
+            } => {
+                let start_session = *start_session;
+                let host_id = host_id.clone();
+                let path = path.clone();
+                self.close_worktree_create_modal(cx);
+                // The agent emits `ProjectsUpdated` when a worktree is added,
+                // which the sidebar already listens for; no manual refresh.
+                if start_session && let (Some(hid), Some(p)) = (host_id, path) {
+                    self.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.create_session(&hid, Some(p), cx);
+                    });
+                }
+            }
+        }
     }
 
     fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
@@ -1801,6 +2001,22 @@ impl MainView {
         ))
     }
 
+    fn render_worktree_create_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let modal = self.worktree_create_modal.as_ref()?;
+        Some(Self::render_modal_overlay(
+            "wt-create-backdrop",
+            "wt-create-container",
+            px(120.0),
+            px(520.0),
+            None,
+            Some(px(540.0)),
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_worktree_create_modal(cx);
+            }),
+            modal.clone().into_any_element(),
+        ))
+    }
+
     fn render_settings_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let settings = self.settings_modal.as_ref()?;
         let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
@@ -1862,6 +2078,9 @@ impl Render for MainView {
             root = root.child(overlay);
         }
         if let Some(overlay) = self.render_settings_overlay(cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_worktree_create_overlay(cx) {
             root = root.child(overlay);
         }
 
@@ -1964,6 +2183,13 @@ pub enum SidebarEvent {
     },
     OpenHelp,
     OpenSettings,
+    /// User requested a new worktree under a parent git project. `MainView`
+    /// opens the create modal. `parent_project_id` is the root repo (never a
+    /// worktree — sidebar/command-palette resolve to the root before emitting).
+    OpenNewWorktree {
+        parent_project_id: String,
+        host_id: String,
+    },
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}

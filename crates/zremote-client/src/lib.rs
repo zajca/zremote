@@ -30,6 +30,8 @@ pub use types::{
     // Protocol re-exports
     AgenticLoopId,
     AgenticStatus,
+    Branch,
+    BranchList,
     ClaudeSessionInfo,
     ClaudeTask,
     ClaudeTaskStatus,
@@ -83,5 +85,9 @@ pub use types::{
     TerminalInput,
     UpdateAgentProfileRequest,
     UpdateProjectRequest,
+    WorktreeCreateError,
+    WorktreeCreationStage,
+    WorktreeError,
+    WorktreeErrorCode,
     WorktreeInfo,
 };

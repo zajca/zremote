@@ -43,6 +43,13 @@ pub enum PaletteAction {
         working_dir: Option<String>,
     },
     ManageAgentProfiles,
+    /// Open the new-worktree modal. When `parent_project_id` is set, the
+    /// modal targets that parent directly; otherwise the main view resolves
+    /// the parent from the current selection.
+    NewWorktree {
+        parent_project_id: Option<String>,
+        host_id: Option<String>,
+    },
 }
 
 impl PaletteAction {
@@ -67,6 +74,7 @@ impl PaletteAction {
             Self::AddProject => "AddProject",
             Self::StartAgent { .. } => "StartAgent",
             Self::ManageAgentProfiles => "ManageAgentProfiles",
+            Self::NewWorktree { .. } => "NewWorktree",
         }
     }
 }
@@ -187,6 +195,15 @@ impl CommandPalette {
                     PaletteAction::ManageAgentProfiles => {
                         cx.emit(CommandPaletteEvent::ShowSettings);
                     }
+                    PaletteAction::NewWorktree {
+                        parent_project_id,
+                        host_id,
+                    } => {
+                        cx.emit(CommandPaletteEvent::NewWorktree {
+                            parent_project_id: parent_project_id.clone(),
+                            host_id: host_id.clone(),
+                        });
+                    }
                 }
                 // Record recent action usage (only fires when the action
                 // actually executes — early returns above skip this).
@@ -237,6 +254,10 @@ mod tests {
                 working_dir: None,
             },
             PaletteAction::ManageAgentProfiles,
+            PaletteAction::NewWorktree {
+                parent_project_id: None,
+                host_id: None,
+            },
         ];
         let keys: std::collections::HashSet<&str> =
             actions.iter().map(|a| a.action_key()).collect();

@@ -1001,11 +1001,17 @@ upstream\tgit@github.com:org/repo.git (push)
         let tmp = TempDir::new().unwrap();
         init_git_repo(tmp.path());
 
-        // Create 520 lightweight branches (each points at HEAD).
+        // Create 520 lightweight branches by writing them directly to
+        // `.git/packed-refs`. Spawning 520 `git branch` calls is slow and
+        // flakes under parallel test load; a single file write avoids any
+        // subprocess work.
+        let head = run_git(tmp.path(), &["rev-parse", "HEAD"]).unwrap();
+        let head = head.trim();
+        let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
         for i in 0..520 {
-            let name = format!("b{i:04}");
-            run_git(tmp.path(), &["branch", &name]).unwrap();
+            packed.push_str(&format!("{head} refs/heads/b{i:04}\n"));
         }
+        fs::write(tmp.path().join(".git").join("packed-refs"), packed).expect("write packed-refs");
 
         let list = GitInspector::list_branches(tmp.path()).expect("list branches");
         // Default branch (main) + 520 created - but cap is 500.

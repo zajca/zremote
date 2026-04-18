@@ -563,6 +563,53 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// Create a worktree, surfacing a structured [`WorktreeError`] when the
+    /// agent returns one in the response body. Falls back to the plain
+    /// [`ApiError`] path for transport or non-structured server errors.
+    ///
+    /// GUI and CLI call this directly so they can map `code`/`hint` onto
+    /// inline field errors without inspecting status codes or regex-matching
+    /// raw stderr.
+    pub async fn create_worktree_structured(
+        &self,
+        project_id: &str,
+        req: &CreateWorktreeRequest,
+    ) -> Result<serde_json::Value, crate::types::WorktreeCreateError> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/projects/{}/worktrees",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)))?;
+
+        if resp.status().is_success() {
+            return resp
+                .json()
+                .await
+                .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)));
+        }
+
+        let status = resp.status();
+        // Read the body once, then try JSON first (structured error), fall
+        // back to plain text (ApiError::ServerError).
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)))?;
+        if let Ok(err) = serde_json::from_slice::<crate::types::WorktreeError>(&bytes) {
+            return Err(crate::types::WorktreeCreateError::Structured(err));
+        }
+        let message = String::from_utf8_lossy(&bytes).into_owned();
+        Err(crate::types::WorktreeCreateError::Api(
+            ApiError::ServerError { status, message },
+        ))
+    }
+
     /// List local and remote branches for a project with ahead/behind counts.
     ///
     /// The agent returns a `BranchList` with `local`, `remote`, `current`,

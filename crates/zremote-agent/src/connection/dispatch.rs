@@ -639,7 +639,7 @@ pub(super) async fn handle_server_message(
                 let b = branch.clone();
                 let wp = wt_path.clone();
                 let br = base_ref.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let mut handle = tokio::task::spawn_blocking(move || {
                     GitInspector::create_worktree(
                         std::path::Path::new(&pp),
                         &b,
@@ -647,10 +647,16 @@ pub(super) async fn handle_server_message(
                         new_branch,
                         br.as_deref(),
                     )
-                })
-                .await;
+                });
+                // Bound the git subprocess the same way the local HTTP
+                // route does — otherwise a hung git can leak a blocking
+                // thread for the lifetime of the agent process. Kept in
+                // sync with `local::routes::projects::worktree::WORKTREE_CREATE_TIMEOUT`.
+                const WORKTREE_CREATE_TIMEOUT: Duration = Duration::from_secs(60);
+                let result = tokio::time::timeout(WORKTREE_CREATE_TIMEOUT, &mut handle).await;
+                let timeout_secs = WORKTREE_CREATE_TIMEOUT.as_secs();
                 match result {
-                    Ok(Ok(worktree)) => {
+                    Ok(Ok(Ok(worktree))) => {
                         // Finalizing: git is done; DB insert + hook still
                         // ahead of us.
                         send_creation_progress(
@@ -694,20 +700,24 @@ pub(super) async fn handle_server_message(
                             tracing::warn!("outbound channel closed, WorktreeCreated dropped");
                         }
                     }
-                    Ok(Err(msg)) => {
+                    Ok(Ok(Err(stderr))) => {
+                        // Sanitize the raw git stderr before forwarding —
+                        // matches the local-route behavior fixed in 96ebda9.
+                        let err =
+                            zremote_protocol::project::WorktreeError::from_git_stderr(&stderr);
                         send_creation_progress(
                             &tx,
                             &project_path,
                             &job_id,
                             zremote_protocol::events::WorktreeCreationStage::Failed,
                             100,
-                            Some(msg.clone()),
+                            Some(err.message.clone()),
                         )
                         .await;
                         if tx
                             .send(AgentMessage::WorktreeError {
                                 project_path,
-                                message: msg,
+                                message: err.message,
                             })
                             .await
                             .is_err()
@@ -715,7 +725,7 @@ pub(super) async fn handle_server_message(
                             tracing::warn!("outbound channel closed, WorktreeError dropped");
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         send_creation_progress(
                             &tx,
                             &project_path,
@@ -729,6 +739,36 @@ pub(super) async fn handle_server_message(
                             .send(AgentMessage::WorktreeError {
                                 project_path,
                                 message: format!("worktree create task panicked: {e}"),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        }
+                    }
+                    Err(_) => {
+                        // Timed out — abort the blocking task so the
+                        // subprocess doesn't linger past this handler.
+                        handle.abort();
+                        tracing::warn!(
+                            job_id = %job_id,
+                            timeout_secs,
+                            "worktree create timed out (server mode)"
+                        );
+                        let msg = format!("timed out after {timeout_secs}s");
+                        send_creation_progress(
+                            &tx,
+                            &project_path,
+                            &job_id,
+                            zremote_protocol::events::WorktreeCreationStage::Failed,
+                            100,
+                            Some(msg.clone()),
+                        )
+                        .await;
+                        if tx
+                            .send(AgentMessage::WorktreeError {
+                                project_path,
+                                message: msg,
                             })
                             .await
                             .is_err()
