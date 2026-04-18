@@ -9120,6 +9120,7 @@ dependencies = [
  "comfy-table",
  "crossterm 0.28.1",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

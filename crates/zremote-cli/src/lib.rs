@@ -63,6 +63,7 @@ pub enum Commands {
         command: commands::project::ProjectCommand,
     },
     /// Manage git worktrees
+    #[command(visible_alias = "wt")]
     Worktree {
         #[command(subcommand)]
         command: commands::worktree::WorktreeCommand,
