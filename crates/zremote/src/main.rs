@@ -167,13 +167,37 @@ fn ensure_local_agent(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(port, "starting local agent");
 
-    // Spawn the agent as a child process using the same binary
+    // Redirect the spawned agent's stdout+stderr to a log file so users hitting
+    // 500s or crashes can actually see what went wrong. Previously both streams
+    // went to /dev/null, which made diagnosing local-mode issues impossible
+    // without re-launching the agent manually.
+    let log_path = agent_log_path();
+    let log_file = open_agent_log(&log_path);
+
+    // Spawn the agent as a child process using the same binary. Inherit
+    // RUST_LOG if the user set one; otherwise default to info for our crates
+    // so the log file is actually useful when something goes wrong.
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["agent", "local", "--port", &port.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    if std::env::var_os("RUST_LOG").is_none() {
+        cmd.env("RUST_LOG", "zremote_agent=info,zremote_core=info");
+    }
+    match log_file {
+        Some(file) => {
+            let stdout = file
+                .try_clone()
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("open /dev/null"));
+            cmd.stdout(std::process::Stdio::from(stdout))
+                .stderr(std::process::Stdio::from(file));
+            tracing::info!(log = %log_path.display(), "agent logs streaming to file");
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
 
     // Create a new process group so the agent is isolated from the GUI's
     // process group. Prevents process-group signals from the agent reaching
@@ -197,6 +221,34 @@ fn ensure_local_agent(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Err("local agent did not become healthy within 5 seconds".into())
+}
+
+/// Path to the agent log file written when the GUI spawns a local agent. Kept
+/// next to the local DB so `~/.zremote/` is the single place a user has to
+/// look when something goes wrong.
+#[cfg(feature = "gui")]
+fn agent_log_path() -> PathBuf {
+    let base = dirs::home_dir().map_or_else(|| PathBuf::from("."), |h| h.join(".zremote"));
+    base.join("agent.log")
+}
+
+/// Open the agent log file for append. Creates the parent directory if it
+/// doesn't exist. Returns `None` on any IO failure — the caller falls back to
+/// /dev/null so a bad permissions / read-only home never blocks startup.
+#[cfg(feature = "gui")]
+fn open_agent_log(path: &std::path::Path) -> Option<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| {
+            tracing::warn!(error = %e, path = %path.display(), "failed to open agent log");
+            e
+        })
+        .ok()
 }
 
 /// Quick synchronous health check: TCP connect + HTTP GET `/health`, then
