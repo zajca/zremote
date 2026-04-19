@@ -27,8 +27,8 @@ use zremote_core::state::SessionState;
 use zremote_protocol::agents::AgentProfileData;
 
 use crate::agents::{LaunchRequest, LauncherContext, LauncherError};
-use crate::local::routes::sessions::default_shell;
 use crate::local::state::LocalAppState;
+use crate::shell::default_shell;
 
 /// JSON body for `POST /api/agent-tasks`.
 ///

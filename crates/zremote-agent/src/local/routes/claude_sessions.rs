@@ -30,11 +30,7 @@ pub struct CreateClaudeTaskRequest {
     pub print_mode: Option<bool>,
 }
 
-/// Resolve the default shell (same logic as sessions.rs).
-fn default_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
-}
+use crate::shell::default_shell;
 
 /// `POST /api/claude-tasks` - Create and start a Claude task.
 #[allow(clippy::too_many_lines)]

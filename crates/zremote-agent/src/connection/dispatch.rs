@@ -5,7 +5,6 @@ use zremote_protocol::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use zremote_protocol::knowledge::KnowledgeServerMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, HostId, ServerMessage, SessionId};
 
-use super::registration::default_shell;
 use crate::agentic::analyzer::OutputAnalyzer;
 use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::{self, BridgeSenders};
@@ -15,6 +14,7 @@ use crate::project::ProjectScanner;
 use crate::project::git::GitInspector;
 use crate::pty::shell_integration::ShellIntegrationConfig;
 use crate::session::SessionManager;
+use crate::shell::{default_shell, resolve_shell};
 use zremote_core::validation::validate_path_no_traversal;
 
 /// Handle a `SessionCreate` message: spawn a PTY and send `SessionCreated` or `Error`.
@@ -30,7 +30,8 @@ pub(super) async fn handle_session_create(
     env: Option<&std::collections::HashMap<String, String>>,
     initial_command: Option<&str>,
 ) {
-    let shell = shell.unwrap_or(default_shell());
+    let shell_owned = resolve_shell(shell);
+    let shell = shell_owned.as_str();
     let manual_config = ShellIntegrationConfig::for_manual_session();
     match session_manager
         .create(
@@ -1285,7 +1286,9 @@ async fn handle_agent_server_message(
         }
     };
 
-    // Spawn PTY session.
+    // Spawn PTY session. Uses the canonical login shell (not resolve_shell) because
+    // agent tasks deliberately ignore per-project `shell` settings — they always run
+    // the launcher command under the user's real login environment.
     let shell = default_shell();
     let ai_config = ShellIntegrationConfig::for_ai_session();
     let pid = match session_manager
@@ -1462,7 +1465,8 @@ async fn handle_claude_server_message(
                 }
             };
 
-            // Spawn PTY session using default shell
+            // Spawn PTY session. Same rationale as the Claude task path above:
+            // agent tasks always use the login shell, ignoring per-project settings.
             let shell = default_shell();
             let ai_config = ShellIntegrationConfig::for_ai_session();
             match session_manager

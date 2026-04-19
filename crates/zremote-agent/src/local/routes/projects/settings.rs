@@ -203,7 +203,7 @@ pub async fn run_action(
     )
     .await?;
 
-    let shell = super::super::sessions::default_shell();
+    let shell = crate::shell::default_shell();
     let env_map: std::collections::HashMap<String, String> = env.into_iter().collect();
     let env_ref = if env_map.is_empty() {
         None
@@ -293,12 +293,6 @@ pub async fn run_action(
 pub struct ConfigureRequest {
     pub model: Option<String>,
     pub skip_permissions: Option<bool>,
-}
-
-/// Resolve the default shell (same logic as sessions.rs).
-fn configure_default_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
 }
 
 /// `POST /api/projects/:project_id/configure` - Configure project with Claude.
@@ -399,7 +393,7 @@ pub async fn configure_with_claude(
         .map_err(|e| AppError::BadRequest(format!("invalid command options: {e}")))?;
 
     // Spawn PTY session
-    let shell = configure_default_shell();
+    let shell = crate::shell::default_shell();
     let ai_config = crate::pty::shell_integration::ShellIntegrationConfig::for_ai_session();
     let pid = {
         let mut mgr = state.session_manager.lock().await;

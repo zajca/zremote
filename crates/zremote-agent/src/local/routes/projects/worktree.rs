@@ -72,6 +72,10 @@ fn status_for_code(code: &WorktreeErrorCode) -> StatusCode {
         | WorktreeErrorCode::Locked
         | WorktreeErrorCode::Unmerged
         | WorktreeErrorCode::InvalidRef => StatusCode::BAD_REQUEST,
+        // The project directory is gone — the caller has to fix the project
+        // registration, not the worktree inputs. 404 matches the semantics
+        // (the referenced resource no longer exists on this host).
+        WorktreeErrorCode::PathMissing => StatusCode::NOT_FOUND,
         WorktreeErrorCode::Internal | WorktreeErrorCode::Unknown => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -624,7 +628,7 @@ pub(super) async fn spawn_command_session(
     )
     .await?;
 
-    let shell = super::super::sessions::default_shell();
+    let shell = crate::shell::default_shell();
 
     {
         let parsed_host_id: Uuid = host_id_str

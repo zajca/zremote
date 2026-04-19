@@ -10,40 +10,6 @@ use crate::config::AgentConfig;
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Read the current user's login shell from the passwd database.
-fn login_shell_from_passwd() -> Option<String> {
-    let uid = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    let output = std::process::Command::new("getent")
-        .args(["passwd", uid.trim()])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    // passwd format: name:password:uid:gid:gecos:home:shell
-    let shell = output.trim().rsplit(':').next()?;
-    if shell.is_empty() {
-        return None;
-    }
-    Some(shell.to_string())
-}
-
-pub(crate) fn default_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| {
-        // Read login shell from passwd database instead of $SHELL.
-        // $SHELL can be overridden by nix develop to a non-interactive bash
-        // (without readline), which breaks PS1 escape processing in PTY sessions.
-        // The passwd entry always has the user's actual login shell.
-        login_shell_from_passwd()
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
-    })
-}
-
 /// Register with the server and return the assigned host ID.
 pub(super) async fn register(
     ws: &mut WsStream,

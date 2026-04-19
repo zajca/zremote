@@ -38,6 +38,7 @@ mod mcp;
 mod project;
 mod pty;
 mod session;
+mod shell;
 
 use std::path::PathBuf;
 use std::time::Duration;

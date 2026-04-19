@@ -13,37 +13,7 @@ use zremote_protocol::status::SessionStatus;
 
 use crate::local::state::LocalAppState;
 use crate::pty::shell_integration::ShellIntegrationConfig;
-
-/// Resolve the default shell from the passwd database, falling back to $SHELL
-/// and then `/bin/sh`.
-pub(crate) fn default_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SHELL.get_or_init(|| {
-        login_shell_from_passwd()
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()))
-    })
-}
-
-/// Read the current user's login shell from the passwd database.
-fn login_shell_from_passwd() -> Option<String> {
-    let uid = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    let output = std::process::Command::new("getent")
-        .args(["passwd", uid.trim()])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())?;
-    let shell = output.trim().rsplit(':').next()?;
-    if shell.is_empty() {
-        return None;
-    }
-    Some(shell.to_string())
-}
+use crate::shell::resolve_shell;
 
 /// Request body for creating a new session.
 #[derive(Debug, Deserialize)]
@@ -105,12 +75,17 @@ pub async fn create_session(
         (None, None)
     };
 
-    // Apply overrides from settings
-    let effective_shell = settings
-        .as_ref()
-        .and_then(|s| s.shell.as_deref())
-        .or(body.shell.as_deref())
-        .unwrap_or(default_shell());
+    // Apply overrides from settings. resolve_shell validates the path and
+    // falls back to the login shell if the requested one doesn't exist,
+    // so per-project settings remain portable across hosts (e.g. NixOS
+    // vs. FHS distros, where `/bin/zsh` is not guaranteed to exist).
+    let effective_shell_owned = resolve_shell(
+        settings
+            .as_ref()
+            .and_then(|s| s.shell.as_deref())
+            .or(body.shell.as_deref()),
+    );
+    let effective_shell: &str = &effective_shell_owned;
 
     let effective_working_dir = settings
         .as_ref()
