@@ -605,6 +605,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// RFC-007 §2.5.1 — the filesystem autocomplete endpoint
+    /// (`GET /api/fs/complete`) is a local-mode-only affordance. Exposing it
+    /// from the server-mode router would turn the agent into a cross-network
+    /// FS probe, which is an explicit security non-goal for v1.
+    #[tokio::test]
+    async fn server_router_does_not_expose_fs_complete() {
+        let state = test_state().await;
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::get("/api/fs/complete?prefix=/tmp/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn get_host_invalid_uuid_returns_bad_request() {
         let state = test_state().await;

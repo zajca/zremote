@@ -48,8 +48,30 @@ pub async fn add_project(
 
     validate_path_no_traversal(&body.path)?;
 
+    // Check host existence BEFORE the FS probe so an unknown host fails with
+    // 404 regardless of what path the caller supplied. Running the FS check
+    // first would otherwise mask the real "host not registered" error behind
+    // a 400 (bad path), which is what callers and tests key off of.
     if !sq::host_exists(&state.db, &host_id).await? {
         return Err(AppError::NotFound(format!("host {host_id} not found")));
+    }
+
+    // Reject non-existent paths up front. Without this, the DB row is created
+    // regardless, the sidebar shows a ghost project, and every later
+    // operation (git refresh, list branches, worktree create) fails with
+    // confusing errors — the user has to reach for sqlite to recover.
+    let candidate = Path::new(&body.path);
+    if !candidate.exists() {
+        return Err(AppError::BadRequest(format!(
+            "path does not exist on disk: {}",
+            body.path
+        )));
+    }
+    if !candidate.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "path is not a directory: {}",
+            body.path
+        )));
     }
 
     // Detect project info directly from filesystem on a blocking thread

@@ -528,6 +528,7 @@ fn code_as_str(code: &WorktreeErrorCode) -> &'static str {
         WorktreeErrorCode::Locked => "locked",
         WorktreeErrorCode::Unmerged => "unmerged",
         WorktreeErrorCode::InvalidRef => "invalid_ref",
+        WorktreeErrorCode::PathMissing => "path_missing",
         WorktreeErrorCode::Internal => "internal",
         WorktreeErrorCode::Unknown => "unknown",
     }

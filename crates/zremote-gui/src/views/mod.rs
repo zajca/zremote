@@ -1,6 +1,7 @@
 pub mod activity_panel;
 pub mod cc_widgets;
 pub mod command_palette;
+pub mod components;
 pub mod double_shift;
 pub mod fuzzy;
 pub mod help_modal;

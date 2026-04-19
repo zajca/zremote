@@ -29,7 +29,12 @@ impl CommandPalette {
             return;
         }
         if matches!(self.current_level(), Some(DrillDownLevel::PathInput { .. })) {
-            self.handle_path_input_key(event, cx);
+            // Path input is delegated to the `PathAutocompleteInput` entity —
+            // it owns focus and key handling. The palette only intercepts Esc
+            // to close (in case focus is on the outer container).
+            if event.keystroke.key.as_str() == "escape" {
+                self.dismiss(cx);
+            }
             return;
         }
 
@@ -336,7 +341,7 @@ impl CommandPalette {
                     .collect()
             };
             if let Some(host) = filtered.get(self.selected_index) {
-                self.enter_path_input(host.id.clone());
+                self.enter_path_input(host.id.clone(), cx);
                 cx.notify();
             }
             return;
@@ -361,70 +366,6 @@ impl CommandPalette {
         if let Some(ch) = &event.keystroke.key_char {
             self.query.push_str(ch);
             self.selected_index = 0;
-            cx.notify();
-        }
-    }
-
-    pub(super) fn handle_path_input_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
-
-        if key == "escape" {
-            self.dismiss(cx);
-            return;
-        }
-
-        if key == "left" && !mods.control && !mods.alt {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "enter" {
-            if !self.query.is_empty()
-                && let Some(DrillDownLevel::PathInput { host_id }) = self.current_level()
-            {
-                let host_id = host_id.clone();
-                let path = self.query.clone();
-                cx.emit(CommandPaletteEvent::AddProject { host_id, path });
-                cx.emit(CommandPaletteEvent::Close);
-            }
-            return;
-        }
-
-        // Paste from clipboard
-        if key == "v" && mods.control {
-            if let Some(text) = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .filter(|t| !t.is_empty())
-            {
-                self.query.push_str(&text);
-                cx.notify();
-            }
-            return;
-        }
-
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        // Printable characters
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
             cx.notify();
         }
     }

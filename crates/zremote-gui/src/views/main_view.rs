@@ -18,6 +18,7 @@ use crate::theme;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
+use crate::views::components::path_autocomplete::PathAutocompleteApi;
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
@@ -1074,14 +1075,18 @@ impl MainView {
 
         // Build snapshot from sidebar + persistence (Rc::clone = O(1), no data copying)
         let snapshot = self.sidebar.read(cx);
-        let (recent_sessions, recent_actions) = self
+        let (recent_sessions, recent_actions, recent_add_paths) = self
             .app_state
             .persistence
             .lock()
             .ok()
             .map(|p| {
                 let state = p.state();
-                (state.recent_sessions.clone(), state.recent_actions.clone())
+                (
+                    state.recent_sessions.clone(),
+                    state.recent_actions.clone(),
+                    state.recent_add_paths.clone(),
+                )
             })
             .unwrap_or_default();
         let cc_states = snapshot.cc_states().clone();
@@ -1099,7 +1104,9 @@ impl MainView {
             Rc::clone(snapshot.agent_profiles_rc()),
             Rc::clone(snapshot.agent_kinds_rc()),
         );
-        let palette = cx.new(|cx| CommandPalette::new(palette_snapshot, tab, cx));
+        let path_api: Arc<dyn PathAutocompleteApi> = Arc::new(self.app_state.api.clone());
+        let palette =
+            cx.new(|cx| CommandPalette::new(palette_snapshot, tab, path_api, recent_add_paths, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();
         self.command_palette = Some(palette);
         cx.notify();
@@ -1215,22 +1222,106 @@ impl MainView {
                     cx,
                 );
                 let api = self.app_state.api.clone();
-                let host_id = host_id.clone();
-                let path = path.clone();
-                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-                self.app_state.tokio_handle.spawn(async move {
-                    let req = zremote_client::AddProjectRequest { path };
-                    if let Err(e) = api.add_project(&host_id, &req).await {
-                        tracing::error!("Failed to add project: {e}");
-                    }
-                });
+                let handle = self.app_state.tokio_handle.clone();
+                let host_id_owned = host_id.clone();
+                let path_owned = path.clone();
+                let name = path.rsplit('/').next().unwrap_or(path).to_string();
                 self.show_toast(
                     &format!("Adding project: {name}"),
                     ToastLevel::Info,
                     Some(Icon::Folder),
-                    ctx,
+                    ctx.clone(),
                     cx,
                 );
+                let recent_path = path.clone();
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let result = handle
+                        .spawn(async move {
+                            let req = zremote_client::AddProjectRequest { path: path_owned };
+                            api.add_project(&host_id_owned, &req).await
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(Ok(())) => {
+                            // Only record the path in the LRU on success —
+                            // failed adds would otherwise surface as noise in
+                            // the next invocation's recent-path dropdown.
+                            if let Ok(mut p) = this.app_state.persistence.lock() {
+                                p.update(|s| s.push_recent_add_path(recent_path.clone()));
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            let msg = friendly_add_project_error(&e);
+                            tracing::warn!(error = %e, "add_project failed");
+                            this.show_toast(
+                                &msg,
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!(error = %join_err, "add_project task join failed");
+                            this.show_toast(
+                                "Failed to add project",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .detach();
+            }
+            CommandPaletteEvent::RemoveProject {
+                project_id,
+                project_name,
+            } => {
+                let ctx =
+                    self.resolve_toast_context(None, None, None, Some(project_id), None, None, cx);
+                let api = self.app_state.api.clone();
+                let handle = self.app_state.tokio_handle.clone();
+                let pid = project_id.clone();
+                let name = project_name.clone();
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let result = handle
+                        .spawn(async move { api.delete_project(&pid).await })
+                        .await;
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(Ok(())) => {
+                            this.show_toast(
+                                &format!("Removed project: {name}"),
+                                ToastLevel::Success,
+                                Some(Icon::Folder),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "delete_project failed");
+                            this.show_toast(
+                                "Failed to remove project",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!(error = %join_err, "delete_project task join failed");
+                            this.show_toast(
+                                "Failed to remove project",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .detach();
             }
             CommandPaletteEvent::Reconnect => {
                 if let Some(terminal) = &self.terminal {
@@ -2148,6 +2239,40 @@ fn read_bridge_port() -> Option<u16> {
         .join("bridge-port");
     let content = std::fs::read_to_string(&path).ok()?;
     content.trim().parse().ok()
+}
+
+/// Extract a user-facing error message from an `add_project` failure.
+/// Parses the server's structured `{error: {code, message}}` body when
+/// present and falls back to a status-based generic otherwise. 5xx bodies
+/// are intentionally scrubbed on the server side, so we show a generic
+/// "internal error" rather than leaking whatever escaped.
+fn friendly_add_project_error(err: &zremote_client::ApiError) -> String {
+    use zremote_client::ApiError;
+    match err {
+        ApiError::ServerError { status, message } => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(message)
+                && let Some(msg) = json
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                && !msg.is_empty()
+            {
+                if status.is_server_error() {
+                    return format!("Failed to add project ({status}): {msg}");
+                }
+                return format!("Cannot add project: {msg}");
+            }
+            if status.is_server_error() {
+                format!("Failed to add project ({status})")
+            } else {
+                format!("Cannot add project ({status})")
+            }
+        }
+        ApiError::Http(_) | ApiError::WebSocket(_) | ApiError::ChannelClosed => {
+            "Connection error — please try again".to_string()
+        }
+        _ => "Failed to add project".to_string(),
+    }
 }
 
 /// Read the bridge host_id from `~/.zremote/bridge-host-id`.

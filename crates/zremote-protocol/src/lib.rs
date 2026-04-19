@@ -3,6 +3,7 @@ pub mod agents;
 pub mod channel;
 pub mod claude;
 pub mod events;
+pub mod fs;
 pub mod knowledge;
 pub mod project;
 pub mod status;
@@ -15,6 +16,7 @@ pub use agents::{
 };
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
+pub use fs::{FsCompleteEntry, FsCompleteKind, FsCompleteResponse};
 pub use knowledge::*;
 pub use project::*;
 pub use status::*;

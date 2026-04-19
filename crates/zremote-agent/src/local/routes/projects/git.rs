@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use uuid::Uuid;
 use zremote_core::error::AppError;
 use zremote_core::queries::projects as q;
-use zremote_protocol::project::BranchList;
+use zremote_protocol::project::{BranchList, WorktreeError, WorktreeErrorCode};
 
 /// Maximum wall time for the blocking `git for-each-ref` + rev-list calls
 /// that back the branch listing endpoint. A pathological repo (huge ref
@@ -138,10 +138,28 @@ pub(crate) async fn list_branches_with_timeout(
     // handle` keeps ownership so we can abort on timeout.
     match tokio::time::timeout(timeout, &mut handle).await {
         Ok(join_result) => {
-            let result = join_result
-                .map_err(|e| AppError::Internal(format!("branch list task failed: {e}")))?
-                .map_err(|e| AppError::Internal(format!("failed to list branches: {e}")))?;
-            Ok(Json(result).into_response())
+            let join = join_result
+                .map_err(|e| AppError::Internal(format!("branch list task failed: {e}")))?;
+            match join {
+                Ok(result) => Ok(Json(result).into_response()),
+                Err(stderr) => {
+                    // Classify via the shared stderr→WorktreeError mapper so
+                    // "path missing" surfaces to the GUI/CLI as a structured
+                    // 404 with an actionable hint instead of a generic 500.
+                    let classified = WorktreeError::from_git_stderr(&stderr);
+                    if matches!(classified.code, WorktreeErrorCode::PathMissing) {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %stderr,
+                            "list_branches: project path missing"
+                        );
+                        return Ok((StatusCode::NOT_FOUND, Json(classified)).into_response());
+                    }
+                    Err(AppError::Internal(format!(
+                        "failed to list branches: {stderr}"
+                    )))
+                }
+            }
         }
         Err(_) => {
             handle.abort();

@@ -14,6 +14,13 @@ const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// GUI askpass) so a repo with a broken remote can't block the caller
 /// waiting for human input.
 fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
+    // `Command::spawn` fails with ENOENT both when the binary is missing AND
+    // when `current_dir` points at a nonexistent directory — the two are
+    // indistinguishable from the caller's perspective. Pre-check the path so
+    // the error message tells users the real problem.
+    if !path.exists() {
+        return Err(format!("path does not exist: {}", path.display()));
+    }
     let mut child = Command::new("git")
         .args(args)
         .current_dir(path)
@@ -991,6 +998,20 @@ upstream\tgit@github.com:org/repo.git (push)
     fn list_branches_non_git_returns_error() {
         let tmp = TempDir::new().unwrap();
         assert!(GitInspector::list_branches(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn run_git_reports_missing_path_clearly() {
+        // Previously `current_dir` on a nonexistent path produced ENOENT
+        // from spawn, which surfaced as "failed to spawn git: No such file
+        // or directory" — indistinguishable from git being missing from
+        // PATH. The pre-check must now report the real cause.
+        let missing = Path::new("/nonexistent-zremote-test-path-a29fbb11");
+        let err = run_git(missing, &["--version"]).expect_err("must fail");
+        assert!(
+            err.contains("path does not exist"),
+            "expected path-missing error, got: {err}"
+        );
     }
 
     #[test]

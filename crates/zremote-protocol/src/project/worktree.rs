@@ -20,6 +20,8 @@ pub enum WorktreeErrorCode {
     Unmerged,
     /// Supplied ref (branch, tag, SHA) could not be resolved by git.
     InvalidRef,
+    /// The project's path does not exist on disk (stale DB row, moved dir).
+    PathMissing,
     /// Catch-all for unexpected agent-side failures (I/O, permissions, etc).
     Internal,
     /// Forward-compat placeholder for codes added in future agent versions.
@@ -69,6 +71,18 @@ impl WorktreeError {
     pub fn from_git_stderr(stderr: &str) -> Self {
         let lower = stderr.to_lowercase();
         // Order matters: the more specific matches come first.
+        // Detect the "project directory missing" class before other matches —
+        // git doesn't produce this text itself (it's synthesised by the agent
+        // when `current_dir` would fail with ENOENT), but a stray "no such
+        // file or directory" from git itself is equally fatal and benefits
+        // from the same actionable hint.
+        if lower.contains("path does not exist") || lower.contains("no such file or directory") {
+            return Self::new(
+                WorktreeErrorCode::PathMissing,
+                "Project path no longer exists on disk. Remove the project and re-add it with the correct path.",
+                "The project directory was not found.",
+            );
+        }
         if lower.contains("is already checked out")
             || lower.contains("already used by worktree")
             || (lower.contains("already exists") && lower.contains("branch"))
@@ -204,6 +218,21 @@ mod tests {
     fn classify_falls_back_to_internal() {
         let err = WorktreeError::from_git_stderr("fatal: some bizarre failure we never saw");
         assert_eq!(err.code, WorktreeErrorCode::Internal);
+    }
+
+    #[test]
+    fn classify_path_missing_from_agent_precheck() {
+        let err = WorktreeError::from_git_stderr("path does not exist: /home/user/gone");
+        assert_eq!(err.code, WorktreeErrorCode::PathMissing);
+        assert!(err.hint.contains("no longer exists"));
+    }
+
+    #[test]
+    fn classify_path_missing_from_raw_enoent() {
+        let err = WorktreeError::from_git_stderr(
+            "failed to spawn git: No such file or directory (os error 2)",
+        );
+        assert_eq!(err.code, WorktreeErrorCode::PathMissing);
     }
 
     #[test]

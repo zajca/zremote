@@ -633,6 +633,76 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// Variant of [`Self::list_branches`] that surfaces a structured
+    /// [`WorktreeError`] when the agent returns one (currently `PathMissing`).
+    /// Falls back to the plain [`ApiError`] path for anything else.
+    pub async fn list_branches_structured(
+        &self,
+        project_id: &str,
+    ) -> Result<zremote_protocol::project::BranchList, crate::types::WorktreeCreateError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/projects/{}/git/branches",
+                self.base_url,
+                encode_path(project_id)
+            ))
+            .send()
+            .await
+            .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)))?;
+
+        if resp.status().is_success() {
+            return resp
+                .json()
+                .await
+                .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)));
+        }
+
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| crate::types::WorktreeCreateError::Api(ApiError::Http(e)))?;
+        if let Ok(err) = serde_json::from_slice::<crate::types::WorktreeError>(&bytes) {
+            return Err(crate::types::WorktreeCreateError::Structured(err));
+        }
+        let message = String::from_utf8_lossy(&bytes).into_owned();
+        Err(crate::types::WorktreeCreateError::Api(
+            ApiError::ServerError { status, message },
+        ))
+    }
+
+    /// Filesystem autocomplete (RFC-007 Phase 2.5). Returns directory
+    /// suggestions for a path-input prefix. Only available in local mode —
+    /// calling this against a server-mode deployment will return 404.
+    ///
+    /// 400 (invalid/relative prefix) and 404 (parent missing) are surfaced
+    /// through [`ApiError::ServerError`] with the body preserved in
+    /// `message`; callers that want the structured `error.code` can parse
+    /// the JSON out of that string.
+    pub async fn fs_complete(
+        &self,
+        prefix: &str,
+        kind: zremote_protocol::fs::FsCompleteKind,
+    ) -> Result<zremote_protocol::fs::FsCompleteResponse, ApiError> {
+        let kind_str = match kind {
+            zremote_protocol::fs::FsCompleteKind::Dir => "dir",
+            // `Any` is intentional scaffolding — not used by the current
+            // Add-Project / Worktree-Create flows but reserved for future
+            // callers that need file entries (e.g., file-picker flows).
+            // Keep the mapping wired so the wire format stays stable.
+            zremote_protocol::fs::FsCompleteKind::Any => "any",
+        };
+        let resp = self
+            .client
+            .get(format!("{}/api/fs/complete", self.base_url))
+            .query(&[("prefix", prefix), ("kind", kind_str)])
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Delete a worktree.
     pub async fn delete_worktree(
         &self,

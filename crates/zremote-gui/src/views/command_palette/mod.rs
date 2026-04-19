@@ -17,6 +17,7 @@ pub mod items;
 mod keybindings;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -24,6 +25,9 @@ use gpui::*;
 use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::cc_widgets;
+use crate::views::components::path_autocomplete::{
+    PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind,
+};
 use zremote_client::{Host, SessionStatus};
 
 pub use actions::PaletteAction;
@@ -144,6 +148,11 @@ pub enum CommandPaletteEvent {
         parent_project_id: Option<String>,
         host_id: Option<String>,
     },
+    /// Unregister a project (DB only, no FS changes).
+    RemoveProject {
+        project_id: String,
+        project_name: String,
+    },
     RecordRecentAction {
         action_key: String,
     },
@@ -189,6 +198,18 @@ pub struct CommandPalette {
     pub(super) results: PaletteResults,
     /// Cached tab counts to avoid rebuilding item lists during render.
     tab_counts: [usize; 4],
+    /// Shared HTTP client erased behind [`PathAutocompleteApi`], used when
+    /// spinning up the path-input entity for the Add Project flow.
+    path_autocomplete_api: Arc<dyn PathAutocompleteApi>,
+    /// LRU of recently-added project paths, passed to the path-input entity
+    /// as initial recent suggestions.
+    recent_add_paths: Vec<String>,
+    /// Live [`PathAutocompleteInput`] while the user is in `PathInput` state.
+    /// Created lazily on transition in, dropped on transition out.
+    path_input: Option<Entity<PathAutocompleteInput>>,
+    /// Subscription to `path_input`'s events. Retained so it is cancelled
+    /// when the palette or path-input is dropped.
+    path_input_subscription: Option<Subscription>,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +217,13 @@ pub struct CommandPalette {
 // ---------------------------------------------------------------------------
 
 impl CommandPalette {
-    pub fn new(snapshot: PaletteSnapshot, initial_tab: PaletteTab, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        snapshot: PaletteSnapshot,
+        initial_tab: PaletteTab,
+        path_autocomplete_api: Arc<dyn PathAutocompleteApi>,
+        recent_add_paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let session_items = build_session_items(&snapshot);
         let project_items = build_project_items(&snapshot);
@@ -222,6 +249,10 @@ impl CommandPalette {
             drill_items: Vec::new(),
             results: PaletteResults::Grouped(Vec::new()),
             tab_counts,
+            path_autocomplete_api,
+            recent_add_paths,
+            path_input: None,
+            path_input_subscription: None,
         };
         palette.recompute_results();
         palette
@@ -323,7 +354,43 @@ impl CommandPalette {
         self.push_drill_down(DrillDownLevel::HostPickerForProject);
     }
 
-    pub(super) fn enter_path_input(&mut self, host_id: String) {
+    pub(super) fn enter_path_input(&mut self, host_id: String, cx: &mut Context<Self>) {
+        let host_id_for_sub = host_id.clone();
+        let api = self.path_autocomplete_api.clone();
+        let recent = self.recent_add_paths.clone();
+        let path_entity = cx.new(|cx| {
+            PathAutocompleteInput::new(
+                api,
+                PathKind::Dir,
+                recent,
+                "Path to project directory (e.g. ~/code/myrepo)",
+                cx,
+            )
+        });
+        let subscription = cx.subscribe(
+            &path_entity,
+            move |this: &mut Self, _entity, event: &PathAutocompleteEvent, cx| match event {
+                PathAutocompleteEvent::Submit(path) => {
+                    let trimmed = path.trim();
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    cx.emit(CommandPaletteEvent::AddProject {
+                        host_id: host_id_for_sub.clone(),
+                        path: trimmed.to_string(),
+                    });
+                    cx.emit(CommandPaletteEvent::Close);
+                }
+                PathAutocompleteEvent::Cancel => {
+                    this.dismiss(cx);
+                }
+                PathAutocompleteEvent::SelectionChanged(_) => {
+                    cx.notify();
+                }
+            },
+        );
+        self.path_input = Some(path_entity);
+        self.path_input_subscription = Some(subscription);
         self.push_drill_down(DrillDownLevel::PathInput { host_id });
     }
 
@@ -345,7 +412,13 @@ impl CommandPalette {
     }
 
     pub(super) fn pop_drill_down(&mut self) -> bool {
-        if self.nav_stack.pop().is_some() {
+        if let Some(popped) = self.nav_stack.pop() {
+            if matches!(popped, DrillDownLevel::PathInput { .. }) {
+                // Drop the entity + subscription so the background debounce
+                // task is cancelled when the user leaves the path-input step.
+                self.path_input = None;
+                self.path_input_subscription = None;
+            }
             if let Some(saved) = self.nav_saved_state.pop() {
                 self.query = saved.query;
                 self.selected_index = saved.selected_index;
@@ -1068,6 +1141,7 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::RemoveProject { .. } => Icon::XCircle,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
@@ -1675,7 +1749,7 @@ impl CommandPalette {
                     )
                     .child(div().size(px(6.0)).rounded_full().bg(theme::success()))
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.enter_path_input(host_id.clone());
+                        this.enter_path_input(host_id.clone(), cx);
                         cx.notify();
                     })),
             );
@@ -1724,24 +1798,15 @@ impl CommandPalette {
         container
     }
 
-    fn render_path_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query_display = if self.query.is_empty() {
-            "/home/user/myproject...".to_string()
-        } else {
-            self.query.clone()
-        };
-        let query_is_empty = self.query.is_empty();
+    fn render_path_input(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let path_entity = self.path_input.clone();
 
         div()
             .id("command-palette-path-input")
-            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.handle_path_input_key(event, cx);
-            }))
             // Title
             .child(
                 div()
@@ -1756,59 +1821,17 @@ impl CommandPalette {
                     .text_color(theme::text_primary())
                     .child("Add Project"),
             )
-            // Input
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(40.0))
-                    .px(px(12.0))
-                    .gap(px(8.0))
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .child(
-                        icon(Icon::Folder)
-                            .size(px(14.0))
-                            .text_color(theme::text_tertiary()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(4.0))
-                            .bg(theme::bg_primary())
-                            .border_1()
-                            .border_color(theme::border())
-                            .text_size(px(13.0))
-                            .text_color(if query_is_empty {
-                                theme::text_tertiary()
-                            } else {
-                                theme::text_primary()
-                            })
-                            .child(query_display),
-                    ),
-            )
-            // Help text
+            // Input body: hand off to PathAutocompleteInput (which owns its
+            // focus, debounce, dropdown, and key handling).
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .py(px(32.0))
-                    .child(
-                        icon(Icon::Folder)
-                            .size(px(24.0))
-                            .text_color(theme::text_tertiary()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme::text_secondary())
-                            .child("Type the absolute path to the project directory"),
-                    ),
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(12.0))
+                    .when_some(path_entity, |d, e| d.child(e)),
             )
             // Footer
             .child(
@@ -1820,7 +1843,7 @@ impl CommandPalette {
                     .gap(px(12.0))
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(render_footer_hint("Left", "Back"))
+                    .child(render_footer_hint("Tab", "Complete"))
                     .child(render_footer_hint("Enter", "Add"))
                     .child(render_footer_hint("Esc", "Close")),
             )
@@ -2114,6 +2137,7 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::RemoveProject { .. } => Icon::XCircle,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
@@ -2207,6 +2231,7 @@ impl CommandPalette {
                 }
                 PaletteAction::Reconnect => Icon::Wifi,
                 PaletteAction::AddProject => Icon::Folder,
+                PaletteAction::RemoveProject { .. } => Icon::XCircle,
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
@@ -2302,6 +2327,21 @@ impl Focusable for CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In the path-input state, delegate focus to the child entity so its
+        // key handler receives keystrokes directly. For every other state the
+        // palette keeps focus itself.
+        if matches!(self.current_level(), Some(DrillDownLevel::PathInput { .. })) {
+            if let Some(path_entity) = &self.path_input {
+                let child_focus = path_entity.read(cx).focus_handle(cx);
+                if !child_focus.contains_focused(window, cx)
+                    && !self.focus_handle.contains_focused(window, cx)
+                {
+                    child_focus.focus(window);
+                }
+            }
+            return self.render_path_input(cx).into_any_element();
+        }
+
         if !self.focus_handle.is_focused(window) {
             self.focus_handle.focus(window);
         }
@@ -2315,9 +2355,6 @@ impl Render for CommandPalette {
             Some(DrillDownLevel::HostPickerForProject)
         ) {
             return self.render_host_picker_for_project(cx).into_any_element();
-        }
-        if matches!(self.current_level(), Some(DrillDownLevel::PathInput { .. })) {
-            return self.render_path_input(cx).into_any_element();
         }
 
         // Drill-down view

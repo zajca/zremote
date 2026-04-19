@@ -527,13 +527,18 @@ async fn add_project_host_not_found() {
     let fake_host = Uuid::new_v4();
     let app = build_test_router(state);
 
+    // Use `/tmp` (guaranteed to exist on the test host) so the host-not-found
+    // branch is isolated even if the ordering between host existence and
+    // path validation regresses in the future. If the path check ran first
+    // against a missing path, the test would see a 400 and miss the 404
+    // regression entirely.
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/hosts/{fake_host}/projects"))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"path": "/tmp/test"}"#))
+                .body(Body::from(r#"{"path": "/tmp"}"#))
                 .unwrap(),
         )
         .await
@@ -1040,6 +1045,68 @@ async fn add_project_empty_path_returns_bad_request() {
                 .uri(format!("/api/hosts/{host_id}/projects"))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"path": ""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn add_project_rejects_nonexistent_path() {
+    // Previously the agent accepted any string and inserted a ghost row; the
+    // user then couldn't list branches or create worktrees because every
+    // downstream git call failed with ENOENT. The endpoint must validate
+    // the path exists up front.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let app = build_test_router(state);
+
+    let bogus = "/nonexistent-zremote-project-path-e92d41f3";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/hosts/{host_id}/projects"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({ "path": bogus })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("does not exist"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn add_project_rejects_file_path() {
+    // A file path is treated the same as a missing one — we need a directory
+    // for git operations to make sense.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let file_path = tmp.path().to_str().unwrap().to_string();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/hosts/{host_id}/projects"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({ "path": file_path })).unwrap(),
+                ))
                 .unwrap(),
         )
         .await

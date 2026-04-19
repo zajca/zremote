@@ -22,6 +22,9 @@ use zremote_client::{
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::components::path_autocomplete::{
+    PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind,
+};
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
 /// Event emitted by the modal for `MainView` to react to.
@@ -75,10 +78,21 @@ pub struct WorktreeCreateModal {
 
     branch_input: String,
     base_ref_input: String,
-    path_input: String,
+    /// Path field is a `PathAutocompleteInput` view with filesystem dropdown and
+    /// Tab-completion. The buffer lives inside the entity — read it via
+    /// `self.path.read(cx).value(cx)` at submit time.
+    path: Entity<PathAutocompleteInput>,
     /// True once the user has hand-edited the path. Until then the modal keeps
     /// the path auto-synced with `branch_input` via [`suggest_worktree_path`].
     path_user_edited: bool,
+    /// Value most recently pushed into `path` by the auto-suggest sync. Used by
+    /// the `SelectionChanged` subscriber to distinguish a user keystroke from
+    /// the echo of our own `set_value` call (GPUI emits may be dispatched
+    /// asynchronously, so a plain boolean guard is racy).
+    last_auto_suggested_path: Option<String>,
+    /// Subscription to `PathAutocompleteEvent` emitted by `path`. Retained so
+    /// the subscription is cancelled when the modal is dropped.
+    _path_subscription: Subscription,
 
     active_field: ActiveField,
     mode: BranchMode,
@@ -124,6 +138,45 @@ impl WorktreeCreateModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let api: Arc<dyn PathAutocompleteApi> = Arc::new(app_state.api.clone());
+        let path = cx.new(|cx| {
+            PathAutocompleteInput::new(
+                api,
+                PathKind::Dir,
+                Vec::new(),
+                "Worktree directory path",
+                cx,
+            )
+        });
+        let path_subscription = cx.subscribe(
+            &path,
+            |this: &mut Self, _entity, event: &PathAutocompleteEvent, cx| match event {
+                PathAutocompleteEvent::Submit(_) => {
+                    this.submit(cx);
+                }
+                PathAutocompleteEvent::Cancel => {
+                    cx.emit(WorktreeCreateModalEvent::Close);
+                }
+                PathAutocompleteEvent::SelectionChanged(new_value) => {
+                    // If the incoming value matches the string we just pushed
+                    // via `set_value` from auto-suggest, this is the echo of
+                    // that programmatic write, not a user edit. Consume the
+                    // marker so the next matching value (a genuine user edit
+                    // back to the suggestion) is still counted.
+                    if this.last_auto_suggested_path.as_deref() == Some(new_value.as_str()) {
+                        this.last_auto_suggested_path = None;
+                        return;
+                    }
+                    this.path_user_edited = true;
+                    if let Some(err) = &this.last_error
+                        && err.code == WorktreeErrorCode::PathCollision
+                    {
+                        this.last_error = None;
+                    }
+                    cx.notify();
+                }
+            },
+        );
         let mut modal = Self {
             app_state,
             focus_handle,
@@ -133,8 +186,10 @@ impl WorktreeCreateModal {
             parent_host_id,
             branch_input: String::new(),
             base_ref_input: String::new(),
-            path_input: String::new(),
+            path,
             path_user_edited: false,
+            last_auto_suggested_path: None,
+            _path_subscription: path_subscription,
             active_field: ActiveField::Branch,
             mode: BranchMode::New,
             start_session: true,
@@ -227,14 +282,25 @@ impl WorktreeCreateModal {
         let project_id = self.parent_project_id.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = handle
-                .spawn(async move { api.list_branches(&project_id).await })
+                .spawn(async move { api.list_branches_structured(&project_id).await })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(list)) => {
                         this.branches = BranchesState::Loaded(list);
                     }
-                    Ok(Err(e)) => {
+                    Ok(Err(WorktreeCreateError::Structured(err))) => {
+                        // Promote structured errors (e.g. PathMissing) into
+                        // `last_error` so the modal shows the title + hint
+                        // instead of a generic "Unable to load branches".
+                        tracing::warn!(
+                            code = ?err.code,
+                            "list_branches returned structured error"
+                        );
+                        this.branches = BranchesState::Failed(err.hint.clone());
+                        this.last_error = Some(err);
+                    }
+                    Ok(Err(WorktreeCreateError::Api(e))) => {
                         tracing::warn!(error = %e, "failed to list branches for worktree modal");
                         this.branches =
                             BranchesState::Failed("Unable to load branches".to_string());
@@ -265,12 +331,13 @@ impl WorktreeCreateModal {
         self.progress = None;
         self.submitting = true;
 
+        let path_value = self.path.read(cx).value(cx);
         let req = CreateWorktreeRequest {
             branch: branch.to_string(),
-            path: if self.path_input.trim().is_empty() {
+            path: if path_value.trim().is_empty() {
                 None
             } else {
-                Some(self.path_input.trim().to_string())
+                Some(path_value.trim().to_string())
             },
             new_branch: matches!(self.mode, BranchMode::New),
             base_ref: {
@@ -341,15 +408,19 @@ impl WorktreeCreateModal {
             return true;
         }
 
+        // Keys for the Path field are handled by the `PathAutocompleteInput`
+        // child when it holds focus; the modal only reaches this point while
+        // Branch or BaseRef is active.
+        if matches!(self.active_field, ActiveField::Path) {
+            return false;
+        }
+
         if key == "backspace" {
-            let (buffer, is_branch, is_path) = self.active_buffer_mut_with_meta();
+            let buffer = self.active_buffer_mut();
             if !buffer.is_empty() {
                 buffer.pop();
-                if is_branch {
-                    self.after_branch_change();
-                }
-                if is_path {
-                    self.path_user_edited = true;
+                if matches!(self.active_field, ActiveField::Branch) {
+                    self.after_branch_change(cx);
                 }
                 cx.notify();
             }
@@ -361,13 +432,10 @@ impl WorktreeCreateModal {
         }
 
         if let Some(ch) = &event.keystroke.key_char {
-            let (buffer, is_branch, is_path) = self.active_buffer_mut_with_meta();
+            let buffer = self.active_buffer_mut();
             buffer.push_str(ch);
-            if is_branch {
-                self.after_branch_change();
-            }
-            if is_path {
-                self.path_user_edited = true;
+            if matches!(self.active_field, ActiveField::Branch) {
+                self.after_branch_change(cx);
             }
             cx.notify();
             return true;
@@ -375,15 +443,19 @@ impl WorktreeCreateModal {
         false
     }
 
-    fn active_buffer_mut_with_meta(&mut self) -> (&mut String, bool, bool) {
+    /// Returns the buffer backing the currently-active text field. Callers
+    /// must have already short-circuited `ActiveField::Path`, since the Path
+    /// field is backed by a `PathAutocompleteInput` child view and has no
+    /// buffer here — the fallback for that case is a harmless pointer to the
+    /// branch buffer.
+    fn active_buffer_mut(&mut self) -> &mut String {
         match self.active_field {
-            ActiveField::Branch => (&mut self.branch_input, true, false),
-            ActiveField::BaseRef => (&mut self.base_ref_input, false, false),
-            ActiveField::Path => (&mut self.path_input, false, true),
+            ActiveField::BaseRef => &mut self.base_ref_input,
+            ActiveField::Branch | ActiveField::Path => &mut self.branch_input,
         }
     }
 
-    fn after_branch_change(&mut self) {
+    fn after_branch_change(&mut self, cx: &mut Context<Self>) {
         // Clear stale branch-exists error if the user retyped.
         if let Some(err) = &self.last_error
             && err.code == WorktreeErrorCode::BranchExists
@@ -391,7 +463,12 @@ impl WorktreeCreateModal {
             self.last_error = None;
         }
         if !self.path_user_edited {
-            self.path_input = suggest_worktree_path(&self.parent_project_path, &self.branch_input);
+            let suggested = suggest_worktree_path(&self.parent_project_path, &self.branch_input);
+            // Remember the value we're about to write so the SelectionChanged
+            // echo from `set_value` isn't mis-classified as a user edit when
+            // GPUI dispatches the event after this closure returns.
+            self.last_auto_suggested_path = Some(suggested.clone());
+            self.path.update(cx, |p, cx| p.set_value(suggested, cx));
         }
     }
 
@@ -698,7 +775,7 @@ impl WorktreeCreateModal {
                                 })
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                                     this.branch_input = name_for_click.clone();
-                                    this.after_branch_change();
+                                    this.after_branch_change(cx);
                                     cx.notify();
                                 })),
                         );
@@ -769,18 +846,32 @@ impl WorktreeCreateModal {
             .as_ref()
             .filter(|e| e.code == WorktreeErrorCode::PathCollision)
             .map(|e| e.hint.clone());
-        div()
+        let mut block = div()
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(Self::render_label("Target path"))
-            .child(self.render_input_box(
-                ActiveField::Path,
-                &self.path_input,
-                "(auto from branch)",
-                err.as_deref(),
-                cx,
-            ))
+            .child(
+                div()
+                    .id("wt-path-label-row")
+                    .cursor_pointer()
+                    .child(Self::render_label("Target path"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.active_field = ActiveField::Path;
+                        let child_focus = this.path.read(cx).focus_handle(cx);
+                        child_focus.focus(window);
+                        cx.notify();
+                    })),
+            )
+            .child(self.path.clone());
+        if let Some(hint) = err {
+            block = block.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme::error())
+                    .child(hint),
+            );
+        }
+        block
     }
 
     fn render_progress(&self) -> Option<impl IntoElement> {
@@ -1009,8 +1100,24 @@ impl Focusable for WorktreeCreateModal {
 
 impl Render for WorktreeCreateModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+        // Delegate focus to the PathAutocompleteInput child when the Path
+        // field is active so its key handler receives keystrokes directly.
+        // For Branch / BaseRef the modal keeps focus itself since those two
+        // fields are plain buffers driven by `handle_key` below.
+        match self.active_field {
+            ActiveField::Path => {
+                let child_focus = self.path.read(cx).focus_handle(cx);
+                if !child_focus.contains_focused(window, cx)
+                    && !self.focus_handle.contains_focused(window, cx)
+                {
+                    child_focus.focus(window);
+                }
+            }
+            ActiveField::Branch | ActiveField::BaseRef => {
+                if !self.focus_handle.contains_focused(window, cx) {
+                    self.focus_handle.focus(window);
+                }
+            }
         }
 
         let body = div()
@@ -1107,6 +1214,7 @@ pub fn classify_error_title(code: &WorktreeErrorCode) -> &'static str {
         WorktreeErrorCode::Locked => "Worktree locked",
         WorktreeErrorCode::Unmerged => "Unmerged changes",
         WorktreeErrorCode::InvalidRef => "Invalid ref",
+        WorktreeErrorCode::PathMissing => "Project path not found",
         WorktreeErrorCode::Internal => "Agent error",
         WorktreeErrorCode::Unknown => "Worktree error",
     }
@@ -1165,6 +1273,7 @@ mod tests {
             WorktreeErrorCode::Locked,
             WorktreeErrorCode::Unmerged,
             WorktreeErrorCode::InvalidRef,
+            WorktreeErrorCode::PathMissing,
             WorktreeErrorCode::Internal,
             WorktreeErrorCode::Unknown,
         ] {
@@ -1202,5 +1311,30 @@ mod tests {
         assert_eq!(filtered[0].name, "main");
         let filtered = filter_branches(&branches, "   ");
         assert_eq!(filtered.len(), 3);
+    }
+
+    /// Smoke check over the auto-suggest contract the modal's `after_branch_change`
+    /// relies on once the path field is driven by `PathAutocompleteInput`: the
+    /// suggested value must remain deterministic for a given `(parent, branch)`
+    /// pair. The modal programmatically calls `path.set_value(suggested, cx)`
+    /// while `suppress_path_user_edit` is set, so regressions in
+    /// `suggest_worktree_path` would immediately break the branch→path sync
+    /// against a real user's input.
+    #[test]
+    fn worktree_create_modal_auto_suggest_is_stable_across_branch_edits() {
+        let parent = "/home/me/work/zremote";
+        // Typing one branch name and then another should produce two cleanly
+        // different paths (no lingering segments from the prior suggestion).
+        assert_eq!(
+            suggest_worktree_path(parent, "feature/a"),
+            "/home/me/work/zremote-feature-a"
+        );
+        assert_eq!(
+            suggest_worktree_path(parent, "hotfix"),
+            "/home/me/work/zremote-hotfix"
+        );
+        // Empty branch clears the suggestion so the component shows its
+        // placeholder instead of a stale `-` trailer.
+        assert_eq!(suggest_worktree_path(parent, ""), "");
     }
 }

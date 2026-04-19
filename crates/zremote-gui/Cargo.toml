@@ -6,6 +6,9 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true
@@ -14,6 +17,7 @@ chrono.workspace = true
 tracing.workspace = true
 url.workspace = true
 zremote-client.workspace = true
+zremote-protocol.workspace = true
 
 gpui.workspace = true
 alacritty_terminal.workspace = true

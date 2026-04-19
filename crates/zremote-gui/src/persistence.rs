@@ -76,6 +76,9 @@ const FORMAT_VERSION: u32 = 2;
 /// Default debounce window for the production worker.
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// Maximum entries retained in [`GuiState::recent_add_paths`].
+pub const RECENT_ADD_PATHS_CAP: usize = 20;
+
 /// Default deadline used by `Drop` to flush pending writes before shutdown.
 const DROP_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -104,6 +107,11 @@ pub struct GuiState {
     /// a <4-worktree parent hidden can make it stay hidden across restarts.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub collapsed_projects: HashSet<String>,
+    /// Most-recently-used paths from the "Add project" path autocomplete.
+    /// Front is newest; deduped on push; capped at [`RECENT_ADD_PATHS_CAP`].
+    /// Stored as-given by the caller (no canonicalization).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_add_paths: Vec<String>,
 }
 
 impl GuiState {
@@ -117,6 +125,22 @@ impl GuiState {
             && !self.activity_panel_visible
             && self.expanded_projects.is_empty()
             && self.collapsed_projects.is_empty()
+            && self.recent_add_paths.is_empty()
+    }
+
+    /// Record a path entered in the "Add project" autocomplete: dedupe against
+    /// any existing equal entry, push to the front, and cap the list at
+    /// [`RECENT_ADD_PATHS_CAP`]. The path is stored as-given — callers that
+    /// want canonicalization must do it themselves.
+    pub fn push_recent_add_path(&mut self, path: String) {
+        self.recent_add_paths.retain(|p| p != &path);
+        self.recent_add_paths.insert(0, path);
+        self.recent_add_paths.truncate(RECENT_ADD_PATHS_CAP);
+    }
+
+    #[must_use]
+    pub fn recent_add_paths(&self) -> &[String] {
+        &self.recent_add_paths
     }
 }
 
@@ -1118,6 +1142,7 @@ mod tests {
             activity_panel_visible: false,
             expanded_projects: HashSet::new(),
             collapsed_projects: HashSet::new(),
+            recent_add_paths: Vec::new(),
         };
 
         FileWriter.write(&path, &state).expect("write");
@@ -1325,5 +1350,55 @@ mod tests {
         }
         let reloaded = load_state_from_disk(&path2);
         assert!(reloaded.collapsed_projects.contains("pa"));
+    }
+
+    #[test]
+    fn push_recent_add_path_adds_to_front() {
+        let mut state = GuiState::default();
+        state.push_recent_add_path("a".to_string());
+        state.push_recent_add_path("b".to_string());
+        assert_eq!(
+            state.recent_add_paths(),
+            &["b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn push_recent_add_path_dedupes() {
+        let mut state = GuiState::default();
+        state.push_recent_add_path("a".to_string());
+        state.push_recent_add_path("b".to_string());
+        state.push_recent_add_path("a".to_string());
+        assert_eq!(
+            state.recent_add_paths(),
+            &["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn push_recent_add_path_trims_to_20() {
+        let mut state = GuiState::default();
+        for i in 0..25 {
+            state.push_recent_add_path(format!("/path/{i}"));
+        }
+        assert_eq!(state.recent_add_paths().len(), RECENT_ADD_PATHS_CAP);
+        assert_eq!(state.recent_add_paths()[0], "/path/24");
+        // The 5 oldest pushes must have fallen off the back.
+        assert!(!state.recent_add_paths().iter().any(|p| p == "/path/0"));
+        assert!(!state.recent_add_paths().iter().any(|p| p == "/path/4"));
+        // The 20 newest must still be present.
+        assert_eq!(
+            state.recent_add_paths()[RECENT_ADD_PATHS_CAP - 1],
+            "/path/5"
+        );
+    }
+
+    #[test]
+    fn deserialize_without_recent_add_paths_field() {
+        // A state blob written before recent_add_paths existed must still
+        // load with an empty vec for the new field (serde(default)).
+        let legacy_json = r#"{"version":2,"recent_sessions":[]}"#;
+        let state: GuiState = serde_json::from_str(legacy_json).unwrap();
+        assert!(state.recent_add_paths().is_empty());
     }
 }

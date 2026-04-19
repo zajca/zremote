@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use zremote_core::request_id::request_id_middleware;
 
@@ -45,6 +44,10 @@ pub(crate) fn build_router(
     let router = Router::new()
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
+        // Filesystem autocomplete — LOCAL MODE ONLY (RFC-007 §2.5.1).
+        // The server-mode router intentionally does NOT register this
+        // endpoint: FS probing across the network is out of scope for v1.
+        .route("/api/fs/complete", get(routes::fs::fs_complete))
         // Hosts endpoints (synthetic local host)
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route("/api/hosts/{host_id}", get(routes::hosts::get_host))
@@ -292,8 +295,70 @@ pub(crate) fn build_router(
         .route("/ws/events", get(routes::events::ws_handler))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(request_id_middleware))
-        .layer(CorsLayer::permissive())
+        // No CORS layer: the GUI uses reqwest (not a browser) so cross-origin
+        // preflight is irrelevant. `CorsLayer::permissive()` previously enabled
+        // any web origin to probe the local API, which is a needless attack
+        // surface on a 127.0.0.1 trust boundary. If a browser-based consumer
+        // is ever added in the future, register CORS on a scoped sub-router
+        // (e.g., just the specific endpoints that need it) instead of here.
         .with_state(state);
 
     Ok(router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use crate::local::state::LocalAppState;
+
+    async fn test_state() -> std::sync::Arc<LocalAppState> {
+        let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        let shutdown = CancellationToken::new();
+        LocalAppState::new(
+            pool,
+            "test".to_string(),
+            Uuid::new_v4(),
+            shutdown,
+            crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp/zremote-cors-test"),
+            Uuid::new_v4(),
+        )
+    }
+
+    /// Verify the local router does NOT echo permissive CORS headers in
+    /// response to a cross-origin probe. With `CorsLayer::permissive()`
+    /// removed, an `Origin: http://evil.example` request should complete
+    /// without any `Access-Control-Allow-*` headers — a browser would then
+    /// refuse to expose the response to the calling page.
+    #[tokio::test]
+    async fn local_router_does_not_echo_permissive_cors_headers() {
+        let state = test_state().await;
+        let router = build_router(state).unwrap();
+
+        let response = router
+            .oneshot(
+                Request::get("/health")
+                    .header("origin", "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "local router must not echo Access-Control-Allow-Origin — \
+             CorsLayer::permissive() should be absent"
+        );
+    }
 }

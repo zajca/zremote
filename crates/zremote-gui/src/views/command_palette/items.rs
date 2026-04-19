@@ -403,6 +403,15 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
             subtitle: String::new(),
             selectable: true,
         });
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::RemoveProject {
+                project_id: p.id.clone(),
+                project_name: p.name.clone(),
+            }),
+            title: format!("Remove Project: {}", p.name),
+            subtitle: p.path.clone(),
+            selectable: true,
+        });
     }
 
     if snapshot.mode == "server" {

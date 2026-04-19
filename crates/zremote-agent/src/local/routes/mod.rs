@@ -5,6 +5,7 @@ pub mod channel;
 pub mod claude_sessions;
 pub mod config;
 pub mod events;
+pub mod fs;
 pub mod health;
 pub mod hosts;
 pub mod knowledge;

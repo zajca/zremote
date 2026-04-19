@@ -33,6 +33,12 @@ pub enum PaletteAction {
     },
     SwitchSession,
     AddProject,
+    /// Remove a project registration (and its worktree children / session
+    /// history). Does NOT touch the filesystem — it's a DB unregister only.
+    RemoveProject {
+        project_id: String,
+        project_name: String,
+    },
     /// Launch an agent. If `host_id` + `working_dir` are provided, the launch
     /// skips the resolver and targets that project directly — used from the
     /// project drill-down where the target is already known. Otherwise the
@@ -72,6 +78,7 @@ impl PaletteAction {
             Self::SwitchToSession { .. } => "SwitchToSession",
             Self::SwitchSession => "SwitchSession",
             Self::AddProject => "AddProject",
+            Self::RemoveProject { .. } => "RemoveProject",
             Self::StartAgent { .. } => "StartAgent",
             Self::ManageAgentProfiles => "ManageAgentProfiles",
             Self::NewWorktree { .. } => "NewWorktree",
@@ -168,7 +175,7 @@ impl CommandPalette {
                         let online = self.snapshot.online_hosts();
                         if is_local || online.len() == 1 {
                             if let Some(host) = online.first() {
-                                self.enter_path_input(host.id.clone());
+                                self.enter_path_input(host.id.clone(), cx);
                                 cx.notify();
                                 return;
                             }
@@ -202,6 +209,15 @@ impl CommandPalette {
                         cx.emit(CommandPaletteEvent::NewWorktree {
                             parent_project_id: parent_project_id.clone(),
                             host_id: host_id.clone(),
+                        });
+                    }
+                    PaletteAction::RemoveProject {
+                        project_id,
+                        project_name,
+                    } => {
+                        cx.emit(CommandPaletteEvent::RemoveProject {
+                            project_id: project_id.clone(),
+                            project_name: project_name.clone(),
                         });
                     }
                 }
@@ -257,6 +273,10 @@ mod tests {
             PaletteAction::NewWorktree {
                 parent_project_id: None,
                 host_id: None,
+            },
+            PaletteAction::RemoveProject {
+                project_id: "a".into(),
+                project_name: "a".into(),
             },
         ];
         let keys: std::collections::HashSet<&str> =
