@@ -1,6 +1,6 @@
 //! Connection resolution: server URL and host ID resolution.
 
-use zremote_client::{ApiClient, ApiError, Host};
+use zremote_client::{ApiClient, ApiError, Host, Session};
 
 use crate::GlobalOpts;
 
@@ -73,6 +73,25 @@ impl ConnectionResolver {
         }
     }
 
+    /// Resolve a session ID or UUID prefix to a full UUID.
+    ///
+    /// Accepts a full UUID or a prefix that uniquely matches one session for the
+    /// resolved host. Mirrors the prefix-matching UX of `session list`, which
+    /// truncates IDs to 8 chars.
+    pub async fn resolve_session_id(
+        &self,
+        client: &ApiClient,
+        input: &str,
+    ) -> Result<String, CliConnectionError> {
+        let host_id = self.resolve_host_id(client).await?;
+        let sessions = client
+            .list_sessions(&host_id)
+            .await
+            .map_err(CliConnectionError::Api)?;
+
+        match_session_prefix(&sessions, input)
+    }
+
     async fn resolve_by_prefix(
         &self,
         client: &ApiClient,
@@ -113,6 +132,25 @@ impl ConnectionResolver {
     }
 }
 
+/// Filter `sessions` by ID prefix (case-insensitive).
+///
+/// Returns `Ok(full_id)` when exactly one session matches, else a typed error.
+fn match_session_prefix(sessions: &[Session], input: &str) -> Result<String, CliConnectionError> {
+    let input_lower = input.to_lowercase();
+    let matches: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.id.to_lowercase().starts_with(&input_lower))
+        .collect();
+
+    match matches.len() {
+        0 => Err(CliConnectionError::SessionNotFound(input.to_string())),
+        1 => Ok(matches[0].id.clone()),
+        _ => Err(CliConnectionError::AmbiguousSession {
+            matches: matches.iter().map(|s| s.id.clone()).collect(),
+        }),
+    }
+}
+
 /// Errors specific to connection/host resolution.
 #[derive(Debug)]
 pub enum CliConnectionError {
@@ -121,6 +159,8 @@ pub enum CliConnectionError {
     NoHostsFound,
     HostNotFound(String),
     AmbiguousHost { matches: Vec<String> },
+    SessionNotFound(String),
+    AmbiguousSession { matches: Vec<String> },
 }
 
 impl std::fmt::Display for CliConnectionError {
@@ -141,6 +181,81 @@ impl std::fmt::Display for CliConnectionError {
                 }
                 Ok(())
             }
+            Self::SessionNotFound(prefix) => {
+                write!(f, "no session matching '{prefix}' found")
+            }
+            Self::AmbiguousSession { matches } => {
+                write!(f, "ambiguous session — multiple matches:")?;
+                for m in matches {
+                    write!(f, "\n  {m}")?;
+                }
+                Ok(())
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zremote_client::SessionStatus;
+
+    fn mk_session(id: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            host_id: "host".to_string(),
+            name: None,
+            shell: None,
+            status: SessionStatus::Active,
+            working_dir: None,
+            project_id: None,
+            pid: None,
+            exit_code: None,
+            created_at: String::new(),
+            closed_at: None,
+        }
+    }
+
+    #[test]
+    fn prefix_unique_match() {
+        let sessions = vec![
+            mk_session("de683bd4-1111-2222-3333-444455556666"),
+            mk_session("99999999-aaaa-bbbb-cccc-dddddddddddd"),
+        ];
+        let resolved = match_session_prefix(&sessions, "de683bd4").unwrap();
+        assert_eq!(resolved, "de683bd4-1111-2222-3333-444455556666");
+    }
+
+    #[test]
+    fn prefix_case_insensitive() {
+        let sessions = vec![mk_session("DE683BD4-1111-2222-3333-444455556666")];
+        let resolved = match_session_prefix(&sessions, "de683bd4").unwrap();
+        assert_eq!(resolved, "DE683BD4-1111-2222-3333-444455556666");
+    }
+
+    #[test]
+    fn prefix_no_match() {
+        let sessions = vec![mk_session("de683bd4-1111-2222-3333-444455556666")];
+        let err = match_session_prefix(&sessions, "ffffffff").unwrap_err();
+        assert!(matches!(err, CliConnectionError::SessionNotFound(_)));
+    }
+
+    #[test]
+    fn prefix_ambiguous_match() {
+        let sessions = vec![
+            mk_session("de683bd4-1111-2222-3333-444455556666"),
+            mk_session("de683bd4-ffff-0000-0000-000000000000"),
+        ];
+        let err = match_session_prefix(&sessions, "de683bd4").unwrap_err();
+        match err {
+            CliConnectionError::AmbiguousSession { matches } => assert_eq!(matches.len(), 2),
+            other => panic!("expected AmbiguousSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_empty_sessions() {
+        let err = match_session_prefix(&[], "de683bd4").unwrap_err();
+        assert!(matches!(err, CliConnectionError::SessionNotFound(_)));
     }
 }

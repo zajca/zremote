@@ -4,7 +4,7 @@ use std::io::Write;
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
-use zremote_client::{ApiClient, TerminalEvent, TerminalInput};
+use zremote_client::{ApiClient, TerminalEvent, TerminalInput, flume};
 
 /// Attach to a terminal session interactively.
 ///
@@ -38,7 +38,7 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
     let resize_tx = session.resize_tx.clone();
 
     // Input task: read crossterm events and forward to WebSocket
-    let input_handle = tokio::spawn(async move {
+    let mut input_handle = tokio::spawn(async move {
         let mut reader = EventStream::new();
         let mut escape_state = EscapeState::AfterNewline; // start as if after newline
 
@@ -74,50 +74,91 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
         DetachReason::InputClosed
     });
 
-    // Output loop: read from WebSocket and write to stdout
+    // Output loop: read from WebSocket and write to stdout. Also races the
+    // input task so that a `~.` escape (which makes the input task return
+    // `DetachReason::UserDetach`) tears down the output loop as well —
+    // otherwise the user's terminal would stay attached until the remote
+    // session closed or the WS disconnected.
     let mut stdout = std::io::stdout();
-    let exit_code = loop {
-        match session.output_rx.recv_async().await {
-            Ok(TerminalEvent::Output(data) | TerminalEvent::PaneOutput { data, .. }) => {
-                let _ = stdout.write_all(&data);
-                let _ = stdout.flush();
-            }
-            Ok(TerminalEvent::SessionClosed { exit_code }) => {
-                break exit_code.unwrap_or(0);
-            }
-            Ok(TerminalEvent::Disconnected) | Err(_) => {
-                break 1;
-            }
-            Ok(TerminalEvent::SessionSuspended) => {
-                let msg = b"\r\n[session suspended]\r\n";
-                let _ = stdout.write_all(msg);
-                let _ = stdout.flush();
-            }
-            Ok(TerminalEvent::SessionResumed) => {
-                let msg = b"\r\n[session resumed]\r\n";
-                let _ = stdout.write_all(msg);
-                let _ = stdout.flush();
-            }
-            Ok(TerminalEvent::Error { message }) => {
-                let msg = format!("\r\n[error: {message}]\r\n");
-                let _ = stdout.write_all(msg.as_bytes());
-                let _ = stdout.flush();
-            }
-            Ok(_) => {} // Scrollback, pane events — ignore in CLI
-        }
-    };
+    let outcome = run_output_loop(&session.output_rx, &mut input_handle, &mut stdout).await;
 
-    // Cancel input task
+    // Cancel input task if it is still running (only true for output-driven
+    // exits; a `UserDetach` outcome means the task already completed).
     input_handle.abort();
+    let _ = (&mut input_handle).await;
 
-    // Check if input task requested detach
-    if let Ok(DetachReason::UserDetach) = input_handle.await {
-        let _ = stdout.write_all(b"\r\n[detached]\r\n");
-        let _ = stdout.flush();
-        return 0;
+    match outcome {
+        LoopOutcome::UserDetach => {
+            let _ = stdout.write_all(b"\r\n[detached]\r\n");
+            let _ = stdout.flush();
+            0
+        }
+        LoopOutcome::Exit(code) => code,
     }
+}
 
-    exit_code
+/// Result of the combined output + input-task select loop.
+#[derive(Debug, PartialEq, Eq)]
+enum LoopOutcome {
+    /// User typed `~.` — input task returned `UserDetach`.
+    UserDetach,
+    /// Session ended via WS event, disconnect, or channel error.
+    Exit(i32),
+}
+
+/// Core attach select loop: read terminal events and write to `stdout`,
+/// exiting either when the session terminates or when the input task
+/// completes with `DetachReason::UserDetach`.
+///
+/// Extracted from [`run_attach`] so it can be exercised in unit tests
+/// without a live WebSocket or real stdin. The loop takes a mutable
+/// reference to the input task's `JoinHandle` so the caller retains
+/// ownership for post-loop cleanup (`abort` + `await`).
+async fn run_output_loop<W: Write>(
+    output_rx: &flume::Receiver<TerminalEvent>,
+    input_handle: &mut tokio::task::JoinHandle<DetachReason>,
+    stdout: &mut W,
+) -> LoopOutcome {
+    loop {
+        tokio::select! {
+            biased;
+            // If the input task finishes first with UserDetach, exit the
+            // loop so the outer function can print "[detached]" and return.
+            // An InputClosed / panic falls through to treat as regular exit.
+            join_result = &mut *input_handle => {
+                return match join_result {
+                    Ok(DetachReason::UserDetach) => LoopOutcome::UserDetach,
+                    _ => LoopOutcome::Exit(0),
+                };
+            }
+            recv = output_rx.recv_async() => match recv {
+                Ok(TerminalEvent::Output(data) | TerminalEvent::PaneOutput { data, .. }) => {
+                    let _ = stdout.write_all(&data);
+                    let _ = stdout.flush();
+                }
+                Ok(TerminalEvent::SessionClosed { exit_code }) => {
+                    return LoopOutcome::Exit(exit_code.unwrap_or(0));
+                }
+                Ok(TerminalEvent::Disconnected) | Err(_) => {
+                    return LoopOutcome::Exit(1);
+                }
+                Ok(TerminalEvent::SessionSuspended) => {
+                    let _ = stdout.write_all(b"\r\n[session suspended]\r\n");
+                    let _ = stdout.flush();
+                }
+                Ok(TerminalEvent::SessionResumed) => {
+                    let _ = stdout.write_all(b"\r\n[session resumed]\r\n");
+                    let _ = stdout.flush();
+                }
+                Ok(TerminalEvent::Error { message }) => {
+                    let msg = format!("\r\n[error: {message}]\r\n");
+                    let _ = stdout.write_all(msg.as_bytes());
+                    let _ = stdout.flush();
+                }
+                Ok(_) => {} // Scrollback, pane events — ignore in CLI
+            },
+        }
+    }
 }
 
 /// RAII guard to restore terminal mode on drop.
@@ -510,5 +551,63 @@ mod tests {
         assert_eq!(csi_modifier(KeyModifiers::ALT), 3);
         assert_eq!(csi_modifier(KeyModifiers::CONTROL), 5);
         assert_eq!(csi_modifier(KeyModifiers::SHIFT | KeyModifiers::ALT), 4);
+    }
+
+    // Regression test for the `~.` detach bug: when the input task returns
+    // `DetachReason::UserDetach`, the output loop must exit even though the
+    // output channel is still open and would otherwise block forever.
+    #[tokio::test]
+    async fn output_loop_exits_on_user_detach() {
+        let (tx, rx) = flume::bounded::<TerminalEvent>(8);
+        // Keep the sender alive so the channel does NOT close — this models
+        // the real-world case where the WS is still streaming PTY output
+        // while the user types `~.`.
+        let _keep_alive = tx.clone();
+
+        // Input task that immediately signals a user-initiated detach.
+        let mut input_handle = tokio::spawn(async { DetachReason::UserDetach });
+
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_output_loop(&rx, &mut input_handle, &mut out),
+        )
+        .await
+        .expect("run_output_loop must exit when input task returns UserDetach");
+
+        assert_eq!(outcome, LoopOutcome::UserDetach);
+        // No output bytes should have been written for a bare detach.
+        assert!(out.is_empty());
+    }
+
+    // The output loop must still exit on SessionClosed when the input task
+    // is still running (the normal "remote process exited" path).
+    #[tokio::test]
+    async fn output_loop_exits_on_session_closed() {
+        let (tx, rx) = flume::bounded::<TerminalEvent>(8);
+        // Input task that never resolves, so only the output channel can
+        // drive loop termination.
+        let mut input_handle = tokio::spawn(async {
+            futures_util::future::pending::<()>().await;
+            DetachReason::InputClosed
+        });
+
+        tx.send_async(TerminalEvent::SessionClosed {
+            exit_code: Some(42),
+        })
+        .await
+        .unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_output_loop(&rx, &mut input_handle, &mut out),
+        )
+        .await
+        .expect("run_output_loop must exit on SessionClosed");
+
+        assert_eq!(outcome, LoopOutcome::Exit(42));
+        input_handle.abort();
+        let _ = input_handle.await;
     }
 }
