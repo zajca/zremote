@@ -265,6 +265,7 @@ mod tests {
             agentic: AgenticSettings::default(),
             actions: vec![],
             worktree: None,
+            hooks: None,
             linear: None,
             prompts: vec![],
             claude: None,
