@@ -192,8 +192,27 @@ async fn handle_terminal_connection(
     session_id_str: String,
     state: Arc<LocalAppState>,
 ) {
-    let Ok(session_id) = session_id_str.parse() else {
+    // A UUID is 36 chars; cap the echoed path segment before any allocation
+    // work (format! + JSON) to bound memory on malformed/malicious requests.
+    const MAX_SESSION_ID_LEN: usize = 64;
+    let (parsed, echoed) = if session_id_str.len() > MAX_SESSION_ID_LEN {
+        (Err(()), "<too long>".to_string())
+    } else {
+        (
+            session_id_str.parse::<uuid::Uuid>().map_err(|_| ()),
+            session_id_str.clone(),
+        )
+    };
+    let Ok(session_id) = parsed else {
         let mut socket = socket;
+        let err = BrowserMessage::Error {
+            message: format!("invalid session id '{echoed}': expected UUID"),
+        };
+        if let Ok(json) = serde_json::to_string(&err) {
+            let _ = socket
+                .send(axum::extract::ws::Message::Text(json.into()))
+                .await;
+        }
         let _ = socket.send(axum::extract::ws::Message::Close(None)).await;
         return;
     };

@@ -130,24 +130,15 @@ pub async fn run(
                 }
             }
         }
-        SessionCommand::Get { session_id } => match client.get_session(&session_id).await {
-            Ok(session) => {
-                println!("{}", fmt.session(&session));
-                0
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        },
-        SessionCommand::Rename {
-            session_id,
-            new_name,
-        } => {
-            let req = UpdateSessionRequest {
-                name: Some(new_name),
+        SessionCommand::Get { session_id } => {
+            let full_id = match resolver.resolve_session_id(client, &session_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
             };
-            match client.update_session(&session_id, &req).await {
+            match client.get_session(&full_id).await {
                 Ok(session) => {
                     println!("{}", fmt.session(&session));
                     0
@@ -158,28 +149,78 @@ pub async fn run(
                 }
             }
         }
-        SessionCommand::Close { session_id } => match client.close_session(&session_id).await {
-            Ok(()) => {
-                println!("Session {session_id} closed.");
-                0
+        SessionCommand::Rename {
+            session_id,
+            new_name,
+        } => {
+            let full_id = match resolver.resolve_session_id(client, &session_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let req = UpdateSessionRequest {
+                name: Some(new_name),
+            };
+            match client.update_session(&full_id, &req).await {
+                Ok(session) => {
+                    println!("{}", fmt.session(&session));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
+        }
+        SessionCommand::Close { session_id } => {
+            let full_id = match resolver.resolve_session_id(client, &session_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            match client.close_session(&full_id).await {
+                Ok(()) => {
+                    println!("Session {full_id} closed.");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
             }
-        },
-        SessionCommand::Purge { session_id } => match client.purge_session(&session_id).await {
-            Ok(()) => {
-                println!("Session {session_id} purged.");
-                0
+        }
+        SessionCommand::Purge { session_id } => {
+            let full_id = match resolver.resolve_session_id(client, &session_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            match client.purge_session(&full_id).await {
+                Ok(()) => {
+                    println!("Session {full_id} purged.");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        },
+        }
         SessionCommand::Attach { session_id } => {
-            crate::terminal::run_attach(client, &session_id).await
+            let full_id = match resolver.resolve_session_id(client, &session_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            crate::terminal::run_attach(client, &full_id).await
         }
     }
 }
