@@ -1,7 +1,7 @@
 # RFC-008: Docker Compose Integration for Projects
 
 **Status:** Draft
-**Date:** 2026-04-19
+**Date:** 2026-04-20
 **Author:** team-lead@rfc-docker-compose
 
 ## Problem Statement
@@ -25,6 +25,7 @@ We want first-class Compose control inside the project panel, available symmetri
 4. **No long-running child processes inside request handlers.** `up`, `down`, `restart` finish quickly and return. `logs -f` and `events` are owned by a background task whose lifetime is tied to the WebSocket client.
 5. **Safety.** Never execute arbitrary user-supplied args. Service names and file paths are validated. `docker` binary is located once via `which`; not configurable via HTTP.
 6. **Discoverability.** Scanner marks a project as "has Compose" and the GUI shows a new Compose tab per project.
+7. **Worktree-aware.** Each git worktree is an independent project row today (RFC-007). Compose must: (a) isolate container/volume/network namespaces per worktree so a main-repo stack and a worktree stack can coexist on the same host; (b) optionally inherit compose files from the parent repo when the worktree does not carry its own; (c) expose both main repo and all worktrees in a single GUI "stacks overview" so the user can see what's running where.
 
 ## Non-Goals
 
@@ -34,6 +35,135 @@ We want first-class Compose control inside the project panel, available symmetri
 - Windows-specific behaviour (stdin PTY quirks). Linux + macOS only in this RFC.
 - Editing compose files via the GUI. View-only for now; user edits in their editor.
 - Remote Docker contexts (`DOCKER_HOST=ssh://...`). Docker runs on the same host as the agent.
+- Orchestrating a *single* compose stack across multiple worktrees (one stack shared by all) — out of scope; every worktree that opts in runs an isolated stack.
+
+## Worktree Handling (design overview)
+
+This subsection is the main answer to: "what happens when a project is a git worktree?"
+
+### Project topology recap
+
+`ProjectRow` today (`crates/zremote-core/src/queries/projects.rs:9-42`) stores each git worktree as its own row with `parent_project_id` pointing at the main repo. The filesystem path is absolute and unique per worktree. Scanner discovers worktrees either by walking `.git/worktrees/*` of the main repo or by encountering them as standalone trees during scan (`crates/zremote-agent/src/project/scanner.rs`).
+
+### Decisions
+
+1. **Container / volume / network isolation per worktree** (mandatory).
+
+   Compose's default `COMPOSE_PROJECT_NAME` is the directory basename. For worktrees living under `.claude/worktrees/<branch-slug>/`, the basename is `<branch-slug>` — readable but not guaranteed unique across repos on the same host. We *override* the project name deterministically:
+
+   ```
+   COMPOSE_PROJECT_NAME = "zremote-" + short_hash(project.id)
+   ```
+
+   where `short_hash` is the first 10 hex chars of SHA-256 of the project UUID. This is set via the `-p` flag on every `docker compose` invocation (also via env when piping to streams). Effect:
+   - Main repo and its worktrees get different project names → separate containers, separate implicit networks, separate named volumes.
+   - Two ZRemote installations pointing at the same filesystem path (rare) stay isolated by UUID.
+   - The user-visible "compose project name" displayed in the GUI is still the directory basename; the `-p` override is an implementation detail they only see if they run `docker ps` manually.
+
+2. **Opt-out of isolation** (optional, advanced).
+
+   Some workflows *want* the worktree to share the stack with its parent (e.g. a schema-migration branch that should hit the main dev database). We support this via an explicit per-project setting:
+
+   ```rust
+   pub enum ComposeNamespacing {
+       Isolated,         // default: COMPOSE_PROJECT_NAME = zremote-<hash(id)>
+       InheritFromParent // COMPOSE_PROJECT_NAME = zremote-<hash(parent.id)>
+   }
+   ```
+
+   Only available when `parent_project_id IS NOT NULL`. Surfaced in GUI as a toggle: "Share compose stack with parent repo". Off by default.
+
+3. **Compose file resolution for worktrees**.
+
+   When a worktree is scanned, the scanner looks for compose files in the worktree directory *first*. Three outcomes:
+
+   | Worktree has compose files? | Parent has compose files? | Behavior |
+   |---|---|---|
+   | Yes | (any) | Worktree uses its own files. `inherit_from_parent=false` enforced. |
+   | No | Yes | Worktree inherits parent's files by default when a row is first created (toggle-able). `inherit_from_parent=true`. |
+   | No | No | No Compose tab. |
+
+   "Inherit" is a lazy reference, not a copy: at command-build time we resolve parent's enabled compose file paths and pass them via `-f` while keeping `--project-directory <worktree_path>`. This makes relative paths in `build:` / `volumes:` / `env_file:` resolve against the worktree, which is almost always what the user wants when testing the same services against a different code checkout.
+
+   If the parent's compose file list changes (file added/removed) after the worktree inherits, the worktree automatically picks up the change on next invocation — we re-read from DB each time.
+
+4. **Port collisions** (no auto-remap).
+
+   Isolated stacks on the same host still compete for host ports declared in `ports:`. If a worktree stack starts while the main repo's is running and they both bind `5432:5432`, Docker fails the second `up`. We surface the error verbatim in `ComposeActionResult.stderr`; the GUI shows a toast "Port already in use — stop the other stack or edit ports".
+
+   We do **not** auto-generate an override file or auto-assign ports. Explicit is better: if users want parallel stacks on different ports, they commit a `compose.override.yml` or edit ports in their compose file. Future RFC could add a "port remap" UX.
+
+5. **Named-volume collisions**.
+
+   Because `COMPOSE_PROJECT_NAME` differs, Compose prefixes volumes uniquely by default (`zremote-<hash>_postgres-data`), so there is no collision at the Docker level. Users who want to *share* a named volume between worktrees must declare it `external: true` in compose — unchanged from stock Compose semantics.
+
+6. **Stacks overview**.
+
+   A host-level GUI view (accessible from the host card in the sidebar) aggregates *all* running compose stacks for that host's projects. Backend endpoint: `GET /api/hosts/:host_id/compose/stacks` returns `Vec<ComposeStackSummary>` with `{ project_id, project_path, project_name_effective, service_count, running_count }`. Powered by a single `docker compose ls --format json` call plus a join against the projects table on `COMPOSE_PROJECT_NAME`.
+
+7. **Parent-row deletion cascade**.
+
+   Existing `project_compose_files.project_id` FK has `ON DELETE CASCADE`. If a worktree that was inheriting gets orphaned because its parent row is removed, it just loses compose entirely (no rows, no files → no tab). On next scan we re-detect and reset the inherit flag to `false` (since there is no parent to inherit from).
+
+8. **Deletion of a worktree (git worktree removed on disk)**.
+
+   Scanner notices the tree is gone and triggers the existing project-delete path. Before deletion we fire-and-forget `docker compose down` for that project row, if any services are running, to avoid orphan containers. Best-effort only — user is not blocked on shutdown.
+
+### Impact on data model
+
+Inherit mode is a property of the *project row*, not of the compose file. New migration:
+
+```sql
+-- 023_project_compose_settings.sql
+ALTER TABLE projects ADD COLUMN compose_inherit_from_parent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN compose_project_name_override TEXT; -- NULL = zremote-<hash(id)>
+```
+
+`compose_project_name_override` is reserved for a later user-visible rename feature; we never auto-fill it in this RFC but the column is cheap and avoids a second migration later.
+
+### Impact on scanner
+
+`detect_project()` continues to run per-directory. When it fires for a worktree and detects zero compose files, it queries parent's compose file rows; if parent has any, it sets `compose_inherit_from_parent = 1` on the worktree row on first insert. It never changes the flag on subsequent scans (user may have toggled it). Scanner writes nothing if the project row already exists with its own compose files — explicit files always win over inheritance.
+
+### Impact on `ComposeContext` builder
+
+```rust
+impl ComposeContext {
+    pub async fn build(db: &SqlitePool, project: &ProjectRow) -> Result<Self, Error> {
+        let files = if project.compose_inherit_from_parent && project.parent_project_id.is_some() {
+            let parent_id = project.parent_project_id.as_deref().unwrap();
+            list_enabled_compose_files(db, parent_id).await?
+                .into_iter()
+                .map(|f| parent_path_of(db, parent_id).await?.join(f.relative_path))
+                .collect()
+        } else {
+            list_enabled_compose_files(db, &project.id).await?
+                .into_iter()
+                .map(|f| PathBuf::from(&project.path).join(f.relative_path))
+                .collect()
+        };
+
+        Ok(ComposeContext {
+            project_path: PathBuf::from(&project.path),      // always the worktree path
+            project_name: compose_project_name(project),      // -p flag value
+            files,
+        })
+    }
+}
+
+fn compose_project_name(project: &ProjectRow) -> String {
+    project.compose_project_name_override.clone()
+        .unwrap_or_else(|| format!("zremote-{}", short_hash(&project.id)))
+}
+```
+
+`build_argv` always adds `--project-directory <project_path>` so relative paths in inherited compose files resolve against the worktree, not the parent.
+
+### Impact on GUI
+
+- Each worktree's Compose tab shows a small header pill: "Inherited from parent" (with a link to the parent's Compose tab) or "Own compose files".
+- The pill is a toggle when a parent exists, letting the user switch modes. Switching clears own-file selections and re-reads from parent (or vice versa) — confirmation dialog shows which files will be used.
+- Host-level Stacks view (see decision #6) lives at `/app/hosts/:host_id/compose` and surfaces cross-project stack status at a glance.
 
 ## Architecture
 
@@ -79,14 +209,18 @@ CREATE TABLE IF NOT EXISTS project_compose_files (
 CREATE INDEX idx_compose_files_project ON project_compose_files(project_id);
 ```
 
-The `projects` table gains a derived flag:
+The `projects` table gains a derived flag and worktree-related settings:
 
 ```sql
 -- 022_project_has_compose.sql
 ALTER TABLE projects ADD COLUMN has_compose INTEGER NOT NULL DEFAULT 0;
+
+-- 023_project_compose_settings.sql
+ALTER TABLE projects ADD COLUMN compose_inherit_from_parent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN compose_project_name_override TEXT;
 ```
 
-`has_compose` is set by the scanner whenever at least one compose file is detected; kept in sync on scan + CRUD.
+`has_compose` is `true` when the project has any own compose files OR inherits from a parent that has compose files. Kept in sync on scan, CRUD, and when the inherit toggle flips. `compose_inherit_from_parent` is meaningful only for rows with `parent_project_id IS NOT NULL`; enforced at the query layer.
 
 ### Compose File Detection
 
@@ -125,9 +259,22 @@ pub struct ComposeService {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeProject {
-    pub project_name: String,           // -p flag value; defaults to dir name
+    pub project_name: String,               // -p flag value (zremote-<hash> by default)
+    pub project_name_display: String,       // directory basename, shown in GUI headers
+    pub inherits_from_parent: bool,         // true => files resolved from parent project row
+    pub parent_project_id: Option<String>,  // helps GUI render "inherited from" pill
     pub files: Vec<ComposeFileInfo>,
     pub services: Vec<ComposeService>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeStackSummary {
+    pub project_id: String,
+    pub project_path: String,
+    pub project_name_effective: String,     // zremote-<hash>
+    pub is_worktree: bool,
+    pub service_count: usize,
+    pub running_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -175,12 +322,14 @@ pub struct ComposeEvent {
 
 ```rust
 // ServerMessage additions:
-ComposeList    { request_id: String, project_id: String },
-ComposeAction  { request_id: String, request: ComposeActionRequest },
+ComposeList         { request_id: String, project_id: String },
+ComposeInherit      { request_id: String, project_id: String, inherit: bool },
+ComposeAction       { request_id: String, request: ComposeActionRequest },
 ComposeLogsSubscribe    { request_id: String, project_id: String, services: Vec<String>, tail: usize },
 ComposeLogsUnsubscribe  { request_id: String },
 ComposeEventsSubscribe  { request_id: String, project_id: String },
 ComposeEventsUnsubscribe{ request_id: String },
+ComposeStacks       { request_id: String, host_id: String },
 
 // AgentMessage additions:
 ComposeProject     { request_id: String, project: ComposeProject },
@@ -188,6 +337,7 @@ ComposeActionDone  { request_id: String, result: ComposeActionResult },
 ComposeLogChunk    { chunk: ComposeLogChunk },
 ComposeLogEnded    { request_id: String, reason: String },
 ComposeEvent       { request_id: String, event: ComposeEvent },
+ComposeStacks      { request_id: String, stacks: Vec<ComposeStackSummary> },
 ComposeError       { request_id: String, message: String },
 ```
 
@@ -272,7 +422,9 @@ REST endpoints:
 |---|---|---|---|
 | GET | `/api/projects/:project_id/compose` | `list::get` | `ComposeProject` |
 | PATCH | `/api/projects/:project_id/compose/files/:file_id` | `files::patch` | `ComposeFileInfo` |
+| PATCH | `/api/projects/:project_id/compose/inherit` | `inherit::patch` | `ComposeProject` — body `{ inherit: bool }`; 400 if project has no parent |
 | POST | `/api/projects/:project_id/compose/actions` | `actions::post` | `ComposeActionResult` |
+| GET | `/api/hosts/:host_id/compose/stacks` | `stacks::list` | `Vec<ComposeStackSummary>` — cross-worktree overview |
 
 `actions::post` body = `ComposeActionRequest` minus `project_id` (taken from path).
 
@@ -324,55 +476,67 @@ Navigation: add a "Compose" tab to the existing project tabs (alongside Sessions
 
 ## Phases
 
-### Phase 1 — Detection + data model (1 teammate, ~1 day)
+### Phase 1 — Detection + data model (1 teammate, ~1.5 days)
 
 Create-or-modify:
 
 - `crates/zremote-core/migrations/021_compose_files.sql` — new.
 - `crates/zremote-core/migrations/022_project_has_compose.sql` — new.
-- `crates/zremote-core/src/queries/projects.rs` — add `has_compose` to `ProjectRow`; update `list_projects`, `get_project`, `insert_project_with_parent`.
+- `crates/zremote-core/migrations/023_project_compose_settings.sql` — new (`compose_inherit_from_parent`, `compose_project_name_override`).
+- `crates/zremote-core/src/queries/projects.rs` — add `has_compose`, `compose_inherit_from_parent`, `compose_project_name_override` to `ProjectRow`; update `PROJECT_COLUMNS`, `list_projects`, `get_project`, `insert_project_with_parent`.
 - `crates/zremote-core/src/queries/compose.rs` — new module:
   - `list_compose_files(db, project_id) -> Vec<ComposeFileRow>`
+  - `list_enabled_compose_files(db, project_id) -> Vec<ComposeFileRow>`
+  - `list_effective_compose_files(db, project) -> Vec<(PathBuf, ComposeFileRow)>` — resolves inherit flag, returns absolute paths
   - `upsert_compose_file(db, project_id, relative_path, is_base) -> ComposeFileRow`
   - `set_compose_file_enabled(db, file_id, enabled) -> ComposeFileRow`
   - `delete_compose_files_for_project(db, project_id)`
   - `set_project_has_compose(db, project_id, value)`
-- `crates/zremote-protocol/src/compose.rs` — new; types from "Rust Types" section.
-- `crates/zremote-protocol/src/project/info.rs` — add `compose_files: Vec<ComposeFileInfo>` with `#[serde(default)]`.
-- `crates/zremote-agent/src/project/scanner.rs` — extend `detect_project()` to populate `compose_files`.
-- `crates/zremote-agent/src/local/routes/projects/scan.rs` — after upsert, write compose files to DB and set `has_compose`.
+  - `set_project_compose_inherit(db, project_id, inherit) -> ProjectRow` — rejects when `parent_project_id IS NULL`.
+- `crates/zremote-protocol/src/compose.rs` — new; types from "Rust Types" section (including `ComposeStackSummary`, `inherits_from_parent`, `parent_project_id`).
+- `crates/zremote-protocol/src/project/info.rs` — add `compose_files: Vec<ComposeFileInfo>`, `compose_inherits_from_parent: bool` with `#[serde(default)]`.
+- `crates/zremote-agent/src/project/scanner.rs` — extend `detect_project()` to populate `compose_files`; when a worktree scan yields zero files AND parent has compose files, mark `compose_inherit_from_parent=true` on first insert only.
+- `crates/zremote-agent/src/local/routes/projects/scan.rs` — after upsert, write compose files to DB, recompute `has_compose` (own OR inherited).
 
 Tests:
 - `project::scanner` — detect single `compose.yml`; detect base + override; detect glob variants; ignore nested.
-- `queries::compose` — round-trip a row; toggle enabled; cascade delete with project.
+- `project::scanner` — **worktree detection**: worktree with own files → inherit=false; worktree without files + parent with files → inherit=true on first insert; worktree without files + parent without files → no-op.
+- `queries::compose` — round-trip a row; toggle enabled; cascade delete with project; `set_project_compose_inherit` rejects on rows with NULL parent.
+- `queries::compose::list_effective_compose_files` — returns own files when inherit=false; returns parent's files (with parent absolute paths) when inherit=true.
 - migration apply / rollback sanity (existing pattern in `zremote-core` test harness).
 
-### Phase 2 — Docker service layer (1 teammate, ~1.5 days)
+### Phase 2 — Docker service layer (1 teammate, ~2 days)
 
 Create:
 
 - `crates/zremote-agent/src/docker/mod.rs`
 - `crates/zremote-agent/src/docker/binary.rs` — `DockerBinary::detect()`, `argv_prefix(&self) -> Vec<&str>` (`["docker","compose"]` or `["docker-compose"]`).
-- `crates/zremote-agent/src/docker/cli.rs` — `build_argv(ctx, extra) -> Vec<String>` with `-p`, `-f` flags assembled.
-- `crates/zremote-agent/src/docker/service.rs` — `DockerService` impl: `list`, `run_action`, `stream_logs`, `stream_events`.
-- `crates/zremote-agent/src/docker/parser.rs` — parse `ps --format json` (one JSON object per line) + events stream.
+- `crates/zremote-agent/src/docker/context.rs` — `ComposeContext::build(db, project)` with worktree inherit resolution; `compose_project_name(project)` deterministic naming (`zremote-<sha256(id)[..10]>`).
+- `crates/zremote-agent/src/docker/cli.rs` — `build_argv(ctx, extra) -> Vec<String>` always emits `-p <project_name>`, `--project-directory <project_path>`, then `-f` for each file.
+- `crates/zremote-agent/src/docker/service.rs` — `DockerService` impl: `list`, `run_action`, `stream_logs`, `stream_events`, `list_host_stacks`.
+- `crates/zremote-agent/src/docker/parser.rs` — parse `ps --format json` (one JSON object per line), `compose ls --format json`, and events stream.
 - `crates/zremote-agent/src/docker/tests.rs` — mock binary via `DOCKER_BINARY_OVERRIDE` env for integration tests.
 
 Tests:
-- Parser tests with captured fixtures (`tests/fixtures/compose_ps.jsonl`, `compose_events.jsonl`).
-- `build_argv` unit tests for multiple files / services / flags.
+- Parser tests with captured fixtures (`tests/fixtures/compose_ps.jsonl`, `compose_events.jsonl`, `compose_ls.json`).
+- `build_argv` unit tests for multiple files / services / flags; assert `-p zremote-<hash>` and `--project-directory` are always present.
+- `compose_project_name` — stable across calls for same UUID; different UUIDs → different names.
+- `ComposeContext::build` — inherit=false uses own absolute paths; inherit=true uses parent absolute paths with worktree `project_directory`; failure to resolve parent propagates error.
 - Integration test behind `#[ignore]` that runs real `docker compose up -d` against a tiny nginx compose fixture (CI opt-in).
+- Integration test behind `#[ignore]`: spin up *two* stacks (one from a fake "main repo" temp dir, one from a fake "worktree" temp dir inheriting it) and assert both run simultaneously without container-name or network collisions.
 
-### Phase 3 — Local routes (1 teammate, ~1 day)
+### Phase 3 — Local routes (1 teammate, ~1.5 days)
 
 Create:
 
-- `crates/zremote-agent/src/local/routes/compose/` as described above.
+- `crates/zremote-agent/src/local/routes/compose/` — `list.rs`, `files.rs`, `inherit.rs`, `actions.rs`, `logs.rs`, `events.rs`, `stacks.rs`.
 - Register in `crates/zremote-agent/src/local/router.rs`.
 - Touch: `crates/zremote-agent/src/local/state.rs` — hold `Arc<DockerService>` on `AppState`.
 
 Tests:
-- Route-level test using `axum::Router::oneshot` for `GET .../compose` returning mocked `ComposeProject`.
+- Route-level test using `axum::Router::oneshot` for `GET .../compose` returning mocked `ComposeProject` (own + inherited variants).
+- `PATCH .../compose/inherit` — toggles flag; rejects with 400 when project has no parent; emits ProjectsUpdated event.
+- `GET .../hosts/:host_id/compose/stacks` — correlates `docker compose ls` project names back to our `projects` table via `COMPOSE_PROJECT_NAME` hash.
 - WS logs test: fake log receiver; assert frames propagate; assert cancel-on-disconnect.
 
 ### Phase 4 — Protocol + server dispatch (1 teammate, ~1.5 days)
@@ -388,14 +552,20 @@ Tests:
 - Agent-side dispatch: inject fake `DockerService`, assert `ComposeActionDone` sent with matching `request_id`.
 - Server-side: end-to-end with two in-process fakes (client → server → agent) using `tokio::spawn` channels.
 
-### Phase 5 — GUI (1 teammate, ~2 days)
+### Phase 5 — GUI (1 teammate, ~2.5 days)
 
 Create:
-- `crates/zremote-gui/src/views/compose_panel.rs` — view with subcomponents (ServicesTable, LogsDrawer, ActionsToolbar, FilesList). Decomposed per CLAUDE.md GPUI convention (render ≤ 80 lines).
+- `crates/zremote-gui/src/views/compose_panel.rs` — view with subcomponents (ServicesTable, LogsDrawer, ActionsToolbar, FilesList, **InheritPill**). Decomposed per CLAUDE.md GPUI convention (render ≤ 80 lines).
 - `crates/zremote-gui/src/views/compose_logs.rs` — virtualized log drawer, shared with future live-logs feature where possible.
+- `crates/zremote-gui/src/views/compose_stacks.rs` — host-level cross-project stacks overview (new route `/hosts/:id/compose`).
 - `crates/zremote-gui/src/client/compose.rs` — client helpers wrapping `zremote-client` for compose endpoints.
-- Icons in `crates/zremote-gui/src/icons.rs`: `Container`, `Play`, `Stop`, `Restart`, `Download`, `Hammer` (Lucide names `container`, `play`, `square`, `rotate-cw`, `download`, `hammer`).
-- Touch `crates/zremote-gui/src/views/sidebar.rs` and project tab switcher to surface the Compose tab when `has_compose == true`.
+- Icons in `crates/zremote-gui/src/icons.rs`: `Container`, `Play`, `Stop`, `Restart`, `Download`, `Hammer`, `LinkChain` (for inherit pill). Lucide names `container`, `play`, `square`, `rotate-cw`, `download`, `hammer`, `link`.
+- Touch `crates/zremote-gui/src/views/sidebar.rs` and project tab switcher to surface the Compose tab when `has_compose == true`; under each project with worktrees, show a "See stacks" link jumping to the host-level stacks view.
+
+Worktree-specific UX beats:
+- Compose tab header on a worktree shows `Inherited from <parent name>` pill when `inherits_from_parent==true`, clickable to open parent's tab. Toggle button "Use own compose files" kicks a confirm dialog → `PATCH /compose/inherit { inherit: false }` and prompts the user to add files.
+- When a worktree has own files but a parent also has files, show a subtle secondary action "Switch to inherit from parent" in the files list overflow menu.
+- Stacks overview table has columns: Project, Path, Services, Running, Worktree?, Actions. "Worktree?" column renders a small branch icon for rows where `is_worktree==true`.
 
 Tests:
 - Unit test for `ComposeStateReducer::apply_event()` (GUI state update on `ComposeEvent` arrival).
@@ -409,6 +579,11 @@ Tests:
   - `Up`, `Down`, `Restart` each service; state badges update within 2 s.
   - Logs stream for 30 s without frame drops or memory growth >50 MB.
   - Kill & restart agent mid-stream; GUI reconnects (existing reconnect logic applies).
+- **Worktree E2E**:
+  - Main repo with `compose.yml` + one worktree with no compose → worktree GUI shows "Inherited" pill; `Up` works; both stacks coexist on `docker ps`.
+  - Second worktree adds its own `compose.yml` → pill disappears; own files used.
+  - Toggle inherit back on → GUI confirms switch; own files are kept in DB but bypassed until toggled off.
+  - `docker compose ls` and our Stacks view agree on running stacks count and project names.
 - Same walkthrough in server mode (`agent server` + `agent run` + `gui --server`).
 - `rust-reviewer`, `code-reviewer`, `security-reviewer`, UX review — all findings fixed before merge.
 
@@ -423,6 +598,11 @@ Tests:
 | Protocol drift between old agent + new server | All additions are new enum variants with `#[serde(default)]`; old agents ignore unknown variants. Server degrades the Compose tab to "unsupported agent" when agent version lacks the feature flag (new `AgentCapabilities::compose`). |
 | Server-mode correlation map leak if client drops WS without unsubscribe | WS drop on server side triggers synthetic `ComposeLogsUnsubscribe`. Correlation entry also times out after 10 min idle. |
 | Symlink / case-sensitivity on macOS | Scanner normalizes with `std::fs::canonicalize`, matches filenames case-insensitively on macOS only. |
+| Worktree stack collides with main-repo stack on host ports | `-p` override guarantees different container/network/volume namespaces; port bindings remain user-declared and fail loud. GUI surfaces the Docker error verbatim; future RFC may add a port-remap helper. |
+| User deletes a worktree from disk while its stack is running | Scanner's delete path fires best-effort `docker compose down` before removing the project row; failures logged, not blocking. |
+| Inherit flag flipped while stack is running | `PATCH /compose/inherit` does not restart containers. GUI shows an info banner "Stack still tagged with previous project name; run Down to reconcile". Next `Up` creates new containers under the new effective name. |
+| Worktree inherits a parent whose compose file uses `build:` with a relative context that does not exist in the worktree | Pass `--project-directory <worktree_path>`; `build` resolves against the worktree. If the context directory is missing in the worktree, Compose errors out at `build` time; stderr shown in GUI. We do not pre-validate. |
+| `docker compose ls` names correlate back to wrong project row | Stacks view joins on `COMPOSE_PROJECT_NAME == "zremote-<hash>"`; unknown names are listed under a "Foreign stacks" section so the user can still see them without surprising the join. |
 
 ## Acceptance Criteria
 
@@ -432,6 +612,8 @@ Tests:
 4. All of the above works identically against a remote agent via `zremote-server`.
 5. GUI shows a Compose tab with a live-updating services table, action buttons, and a logs drawer.
 6. Integration test (behind `#[ignore]`) starts + stops an nginx-only compose fixture in CI on demand.
+7. Worktree parity: a worktree without its own compose files auto-inherits from its parent and its stack runs simultaneously with the parent's stack (different container names, networks, named volumes). Integration test (`#[ignore]`) demonstrates two stacks running in parallel.
+8. Host-level Stacks overview lists stacks from both main repos and worktrees, with a "Worktree" marker where applicable, and running counts match `docker compose ls`.
 
 ## References
 
