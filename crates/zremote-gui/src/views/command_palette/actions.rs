@@ -56,6 +56,13 @@ pub enum PaletteAction {
         parent_project_id: Option<String>,
         host_id: Option<String>,
     },
+    /// Delete a git worktree: runs `git worktree remove` on disk and removes
+    /// the child-project DB row. Destructive — directory contents are lost.
+    DeleteWorktree {
+        worktree_id: String,
+        parent_project_id: String,
+        worktree_name: String,
+    },
 }
 
 impl PaletteAction {
@@ -82,6 +89,7 @@ impl PaletteAction {
             Self::StartAgent { .. } => "StartAgent",
             Self::ManageAgentProfiles => "ManageAgentProfiles",
             Self::NewWorktree { .. } => "NewWorktree",
+            Self::DeleteWorktree { .. } => "DeleteWorktree",
         }
     }
 }
@@ -220,6 +228,17 @@ impl CommandPalette {
                             project_name: project_name.clone(),
                         });
                     }
+                    PaletteAction::DeleteWorktree {
+                        worktree_id,
+                        parent_project_id,
+                        worktree_name,
+                    } => {
+                        cx.emit(CommandPaletteEvent::DeleteWorktree {
+                            worktree_id: worktree_id.clone(),
+                            parent_project_id: parent_project_id.clone(),
+                            worktree_name: worktree_name.clone(),
+                        });
+                    }
                 }
                 // Record recent action usage (only fires when the action
                 // actually executes — early returns above skip this).
@@ -277,6 +296,11 @@ mod tests {
             PaletteAction::RemoveProject {
                 project_id: "a".into(),
                 project_name: "a".into(),
+            },
+            PaletteAction::DeleteWorktree {
+                worktree_id: "a".into(),
+                parent_project_id: "b".into(),
+                worktree_name: "a".into(),
             },
         ];
         let keys: std::collections::HashSet<&str> =

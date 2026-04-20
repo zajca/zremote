@@ -242,33 +242,64 @@ pub async fn close_session(
         .parse()
         .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
 
-    let (_id, _host_id_str) = q::find_session_for_close(&state.db, &session_id)
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("session {session_id} not found or already closed"))
-        })?;
+    let found = q::find_session_for_close(&state.db, &session_id).await?;
+    if found.is_none() {
+        return Err(AppError::NotFound(format!(
+            "session {session_id} not found or already closed"
+        )));
+    }
 
+    close_session_internal(&state, &session_id, parsed_session_id).await?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Gracefully close a single session: send SIGTERM to the PTY process, update
+/// the DB row, notify browser clients, and broadcast a `SessionClosed` event.
+///
+/// This is the shared path used by the HTTP handler and by bulk operations
+/// (e.g. tearing down all sessions bound to a worktree before removing it).
+/// Safe to call on an already-closed session: the UPDATE is guarded with
+/// `status != 'closed'` so a race with a concurrent `DELETE /api/sessions/:id`
+/// won't emit a second `SessionClosed` event or rewrite `exit_code`.
+pub(crate) async fn close_session_internal(
+    state: &Arc<LocalAppState>,
+    session_id: &str,
+    parsed_session_id: Uuid,
+) -> Result<(), AppError> {
     // Close session in session manager
     let exit_code = {
         let mut mgr = state.session_manager.lock().await;
         mgr.close(&parsed_session_id)
     };
 
+    // Guard the UPDATE with `status != 'closed'` so a racing close (e.g. the
+    // user clicking X on a terminal while a worktree deletion is in flight)
+    // doesn't produce a second row update + duplicate event. The affected-row
+    // count tells us whether *we* were the one that actually transitioned it.
+    let result = sqlx::query(
+        "UPDATE sessions SET status = 'closed', exit_code = ?, closed_at = datetime('now') \
+         WHERE id = ? AND status != 'closed'",
+    )
+    .bind(exit_code)
+    .bind(session_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Database)?;
+
+    if result.rows_affected() == 0 {
+        tracing::debug!(
+            session_id = %session_id,
+            "session already closed; skipping browser notify + event"
+        );
+        return Ok(());
+    }
+
     tracing::info!(
         session_id = %session_id,
         exit_code = ?exit_code,
         "local session closed"
     );
-
-    // Update DB status
-    sqlx::query(
-        "UPDATE sessions SET status = 'closed', exit_code = ?, closed_at = datetime('now') WHERE id = ?",
-    )
-    .bind(exit_code)
-    .bind(&session_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Database)?;
 
     // Notify browser clients and remove from store
     {
@@ -288,11 +319,83 @@ pub async fn close_session(
 
     // Broadcast event
     let _ = state.events.send(ServerEvent::SessionClosed {
-        session_id: session_id.clone(),
+        session_id: session_id.to_string(),
         exit_code,
     });
 
-    Ok(StatusCode::ACCEPTED)
+    Ok(())
+}
+
+/// Close every active session attached to `project_id` or living inside
+/// `path_scope` (when provided).
+///
+/// Used before destroying a project/worktree so the PTY children release the
+/// working directory and the GUI observes a clean `SessionClosed` event
+/// instead of a terminal that silently stops responding. The `path_scope`
+/// fallback catches legacy rows that were tagged with the parent project's
+/// id (possible when a worktree lives inside its parent repo) so the real
+/// sessions-in-a-worktree still get torn down.
+pub(crate) async fn close_sessions_for_project(
+    state: &Arc<LocalAppState>,
+    host_id: &str,
+    project_id: &str,
+    path_scope: Option<&str>,
+) -> Result<usize, AppError> {
+    // Collect session ids from both lookups, dedup, and drop already-closed
+    // rows. Order doesn't matter — each close is independent.
+    //
+    // `seen` tracks only sessions we intend to close. Closed rows are skipped
+    // before insertion so they never participate in deduplication (they would
+    // never reappear via `list_active_sessions_under_path` anyway, but being
+    // explicit here avoids relying on that coincidence).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut targets: Vec<(String, Uuid)> = Vec::new();
+
+    let by_project = q::list_sessions_by_project(&state.db, project_id).await?;
+    for row in by_project {
+        if row.status == "closed" {
+            continue;
+        }
+        if !seen.insert(row.id.clone()) {
+            continue;
+        }
+        let Ok(parsed) = row.id.parse::<Uuid>() else {
+            tracing::warn!(session_id = %row.id, "skipping session with unparseable id");
+            continue;
+        };
+        targets.push((row.id, parsed));
+    }
+
+    if let Some(path) = path_scope {
+        let by_path = q::list_active_sessions_under_path(&state.db, host_id, path).await?;
+        for row in by_path {
+            if !seen.insert(row.id.clone()) {
+                continue;
+            }
+            let Ok(parsed) = row.id.parse::<Uuid>() else {
+                tracing::warn!(session_id = %row.id, "skipping session with unparseable id");
+                continue;
+            };
+            targets.push((row.id, parsed));
+        }
+    }
+
+    let mut closed = 0usize;
+    for (id_str, parsed) in targets {
+        // Per-session errors must not abort the batch: if session 2 of 3 fails
+        // to close, we still want session 3 shut down so `git worktree remove`
+        // isn't blocked by the one remaining PTY. Log and continue.
+        if let Err(e) = close_session_internal(state, &id_str, parsed).await {
+            tracing::warn!(
+                session_id = %id_str,
+                error = %e,
+                "failed to close session during bulk close; continuing"
+            );
+            continue;
+        }
+        closed += 1;
+    }
+    Ok(closed)
 }
 
 /// `DELETE /api/sessions/:session_id/purge` - permanently delete a closed session.

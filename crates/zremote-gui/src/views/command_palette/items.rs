@@ -412,6 +412,26 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
             subtitle: p.path.clone(),
             selectable: true,
         });
+
+        // Delete Worktree: only offered for child projects tagged as
+        // worktrees. Unlike RemoveProject this actually runs `git worktree
+        // remove` and deletes the checkout from disk, so the label is
+        // intentionally different ("Delete" vs "Remove") and the action only
+        // appears for projects that have a parent repo registered.
+        if p.project_type == "worktree"
+            && let Some(parent_id) = p.parent_project_id.as_ref()
+        {
+            items.push(ResultItem {
+                item: PaletteItem::Action(PaletteAction::DeleteWorktree {
+                    worktree_id: p.id.clone(),
+                    parent_project_id: parent_id.clone(),
+                    worktree_name: p.name.clone(),
+                }),
+                title: format!("Delete Worktree: {}", p.name),
+                subtitle: p.path.clone(),
+                selectable: true,
+            });
+        }
     }
 
     if snapshot.mode == "server" {
@@ -539,6 +559,25 @@ pub(super) fn build_project_drill_items_from(
         selectable: true,
     });
     action_indices.push(pin_idx);
+
+    // "Delete Worktree" — drill-down only shows this when the drilled
+    // project is a linked worktree with a known parent repo.
+    if project.project_type == "worktree"
+        && let Some(parent_id) = project.parent_project_id.as_ref()
+    {
+        let delete_idx = items.len();
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::DeleteWorktree {
+                worktree_id: project.id.clone(),
+                parent_project_id: parent_id.clone(),
+                worktree_name: project.name.clone(),
+            }),
+            title: format!("Delete Worktree: {}", project.name),
+            subtitle: project.path.clone(),
+            selectable: true,
+        });
+        action_indices.push(delete_idx);
+    }
 
     groups.push(CategoryGroup {
         category: PaletteCategory::DrillActions,
@@ -1683,6 +1722,182 @@ mod tests {
         assert_eq!(
             session_count, 1,
             "session with matching working_dir should appear in project drill-down"
+        );
+    }
+
+    fn worktree_project(
+        id: &str,
+        name: &str,
+        parent_id: Option<&str>,
+        project_type: &str,
+    ) -> Project {
+        Project {
+            id: id.to_string(),
+            host_id: "host-1".to_string(),
+            path: format!("/home/user/{name}"),
+            name: name.to_string(),
+            has_claude_config: false,
+            has_zremote_config: false,
+            project_type: project_type.to_string(),
+            created_at: String::new(),
+            parent_project_id: parent_id.map(str::to_string),
+            git_branch: None,
+            git_commit_hash: None,
+            git_commit_message: None,
+            git_is_dirty: false,
+            git_ahead: 0,
+            git_behind: 0,
+            git_remotes: None,
+            git_updated_at: None,
+            pinned: false,
+            frameworks: None,
+            architecture: None,
+            conventions: None,
+            package_manager: None,
+        }
+    }
+
+    fn snapshot_with_projects(projects: Vec<Project>) -> PaletteSnapshot {
+        let hosts = Rc::new(vec![Host {
+            id: "host-1".to_string(),
+            name: "host-1".to_string(),
+            hostname: "localhost".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }]);
+        PaletteSnapshot::capture(
+            hosts,
+            Rc::new(Vec::new()),
+            Rc::new(projects),
+            "local".to_string(),
+            None,
+            &[],
+            &[],
+            HashMap::new(),
+            HashMap::new(),
+            Rc::new(Vec::new()),
+            Rc::new(Vec::new()),
+        )
+    }
+
+    #[test]
+    fn test_action_items_include_delete_worktree_for_linked_worktrees() {
+        let snapshot = snapshot_with_projects(vec![
+            worktree_project("parent-1", "main-repo", None, "rust"),
+            worktree_project("wt-1", "feature-x", Some("parent-1"), "worktree"),
+        ]);
+
+        let items = build_action_items(&snapshot);
+        let deletes: Vec<(&str, &str)> = items
+            .iter()
+            .filter_map(|i| match &i.item {
+                PaletteItem::Action(PaletteAction::DeleteWorktree {
+                    worktree_id,
+                    parent_project_id,
+                    ..
+                }) => Some((worktree_id.as_str(), parent_project_id.as_str())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(deletes, vec![("wt-1", "parent-1")]);
+        assert!(
+            items
+                .iter()
+                .any(|i| i.title == "Delete Worktree: feature-x"),
+            "Delete Worktree entry must carry the worktree name"
+        );
+    }
+
+    #[test]
+    fn test_action_items_skip_delete_worktree_for_non_worktree_projects() {
+        let snapshot = snapshot_with_projects(vec![
+            worktree_project("proj-1", "plain-repo", None, "rust"),
+            // project_type mismatched — must not produce a delete entry.
+            worktree_project("proj-2", "weird", Some("proj-1"), "rust"),
+        ]);
+
+        let items = build_action_items(&snapshot);
+        let has_delete = items.iter().any(|i| {
+            matches!(
+                i.item,
+                PaletteItem::Action(PaletteAction::DeleteWorktree { .. })
+            )
+        });
+        assert!(
+            !has_delete,
+            "plain projects must not expose a Delete Worktree action"
+        );
+    }
+
+    #[test]
+    fn test_project_drill_items_expose_delete_worktree_for_worktree() {
+        let projects = vec![worktree_project(
+            "wt-1",
+            "feature-y",
+            Some("parent-1"),
+            "worktree",
+        )];
+        let snapshot = snapshot_with_projects(projects);
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let has_delete = items
+            .iter()
+            .any(|i| matches!(&i.item, PaletteItem::Action(PaletteAction::DeleteWorktree { worktree_id, parent_project_id, .. })
+                if worktree_id == "wt-1" && parent_project_id == "parent-1"));
+        assert!(
+            has_delete,
+            "drill-down on a worktree must include Delete Worktree"
+        );
+    }
+
+    #[test]
+    fn test_action_items_skip_delete_worktree_without_parent() {
+        // A project with project_type=worktree but no parent_project_id is an
+        // inconsistent DB state (orphan). Don't offer deletion — we would not
+        // know which repo to hand to `git worktree remove`.
+        let snapshot = snapshot_with_projects(vec![worktree_project(
+            "orphan-wt",
+            "orphan",
+            None,
+            "worktree",
+        )]);
+
+        let items = build_action_items(&snapshot);
+        let has_delete = items.iter().any(|i| {
+            matches!(
+                i.item,
+                PaletteItem::Action(PaletteAction::DeleteWorktree { .. })
+            )
+        });
+        assert!(
+            !has_delete,
+            "orphan worktree (no parent_project_id) must not expose Delete Worktree"
+        );
+    }
+
+    #[test]
+    fn test_project_drill_items_no_delete_worktree_for_plain_project() {
+        let projects = vec![worktree_project("proj-1", "plain", None, "rust")];
+        let snapshot = snapshot_with_projects(projects);
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let has_delete = items.iter().any(|i| {
+            matches!(
+                i.item,
+                PaletteItem::Action(PaletteAction::DeleteWorktree { .. })
+            )
+        });
+        assert!(
+            !has_delete,
+            "drill-down on plain project must not include Delete Worktree"
         );
     }
 }

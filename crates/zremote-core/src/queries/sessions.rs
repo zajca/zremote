@@ -32,8 +32,19 @@ pub async fn resolve_project_id(
     host_id: &str,
     working_dir: &str,
 ) -> Result<Option<String>, AppError> {
+    // Prefer the most specific (longest path) match. A git worktree placed
+    // inside its parent repo (e.g. `/repo/.worktrees/feat`) also matches the
+    // parent's path prefix, so a naked LIMIT 1 could bind the session to the
+    // parent project — which then breaks worktree deletion (we can't find
+    // the worktree's own sessions) and muddles project-scoped queries.
+    //
+    // Use SUBSTR-based prefix matching rather than LIKE: a project path stored
+    // with a literal `%` or `_` (SQLite LIKE wildcards) would otherwise match
+    // unrelated working directories.
     let project_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM projects WHERE host_id = ? AND (? = path OR ? LIKE path || '/%') LIMIT 1",
+        "SELECT id FROM projects WHERE host_id = ? \
+           AND (? = path OR SUBSTR(?, 1, LENGTH(path) + 1) = path || '/') \
+         ORDER BY LENGTH(path) DESC LIMIT 1",
     )
     .bind(host_id)
     .bind(working_dir)
@@ -175,6 +186,38 @@ pub async fn list_sessions_by_project(
     Ok(sessions)
 }
 
+/// List active sessions whose `working_dir` is inside (or equal to) `path`.
+///
+/// Complements `list_sessions_by_project` for the worktree-deletion path: a
+/// session spawned before `resolve_project_id` was fixed may carry the parent
+/// project's id but actually live inside a worktree subdirectory. Matching on
+/// path catches those rows so we can still tear them down before running
+/// `git worktree remove`.
+pub async fn list_active_sessions_under_path(
+    pool: &SqlitePool,
+    host_id: &str,
+    path: &str,
+) -> Result<Vec<SessionRow>, AppError> {
+    // SUBSTR prefix match (not LIKE) so that a path containing SQLite LIKE
+    // wildcards (`%`, `_`) doesn't over-select sessions under unrelated
+    // directories.
+    let sessions: Vec<SessionRow> = sqlx::query_as(
+        "SELECT id, host_id, name, shell, status, working_dir, project_id, pid, exit_code, created_at, closed_at \
+         FROM sessions \
+         WHERE host_id = ? AND status != 'closed' \
+           AND working_dir IS NOT NULL \
+           AND (working_dir = ? OR SUBSTR(working_dir, 1, LENGTH(?) + 1) = ? || '/') \
+         ORDER BY created_at DESC",
+    )
+    .bind(host_id)
+    .bind(path)
+    .bind(path)
+    .bind(path)
+    .fetch_all(pool)
+    .await?;
+    Ok(sessions)
+}
+
 /// Mark a session row as errored.
 ///
 /// Used by the server-side `AgentLifecycle::StartFailed` handler to surface
@@ -217,6 +260,80 @@ mod tests {
         let row = get_session(&pool, "s1").await.unwrap();
         assert_eq!(row.status, "error");
         assert!(row.closed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_project_id_prefers_longest_matching_path() {
+        // Regression guard: a worktree nested inside its parent repo
+        // (e.g. `/repo/.worktrees/feat`) matches both the parent and itself
+        // via `LIKE path || '/%'`. A naked `LIMIT 1` used to pick whichever
+        // row the engine returned first, so sessions created inside the
+        // worktree could be bound to the parent project — which then broke
+        // worktree deletion. The longest-prefix rule must tie them to the
+        // worktree.
+        let pool = setup().await;
+        let parent_id = "p-parent";
+        let wt_id = "p-wt";
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES (?, 'h1', '/repo', 'repo', 'git')",
+        )
+        .bind(parent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+             VALUES (?, 'h1', '/repo/.worktrees/feat', 'feat', ?, 'worktree')",
+        )
+        .bind(wt_id)
+        .bind(parent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resolved = resolve_project_id(&pool, "h1", "/repo/.worktrees/feat/src")
+            .await
+            .unwrap();
+        assert_eq!(resolved.as_deref(), Some(wt_id));
+
+        let parent_only = resolve_project_id(&pool, "h1", "/repo/src").await.unwrap();
+        assert_eq!(parent_only.as_deref(), Some(parent_id));
+    }
+
+    #[tokio::test]
+    async fn resolve_project_id_is_robust_to_like_wildcards_in_path() {
+        // Regression guard: prior implementation used `LIKE path || '/%'`
+        // where `%` and `_` in the working_dir or the stored path would act
+        // as wildcards, potentially matching unrelated projects.
+        let pool = setup().await;
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES ('p1', 'h1', '/tmp/foo%bar', 'foo%bar', 'git')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES ('p2', 'h1', '/tmp/foo_bar', 'foo_bar', 'git')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // `/tmp/fooXbar/inside` must NOT match `/tmp/foo%bar` (where `%`
+        // is meant literally).
+        let wrong = resolve_project_id(&pool, "h1", "/tmp/fooXbar/inside")
+            .await
+            .unwrap();
+        assert_eq!(wrong, None);
+
+        // Literal `%` in the working_dir matches the project that stores it.
+        let right = resolve_project_id(&pool, "h1", "/tmp/foo%bar/inside")
+            .await
+            .unwrap();
+        assert_eq!(right.as_deref(), Some("p1"));
     }
 
     #[tokio::test]

@@ -1454,6 +1454,56 @@ impl MainView {
                 }
                 _ => self.trigger_new_worktree_for_selection(cx),
             },
+            CommandPaletteEvent::DeleteWorktree {
+                worktree_id,
+                parent_project_id,
+                worktree_name,
+            } => {
+                let ctx =
+                    self.resolve_toast_context(None, None, None, Some(worktree_id), None, None, cx);
+                let api = self.app_state.api.clone();
+                let handle = self.app_state.tokio_handle.clone();
+                let pid = parent_project_id.clone();
+                let wid = worktree_id.clone();
+                let name = worktree_name.clone();
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let result = handle
+                        .spawn(async move { api.delete_worktree(&pid, &wid).await })
+                        .await;
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(Ok(())) => {
+                            this.show_toast(
+                                &format!("Deleted worktree: {name}"),
+                                ToastLevel::Success,
+                                Some(Icon::GitBranch),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "delete_worktree failed");
+                            this.show_toast(
+                                &format!("Failed to delete worktree: {e}"),
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!(error = %join_err, "delete_worktree task join failed");
+                            this.show_toast(
+                                "Failed to delete worktree",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .detach();
+            }
             CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);

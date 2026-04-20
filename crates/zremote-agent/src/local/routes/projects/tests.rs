@@ -2468,3 +2468,288 @@ async fn run_action_with_custom_inputs() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["command"], "git tag v1.0.0");
 }
+
+#[tokio::test]
+async fn close_sessions_for_project_only_targets_matching_project() {
+    // Regression guard for `delete_worktree`: the helper must only shut down
+    // sessions bound to the requested project, never siblings on the same
+    // host. If this widens to `host_id` by mistake, deleting a worktree
+    // would kill every terminal on that machine.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_a = Uuid::new_v4().to_string();
+    let project_b = Uuid::new_v4().to_string();
+
+    q::insert_project(&state.db, &project_a, &host_id, "/tmp/a", "a")
+        .await
+        .unwrap();
+    q::insert_project(&state.db, &project_b, &host_id, "/tmp/b", "b")
+        .await
+        .unwrap();
+
+    let session_a = Uuid::new_v4().to_string();
+    let session_b = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+    )
+    .bind(&session_a)
+    .bind(&host_id)
+    .bind(&project_a)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+    )
+    .bind(&session_b)
+    .bind(&host_id)
+    .bind(&project_b)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let mut rx = state.events.subscribe();
+
+    let closed = crate::local::routes::sessions::close_sessions_for_project(
+        &state, &host_id, &project_a, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed, 1);
+
+    let status_a: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+        .bind(&session_a)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status_a.as_deref(), Some("closed"));
+
+    let status_b: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+        .bind(&session_b)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status_b.as_deref(), Some("active"));
+
+    let mut saw_closed_for_a = false;
+    while let Ok(event) = rx.try_recv() {
+        if let zremote_core::state::ServerEvent::SessionClosed { session_id, .. } = event
+            && session_id == session_a
+        {
+            saw_closed_for_a = true;
+        }
+    }
+    assert!(
+        saw_closed_for_a,
+        "expected SessionClosed event for project A"
+    );
+}
+
+#[tokio::test]
+async fn close_sessions_for_project_skips_already_closed() {
+    // Already-closed rows must not be re-closed: sending a second
+    // SessionClosed event would confuse GUI clients that already torn down
+    // their terminal state.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, "/tmp/p", "p")
+        .await
+        .unwrap();
+
+    let session_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'closed', ?)",
+    )
+    .bind(&session_id)
+    .bind(&host_id)
+    .bind(&project_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let closed = crate::local::routes::sessions::close_sessions_for_project(
+        &state,
+        &host_id,
+        &project_id,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed, 0);
+}
+
+#[tokio::test]
+async fn close_sessions_for_project_path_fallback_catches_mis_tagged_sessions() {
+    // Regression guard: before `resolve_project_id` was fixed to prefer the
+    // longest matching path, a session started inside a worktree nested under
+    // its parent repo could be tagged with the parent's `project_id`. The
+    // bulk-close helper must still find and close such rows via the
+    // `path_scope` fallback, otherwise worktree deletion would silently leave
+    // the terminal (and its file locks) alive.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    let worktree_id = Uuid::new_v4().to_string();
+    let parent_path = "/tmp/repo";
+    let wt_path = "/tmp/repo/.worktrees/feat";
+
+    q::insert_project(&state.db, &parent_id, &host_id, parent_path, "repo")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+         VALUES (?, ?, ?, ?, ?, 'worktree')",
+    )
+    .bind(&worktree_id)
+    .bind(&host_id)
+    .bind(wt_path)
+    .bind("feat")
+    .bind(&parent_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Session tagged with PARENT project id (simulating legacy buggy resolve)
+    // but working_dir actually inside the worktree.
+    let session_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO sessions (id, host_id, status, project_id, working_dir) \
+         VALUES (?, ?, 'active', ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(&host_id)
+    .bind(&parent_id)
+    .bind(wt_path)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let closed = crate::local::routes::sessions::close_sessions_for_project(
+        &state,
+        &host_id,
+        &worktree_id,
+        Some(wt_path),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed, 1, "path fallback must close mis-tagged session");
+
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status.as_deref(), Some("closed"));
+}
+
+#[tokio::test]
+async fn delete_worktree_closes_bound_sessions() {
+    // Verifies the contract that matters to callers: when a worktree deletion
+    // request comes in, every active session bound to that worktree is
+    // transitioned to `closed` and a `SessionClosed` event is broadcast, so
+    // the PTY child releases its CWD before we touch the filesystem.
+    //
+    // Uses a real isolated git repo but a worktree path that does NOT yet
+    // exist on disk, because:
+    //   1. We only care about the session-teardown side of `delete_worktree`
+    //      here — the git-remove side is covered by unit tests in
+    //      `project::git::create_and_remove_worktree`.
+    //   2. Creating a real linked worktree under parallel test load has
+    //      proven flaky on this host (a concurrent git operation sometimes
+    //      prunes the worktree link between `add` and `remove`, producing a
+    //      spurious "not a working tree" error). Bypassing that setup makes
+    //      the test deterministic.
+    //
+    // With no on-disk worktree, `git worktree remove` returns an error and
+    // the endpoint responds 400 — but the session close happens *before*
+    // the git call, so the status transition and event are still observable.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "main")
+        .await
+        .unwrap();
+
+    let wt_path = dir
+        .path()
+        .join("nonexistent-worktree")
+        .to_string_lossy()
+        .to_string();
+
+    let worktree_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+         VALUES (?, ?, ?, ?, ?, 'worktree')",
+    )
+    .bind(&worktree_id)
+    .bind(&host_id)
+    .bind(&wt_path)
+    .bind("nonexistent-worktree")
+    .bind(&project_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let session_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO sessions (id, host_id, status, project_id) VALUES (?, ?, 'active', ?)",
+    )
+    .bind(&session_id)
+    .bind(&host_id)
+    .bind(&worktree_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let mut rx = state.events.subscribe();
+
+    let app = build_test_router(state.clone());
+    let _response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/projects/{project_id}/worktrees/{worktree_id}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // We don't assert the response status: whether git-remove succeeds is
+    // irrelevant to the session-teardown contract under test here. Git
+    // integration is covered separately in `project::git`.
+
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        status.as_deref(),
+        Some("closed"),
+        "session must be closed before git worktree remove runs"
+    );
+
+    let mut saw_closed = false;
+    while let Ok(event) = rx.try_recv() {
+        if let zremote_core::state::ServerEvent::SessionClosed {
+            session_id: sid, ..
+        } = event
+            && sid == session_id
+        {
+            saw_closed = true;
+        }
+    }
+    assert!(
+        saw_closed,
+        "expected SessionClosed event for worktree session"
+    );
+}

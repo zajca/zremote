@@ -472,6 +472,37 @@ pub async fn delete_worktree(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("worktree {worktree_id} not found")))?;
 
+    // Gracefully close any active sessions bound to this worktree before we
+    // touch the filesystem. Each session is shut down via the same code path
+    // as `DELETE /api/sessions/:id` so the GUI observes a consistent
+    // `SessionClosed` event instead of a terminal that silently stops
+    // responding. We look up sessions both by `project_id == worktree_id`
+    // (the canonical tag) and by working-dir prefix matching the worktree
+    // path (covers legacy rows tagged against the parent project when the
+    // worktree lives inside the parent repo).
+    let closed = crate::local::routes::sessions::close_sessions_for_project(
+        &state,
+        &host_id_str,
+        &worktree_id,
+        Some(&worktree_path),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(
+            worktree_id = %worktree_id,
+            error = %e,
+            "failed to close sessions for worktree before delete"
+        );
+        0
+    });
+    if closed > 0 {
+        tracing::info!(
+            worktree_id = %worktree_id,
+            count = closed,
+            "closed active sessions before worktree deletion"
+        );
+    }
+
     // Check for custom delete_command
     let wt_settings = read_worktree_settings(&project_path).await;
     if let Some(delete_cmd) = wt_settings.as_ref().and_then(|s| s.delete_command.as_ref()) {
@@ -578,15 +609,29 @@ pub async fn delete_worktree(
     let repo = project_path.clone();
     let wt = worktree_path.clone();
 
+    // Never auto-escalate to `git worktree remove --force`: force would
+    // silently discard any uncommitted changes in the worktree. We already
+    // closed every session inside the worktree above, so the typical
+    // remaining failure reason is a dirty tree — which the user should see
+    // and decide about explicitly. Propagate the error and let the GUI
+    // surface it; a future API flag can opt into forced removal.
     tokio::task::spawn_blocking(move || {
         GitInspector::remove_worktree(Path::new(&repo), Path::new(&wt), false)
     })
     .await
     .map_err(|e| AppError::Internal(format!("worktree delete task failed: {e}")))?
-    .map_err(|e| AppError::Internal(format!("failed to delete worktree: {e}")))?;
+    .map_err(|e| AppError::BadRequest(format!("failed to delete worktree: {e}")))?;
 
     // Remove from DB
     q::delete_project(&state.db, &worktree_id).await?;
+
+    // Notify clients: the sidebar keys off `ProjectsUpdated` to re-list
+    // projects after a worktree is added or removed. Without this the tree
+    // deletion would be invisible in the GUI until another event (host
+    // reconnect, session close, scan) incidentally refreshed it.
+    let _ = state.events.send(ServerEvent::ProjectsUpdated {
+        host_id: host_id_str.clone(),
+    });
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }

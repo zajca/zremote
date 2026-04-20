@@ -153,6 +153,13 @@ pub enum CommandPaletteEvent {
         project_id: String,
         project_name: String,
     },
+    /// Delete a git worktree on disk (`git worktree remove`) and drop the
+    /// child-project row. Destructive — the worktree directory is removed.
+    DeleteWorktree {
+        worktree_id: String,
+        parent_project_id: String,
+        worktree_name: String,
+    },
     RecordRecentAction {
         action_key: String,
     },
@@ -1145,6 +1152,7 @@ impl CommandPalette {
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
+                PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
             },
         };
 
@@ -2141,6 +2149,7 @@ impl CommandPalette {
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
+                PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
             },
         };
 
@@ -2235,6 +2244,7 @@ impl CommandPalette {
                 PaletteAction::StartAgent { .. } => Icon::Zap,
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
+                PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
             },
         };
 
