@@ -366,6 +366,26 @@ mod tests {
     }
 
     #[test]
+    fn diff_line_kind_wire_format() {
+        assert_eq!(
+            serde_json::to_string(&DiffLineKind::Context).unwrap(),
+            "\"context\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiffLineKind::Added).unwrap(),
+            "\"added\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiffLineKind::Removed).unwrap(),
+            "\"removed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DiffLineKind::NoNewlineMarker).unwrap(),
+            "\"no_newline_marker\""
+        );
+    }
+
+    #[test]
     fn diff_hunk_roundtrip() {
         roundtrip(&DiffHunk {
             old_start: 10,

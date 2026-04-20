@@ -1293,6 +1293,27 @@ mod tests {
     }
 
     #[test]
+    fn project_diff_sources_without_max_commits_deserializes() {
+        let id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"ProjectDiffSources","payload":{{"request_id":"{id}","project_path":"/home/user/repo"}}}}"#
+        );
+        let msg: ServerMessage = serde_json::from_str(&raw).unwrap();
+        match msg {
+            ServerMessage::ProjectDiffSources {
+                request_id,
+                project_path,
+                max_commits,
+            } => {
+                assert_eq!(request_id, id);
+                assert_eq!(project_path, "/home/user/repo");
+                assert!(max_commits.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn project_send_review_server_message_roundtrip() {
         use crate::project::{DiffSource, ReviewDelivery, SendReviewRequest};
         roundtrip_server(&ServerMessage::ProjectSendReview {
