@@ -166,8 +166,16 @@ pub(super) fn compute_items(
     // When a project is selected, pull sessions from non-selected nodes
     // into the hidden bucket (D1). Orphan sessions have no project so
     // they stay visible regardless.
+    //
+    // D1 is scoped to the host that owns the selected project. A selection
+    // on host A must not hide sessions on host B — otherwise clicking a
+    // project in one host's tree would blank out every other host's
+    // sessions because `build_selected_family` returns just the id on hosts
+    // where the project does not live.
     let mut hidden_sessions: Vec<Session> = Vec::new();
-    if let Some(sel) = selected_pid {
+    if let Some(sel) = selected_pid
+        && host_projects.iter().any(|p| p.id == sel)
+    {
         // Selected family: if `sel` is a worktree, only that worktree
         // stays visible; if it is a parent, the parent and all its
         // worktrees stay visible so clicking the parent does not hide
@@ -498,6 +506,36 @@ mod tests {
         assert!(family.contains("wa"));
         assert!(family.contains("wb"));
         assert!(!family.contains("q"));
+    }
+
+    #[test]
+    fn selection_on_other_host_does_not_hide_sessions_here() {
+        // Two hosts, each with its own project and session. Select a
+        // project on host A; host B's session must remain visible
+        // (regression: earlier `build_selected_family` returned just the
+        // selected id, so on host B nothing matched and every session
+        // fell into `hidden_sessions`).
+        let a = make_project("a", "host-a");
+        let b = make_project("b", "host-b");
+        let projects = vec![a, b];
+        let sessions = vec![
+            make_session("s_a", "host-a", Some("a")),
+            make_session("s_b", "host-b", Some("b")),
+        ];
+
+        let items_b = compute_items(&sessions, &projects, "host-b", Some("a"));
+        assert!(
+            items_b.hidden_sessions.is_empty(),
+            "host-b sessions must stay visible when selection is on host-a, \
+             got hidden: {:?}",
+            items_b
+                .hidden_sessions
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(items_b.project_nodes.len(), 1);
+        assert_eq!(items_b.project_nodes[0].sessions.len(), 1);
     }
 
     #[test]

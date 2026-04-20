@@ -188,26 +188,41 @@ impl SidebarView {
             }
         }
 
-        // Auto-expand when any child has activity the user cares about.
-        let has_active_session = node
-            .worktrees
-            .iter()
-            .any(|w| w.sessions.iter().any(|s| s.status == SessionStatus::Active));
-        let has_running_loop = node.worktrees.iter().any(|w| {
-            w.sessions.iter().any(|s| {
-                self.cc_states.get(&s.id).is_some_and(|cc| {
-                    matches!(
-                        cc.status,
-                        AgenticStatus::Working | AgenticStatus::WaitingForInput
-                    )
-                })
-            })
-        });
-        if has_active_session || has_running_loop {
+        // Read activity from the raw session snapshot, not `node.worktrees[i].sessions`:
+        // `compute_items` moves sessions belonging to non-selected projects into the
+        // hidden bucket, which would otherwise flip this heuristic and auto-collapse
+        // every sibling project when the user selects one.
+        if self.any_worktree_has_activity(node) {
             return true;
         }
 
         node.worktrees.len() < DEFAULT_COLLAPSE_THRESHOLD
+    }
+
+    /// True when any worktree linked to `node.project.id` has an active
+    /// session or a running agentic loop, consulting the raw session list
+    /// so the result is independent of D1 hiding.
+    fn any_worktree_has_activity(&self, node: &ProjectNode) -> bool {
+        let worktree_ids: HashSet<&str> = node
+            .worktrees
+            .iter()
+            .map(|w| w.project.id.as_str())
+            .collect();
+        if worktree_ids.is_empty() {
+            return false;
+        }
+        self.sessions.iter().any(|s| {
+            s.project_id
+                .as_deref()
+                .is_some_and(|pid| worktree_ids.contains(pid))
+                && (s.status == SessionStatus::Active
+                    || self.cc_states.get(&s.id).is_some_and(|cc| {
+                        matches!(
+                            cc.status,
+                            AgenticStatus::Working | AgenticStatus::WaitingForInput
+                        )
+                    }))
+        })
     }
 
     /// Read the tri-state override slot for a project from persistence.
@@ -244,21 +259,7 @@ impl SidebarView {
     /// persisted override slots. Extracted so `toggle_project_expanded` can
     /// recover the heuristic's answer when rotating the override.
     fn default_expanded(&self, node: &ProjectNode) -> bool {
-        let has_active_session = node
-            .worktrees
-            .iter()
-            .any(|w| w.sessions.iter().any(|s| s.status == SessionStatus::Active));
-        let has_running_loop = node.worktrees.iter().any(|w| {
-            w.sessions.iter().any(|s| {
-                self.cc_states.get(&s.id).is_some_and(|cc| {
-                    matches!(
-                        cc.status,
-                        AgenticStatus::Working | AgenticStatus::WaitingForInput
-                    )
-                })
-            })
-        });
-        if has_active_session || has_running_loop {
+        if self.any_worktree_has_activity(node) {
             return true;
         }
         node.worktrees.len() < DEFAULT_COLLAPSE_THRESHOLD
@@ -1048,9 +1049,9 @@ impl SidebarView {
 
         let indents = Indents {
             project: 12.0,
-            worktree: 24.0,
-            session: 28.0,
-            worktree_session: 40.0,
+            worktree: 30.0,
+            session: 30.0,
+            worktree_session: 48.0,
         };
         let orphan_indent = if is_local { 16.0 } else { 20.0 };
 
