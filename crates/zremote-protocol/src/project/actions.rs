@@ -56,3 +56,36 @@ pub struct WorktreeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
 }
+
+/// Reference from a hook slot to a named `ProjectAction`, with optional
+/// input overrides that populate the action's `{{input}}` placeholders.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookRef {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub inputs: HashMap<String, String>,
+}
+
+/// Worktree lifecycle hooks. Each slot points at a named action in
+/// `ProjectSettings.actions`. Slots `create` and `delete` override the
+/// default git flow (PTY). Slots `post_create` and `pre_delete` run in
+/// captured mode around the default flow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorktreeHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<HookRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete: Option<HookRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_create: Option<HookRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_delete: Option<HookRef>,
+}
+
+/// Top-level hook configuration. Nests event-family maps (currently only
+/// `worktree`; future RFCs may add `session`, `project`, ...).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProjectHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeHooks>,
+}

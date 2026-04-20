@@ -232,6 +232,7 @@ fn project_settings_roundtrip() {
         },
         actions: vec![],
         worktree: None,
+        hooks: None,
         linear: None,
         prompts: vec![],
         claude: None,
@@ -252,6 +253,7 @@ fn project_settings_default() {
     assert!(settings.agentic.auto_approve_patterns.is_empty());
     assert!(settings.actions.is_empty());
     assert!(settings.worktree.is_none());
+    assert!(settings.hooks.is_none());
     assert!(settings.linear.is_none());
     assert!(settings.prompts.is_empty());
     assert!(settings.claude.is_none());
@@ -473,6 +475,7 @@ fn project_settings_with_actions_roundtrip() {
             on_create: Some("npm install".to_string()),
             on_delete: None,
         }),
+        hooks: None,
         linear: None,
         prompts: vec![],
         claude: None,
@@ -515,6 +518,7 @@ fn project_settings_with_linear_roundtrip() {
         agentic: AgenticSettings::default(),
         actions: vec![],
         worktree: None,
+        hooks: None,
         linear: Some(LinearSettings {
             token_env_var: "LINEAR_API_KEY".to_string(),
             team_key: "ENG".to_string(),
@@ -981,6 +985,7 @@ fn project_settings_with_prompts_roundtrip() {
         agentic: AgenticSettings::default(),
         actions: vec![],
         worktree: None,
+        hooks: None,
         linear: None,
         prompts: vec![PromptTemplate {
             name: "Debug".to_string(),
@@ -1006,4 +1011,156 @@ fn project_settings_with_prompts_roundtrip() {
     let json = serde_json::to_string(&settings).expect("serialize");
     let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(settings, parsed);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 008 Phase 1: hook protocol types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hook_ref_deserialises_without_inputs() {
+    let json = r#"{"action":"spawn-stack"}"#;
+    let parsed: HookRef = serde_json::from_str(json).expect("deserialize");
+    assert_eq!(parsed.action, "spawn-stack");
+    assert!(parsed.inputs.is_empty());
+}
+
+#[test]
+fn hook_ref_with_inputs_roundtrip() {
+    let hook = HookRef {
+        action: "teardown".to_string(),
+        inputs: HashMap::from([
+            ("scope".to_string(), "full".to_string()),
+            ("force".to_string(), "true".to_string()),
+        ]),
+    };
+    let json = serde_json::to_string(&hook).expect("serialize");
+    let parsed: HookRef = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(hook, parsed);
+}
+
+#[test]
+fn hook_ref_empty_inputs_skipped_in_json() {
+    let hook = HookRef {
+        action: "noop".to_string(),
+        inputs: HashMap::new(),
+    };
+    let val = serde_json::to_value(&hook).unwrap();
+    assert!(
+        val.get("inputs").is_none(),
+        "empty inputs should be skipped"
+    );
+}
+
+#[test]
+fn project_settings_without_hooks_roundtrip() {
+    let settings = ProjectSettings::default();
+    let val = serde_json::to_value(&settings).unwrap();
+    assert!(
+        val.get("hooks").is_none(),
+        "hooks should be skipped when None"
+    );
+    let json = serde_json::to_string(&settings).expect("serialize");
+    let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(settings, parsed);
+    assert!(parsed.hooks.is_none());
+}
+
+#[test]
+fn project_settings_with_hooks_worktree_create_roundtrip() {
+    let settings = ProjectSettings {
+        hooks: Some(ProjectHooks {
+            worktree: Some(WorktreeHooks {
+                create: Some(HookRef {
+                    action: "worktree-add".to_string(),
+                    inputs: HashMap::from([("branch".to_string(), "feature/x".to_string())]),
+                }),
+                delete: None,
+                post_create: Some(HookRef {
+                    action: "spawn-stack".to_string(),
+                    inputs: HashMap::new(),
+                }),
+                pre_delete: None,
+            }),
+        }),
+        ..ProjectSettings::default()
+    };
+    let json = serde_json::to_string(&settings).expect("serialize");
+    let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(settings, parsed);
+
+    let hooks = parsed.hooks.as_ref().expect("hooks present");
+    let wt = hooks.worktree.as_ref().expect("worktree hooks present");
+    assert_eq!(wt.create.as_ref().unwrap().action, "worktree-add");
+    assert_eq!(
+        wt.create
+            .as_ref()
+            .unwrap()
+            .inputs
+            .get("branch")
+            .map(String::as_str),
+        Some("feature/x"),
+    );
+    assert_eq!(wt.post_create.as_ref().unwrap().action, "spawn-stack");
+    assert!(wt.delete.is_none());
+    assert!(wt.pre_delete.is_none());
+}
+
+#[test]
+fn project_settings_legacy_worktree_and_new_hooks_coexist() {
+    // Backward-compat: legacy `worktree.create_command` + new `hooks.worktree.create`
+    // must both survive roundtrip so the dispatcher can decide precedence at runtime.
+    let settings = ProjectSettings {
+        worktree: Some(WorktreeSettings {
+            create_command: Some("echo legacy".to_string()),
+            delete_command: None,
+            on_create: Some("npm install".to_string()),
+            on_delete: None,
+        }),
+        hooks: Some(ProjectHooks {
+            worktree: Some(WorktreeHooks {
+                create: Some(HookRef {
+                    action: "worktree-add".to_string(),
+                    inputs: HashMap::new(),
+                }),
+                delete: None,
+                post_create: None,
+                pre_delete: None,
+            }),
+        }),
+        ..ProjectSettings::default()
+    };
+    let json = serde_json::to_string(&settings).expect("serialize");
+    let parsed: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(settings, parsed);
+
+    let legacy = parsed.worktree.as_ref().expect("legacy worktree present");
+    assert_eq!(legacy.create_command.as_deref(), Some("echo legacy"));
+    assert_eq!(legacy.on_create.as_deref(), Some("npm install"));
+
+    let new = parsed
+        .hooks
+        .as_ref()
+        .and_then(|h| h.worktree.as_ref())
+        .expect("new worktree hooks present");
+    assert_eq!(new.create.as_ref().unwrap().action, "worktree-add");
+}
+
+#[test]
+fn project_hooks_empty_worktree_skipped_in_json() {
+    let hooks = ProjectHooks::default();
+    let val = serde_json::to_value(&hooks).unwrap();
+    assert!(
+        val.get("worktree").is_none(),
+        "empty worktree field should be skipped"
+    );
+}
+
+#[test]
+fn worktree_hooks_all_none_serialises_to_empty_object() {
+    let wh = WorktreeHooks::default();
+    let val = serde_json::to_value(&wh).unwrap();
+    assert!(val.as_object().unwrap().is_empty());
+    let parsed: WorktreeHooks = serde_json::from_str("{}").expect("deserialize");
+    assert_eq!(parsed, wh);
 }
