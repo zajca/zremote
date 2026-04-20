@@ -19,6 +19,17 @@ pub struct AuthContext {
 }
 
 /// Errors returned by bearer verification.
+///
+/// **Oracle caution (HTTP handlers):** every variant — `MissingHeader`,
+/// `Malformed`, `NotFound`, `Expired`, `Db` — MUST map to one identical
+/// response (`401 { "error": "unauthorized" }`, no `WWW-Authenticate` nuance,
+/// no distinct body) with uniform timing. Distinguishing "token absent" from
+/// "token present but unknown" from "token expired" gives an attacker a
+/// high-signal oracle for session-token guessing. Inside the server the
+/// variants remain for audit-log precision; the edge collapses them. When
+/// collapsing, ensure every branch performs the same work order (hash +
+/// DB lookup) or pad out short branches with `tokio::time::sleep` so the
+/// response latency does not differ meaningfully between cases.
 #[derive(Debug)]
 pub enum AuthErr {
     MissingHeader,
@@ -72,12 +83,23 @@ pub fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Verify a session token: hash it, look up the row, check expiry. Returns
-/// an `AuthContext` on success. Hash comparison happens at the DB `WHERE`
-/// layer against the stored hash — the session id is opaque and not an
-/// attacker-controlled value at this point, so timing leakage is bounded
-/// by the SQLite UNIQUE index lookup cost rather than a naive byte loop.
+/// an `AuthContext` on success.
+///
+/// **Why no `subtle::ConstantTimeEq` here** (RFC §4 — session auth): the
+/// comparison happens inside SQLite's B-tree on the `UNIQUE INDEX
+/// sessions.token_hash`, not in a Rust byte loop. The time cost is bounded
+/// by `O(log n)` index descent over a fixed-size 32-byte hash — not by a
+/// character-by-character early-exit match. An attacker who times this
+/// endpoint learns only the `log(sessions)` cost, which is independent of
+/// the secret's bits. A CT wrapper here would give a false sense of safety
+/// without changing the side-channel surface.
+///
+/// The prior layer (`hash_session_token`) already applies SHA-256, so the
+/// raw plaintext token never hits the index; only its digest does.
 pub async fn verify_session(pool: &SqlitePool, token: &str) -> Result<AuthContext, AuthErr> {
     let hash = hash_session_token(token);
+    // DB-indexed CT lookup on `sessions.token_hash` — see fn doc-comment for
+    // the non-use of `subtle::ConstantTimeEq`.
     let row = auth_sessions::lookup(pool, &hash)
         .await?
         .ok_or(AuthErr::NotFound)?;

@@ -84,13 +84,18 @@ pub struct AuditRow {
     pub event: String,
     pub target: Option<String>,
     pub outcome: String,
-    pub details: Option<String>,
+    /// Raw JSON string. `'{}'` when the writer left `details` as `None`.
+    /// The column is `TEXT NOT NULL DEFAULT '{}'` so downstream parsers can
+    /// rely on getting a well-formed JSON object without null-handling.
+    pub details: String,
 }
 
 pub async fn log_event(pool: &SqlitePool, event: AuditEvent) -> Result<i64, AuditError> {
+    // Column is `TEXT NOT NULL DEFAULT '{}'`; collapse `None` → `{}` so every
+    // row carries a well-formed JSON object regardless of caller.
     let details = match event.details {
-        Some(v) => Some(serde_json::to_string(&v)?),
-        None => None,
+        Some(v) => serde_json::to_string(&v)?,
+        None => "{}".to_string(),
     };
     let id = sqlx::query(
         "INSERT INTO audit_log (ts, actor, ip, event, target, outcome, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -178,7 +183,9 @@ mod tests {
         assert_eq!(rows[0].event, "token_rotate");
         assert_eq!(rows[1].event, "login_ok");
         assert_eq!(rows[1].outcome, "ok");
-        assert!(rows[1].details.as_deref().unwrap().contains("admin_token"));
+        assert!(rows[1].details.contains("admin_token"));
+        // Writers that pass `None` see `'{}'` on read.
+        assert_eq!(rows[0].details, "{}");
     }
 
     #[tokio::test]

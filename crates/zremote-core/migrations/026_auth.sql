@@ -60,7 +60,7 @@ CREATE TABLE audit_log (
     event       TEXT NOT NULL,
     target      TEXT,
     outcome     TEXT NOT NULL CHECK (outcome IN ('ok', 'denied', 'error')),
-    details     TEXT
+    details     TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX audit_ts ON audit_log(ts);
 CREATE INDEX audit_event ON audit_log(event);

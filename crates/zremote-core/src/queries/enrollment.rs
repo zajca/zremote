@@ -33,6 +33,15 @@ impl From<sqlx::Error> for EnrollmentError {
 }
 
 /// Result of attempting to redeem an enrollment code.
+///
+/// **Oracle caution (Phase 2/3 HTTP handlers):** every variant here — including
+/// [`RedeemError::NotFound`], [`RedeemError::AlreadyConsumed`], and
+/// [`RedeemError::Expired`] — MUST collapse into the **same** opaque HTTP
+/// response (typically `400 { "error": "enrollment_failed" }`) with uniform
+/// timing. Distinguishing them over the wire tells an attacker whether a
+/// guessed code *existed*, *was used*, or *had expired*, turning the endpoint
+/// into an enumeration oracle. The query layer keeps the distinction only so
+/// the server can log/audit precisely; handlers must flatten before reply.
 #[derive(Debug)]
 pub enum RedeemError {
     NotFound,
@@ -110,51 +119,58 @@ pub async fn create_code(
     })
 }
 
-/// Atomic redemption: within a transaction, verify the row exists, is not
-/// consumed, and is not expired; then stamp `consumed_at` and
-/// `consumed_by_agent_id`. Returns `RedeemError::NotFound` if the code hash
-/// doesn't match, `AlreadyConsumed` if stamped before, `Expired` if past TTL.
+/// Atomically redeem an enrollment code. `SQLite`'s default `BEGIN` (deferred)
+/// leaves a window between a `SELECT` and the follow-up `UPDATE`; previous
+/// revisions of this function had exactly that TOCTOU. The correct primitive
+/// is a single `UPDATE … RETURNING` that guards the `consumed_at IS NULL` +
+/// `expires_at > now` preconditions atomically in one statement. If the
+/// `UPDATE` matches zero rows we re-query with a `SELECT` purely to classify
+/// the *reason* for the miss (`NotFound` vs `AlreadyConsumed` vs `Expired`) for the
+/// server's audit log — the classification never affects the wire response;
+/// the HTTP handler flattens all three into one opaque error (see the
+/// [`RedeemError`] doc-comment).
 pub async fn redeem(
     pool: &SqlitePool,
     code_hash: &str,
     agent_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(), RedeemError> {
-    let mut tx = pool.begin().await?;
+    let now_s = now.to_rfc3339();
+    let affected = sqlx::query(
+        "UPDATE enrollment_codes \
+         SET consumed_at = ?, consumed_by_agent_id = ? \
+         WHERE code_hash = ? \
+           AND consumed_at IS NULL \
+           AND expires_at > ?",
+    )
+    .bind(&now_s)
+    .bind(agent_id)
+    .bind(code_hash)
+    .bind(&now_s)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if affected == 1 {
+        return Ok(());
+    }
+
+    // Zero rows updated — classify the failure for audit logging only. A
+    // direct `sqlx` fetch is used here instead of `find_by_hash` to avoid
+    // tangling `EnrollmentError` into the return type.
     let row = sqlx::query_as::<_, EnrollmentCodeRow>(
         "SELECT code_hash, scope, expires_at, consumed_at, consumed_by_agent_id \
          FROM enrollment_codes WHERE code_hash = ?",
     )
     .bind(code_hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await?;
 
-    let Some(row) = row else {
-        return Err(RedeemError::NotFound);
-    };
-
-    if row.consumed_at.is_some() {
-        return Err(RedeemError::AlreadyConsumed);
+    match row {
+        None => Err(RedeemError::NotFound),
+        Some(row) if row.consumed_at.is_some() => Err(RedeemError::AlreadyConsumed),
+        Some(_) => Err(RedeemError::Expired),
     }
-
-    let expires = DateTime::parse_from_rfc3339(&row.expires_at)
-        .map_err(|_| RedeemError::NotFound)?
-        .with_timezone(&Utc);
-    if expires <= now {
-        return Err(RedeemError::Expired);
-    }
-
-    sqlx::query(
-        "UPDATE enrollment_codes SET consumed_at = ?, consumed_by_agent_id = ? WHERE code_hash = ? AND consumed_at IS NULL",
-    )
-    .bind(now.to_rfc3339())
-    .bind(agent_id)
-    .bind(code_hash)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
 }
 
 pub async fn find_by_hash(
@@ -248,6 +264,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RedeemError::NotFound));
+    }
+
+    /// Regression test for the TOCTOU flagged in Phase 1 security review:
+    /// two concurrent `redeem` calls on the same valid code must result in
+    /// exactly one success and exactly one `AlreadyConsumed`, never two
+    /// simultaneous successes.
+    #[tokio::test]
+    async fn concurrent_redeem_yields_exactly_one_success() {
+        let (pool, agent_id) = setup().await;
+        let now = Utc::now();
+        create_code(&pool, "race-code", now + Duration::minutes(15), "host")
+            .await
+            .unwrap();
+
+        // Second agent so both calls have a distinct FK target.
+        sqlx::query(
+            "INSERT INTO agents (id, host_id, secret_hash, created_at) VALUES ('a2', 'h1', 'sh2', ?)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let p1 = pool.clone();
+        let p2 = pool.clone();
+        let a1 = agent_id.clone();
+        let h1 = tokio::spawn(async move { redeem(&p1, "race-code", &a1, now).await });
+        let h2 = tokio::spawn(async move { redeem(&p2, "race-code", "a2", now).await });
+
+        let r1 = h1.await.unwrap();
+        let r2 = h2.await.unwrap();
+
+        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one of the two concurrent redemptions must succeed (got r1={r1:?}, r2={r2:?})"
+        );
+        let losers: Vec<&RedeemError> =
+            [&r1, &r2].iter().filter_map(|r| r.as_ref().err()).collect();
+        assert_eq!(losers.len(), 1);
+        assert!(
+            matches!(losers[0], RedeemError::AlreadyConsumed),
+            "loser must see AlreadyConsumed, not {:?}",
+            losers[0]
+        );
     }
 
     #[test]
