@@ -1230,6 +1230,19 @@ pub(super) async fn handle_server_message(
             )
             .await;
         }
+        // RFC git-diff-ui P2 wires these diff dispatch arms. The agent's
+        // `supports_diff` Register flag is still `false`, so a conforming
+        // server will not send these to us yet. Log-and-drop if we receive
+        // them prematurely.
+        ServerMessage::ProjectDiff { request_id, .. }
+        | ServerMessage::ProjectDiffSources { request_id, .. }
+        | ServerMessage::ProjectSendReview { request_id, .. }
+        | ServerMessage::DiffCancel { request_id } => {
+            tracing::warn!(
+                %request_id,
+                "received git-diff-ui ServerMessage before RFC git-diff-ui P2 dispatch is wired"
+            );
+        }
     }
 }
 

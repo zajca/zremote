@@ -94,6 +94,7 @@ pub(super) async fn register_agent(
         arch,
         token,
         supports_persistent_sessions,
+        supports_diff: _,
     } = register_msg
     else {
         tracing::warn!("agent sent non-Register message as first message");

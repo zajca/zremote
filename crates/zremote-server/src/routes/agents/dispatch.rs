@@ -790,6 +790,45 @@ pub(super) async fn handle_agent_message(
                 }
             }
         }
+        // RFC git-diff-ui P2 wires these diff streaming arms into a
+        // `DiffDispatch`. Until P2 lands the server has no way to correlate
+        // the event back to a REST handler, so we drop and log; a well-formed
+        // agent will not emit these without a matching `ProjectDiff` request.
+        AgentMessage::DiffStarted { request_id, .. } => {
+            tracing::warn!(
+                host_id = %host_id,
+                %request_id,
+                "received DiffStarted before server-side dispatch (RFC git-diff-ui P2) is wired"
+            );
+        }
+        AgentMessage::DiffFileChunk { request_id, .. } => {
+            tracing::warn!(
+                host_id = %host_id,
+                %request_id,
+                "received DiffFileChunk before server-side dispatch (RFC git-diff-ui P2) is wired"
+            );
+        }
+        AgentMessage::DiffFinished { request_id, .. } => {
+            tracing::warn!(
+                host_id = %host_id,
+                %request_id,
+                "received DiffFinished before server-side dispatch (RFC git-diff-ui P2) is wired"
+            );
+        }
+        AgentMessage::DiffSourcesResult { request_id, .. } => {
+            tracing::warn!(
+                host_id = %host_id,
+                %request_id,
+                "received DiffSourcesResult before server-side dispatch (RFC git-diff-ui P2) is wired"
+            );
+        }
+        AgentMessage::SendReviewResult { request_id, .. } => {
+            tracing::warn!(
+                host_id = %host_id,
+                %request_id,
+                "received SendReviewResult before server-side dispatch (RFC git-diff-ui P2) is wired"
+            );
+        }
     }
     Ok(())
 }

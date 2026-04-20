@@ -28,6 +28,9 @@ pub(super) async fn register(
         arch: std::env::consts::ARCH.to_string(),
         token: config.token.clone(),
         supports_persistent_sessions: supports_persistence,
+        // Diff support wires in later phases; the capability flag is advertised
+        // once the agent implements the `ProjectDiff*` handlers.
+        supports_diff: false,
     };
 
     send_message(ws, &register_msg).await?;
