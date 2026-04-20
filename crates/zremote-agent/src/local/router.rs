@@ -116,6 +116,19 @@ pub(crate) fn build_router(
             "/api/projects/{project_id}/git/branches",
             get(routes::projects::list_branches),
         )
+        // Git diff UI (RFC git-diff-ui)
+        .route(
+            "/api/projects/{project_id}/diff",
+            post(routes::projects::post_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/diff/sources",
+            get(routes::projects::get_diff_sources),
+        )
+        .route(
+            "/api/projects/{project_id}/review/send",
+            post(routes::projects::post_send_review),
+        )
         .route(
             "/api/projects/{project_id}/worktrees",
             get(routes::projects::list_worktrees).post(routes::projects::create_worktree),

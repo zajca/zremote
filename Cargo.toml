@@ -32,6 +32,9 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
 sha2 = "0.10"
 subtle = "2"
 tokio-util = "0.7"
+tokio-stream = "0.1"
+bytes = "1"
+http-body-util = "0.1"
 dashmap = "6"
 teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 

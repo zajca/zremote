@@ -1,4 +1,5 @@
 mod crud;
+mod diff;
 mod git;
 mod scan;
 mod settings;
@@ -7,6 +8,7 @@ pub(crate) mod worktree;
 pub use crud::{
     add_project, delete_project, get_project, list_project_sessions, list_projects, update_project,
 };
+pub use diff::{get_diff_sources, post_diff, post_send_review};
 pub use git::{list_branches, trigger_git_refresh};
 pub use scan::trigger_scan;
 pub use settings::{

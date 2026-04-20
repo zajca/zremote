@@ -2,6 +2,8 @@ pub mod action_inputs;
 pub mod action_runner;
 pub mod actions;
 pub mod configure;
+pub mod diff;
+pub mod diff_parser;
 pub mod git;
 pub mod git_refresh;
 pub mod hook_dispatcher;
@@ -10,6 +12,7 @@ pub mod intelligence;
 pub mod metadata;
 pub mod prompts;
 pub mod repair;
+pub mod review;
 pub mod scanner;
 pub mod settings;
 
