@@ -1,5 +1,6 @@
 pub mod agentic;
 pub mod agents;
+pub mod auth;
 pub mod channel;
 pub mod claude;
 pub mod events;
@@ -13,6 +14,10 @@ pub use agentic::{AgenticAgentMessage, AgenticStatus};
 pub use agents::{
     AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo, SUPPORTED_KINDS,
     supported_kinds,
+};
+pub use auth::{
+    AGENT_PROTOCOL_VERSION, AgentAuthMessage, AuthRejectReason, EnrollRejectReason,
+    ServerAuthMessage,
 };
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
