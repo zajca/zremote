@@ -482,6 +482,11 @@ pub async fn run_connection(
     // Channel bridge for dispatching channel messages to per-session servers
     let mut channel_bridge = crate::channel::bridge::ChannelBridge::new();
 
+    // In-flight diff request registry (RFC git-diff-ui P2). Each `ProjectDiff`
+    // inserts a CancellationToken; `DiffCancel` removes + cancels it.
+    let diff_requests: dispatch::DiffRequestRegistry =
+        std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
     // Main message loop
     let result = loop {
         tokio::select! {
@@ -506,6 +511,7 @@ pub async fn run_connection(
                                     Some(&mut channel_bridge),
                                     &mut channel_dialog_detectors,
                                     launcher_registry,
+                                    &diff_requests,
                                 ).await;
                             }
                             Err(e) => {

@@ -33,6 +33,7 @@ pub(super) struct RegisteredAgent {
     pub(super) os: String,
     pub(super) arch: String,
     pub(super) supports_persistent_sessions: bool,
+    pub(super) supports_diff: bool,
 }
 
 /// Receive a raw `AgentMessage` during registration (before the main loop).
@@ -94,7 +95,7 @@ pub(super) async fn register_agent(
         arch,
         token,
         supports_persistent_sessions,
-        supports_diff: _,
+        supports_diff,
     } = register_msg
     else {
         tracing::warn!("agent sent non-Register message as first message");
@@ -144,7 +145,13 @@ pub(super) async fn register_agent(
 
     let (old_sender, generation) = state
         .connections
-        .register(host_id, hostname.clone(), tx, supports_persistent_sessions)
+        .register(
+            host_id,
+            hostname.clone(),
+            tx,
+            supports_persistent_sessions,
+            supports_diff,
+        )
         .await;
     if let Some(old_sender) = old_sender {
         drop(old_sender);
@@ -170,6 +177,7 @@ pub(super) async fn register_agent(
         os,
         arch,
         supports_persistent_sessions,
+        supports_diff,
     })
 }
 

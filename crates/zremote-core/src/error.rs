@@ -18,6 +18,9 @@ pub enum AppError {
     BadRequest(String),
     Conflict(String),
     Internal(String),
+    /// 501 Not Implemented — used for capability gating when the remote
+    /// agent does not support a feature (e.g. `supports_diff=false`).
+    NotImplemented(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -29,6 +32,7 @@ impl std::fmt::Display for AppError {
             Self::BadRequest(msg) => write!(f, "bad request: {msg}"),
             Self::Conflict(msg) => write!(f, "conflict: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
+            Self::NotImplemented(msg) => write!(f, "not implemented: {msg}"),
         }
     }
 }
@@ -64,6 +68,9 @@ impl IntoResponse for AppError {
                     "INTERNAL_ERROR",
                     "internal server error".to_string(),
                 )
+            }
+            Self::NotImplemented(msg) => {
+                (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED", msg.clone())
             }
         };
 

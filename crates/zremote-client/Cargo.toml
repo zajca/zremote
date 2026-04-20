@@ -23,6 +23,8 @@ tokio-util.workspace = true
 percent-encoding = "2"
 base64.workspace = true
 rand.workspace = true
+bytes.workspace = true
+tokio-stream.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }

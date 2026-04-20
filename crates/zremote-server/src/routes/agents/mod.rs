@@ -42,6 +42,7 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
         os,
         arch,
         supports_persistent_sessions,
+        supports_diff,
     }) = register_agent(&mut socket, &state).await
     else {
         return;
@@ -61,6 +62,9 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
 
     if supports_persistent_sessions {
         tracing::info!(host_id = %host_id, "agent supports persistent sessions");
+    }
+    if supports_diff {
+        tracing::info!(host_id = %host_id, "agent supports git diff");
     }
 
     // Bidirectional message loop
@@ -135,6 +139,11 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
     "ProjectSettingsSaved",
     "WorktreeHookResult",
     "ActionInputsResolved",
+    "DiffStarted",
+    "DiffFileChunk",
+    "DiffFinished",
+    "DiffSourcesResult",
+    "SendReviewResult",
 ];
 
 /// Known `AgenticAgentMessage` type tags.
@@ -239,6 +248,7 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            diff_dispatch: Arc::new(crate::diff_dispatch::DiffDispatch::new()),
         })
     }
 
@@ -443,7 +453,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         let msg = AgenticAgentMessage::LoopDetected {
@@ -494,7 +504,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         // First detect the loop
@@ -552,7 +562,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         // Detect loop first
@@ -618,7 +628,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "cleanup-host".to_string(), tx, false)
+            .register(host_id, "cleanup-host".to_string(), tx, false, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -678,7 +688,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "persist-host".to_string(), tx, true)
+            .register(host_id, "persist-host".to_string(), tx, true, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -720,13 +730,13 @@ mod tests {
         let (tx1, _rx1) = tokio::sync::mpsc::channel(16);
         let (_, gen1) = state
             .connections
-            .register(host_id, "stale-host".to_string(), tx1, false)
+            .register(host_id, "stale-host".to_string(), tx1, false, false)
             .await;
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
         let (_, gen2) = state
             .connections
-            .register(host_id, "stale-host".to_string(), tx2, false)
+            .register(host_id, "stale-host".to_string(), tx2, false, false)
             .await;
 
         assert!(gen2 > gen1);

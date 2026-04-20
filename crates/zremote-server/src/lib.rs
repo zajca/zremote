@@ -11,6 +11,7 @@
 
 mod auth;
 mod db;
+pub mod diff_dispatch;
 mod error;
 mod routes;
 mod state;
@@ -190,6 +191,18 @@ fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project_id}/configure",
             post(routes::projects::configure_with_claude),
+        )
+        .route(
+            "/api/projects/{project_id}/diff",
+            post(routes::projects::post_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/diff/sources",
+            get(routes::projects::get_diff_sources),
+        )
+        .route(
+            "/api/projects/{project_id}/review/send",
+            post(routes::projects::post_send_review),
         )
         .route(
             "/api/config/{key}",
@@ -424,6 +437,7 @@ pub async fn run_server(config: ServerConfig) {
         settings_get_requests,
         settings_save_requests,
         action_inputs_requests,
+        diff_dispatch: Arc::new(diff_dispatch::DiffDispatch::new()),
     });
 
     // Spawn heartbeat monitor background task
@@ -553,6 +567,7 @@ mod tests {
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            diff_dispatch: Arc::new(diff_dispatch::DiffDispatch::new()),
         })
     }
 
@@ -915,7 +930,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(uuid::Uuid::new_v4(), "test-host".to_string(), tx, false)
+            .register(
+                uuid::Uuid::new_v4(),
+                "test-host".to_string(),
+                tx,
+                false,
+                false,
+            )
             .await;
 
         let app = create_router(state);
@@ -943,7 +964,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx, false)
+            .register(host_id, "host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state);
@@ -1133,7 +1154,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx, false)
+            .register(host_id, "host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state);
@@ -1205,7 +1226,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "connected-host".to_string(), tx, false)
+            .register(host_id, "connected-host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state.clone());
@@ -1270,7 +1291,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx, false)
+            .register(host_id, "host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state.clone());
@@ -1327,7 +1348,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx, false)
+            .register(host_id, "host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state.clone());
@@ -1374,7 +1395,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "host".to_string(), tx, false)
+            .register(host_id, "host".to_string(), tx, false, false)
             .await;
 
         let app = create_router(state.clone());

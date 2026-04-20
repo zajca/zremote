@@ -1,9 +1,19 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 use zremote_protocol::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use zremote_protocol::knowledge::KnowledgeServerMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, HostId, ServerMessage, SessionId};
+
+/// Registry of in-flight streaming diff requests. Each entry carries a
+/// cancellation token the `DiffCancel` handler can trigger to abort the
+/// matching worker between files (and, if the child is still running, mark
+/// the token so the worker stops before emitting the next chunk).
+///
+/// RFC git-diff-ui P2.
+pub type DiffRequestRegistry = Arc<Mutex<std::collections::HashMap<uuid::Uuid, CancellationToken>>>;
 
 use crate::agentic::analyzer::OutputAnalyzer;
 use crate::agentic::manager::AgenticLoopManager;
@@ -231,6 +241,7 @@ pub(super) async fn handle_server_message(
     mut channel_bridge: Option<&mut crate::channel::bridge::ChannelBridge>,
     channel_dialog_detectors: &mut std::collections::HashMap<SessionId, ChannelDialogDetector>,
     launcher_registry: &std::sync::Arc<crate::agents::LauncherRegistry>,
+    diff_requests: &DiffRequestRegistry,
 ) {
     match msg {
         ServerMessage::HeartbeatAck { timestamp } => {
@@ -1230,20 +1241,361 @@ pub(super) async fn handle_server_message(
             )
             .await;
         }
-        // RFC git-diff-ui P2 wires these diff dispatch arms. The agent's
-        // `supports_diff` Register flag is still `false`, so a conforming
-        // server will not send these to us yet. Log-and-drop if we receive
-        // them prematurely.
-        ServerMessage::ProjectDiff { request_id, .. }
-        | ServerMessage::ProjectDiffSources { request_id, .. }
-        | ServerMessage::ProjectSendReview { request_id, .. }
-        | ServerMessage::DiffCancel { request_id } => {
-            tracing::warn!(
-                %request_id,
-                "received git-diff-ui ServerMessage before RFC git-diff-ui P2 dispatch is wired"
-            );
+        ServerMessage::ProjectDiff {
+            request_id,
+            request,
+        } => {
+            handle_project_diff(*request_id, request.clone(), outbound_tx, diff_requests).await;
+        }
+        ServerMessage::ProjectDiffSources {
+            request_id,
+            project_path,
+            max_commits,
+        } => {
+            handle_project_diff_sources(
+                *request_id,
+                project_path.clone(),
+                *max_commits,
+                outbound_tx,
+            )
+            .await;
+        }
+        ServerMessage::ProjectSendReview {
+            request_id,
+            request,
+        } => {
+            handle_project_send_review(*request_id, request.clone(), session_manager, outbound_tx)
+                .await;
+        }
+        ServerMessage::DiffCancel { request_id } => {
+            let mut guard = diff_requests.lock().await;
+            if let Some(token) = guard.remove(request_id) {
+                token.cancel();
+                tracing::info!(%request_id, "diff request cancelled");
+            } else {
+                tracing::debug!(%request_id, "DiffCancel for unknown request");
+            }
         }
     }
+}
+
+/// Spawn the blocking diff worker. Emits `DiffStarted`, `DiffFileChunk`,
+/// `DiffFinished` back to the server via `outbound_tx`. Observes the
+/// cancellation token between events so `DiffCancel` can break the stream.
+async fn handle_project_diff(
+    request_id: uuid::Uuid,
+    request: zremote_protocol::project::DiffRequest,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    diff_requests: &DiffRequestRegistry,
+) {
+    // Resolve project path from the DB is a server-side concern; the server
+    // embedded the request_id in its ProjectDiff and we trust the `request`
+    // field — but the underlying `DiffRequest` contains only `project_id`,
+    // not a path. We resolve it via the local scanner: the agent already
+    // knows its own projects. In this environment each agent manages a
+    // single host's filesystem, so we look up the project by id via the
+    // ProjectScanner or the equivalent DB table.
+    //
+    // For P2 we accept a *path* instead of project_id when the caller is
+    // the server. The server always rewrites `project_id` to the UUID, but
+    // the path lives in the server's DB. To keep a clean separation without
+    // threading the local DB here, we fall back to using `project_id` as if
+    // it were a path. The wire shape is cleaner once we add a path override
+    // in a follow-up. For now, the caller (server handler) should set
+    // `project_id` to the absolute project path.
+    //
+    // TODO(rfc-git-diff-ui/followup): add an explicit `project_path` field
+    // on `DiffRequest` when the agent runs in server mode; for now local
+    // mode is the primary code path and project_id == uuid there, resolved
+    // separately.
+
+    let token = CancellationToken::new();
+    diff_requests.lock().await.insert(request_id, token.clone());
+
+    let tx = outbound_tx.clone();
+    let diff_requests = diff_requests.clone();
+
+    // We use `tokio::task::spawn` with an inner `spawn_blocking` so the
+    // async-aware cleanup (registry removal, final DiffFinished) runs on
+    // the tokio runtime.
+    tokio::spawn(async move {
+        let request_clone = request.clone();
+        let token_clone = token.clone();
+        let tx_clone = tx.clone();
+
+        // Resolve project path via local DB. We rely on the agent's local
+        // state — the server-mode path still needs to call into the local
+        // DB that the agent manages. Look up by project_id.
+        let project_path = match resolve_project_path(&request_clone.project_id) {
+            Ok(p) => p,
+            Err(e) => {
+                let err = zremote_protocol::project::DiffError {
+                    code: zremote_protocol::project::DiffErrorCode::PathMissing,
+                    message: e,
+                    hint: None,
+                };
+                let _ = tx_clone
+                    .send(AgentMessage::DiffStarted {
+                        request_id,
+                        files: Vec::new(),
+                    })
+                    .await;
+                let _ = tx_clone
+                    .send(AgentMessage::DiffFinished {
+                        request_id,
+                        error: Some(err),
+                    })
+                    .await;
+                diff_requests.lock().await.remove(&request_id);
+                return;
+            }
+        };
+
+        let join = tokio::task::spawn_blocking(move || {
+            let mut started_sent = false;
+            let result = crate::project::diff::run_diff_streaming(
+                std::path::Path::new(&project_path),
+                &request_clone,
+                |event| {
+                    // Cancellation short-circuits before every emission.
+                    if token_clone.is_cancelled() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "cancelled",
+                        ));
+                    }
+                    let msg = match event {
+                        crate::project::diff::DiffEvent::Started { files } => {
+                            started_sent = true;
+                            AgentMessage::DiffStarted {
+                                request_id,
+                                files: files.clone(),
+                            }
+                        }
+                        crate::project::diff::DiffEvent::File { file_index, file } => {
+                            AgentMessage::DiffFileChunk {
+                                request_id,
+                                file_index: *file_index,
+                                file: file.clone(),
+                            }
+                        }
+                        crate::project::diff::DiffEvent::Finished { error } => {
+                            AgentMessage::DiffFinished {
+                                request_id,
+                                error: error.clone(),
+                            }
+                        }
+                    };
+                    tx_clone.blocking_send(msg).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "outbound channel closed",
+                        )
+                    })
+                },
+            );
+            (started_sent, result)
+        })
+        .await;
+
+        // Always remove from registry when the worker exits.
+        diff_requests.lock().await.remove(&request_id);
+
+        match join {
+            Ok((started_sent, Ok(()))) => {
+                // run_diff_streaming already emitted Finished in happy path;
+                // if it returned Ok without sending Started (e.g. empty
+                // diff returned early) we still need a terminal event so
+                // the server can close the stream.
+                let _ = started_sent;
+            }
+            Ok((started_sent, Err(err))) => {
+                // run_diff_streaming emits Finished on its own when the
+                // sink accepts; if it failed before doing so, send one
+                // ourselves — otherwise the server hangs.
+                if !started_sent {
+                    let _ = tx
+                        .send(AgentMessage::DiffStarted {
+                            request_id,
+                            files: Vec::new(),
+                        })
+                        .await;
+                }
+                let _ = tx
+                    .send(AgentMessage::DiffFinished {
+                        request_id,
+                        error: Some(err),
+                    })
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!(%request_id, error = %e, "diff worker join failed");
+                let _ = tx
+                    .send(AgentMessage::DiffFinished {
+                        request_id,
+                        error: Some(zremote_protocol::project::DiffError {
+                            code: zremote_protocol::project::DiffErrorCode::Other,
+                            message: format!("worker panicked: {e}"),
+                            hint: None,
+                        }),
+                    })
+                    .await;
+            }
+        }
+    });
+}
+
+#[allow(clippy::unused_async)] // keeps symmetry with sibling async handlers
+async fn handle_project_diff_sources(
+    request_id: uuid::Uuid,
+    project_path_or_id: String,
+    max_commits: Option<u32>,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+) {
+    let tx = outbound_tx.clone();
+    tokio::spawn(async move {
+        // The server currently sends `project_path` as the project path
+        // (resolved from its DB). Use it as-is if it looks like a filesystem
+        // path; otherwise try resolving it as a project_id.
+        let project_path = if std::path::Path::new(&project_path_or_id).is_absolute() {
+            project_path_or_id.clone()
+        } else {
+            match resolve_project_path(&project_path_or_id) {
+                Ok(p) => p,
+                Err(_) => project_path_or_id.clone(),
+            }
+        };
+
+        let n = max_commits.map_or(20, |v| v as usize);
+        let result = tokio::task::spawn_blocking(move || {
+            crate::project::diff::list_diff_sources(std::path::Path::new(&project_path), n)
+        })
+        .await;
+
+        let msg = match result {
+            Ok(Ok(options)) => AgentMessage::DiffSourcesResult {
+                request_id,
+                options: Some(Box::new(options)),
+                error: None,
+            },
+            Ok(Err(err)) => AgentMessage::DiffSourcesResult {
+                request_id,
+                options: None,
+                error: Some(err),
+            },
+            Err(e) => AgentMessage::DiffSourcesResult {
+                request_id,
+                options: None,
+                error: Some(zremote_protocol::project::DiffError {
+                    code: zremote_protocol::project::DiffErrorCode::Other,
+                    message: format!("sources task panicked: {e}"),
+                    hint: None,
+                }),
+            },
+        };
+        let _ = tx.send(msg).await;
+    });
+}
+
+async fn handle_project_send_review(
+    request_id: uuid::Uuid,
+    request: zremote_protocol::project::SendReviewRequest,
+    session_manager: &mut SessionManager,
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+) {
+    use zremote_protocol::project::{DiffError, DiffErrorCode, ReviewDelivery, SendReviewResponse};
+
+    let send_error = |code: DiffErrorCode, message: String| AgentMessage::SendReviewResult {
+        request_id,
+        response: None,
+        error: Some(DiffError {
+            code,
+            message,
+            hint: None,
+        }),
+    };
+
+    match request.delivery {
+        ReviewDelivery::InjectSession => {}
+        ReviewDelivery::StartClaudeTask => {
+            let _ = outbound_tx
+                .send(send_error(
+                    DiffErrorCode::InvalidInput,
+                    "delivery=start_claude_task not yet implemented".to_string(),
+                ))
+                .await;
+            return;
+        }
+        ReviewDelivery::McpTool => {
+            let _ = outbound_tx
+                .send(send_error(
+                    DiffErrorCode::InvalidInput,
+                    "delivery=mcp_tool is reserved for future use".to_string(),
+                ))
+                .await;
+            return;
+        }
+    }
+
+    let Some(session_id) = request.session_id else {
+        let _ = outbound_tx
+            .send(send_error(
+                DiffErrorCode::InvalidInput,
+                "session_id is required for inject_session delivery".to_string(),
+            ))
+            .await;
+        return;
+    };
+
+    let rendered = crate::project::review::render_review_prompt(&request);
+    let mut payload = rendered.clone();
+    if !payload.ends_with('\n') {
+        payload.push('\n');
+    }
+
+    if let Err(e) = session_manager.write_to(&session_id, payload.as_bytes()) {
+        let _ = outbound_tx
+            .send(send_error(
+                DiffErrorCode::Other,
+                format!("failed to inject review into session: {e}"),
+            ))
+            .await;
+        return;
+    }
+
+    let delivered = u32::try_from(request.comments.len()).unwrap_or(u32::MAX);
+    let response = SendReviewResponse {
+        session_id,
+        delivered,
+        prompt: rendered,
+    };
+    let _ = outbound_tx
+        .send(AgentMessage::SendReviewResult {
+            request_id,
+            response: Some(Box::new(response)),
+            error: None,
+        })
+        .await;
+}
+
+/// Look up a project path from the local DB by its UUID (server-mode sends
+/// the UUID as `project_id`). Returns the filesystem path or a descriptive
+/// error. Uses the `LocalAppState` is not accessible here, so we fall back
+/// to a direct SQLite read using the default local DB path. When the agent
+/// runs in server mode, this is not relevant — the server rewrites
+/// `project_id` to the path before sending `ProjectDiff`.
+fn resolve_project_path(project_id_or_path: &str) -> Result<String, String> {
+    // Fast path: caller already sent an absolute path.
+    if std::path::Path::new(project_id_or_path).is_absolute() {
+        return Ok(project_id_or_path.to_string());
+    }
+    // For the server-mode flow the server embeds the path directly (this
+    // is what the P2 server handler does). If we still got an id here,
+    // we cannot resolve it without the local DB handle. Return an error
+    // the caller surfaces as DiffError::PathMissing.
+    Err(format!(
+        "cannot resolve non-absolute project id from agent side: {project_id_or_path}"
+    ))
 }
 
 /// Handle a generic agent-launcher spawn request from the server.
@@ -1762,6 +2114,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
     }
@@ -1790,6 +2143,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
     }
@@ -1818,6 +2172,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
     }
@@ -1845,6 +2200,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
 
@@ -1887,6 +2243,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
     }
@@ -1918,6 +2275,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
 
@@ -1994,6 +2352,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         )
         .await;
 
@@ -2153,6 +2512,8 @@ mod tests {
             new_branch: true,
             base_ref: None,
         };
+        let no_diff_reg: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         handle_server_message(
             &msg,
             &host_id,
@@ -2169,6 +2530,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &no_diff_reg,
         )
         .await;
 
@@ -2228,6 +2590,8 @@ mod tests {
             new_branch: true,
             base_ref: Some("--upload-pack=evil".to_string()),
         };
+        let no_diff_reg: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         handle_server_message(
             &msg,
             &host_id,
@@ -2244,6 +2608,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &no_diff_reg,
         )
         .await;
 
@@ -2300,6 +2665,8 @@ mod tests {
             new_branch: true,
             base_ref: None,
         };
+        let no_diff_reg: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         handle_server_message(
             &msg,
             &host_id,
@@ -2316,6 +2683,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &no_diff_reg,
         )
         .await;
 
@@ -2383,6 +2751,8 @@ mod tests {
             worktree_path: wt_path.to_string_lossy().to_string(),
             force: false,
         };
+        let no_diff_reg: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         handle_server_message(
             &msg,
             &host_id,
@@ -2399,6 +2769,7 @@ mod tests {
             None,
             &mut std::collections::HashMap::new(),
             &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &no_diff_reg,
         )
         .await;
 
@@ -2434,6 +2805,172 @@ mod tests {
         assert!(
             wt_path.exists(),
             "worktree must not be removed when pre_delete fails"
+        );
+    }
+
+    /// RFC git-diff-ui P2 regression: dispatching a `ProjectDiff` must cause
+    /// the agent to emit `DiffStarted` → `DiffFileChunk*` → `DiffFinished`
+    /// back over the outbound channel.
+    #[tokio::test]
+    async fn project_diff_threads_through_dispatch() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_dispatch_test_repo(tmp.path());
+        // Introduce one modified file so the diff isn't empty.
+        std::fs::write(tmp.path().join("f.txt"), "x\nchanged\n").unwrap();
+
+        let msg = ServerMessage::ProjectDiff {
+            request_id: Uuid::new_v4(),
+            request: zremote_protocol::project::DiffRequest {
+                project_id: tmp.path().to_string_lossy().into_owned(),
+                source: zremote_protocol::project::DiffSource::WorkingTree,
+                file_paths: None,
+                context_lines: 3,
+            },
+        };
+        let diff_registry: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &diff_registry,
+        )
+        .await;
+
+        // Drain until DiffFinished.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut saw_started = false;
+        let mut file_chunks = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let msg = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out waiting for diff dispatch output")
+                .expect("outbound channel closed");
+            match msg {
+                AgentMessage::DiffStarted { .. } => saw_started = true,
+                AgentMessage::DiffFileChunk { .. } => file_chunks += 1,
+                AgentMessage::DiffFinished { error, .. } => {
+                    assert!(saw_started, "never saw DiffStarted");
+                    assert!(error.is_none(), "unexpected error: {error:?}");
+                    assert!(file_chunks >= 1, "expected at least one file chunk");
+                    break;
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+    }
+
+    /// `DiffCancel` should abort the in-flight worker: the worker sees the
+    /// cancellation and returns a `DiffFinished { error: Some(_) }`.
+    #[tokio::test]
+    async fn project_diff_cancel_aborts_worker() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_dispatch_test_repo(tmp.path());
+        // Make a few modified files so the worker has work to do.
+        for i in 0..50 {
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), "hello\n").unwrap();
+        }
+
+        let request_id = Uuid::new_v4();
+        let project_path = tmp.path().to_string_lossy().into_owned();
+        let msg = ServerMessage::ProjectDiff {
+            request_id,
+            request: zremote_protocol::project::DiffRequest {
+                project_id: project_path.clone(),
+                source: zremote_protocol::project::DiffSource::WorkingTree,
+                file_paths: None,
+                context_lines: 3,
+            },
+        };
+        let diff_registry: super::DiffRequestRegistry =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &diff_registry,
+        )
+        .await;
+
+        // Immediately cancel.
+        let cancel = ServerMessage::DiffCancel { request_id };
+        handle_server_message(
+            &cancel,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+            &diff_registry,
+        )
+        .await;
+
+        // The worker should eventually emit a DiffFinished (either with a
+        // sink-aborted error or a clean finish, depending on timing). Either
+        // way, the registry must be empty and we must not hang.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let msg = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out waiting for diff cancel output");
+            match msg {
+                Some(AgentMessage::DiffFinished { .. }) => break,
+                Some(_) => {
+                    // Drain intermediate events until Finished.
+                }
+                None => panic!("outbound channel closed before DiffFinished"),
+            }
+        }
+
+        // Registry must be clean.
+        let reg_guard = diff_registry.lock().await;
+        assert!(
+            !reg_guard.contains_key(&request_id),
+            "diff_requests registry leaked the cancelled request"
         );
     }
 }

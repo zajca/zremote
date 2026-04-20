@@ -20,6 +20,10 @@ pub struct AgentConnection {
     pub last_heartbeat: Instant,
     pub generation: u64,
     pub supports_persistent_sessions: bool,
+    /// Whether the connected agent advertised git-diff capability
+    /// (RFC git-diff-ui). Older agents leave this `false`; routes that
+    /// require it respond with 501 Not Implemented.
+    pub supports_diff: bool,
 }
 
 /// Manages all active agent WebSocket connections.
@@ -44,6 +48,7 @@ impl ConnectionManager {
         hostname: String,
         sender: mpsc::Sender<ServerMessage>,
         supports_persistent_sessions: bool,
+        supports_diff: bool,
     ) -> (Option<mpsc::Sender<ServerMessage>>, u64) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let mut conns = self.connections.write().await;
@@ -57,6 +62,7 @@ impl ConnectionManager {
                 last_heartbeat: Instant::now(),
                 generation,
                 supports_persistent_sessions,
+                supports_diff,
             },
         );
         (previous, generation)
@@ -104,6 +110,15 @@ impl ConnectionManager {
             .await
             .get(host_id)
             .is_some_and(|conn| conn.supports_persistent_sessions)
+    }
+
+    /// Whether a connected agent supports git diff requests (RFC git-diff-ui).
+    pub async fn supports_diff(&self, host_id: &HostId) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(host_id)
+            .is_some_and(|conn| conn.supports_diff)
     }
 
     /// Number of currently connected agents.
@@ -187,6 +202,8 @@ pub struct AppState {
     pub settings_save_requests: Arc<DashMap<uuid::Uuid, PendingRequest<SettingsSaveResponse>>>,
     pub action_inputs_requests:
         Arc<DashMap<uuid::Uuid, PendingRequest<ActionInputsResolveResponse>>>,
+    /// Dispatch registry for git-diff streams + review oneshots (RFC git-diff-ui).
+    pub diff_dispatch: crate::diff_dispatch::SharedDiffDispatch,
 }
 
 impl AppState {
@@ -274,10 +291,31 @@ mod tests {
         let mgr = ConnectionManager::new();
         let (tx, _rx) = make_sender();
         let host_id = Uuid::new_v4();
-        let (prev, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        let (prev, generation) = mgr
+            .register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
         assert!(prev.is_none());
         assert!(generation > 0);
         assert_eq!(mgr.connected_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn register_persists_supports_diff_flag() {
+        let mgr = ConnectionManager::new();
+        let host_a = Uuid::new_v4();
+        let host_b = Uuid::new_v4();
+
+        let (tx_a, _rx_a) = make_sender();
+        mgr.register(host_a, "a".to_string(), tx_a, false, true)
+            .await;
+        let (tx_b, _rx_b) = make_sender();
+        mgr.register(host_b, "b".to_string(), tx_b, false, false)
+            .await;
+
+        assert!(mgr.supports_diff(&host_a).await);
+        assert!(!mgr.supports_diff(&host_b).await);
+        // Unknown host: false (not panic).
+        assert!(!mgr.supports_diff(&Uuid::new_v4()).await);
     }
 
     #[tokio::test]
@@ -287,13 +325,13 @@ mod tests {
 
         let (tx1, _rx1) = make_sender();
         let (prev, _generation1) = mgr
-            .register(host_id, "host-a".to_string(), tx1, false)
+            .register(host_id, "host-a".to_string(), tx1, false, false)
             .await;
         assert!(prev.is_none());
 
         let (tx2, _rx2) = make_sender();
         let (prev, _generation2) = mgr
-            .register(host_id, "host-a".to_string(), tx2, false)
+            .register(host_id, "host-a".to_string(), tx2, false, false)
             .await;
         assert!(prev.is_some(), "should return old sender on re-register");
         assert_eq!(mgr.connected_count().await, 1, "count should stay at 1");
@@ -305,10 +343,10 @@ mod tests {
         let (tx1, _rx1) = make_sender();
         let (tx2, _rx2) = make_sender();
         let (_, generation1) = mgr
-            .register(Uuid::new_v4(), "a".to_string(), tx1, false)
+            .register(Uuid::new_v4(), "a".to_string(), tx1, false, false)
             .await;
         let (_, generation2) = mgr
-            .register(Uuid::new_v4(), "b".to_string(), tx2, false)
+            .register(Uuid::new_v4(), "b".to_string(), tx2, false, false)
             .await;
         assert!(generation2 > generation1);
     }
@@ -318,7 +356,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         assert!(mgr.unregister(&host_id).await);
         assert_eq!(mgr.connected_count().await, 0);
@@ -335,7 +374,9 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        let (_, generation) = mgr
+            .register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         assert!(mgr.unregister_if_generation(&host_id, generation).await);
         assert_eq!(mgr.connected_count().await, 0);
@@ -346,7 +387,9 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        let (_, generation) = mgr
+            .register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         assert!(!mgr.unregister_if_generation(&host_id, generation + 1).await);
         assert_eq!(mgr.connected_count().await, 1);
@@ -357,7 +400,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         let sender = mgr.get_sender(&host_id).await;
         assert!(sender.is_some());
@@ -374,7 +418,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         // Should not panic even if called multiple times
         mgr.update_heartbeat(&host_id).await;
@@ -400,7 +445,9 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        let (_, generation) = mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        let (_, generation) = mgr
+            .register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         // With zero max_age, everything is immediately stale
         let stale = mgr.check_stale(std::time::Duration::ZERO).await;
@@ -413,7 +460,8 @@ mod tests {
         let mgr = ConnectionManager::new();
         let host_id = Uuid::new_v4();
         let (tx, _rx) = make_sender();
-        mgr.register(host_id, "host-a".to_string(), tx, false).await;
+        mgr.register(host_id, "host-a".to_string(), tx, false, false)
+            .await;
 
         // With a large max_age, nothing should be stale
         let stale = mgr.check_stale(std::time::Duration::from_secs(3600)).await;
@@ -425,7 +473,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         for _ in 0..5 {
             let (tx, _rx) = make_sender();
-            mgr.register(Uuid::new_v4(), "host".to_string(), tx, false)
+            mgr.register(Uuid::new_v4(), "host".to_string(), tx, false, false)
                 .await;
         }
         assert_eq!(mgr.connected_count().await, 5);
@@ -448,6 +496,7 @@ mod tests {
             settings_get_requests: Arc::new(DashMap::new()),
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
+            diff_dispatch: Arc::new(crate::diff_dispatch::DiffDispatch::new()),
         }
     }
 
