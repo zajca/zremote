@@ -29,7 +29,9 @@ use zremote_protocol::project::{
 };
 
 use crate::local::state::LocalAppState;
-use crate::project::diff::{DIFF_TIMEOUT, DiffEvent, list_diff_sources, run_diff_streaming};
+use crate::project::diff::{
+    DIFF_TIMEOUT, DiffEvent, MAX_COMMITS_QUERY, list_diff_sources, run_diff_streaming,
+};
 use crate::project::review::render_review_prompt;
 
 use super::parse_project_id;
@@ -139,7 +141,9 @@ pub async fn get_diff_sources(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
-    let n = query.max_commits.unwrap_or(20);
+    // Clamp caller-supplied value to MAX_COMMITS_QUERY (CWE-400). Default is
+    // 20 when absent; any explicit value above the cap is silently lowered.
+    let n = query.max_commits.unwrap_or(20).min(MAX_COMMITS_QUERY);
     // Bound blocking git calls by the same DIFF_TIMEOUT budget so a hung repo
     // cannot pin the request thread forever.
     let path_clone = path.clone();
@@ -498,6 +502,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The `max_commits` query param must be clamped to MAX_COMMITS_QUERY
+    /// (CWE-400). Sending `usize::MAX` resolves to exactly the cap.
+    #[test]
+    fn max_commits_query_is_capped_to_upper_bound() {
+        let huge: usize = usize::MAX;
+        let clamped = huge.min(MAX_COMMITS_QUERY);
+        assert_eq!(clamped, MAX_COMMITS_QUERY);
+        assert_eq!(MAX_COMMITS_QUERY, 200);
+        // Default still wins for unset values.
+        let default_n: usize = 20_usize.min(MAX_COMMITS_QUERY);
+        assert_eq!(default_n, 20);
+        // Values below the cap round-trip unchanged.
+        assert_eq!(50usize.min(MAX_COMMITS_QUERY), 50);
+    }
+
+    /// End-to-end: a request with `max_commits=usize::MAX` must complete
+    /// successfully (the clamp prevented an uncapped log walk). Repo has one
+    /// commit, so the response carries ≤ MAX_COMMITS_QUERY entries.
+    #[tokio::test]
+    async fn diff_sources_endpoint_clamps_huge_max_commits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_isolated_git_repo(tmp.path());
+
+        let state = test_state().await;
+        let project_id = seed_project(&state, tmp.path()).await;
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/projects/{project_id}/diff/sources?max_commits={}",
+                    usize::MAX
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: DiffSourceOptions = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(
+            parsed.recent_commits.len() <= MAX_COMMITS_QUERY,
+            "recent_commits must be clamped to {} entries, got {}",
+            MAX_COMMITS_QUERY,
+            parsed.recent_commits.len()
+        );
     }
 
     #[tokio::test]

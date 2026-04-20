@@ -41,6 +41,17 @@ pub const DIFF_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_FILE_PATHS: usize = 1000;
 /// Default number of recent commits returned by `list_diff_sources`.
 pub const DEFAULT_RECENT_COMMITS: usize = 20;
+/// Upper bound enforced on the `max_commits` query parameter. Prevents a
+/// caller from requesting an unbounded `git log -n <N>` and pinning CPU /
+/// memory on a huge repo (CWE-400).
+pub const MAX_COMMITS_QUERY: usize = 200;
+
+// TODO(P2): wire CancellationToken through `run_diff_streaming` so an
+// upstream cancel (client disconnect, request abort) kills the spawned
+// `git diff` child. Today we rely on the sink returning BrokenPipe between
+// files, which stops further emissions but does not kill the in-flight git
+// process. Incremental-streaming parse + kill-on-cancel is owned by P2's
+// connection/dispatch refactor (see CWE-404).
 
 /// Events emitted during a streaming diff run. Shape matches the NDJSON
 /// payload the REST handler forwards to the client.
@@ -429,13 +440,23 @@ fn run_git_capped(path: &Path, args: &[String], max_bytes: usize) -> Result<Stri
         } else {
             DiffErrorCode::Other
         };
+        // Log the full stderr agent-side (CWE-532). Client-visible message is
+        // a fixed category string so we never leak absolute paths, remote
+        // URLs, credentials, or git internals to the caller (CWE-209).
+        tracing::warn!(
+            exit_status = %status,
+            stderr = %stderr_trim,
+            "git subprocess failed"
+        );
+        let safe_message = match code {
+            DiffErrorCode::RefNotFound => "git ref not found",
+            DiffErrorCode::NotGitRepo => "not a git repository",
+            _ => "git command failed",
+        }
+        .to_string();
         return Err(DiffError {
             code,
-            message: if stderr_trim.is_empty() {
-                format!("git {args:?} exited with {status}")
-            } else {
-                stderr_trim.to_string()
-            },
+            message: safe_message,
             hint: None,
         });
     }
@@ -804,6 +825,11 @@ mod tests {
     fn range_diff_reports_all_changes() {
         let tmp = TempDir::new().unwrap();
         init_git_repo(tmp.path());
+        // Capture the initial commit SHA as the base of the range. We deliberately
+        // resolve to a concrete SHA rather than relying on `HEAD~1` — the strict
+        // `validate_git_ref` allowlist (CWE-88) rejects `~` and `^`, so callers
+        // must pass pre-resolved revisions here.
+        let initial = raw_git_out(tmp.path(), &["rev-parse", "HEAD"]);
         // Build a second commit.
         fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
         raw_git(tmp.path(), &["add", "."]);
@@ -812,7 +838,7 @@ mod tests {
         let events = run(
             tmp.path(),
             DiffSource::Range {
-                from: "HEAD~1".to_string(),
+                from: initial,
                 to: "HEAD".to_string(),
                 symmetric: false,
             },
@@ -1057,5 +1083,84 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let err = list_diff_sources(tmp.path(), 5).expect_err("must fail");
         assert_eq!(err.code, DiffErrorCode::NotGitRepo);
+    }
+
+    /// CWE-532 / CWE-209: on a nonzero git exit the client-visible message
+    /// must be a fixed category string — never the raw stderr which can
+    /// leak absolute paths, remote URLs, or git internals. Full stderr is
+    /// still logged agent-side via `tracing::warn!`.
+    #[test]
+    fn git_error_messages_never_leak_stderr_paths() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+
+        // A syntactically valid ref that doesn't exist triggers the "unknown
+        // revision" error path in `run_git_capped`. We call
+        // `run_diff_streaming` directly to capture its return value — a
+        // run_git_capped failure short-circuits with `?` before emitting
+        // any sink events.
+        let req = DiffRequest {
+            project_id: "t".to_string(),
+            source: DiffSource::Commit {
+                sha: "nonexistent-ref-xyz".to_string(),
+            },
+            file_paths: None,
+            context_lines: 3,
+        };
+        let err = run_diff_streaming(tmp.path(), &req, |_| Ok(()))
+            .expect_err("nonexistent ref must produce a DiffError");
+        assert_eq!(err.code, DiffErrorCode::RefNotFound);
+        // Must be the safe category string — not the raw git stderr.
+        assert_eq!(err.message, "git ref not found");
+        // Extra defence: must not leak the absolute test path.
+        let tmp_path_str = tmp.path().to_string_lossy().to_string();
+        assert!(
+            !err.message.contains(&tmp_path_str),
+            "error message must not contain agent-side paths: {}",
+            err.message
+        );
+        // Sanitized messages are drawn from a fixed allowlist — no paths.
+        let allowed = [
+            "git ref not found",
+            "not a git repository",
+            "git command failed",
+        ];
+        assert!(
+            allowed.contains(&err.message.as_str()),
+            "leaked message outside allowlist: {}",
+            err.message
+        );
+    }
+
+    /// CWE-209: whichever git error category we hit, the client-visible
+    /// message must come from the fixed allowlist — never the raw stderr.
+    #[test]
+    fn git_unknown_error_maps_to_generic_message() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+
+        // `deadbeef` passes the allowlist regex; git will reject it with
+        // "unknown revision". Category is RefNotFound, message is "git ref
+        // not found" — no stderr leakage.
+        let req = DiffRequest {
+            project_id: "t".to_string(),
+            source: DiffSource::Commit {
+                sha: "deadbeef".to_string(),
+            },
+            file_paths: None,
+            context_lines: 3,
+        };
+        let err = run_diff_streaming(tmp.path(), &req, |_| Ok(()))
+            .expect_err("deadbeef must produce a DiffError");
+        let allowed = [
+            "git ref not found",
+            "not a git repository",
+            "git command failed",
+        ];
+        assert!(
+            allowed.contains(&err.message.as_str()),
+            "unexpected leaked message: {}",
+            err.message
+        );
     }
 }

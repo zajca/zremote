@@ -99,7 +99,10 @@ pub fn render_review_prompt(req: &SendReviewRequest) -> String {
     }
 
     out.push_str("## Code review comments\n\n");
-    out.push_str(&format!("Diff source: {}\n\n", format_source(&req.source)));
+    // Source string may include a user-supplied ref / SHA. Strip CSI / control
+    // bytes before we embed it into the PTY payload (CWE-79 terminal injection).
+    let source_clean = sanitize_body(&format_source(&req.source));
+    out.push_str(&format!("Diff source: {source_clean}\n\n"));
 
     if req.comments.is_empty() {
         out.push_str("_(no comments)_\n");
@@ -117,7 +120,11 @@ pub fn render_review_prompt(req: &SendReviewRequest) -> String {
     }
 
     for (path, comments) in grouped {
-        out.push_str(&format!("### `{path}`\n\n"));
+        // Comment paths are attacker-controlled (user types or pastes them in
+        // the review drawer). Sanitise CSI / control bytes before they reach
+        // the PTY (CWE-79 terminal injection).
+        let path_clean = sanitize_body(path);
+        out.push_str(&format!("### `{path_clean}`\n\n"));
         for c in comments {
             let body = sanitize_body(&c.body);
             let body_trim = body.trim();
@@ -326,6 +333,55 @@ mod tests {
         let out = render_review_prompt(&req);
         assert!(out.contains("## Code review comments"));
         assert!(out.contains("Diff source: working tree"));
+    }
+
+    /// CWE-79: a comment with a CSI escape in its path must not reach the
+    /// PTY payload. The path is attacker-controlled via the review drawer
+    /// input; `sanitize_body` must be applied to it before we emit the
+    /// `### \`<path>\`` heading.
+    #[test]
+    fn render_review_prompt_sanitizes_csi_in_path() {
+        let c = make_comment("foo\x1b[31m.rs", 1, "safe body");
+        let req = SendReviewRequest {
+            project_id: "p".to_string(),
+            source: DiffSource::WorkingTree,
+            delivery: ReviewDelivery::InjectSession,
+            session_id: None,
+            preamble: None,
+            comments: vec![c],
+        };
+        let out = render_review_prompt(&req);
+        assert!(
+            !out.contains('\x1b'),
+            "rendered output must not contain ESC bytes from a path: {out}"
+        );
+        assert!(
+            !out.contains("[31m"),
+            "rendered output must not preserve CSI parameters: {out}"
+        );
+    }
+
+    /// CWE-79: the `Diff source` line embeds a user-supplied ref / SHA.
+    /// CSI in the ref name must be stripped before we write it to the PTY.
+    #[test]
+    fn render_review_prompt_sanitizes_csi_in_source() {
+        let req = SendReviewRequest {
+            project_id: "p".to_string(),
+            // A ref string containing CSI — the validator would normally
+            // reject this upstream, but defence in depth: the renderer must
+            // sanitise unconditionally so it is safe even if a new code path
+            // forgets the validator.
+            source: DiffSource::HeadVs {
+                reference: "main\x1b[31m".to_string(),
+            },
+            delivery: ReviewDelivery::InjectSession,
+            session_id: None,
+            preamble: None,
+            comments: vec![make_comment("a.rs", 1, "ok")],
+        };
+        let out = render_review_prompt(&req);
+        assert!(!out.contains('\x1b'));
+        assert!(!out.contains("[31m"));
     }
 
     #[test]

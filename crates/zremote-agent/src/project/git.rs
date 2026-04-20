@@ -84,14 +84,24 @@ pub(super) fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Validate a user-supplied git ref/SHA/range endpoint before it is passed to
-/// `git diff` / `git show` / `git rev-list`. Rejects anything that could be
-/// interpreted as a flag (CWE-88 argument injection) or that contains a range
-/// separator / control character.
+/// `git diff` / `git show` / `git rev-list`.
 ///
-/// This is deliberately strict: valid refs cannot start with `-` nor contain
-/// `..`, newlines, or NUL bytes. Legitimate branch/tag names with `/` (like
-/// `feature/foo`) pass.
+/// Strict allowlist: only alphanumerics, `.`, `_`, `/`, `-` are accepted.
+/// Every other byte — including `{`, `}`, `@`, `^`, `:`, `~`, `*`, `?`, `[`,
+/// `\`, space, tabs, all control chars — is rejected. This blocks CWE-88
+/// argument-injection vectors that git's own ref-parser interprets specially
+/// (`@{-1}`, `HEAD^{/pattern}`, `HEAD@{upstream}`, `:/secret`, `~N`).
+///
+/// Additional rejects: leading `-` (flag), leading `.` (git reserves these
+/// names), leading `/`, and `..` substrings (range syntax).
 pub fn validate_git_ref(s: &str) -> Result<(), DiffError> {
+    // Allowlist regex. The set intentionally excludes every metacharacter
+    // git treats specially in a revision.
+    static REF_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = REF_RE.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z0-9._/\-]+$").expect("static ref regex must compile")
+    });
+
     if s.is_empty() {
         return Err(DiffError {
             code: DiffErrorCode::InvalidInput,
@@ -102,25 +112,38 @@ pub fn validate_git_ref(s: &str) -> Result<(), DiffError> {
     if s.starts_with('-') {
         return Err(DiffError {
             code: DiffErrorCode::InvalidInput,
-            message: format!("ref must not start with '-': {s}"),
+            message: "ref must not start with '-'".to_string(),
             hint: Some("flag-injection guard; rename the branch".to_string()),
+        });
+    }
+    if s.starts_with('.') {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not start with '.'".to_string(),
+            hint: None,
+        });
+    }
+    if s.starts_with('/') {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not start with '/'".to_string(),
+            hint: None,
         });
     }
     if s.contains("..") {
         return Err(DiffError {
             code: DiffErrorCode::InvalidInput,
-            message: format!("ref must not contain '..': {s}"),
+            message: "ref must not contain '..'".to_string(),
             hint: Some("use DiffSource::Range for range queries".to_string()),
         });
     }
-    for c in s.chars() {
-        if c == '\n' || c == '\r' || c == '\0' {
-            return Err(DiffError {
-                code: DiffErrorCode::InvalidInput,
-                message: "ref contains control characters".to_string(),
-                hint: None,
-            });
-        }
+    if !re.is_match(s) {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref contains disallowed characters (allowed: A-Z a-z 0-9 . _ / -)"
+                .to_string(),
+            hint: None,
+        });
     }
     Ok(())
 }
@@ -1163,8 +1186,12 @@ upstream\tgit@github.com:org/repo.git (push)
         assert!(validate_git_ref("main").is_ok());
         assert!(validate_git_ref("feature/foo").is_ok());
         assert!(validate_git_ref("v1.0.0").is_ok());
+        assert!(validate_git_ref("v1.2.3").is_ok());
         assert!(validate_git_ref("abc1234").is_ok());
         assert!(validate_git_ref("origin/main").is_ok());
+        assert!(validate_git_ref("user.name/branch").is_ok());
+        assert!(validate_git_ref("HEAD").is_ok());
+        assert!(validate_git_ref("release-1.0").is_ok());
     }
 
     #[test]
@@ -1184,11 +1211,59 @@ upstream\tgit@github.com:org/repo.git (push)
         assert!(validate_git_ref("main\nwhoops").is_err());
         assert!(validate_git_ref("main\0").is_err());
         assert!(validate_git_ref("main\r").is_err());
+        assert!(validate_git_ref("main\t").is_err());
+        assert!(validate_git_ref("main\x01").is_err());
     }
 
     #[test]
     fn validate_git_ref_rejects_empty() {
         assert!(validate_git_ref("").is_err());
+    }
+
+    /// CWE-88: block git's own revision metacharacters. Each of these strings
+    /// passes the previous blocklist (`-`, `..`, LF/CR/NUL) but names
+    /// something unexpected when git parses it — a reflog peek, a pickaxe
+    /// search, an upstream alias, or a flag when concatenated inside a
+    /// `{from}..{to}` range.
+    #[test]
+    fn validate_git_ref_rejects_git_metacharacters() {
+        let bad = [
+            "@{-1}",           // reflog index
+            "HEAD^{/pattern}", // pickaxe search on message
+            "HEAD@{upstream}", // upstream alias
+            ":/secret",        // commit search by message
+            "main~1",          // ancestor
+            "foo^",            // parent
+            "foo*",            // glob
+            "foo?",            // glob
+            "foo[bar]",        // glob
+            "foo\\bar",        // backslash
+            "foo bar",         // space
+            "foo`bar",         // backtick
+            "foo\"bar",        // double quote
+            "foo'bar",         // single quote
+            "foo;bar",         // shell separator
+            "foo&bar",         // background
+            "foo|bar",         // pipe
+            "foo$bar",         // variable
+            "foo<bar",         // redirection
+            "foo>bar",         // redirection
+            "foo(bar)",        // subshell
+            "foo#bar",         // comment
+            "foo=bar",         // flag value
+            "@{upstream}",     // bare at-brace
+            "main\x1b[31m",    // CSI sneak
+        ];
+        for s in bad {
+            assert!(validate_git_ref(s).is_err(), "ref must be rejected: {s:?}");
+        }
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_leading_dot_or_slash() {
+        assert!(validate_git_ref(".hidden").is_err());
+        assert!(validate_git_ref("/abs").is_err());
+        assert!(validate_git_ref(".main").is_err());
     }
 
     #[test]
