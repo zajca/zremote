@@ -6,7 +6,15 @@ use zremote_protocol::project::{Branch, BranchList, GitInfo, GitRemote, Worktree
 /// Maximum wall time for any individual git subprocess. Kills the child on
 /// expiry so a hung command (network, file-lock, misconfigured credential
 /// helper) cannot wedge the scanner/refresh loop.
+///
+/// Under `cfg(test)` this is bumped to 30 s because parallel test runs can
+/// contend heavily for CPU + disk, and a 5 s bound turns the scanner into a
+/// flake source on loaded CI runners. Production keeps the 5 s floor so a
+/// real hang never wedges the scanner loop.
+#[cfg(not(test))]
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Run a git command in the given directory with a 5-second wall-clock
 /// timeout. Returns stdout as a trimmed String on success, or an error
