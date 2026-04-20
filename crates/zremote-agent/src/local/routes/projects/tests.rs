@@ -2753,3 +2753,250 @@ async fn delete_worktree_closes_bound_sessions() {
         "expected SessionClosed event for worktree session"
     );
 }
+
+// ---- Phase 3: worktree hook dispatcher integration tests ----
+
+/// Write a `.zremote/settings.json` file with the given content at the project root.
+fn write_project_settings(
+    project_dir: &std::path::Path,
+    settings: &zremote_protocol::ProjectSettings,
+) {
+    crate::project::settings::write_settings(project_dir, settings).expect("write settings");
+}
+
+#[tokio::test]
+async fn default_create_flow_runs_when_no_hooks_configured() {
+    // Regression: without any `hooks` or `worktree` config, create_worktree
+    // must still fall through to the default git flow.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir
+        .path()
+        .join("wt-default")
+        .to_string_lossy()
+        .to_string();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "branch": "no-hooks",
+                        "path": wt_path,
+                        "new_branch": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Default flow returns a project object, not {session_id, mode}
+    assert!(json.get("session_id").is_none());
+    assert!(json.get("path").is_some());
+}
+
+#[tokio::test]
+async fn pre_delete_hook_runs_before_git_worktree_remove() {
+    // A pre_delete hook writes a timestamp marker file. Since the default
+    // delete fails (non-existent worktree path), we only verify the marker
+    // file exists after the request — proving the hook ran even though the
+    // subsequent git remove failed.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("pre_delete.marker");
+
+    // Legacy on_delete path — simplest surface for the test
+    let settings = zremote_protocol::ProjectSettings {
+        worktree: Some(zremote_protocol::WorktreeSettings {
+            on_delete: Some(format!("touch {}", marker.display())),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    write_project_settings(dir.path(), &settings);
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "main")
+        .await
+        .unwrap();
+
+    // Use a real directory so the hook's working_dir exists. Git-remove
+    // will then still fail (not a linked worktree) but pre_delete runs first.
+    let wt_phys = dir.path().join("pre-delete-wt");
+    std::fs::create_dir(&wt_phys).unwrap();
+    let wt_path = wt_phys.to_string_lossy().to_string();
+    let worktree_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO projects (id, host_id, path, name, parent_project_id, project_type) \
+         VALUES (?, ?, ?, ?, ?, 'worktree')",
+    )
+    .bind(&worktree_id)
+    .bind(&host_id)
+    .bind(&wt_path)
+    .bind("pre-delete-wt")
+    .bind(&project_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let app = build_test_router(state);
+    let _response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/projects/{project_id}/worktrees/{worktree_id}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        marker.exists(),
+        "pre_delete hook marker must exist before git remove runs"
+    );
+}
+
+#[tokio::test]
+async fn post_create_runs_after_successful_default_create() {
+    // Default flow + legacy on_create: after successful create, marker file
+    // must be written by the hook.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("post_create.marker");
+
+    let settings = zremote_protocol::ProjectSettings {
+        worktree: Some(zremote_protocol::WorktreeSettings {
+            on_create: Some(format!("touch {}", marker.display())),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    write_project_settings(dir.path(), &settings);
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "main")
+        .await
+        .unwrap();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt-post").to_string_lossy().to_string();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "branch": "post-branch",
+                        "path": wt_path,
+                        "new_branch": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let hook_result = json
+        .get("hook_result")
+        .expect("hook_result field present when hook configured");
+    assert_eq!(hook_result["success"], serde_json::json!(true));
+
+    assert!(marker.exists(), "post_create hook must have run");
+}
+
+#[tokio::test]
+async fn post_create_not_included_when_no_hook_configured() {
+    // Regression guard: without hooks, response must not carry hook_result.
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let project_id = Uuid::new_v4().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    init_isolated_git_repo(dir.path());
+    let project_path = dir.path().to_str().unwrap().to_string();
+
+    q::insert_project(&state.db, &project_id, &host_id, &project_path, "test")
+        .await
+        .unwrap();
+
+    let wt_dir = tempfile::tempdir().unwrap();
+    let wt_path = wt_dir
+        .path()
+        .join("wt-no-hook")
+        .to_string_lossy()
+        .to_string();
+
+    let app = build_test_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{project_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "branch": "no-hook",
+                        "path": wt_path,
+                        "new_branch": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.get("hook_result").is_none());
+}
