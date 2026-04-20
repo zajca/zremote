@@ -1,4 +1,5 @@
 pub mod action_inputs;
+pub mod action_runner;
 pub mod actions;
 pub mod configure;
 pub mod git;

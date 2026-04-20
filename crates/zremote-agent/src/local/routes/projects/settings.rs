@@ -11,7 +11,6 @@ use uuid::Uuid;
 use zremote_core::error::{AppError, AppJson};
 use zremote_core::queries::claude_sessions as cq;
 use zremote_core::queries::projects as q;
-use zremote_core::queries::sessions as sq;
 use zremote_core::state::{ServerEvent, SessionState};
 use zremote_core::validation::validate_path_no_traversal;
 
@@ -173,118 +172,39 @@ pub async fn run_action(
         .and_then(|p| std::path::Path::new(p).file_name())
         .and_then(|n| n.to_str())
         .map(String::from);
-    let ctx = crate::project::actions::TemplateContext {
+    let ctx = crate::project::action_runner::ActionRunContext {
         project_path: project_path.clone(),
         worktree_path: body.worktree_path.clone(),
         branch: body.branch.clone(),
         worktree_name,
-        custom_inputs: body.inputs.clone(),
+        inputs: body.inputs.clone(),
     };
 
-    let expanded_command = crate::project::actions::expand_template(&action.command, &ctx);
-    let working_dir = crate::project::actions::resolve_working_dir(&action, &ctx);
-    let env = crate::project::actions::build_action_env(&settings.env, &action, &ctx);
-
-    let session_id = Uuid::new_v4();
-    let session_id_str = session_id.to_string();
-    let name = format!("action: {action_name}");
+    let session_name = format!("action: {action_name}");
     let cols = body.cols.unwrap_or(80);
     let rows = body.rows.unwrap_or(24);
 
-    let project_id_ref = sq::resolve_project_id(&state.db, &host_id_str, &working_dir).await?;
-
-    sq::insert_session(
-        &state.db,
-        &session_id_str,
+    let spawned = crate::project::action_runner::spawn_action_pty(
+        &state,
         &host_id_str,
-        Some(&name),
-        Some(&working_dir),
-        project_id_ref.as_deref(),
+        &action,
+        &settings.env,
+        &ctx,
+        &session_name,
+        cols,
+        rows,
     )
     .await?;
-
-    let shell = crate::shell::default_shell();
-    let env_map: std::collections::HashMap<String, String> = env.into_iter().collect();
-    let env_ref = if env_map.is_empty() {
-        None
-    } else {
-        Some(&env_map)
-    };
-
-    {
-        let parsed_host_id: Uuid = host_id_str
-            .parse()
-            .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(
-            session_id,
-            zremote_core::state::SessionState::new(session_id, parsed_host_id),
-        );
-    }
-
-    let manual_config = crate::pty::shell_integration::ShellIntegrationConfig::for_manual_session();
-    let pid = {
-        let mut mgr = state.session_manager.lock().await;
-        mgr.create(
-            session_id,
-            shell,
-            cols,
-            rows,
-            Some(&working_dir),
-            env_ref,
-            Some(&manual_config),
-        )
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
-    };
-
-    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
-        .bind(shell)
-        .bind(i64::from(pid))
-        .bind(&session_id_str)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
-
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.status = zremote_protocol::status::SessionStatus::Active;
-        }
-    }
-
-    let _ = state.events.send(ServerEvent::SessionCreated {
-        session: zremote_core::state::SessionInfo {
-            id: session_id_str.clone(),
-            host_id: host_id_str.clone(),
-            shell: Some(shell.to_string()),
-            status: zremote_protocol::status::SessionStatus::Active,
-        },
-    });
-
-    {
-        let cmd_with_newline = format!("{expanded_command}\n");
-        let state_clone = state.clone();
-        let sid = session_id;
-        let cmd_bytes = cmd_with_newline.into_bytes();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            let mut mgr = state_clone.session_manager.lock().await;
-            if let Err(e) = mgr.write_to(&sid, &cmd_bytes) {
-                tracing::warn!(session_id = %sid, error = %e, "failed to write action command to PTY");
-            }
-        });
-    }
 
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "session_id": session_id_str,
+            "session_id": spawned.session_id,
             "action": action_name,
-            "command": expanded_command,
-            "working_dir": working_dir,
+            "command": spawned.command,
+            "working_dir": spawned.working_dir,
             "status": "active",
-            "pid": pid,
+            "pid": spawned.pid,
         })),
     ))
 }
