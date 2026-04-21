@@ -34,6 +34,8 @@ pub enum Icon {
     PanelRight,
     FileText,
     Clock,
+    Columns,
+    Rows,
 }
 
 impl Icon {
@@ -71,6 +73,8 @@ impl Icon {
             Self::PanelRight => "icons/panel-right.svg",
             Self::FileText => "icons/file-text.svg",
             Self::Clock => "icons/clock.svg",
+            Self::Columns => "icons/columns-2.svg",
+            Self::Rows => "icons/rows-2.svg",
         }
     }
 }

@@ -59,6 +59,7 @@ png = "0.17"
 alacritty_terminal = "0.25"
 flume = "0.11"
 notify-rust = "4"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 
 # Internal
 zremote-protocol = { path = "crates/zremote-protocol" }

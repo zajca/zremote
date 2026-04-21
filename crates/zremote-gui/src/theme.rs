@@ -85,6 +85,48 @@ pub fn warning_border() -> Rgba {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Syntax highlight palette — used by the diff view's syntect bridge. Tuned to
+// the ZRemote dark palette (neutral base, muted accents) so highlighted code
+// sits visually inside the UI instead of competing with it.
+// ---------------------------------------------------------------------------
+
+pub fn syntax_keyword() -> Rgba {
+    rgb(0xc586c0)
+}
+
+pub fn syntax_string() -> Rgba {
+    rgb(0xce9178)
+}
+
+pub fn syntax_comment() -> Rgba {
+    rgb(0x6a9955)
+}
+
+pub fn syntax_function() -> Rgba {
+    rgb(0xdcdcaa)
+}
+
+pub fn syntax_type() -> Rgba {
+    rgb(0x4ec9b0)
+}
+
+pub fn syntax_number() -> Rgba {
+    rgb(0xb5cea8)
+}
+
+pub fn syntax_constant() -> Rgba {
+    rgb(0x569cd6)
+}
+
+pub fn syntax_variable() -> Rgba {
+    rgb(0x9cdcfe)
+}
+
+pub fn syntax_punctuation() -> Rgba {
+    rgb(0xd4d4d4)
+}
+
 pub fn terminal_bg() -> Rgba {
     rgb(0x0a0a0b)
 }

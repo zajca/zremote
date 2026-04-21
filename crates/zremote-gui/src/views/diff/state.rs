@@ -31,11 +31,16 @@ pub enum DiffEvent {
     SourcesLoaded(DiffSourceOptions),
     DiffStarted(Vec<DiffFileSummary>),
     DiffFileChunk(DiffFile),
-    DiffFinished { error: Option<String> },
+    DiffFinished {
+        error: Option<String>,
+    },
     SelectFile(String),
     ChangeSource(DiffSource),
     RequestStarted,
     SourcesError(String),
+    /// Flip `ViewMode::Unified` ↔ `ViewMode::SideBySide`. State only;
+    /// the diff_pane picks up the change on the next render.
+    ToggleViewMode,
 }
 
 pub fn apply(state: &mut DiffState, event: DiffEvent) {
@@ -84,6 +89,12 @@ pub fn apply(state: &mut DiffState, event: DiffEvent) {
             state.selected_file = None;
             state.loading = true;
             state.error = None;
+        }
+        DiffEvent::ToggleViewMode => {
+            state.view_mode = match state.view_mode {
+                ViewMode::Unified => ViewMode::SideBySide,
+                ViewMode::SideBySide => ViewMode::Unified,
+            };
         }
     }
 }
@@ -224,6 +235,16 @@ mod tests {
         apply(&mut s, DiffEvent::SourcesError("boom".to_string()));
         assert_eq!(s.error.as_deref(), Some("boom"));
         assert!(!s.loading);
+    }
+
+    #[test]
+    fn toggle_view_mode_flips_unified_side_by_side() {
+        let mut s = DiffState::default();
+        assert_eq!(s.view_mode, ViewMode::Unified);
+        apply(&mut s, DiffEvent::ToggleViewMode);
+        assert_eq!(s.view_mode, ViewMode::SideBySide);
+        apply(&mut s, DiffEvent::ToggleViewMode);
+        assert_eq!(s.view_mode, ViewMode::Unified);
     }
 
     #[test]

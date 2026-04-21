@@ -30,3 +30,4 @@ arboard.workspace = true
 png.workspace = true
 base64.workspace = true
 notify-rust.workspace = true
+syntect.workspace = true
