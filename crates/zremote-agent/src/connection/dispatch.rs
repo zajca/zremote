@@ -10,7 +10,9 @@ use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::{self, BridgeSenders};
 use crate::claude::ChannelDialogDetector;
 use crate::hooks::mapper::SessionMapper;
+use crate::local::routes::projects::worktree::reject_leading_dash;
 use crate::project::ProjectScanner;
+use crate::project::action_runner::ActionRunContext;
 use crate::project::git::GitInspector;
 use crate::pty::shell_integration::ShellIntegrationConfig;
 use crate::session::SessionManager;
@@ -112,68 +114,69 @@ async fn send_creation_progress(
     }
 }
 
-/// Run a worktree lifecycle hook if configured in project settings.
-async fn run_worktree_hook_server(
+/// Maximum wall time for the `pre_delete` captured hook in server mode. A
+/// stuck teardown must not pin the agent's dispatch task indefinitely — the
+/// same 2-minute ceiling used by the local-mode delete handler applies here.
+const SERVER_PRE_DELETE_HOOK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Maximum wall time for `Create`/`Delete` override hooks in server mode.
+/// Matches the default git-flow guard (`WORKTREE_CREATE_TIMEOUT`) so a stuck
+/// hook command cannot pin a tokio worker or starve `WorktreeCreated`/
+/// `WorktreeDeleted` acknowledgements indefinitely.
+const SERVER_WORKTREE_HOOK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Read full project settings off the blocking runtime. Returns `None` when
+/// no settings file exists or reading fails (treated as "no hooks
+/// configured" — identical semantics to the local-mode helper).
+async fn read_project_settings_server(
     project_path: &str,
-    worktree_path: &str,
-    branch: &str,
-    hook_selector: impl FnOnce(&zremote_protocol::project::WorktreeSettings) -> Option<&str>,
-) -> Option<zremote_protocol::HookResultInfo> {
+) -> Option<zremote_protocol::ProjectSettings> {
     let pp = project_path.to_string();
-    let settings = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         crate::project::settings::read_settings(std::path::Path::new(&pp))
     })
     .await
     .ok()?
     .ok()
-    .flatten()?;
-
-    let wt_settings = settings.worktree.as_ref()?;
-    let template = hook_selector(wt_settings)?;
-
-    let worktree_name = std::path::Path::new(worktree_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let cmd = crate::project::hooks::expand_hook_template(
-        template,
-        project_path,
-        worktree_path,
-        branch,
-        worktree_name,
-    );
-    let result = crate::project::hooks::execute_hook_async(
-        cmd,
-        std::path::PathBuf::from(worktree_path),
-        vec![],
-        None,
-    )
-    .await;
-
-    Some(zremote_protocol::HookResultInfo {
-        success: result.success,
-        output: if result.output.is_empty() {
-            None
-        } else {
-            Some(result.output)
-        },
-        duration_ms: result.duration.as_millis() as u64,
-    })
+    .flatten()
 }
 
-/// Read worktree settings for a project, if configured.
-async fn read_worktree_settings_server(
-    project_path: &str,
-) -> Option<zremote_protocol::project::WorktreeSettings> {
-    let pp = project_path.to_string();
-    let settings = tokio::task::spawn_blocking(move || {
-        crate::project::settings::read_settings(std::path::Path::new(&pp))
-    })
-    .await
-    .ok()?
-    .ok()
-    .flatten()?;
-    settings.worktree
+/// Validate the `branch` / `path` / `base_ref` fields of a `WorktreeCreate`
+/// request in server mode. Returns the error message if any value starts with
+/// `-` (CWE-88). Must run *before* the hook override path so a custom hook
+/// cannot be used to smuggle git flags via `{{branch}}` / `{{base_ref}}`.
+fn validate_worktree_create_inputs(
+    branch: &str,
+    path: Option<&str>,
+    base_ref: Option<&str>,
+) -> Result<(), String> {
+    reject_leading_dash("branch", branch).map_err(|e| e.message)?;
+    if let Some(p) = path {
+        reject_leading_dash("path", p).map_err(|e| e.message)?;
+    }
+    if let Some(b) = base_ref {
+        reject_leading_dash("base_ref", b).map_err(|e| e.message)?;
+    }
+    Ok(())
+}
+
+/// Send a `WorktreeError` over the outbound channel; logs if the channel has
+/// closed. Centralised so every error path in the dispatcher stays consistent.
+async fn send_worktree_error(
+    tx: &mpsc::Sender<AgentMessage>,
+    project_path: String,
+    message: String,
+) {
+    if tx
+        .send(AgentMessage::WorktreeError {
+            project_path,
+            message,
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!("outbound channel closed, WorktreeError dropped");
+    }
 }
 
 /// Decode PNG bytes, set the image on the system clipboard, and send Ctrl+V to the PTY.
@@ -514,108 +517,169 @@ pub(super) async fn handle_server_message(
             let new_branch = *new_branch;
             let base_ref = base_ref.clone();
             tokio::spawn(async move {
-                // Check for custom create_command
-                let wt_settings = read_worktree_settings_server(&project_path).await;
+                // CWE-88 guard: reject leading-dash inputs *before* any hook
+                // lookup. Doing it first keeps the hook override path from
+                // becoming a way to smuggle git flags through `{{branch}}` /
+                // `{{base_ref}}` expansions.
+                if let Err(msg) = validate_worktree_create_inputs(
+                    &branch,
+                    wt_path.as_deref(),
+                    base_ref.as_deref(),
+                ) {
+                    send_worktree_error(&tx, project_path, msg).await;
+                    return;
+                }
 
-                if let Some(create_cmd) =
-                    wt_settings.as_ref().and_then(|s| s.create_command.as_ref())
-                {
-                    // Custom command flow: run via execute_hook_async
-                    let worktree_name = branch.replace('/', "-");
-                    let cmd = create_cmd
-                        .replace("{{project_path}}", &project_path)
-                        .replace("{{branch}}", &branch)
-                        .replace("{{worktree_name}}", &worktree_name);
+                let settings = read_project_settings_server(&project_path).await;
+                let worktree_name = branch.replace('/', "-");
+                // Create-time context: worktree_path is None because the
+                // worktree doesn't exist yet — resolve_working_dir falls back
+                // to project_path so the hook can cd into a directory that
+                // exists. Matches local-mode behaviour in worktree.rs.
+                let ctx = ActionRunContext {
+                    project_path: project_path.clone(),
+                    worktree_path: None,
+                    branch: Some(branch.clone()),
+                    worktree_name: Some(worktree_name.clone()),
+                    inputs: std::collections::HashMap::new(),
+                };
 
-                    let result = crate::project::hooks::execute_hook_async(
-                        cmd,
-                        std::path::PathBuf::from(&project_path),
-                        vec![],
-                        None,
+                // Custom `create` override: run captured (no PTY in server
+                // mode) and then locate the new worktree via git inspect so
+                // the server can emit a `WorktreeCreated` event just like
+                // the default flow would. Note: we do NOT emit the
+                // `WorktreeCreationProgress` Init/Finalizing/Done lifecycle
+                // on the hook path — GUIs that watch those events will not
+                // see progress for hook-driven creates. This matches the
+                // legacy `create_command` behaviour and is out-of-scope for
+                // this RFC.
+                if let Some(ref sett) = settings {
+                    match crate::project::hook_dispatcher::run_worktree_hook(
+                        sett,
+                        crate::project::hook_dispatcher::WorktreeSlot::Create,
+                        ctx.clone(),
+                        Some(SERVER_WORKTREE_HOOK_TIMEOUT),
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(Some(hook_info)) => {
+                            // `worktree_path` is the caller-supplied target
+                            // (may be empty if git is auto-naming); the real
+                            // path is re-derived from `git inspect` below.
+                            if tx
+                                .send(AgentMessage::WorktreeHookResult {
+                                    project_path: project_path.clone(),
+                                    worktree_path: wt_path.clone().unwrap_or_default(),
+                                    hook_type: "create".to_string(),
+                                    success: hook_info.success,
+                                    output: hook_info.output.clone(),
+                                    duration_ms: hook_info.duration_ms,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    "outbound channel closed, WorktreeHookResult dropped"
+                                );
+                            }
 
-                    if result.success {
-                        // Inspect git to find the new worktree
-                        let pp = project_path.clone();
-                        let inspect_result = tokio::task::spawn_blocking(move || {
-                            GitInspector::inspect(std::path::Path::new(&pp))
-                        })
-                        .await;
-
-                        if let Ok(Some((_git_info, worktrees))) = inspect_result {
-                            // Find a worktree matching the branch
-                            if let Some(wt) = worktrees.iter().find(|w| {
-                                w.branch.as_deref() == Some(&*branch)
-                                    || w.path.ends_with(&worktree_name)
-                            }) {
-                                let worktree = zremote_protocol::project::WorktreeInfo {
-                                    path: wt.path.clone(),
-                                    branch: wt.branch.clone(),
-                                    commit_hash: wt.commit_hash.clone(),
-                                    is_detached: wt.is_detached,
-                                    is_locked: wt.is_locked,
-                                    is_dirty: wt.is_dirty,
-                                    commit_message: wt.commit_message.clone(),
-                                };
-
-                                // Run on_create hook if configured
-                                let hook_result = run_worktree_hook_server(
-                                    &project_path,
-                                    &worktree.path,
-                                    worktree.branch.as_deref().unwrap_or_default(),
-                                    |wt| wt.on_create.as_deref(),
-                                )
-                                .await;
-
-                                if tx
-                                    .send(AgentMessage::WorktreeCreated {
-                                        project_path,
-                                        worktree,
-                                        hook_result,
-                                    })
-                                    .await
-                                    .is_err()
-                                {
-                                    tracing::warn!(
-                                        "outbound channel closed, WorktreeCreated dropped"
-                                    );
-                                }
+                            if !hook_info.success {
+                                let msg = hook_info
+                                    .output
+                                    .unwrap_or_else(|| "custom create hook failed".to_string());
+                                send_worktree_error(&tx, project_path, msg).await;
                                 return;
                             }
-                        }
 
-                        // Fallback: couldn't find worktree after custom command
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message:
-                                    "custom create_command succeeded but worktree not found in git"
+                            // Success — locate the worktree in git so the
+                            // server gets a real WorktreeInfo to store.
+                            let pp = project_path.clone();
+                            let inspect_result = tokio::task::spawn_blocking(move || {
+                                GitInspector::inspect(std::path::Path::new(&pp))
+                            })
+                            .await;
+
+                            let worktree = match inspect_result {
+                                Ok(Some((_git_info, worktrees))) => worktrees
+                                    .into_iter()
+                                    .find(|w| {
+                                        w.branch.as_deref() == Some(&*branch)
+                                            || w.path.ends_with(&worktree_name)
+                                    })
+                                    .map(|wt| zremote_protocol::project::WorktreeInfo {
+                                        path: wt.path,
+                                        branch: wt.branch,
+                                        commit_hash: wt.commit_hash,
+                                        is_detached: wt.is_detached,
+                                        is_locked: wt.is_locked,
+                                        is_dirty: wt.is_dirty,
+                                        commit_message: wt.commit_message,
+                                    }),
+                                _ => None,
+                            };
+
+                            let Some(worktree) = worktree else {
+                                send_worktree_error(
+                                    &tx,
+                                    project_path,
+                                    "custom create hook succeeded but worktree not found in git"
                                         .to_string(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                                )
+                                .await;
+                                return;
+                            };
+
+                            // Run PostCreate (captured) if configured. By
+                            // design, a missing-action resolution error here
+                            // is non-fatal — the worktree was created
+                            // successfully; dropping `WorktreeCreated` on
+                            // the floor because of a misconfigured secondary
+                            // hook would be worse than surfacing it later.
+                            // We log the error and proceed without a hook
+                            // result so the server still emits the creation
+                            // event.
+                            let post_ctx = ActionRunContext {
+                                worktree_path: Some(worktree.path.clone()),
+                                branch: worktree.branch.clone(),
+                                ..ctx.clone()
+                            };
+                            let post_hook =
+                                match crate::project::hook_dispatcher::run_worktree_hook(
+                                    sett,
+                                    crate::project::hook_dispatcher::WorktreeSlot::PostCreate,
+                                    post_ctx,
+                                    Some(SERVER_WORKTREE_HOOK_TIMEOUT),
+                                )
+                                .await
+                                {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "post_create resolution failed");
+                                        None
+                                    }
+                                };
+
+                            if tx
+                                .send(AgentMessage::WorktreeCreated {
+                                    project_path,
+                                    worktree,
+                                    hook_result: post_hook,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!("outbound channel closed, WorktreeCreated dropped");
+                            }
+                            return;
                         }
-                    } else {
-                        let msg = if result.output.is_empty() {
-                            "custom create_command failed".to_string()
-                        } else {
-                            format!("custom create_command failed: {}", result.output)
-                        };
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: msg,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                        Ok(None) => {
+                            // No create override — fall through to default.
+                        }
+                        Err(e) => {
+                            send_worktree_error(&tx, project_path, e.to_string()).await;
+                            return;
                         }
                     }
-                    return;
                 }
 
                 // Default flow: existing GitInspector behavior. Thread
@@ -670,14 +734,36 @@ pub(super) async fn handle_server_message(
                         )
                         .await;
 
-                        // Run on_create hook if configured
-                        let hook_result = run_worktree_hook_server(
-                            &project_path,
-                            &worktree.path,
-                            worktree.branch.as_deref().unwrap_or_default(),
-                            |wt| wt.on_create.as_deref(),
-                        )
-                        .await;
+                        // Run PostCreate hook (captured) through the shared
+                        // dispatcher so named-action resolution + legacy
+                        // `on_create` fallback work identically to local.
+                        // Resolution errors (missing action) are downgraded
+                        // to `None` and logged — the worktree already exists,
+                        // so withholding `WorktreeCreated` would be worse
+                        // than a warn-level log for the misconfigured hook.
+                        let hook_result = if let Some(ref sett) = settings {
+                            let post_ctx = ActionRunContext {
+                                worktree_path: Some(worktree.path.clone()),
+                                branch: worktree.branch.clone(),
+                                ..ctx.clone()
+                            };
+                            match crate::project::hook_dispatcher::run_worktree_hook(
+                                sett,
+                                crate::project::hook_dispatcher::WorktreeSlot::PostCreate,
+                                post_ctx,
+                                Some(SERVER_WORKTREE_HOOK_TIMEOUT),
+                            )
+                            .await
+                            {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "post_create resolution failed");
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
 
                         send_creation_progress(
                             &tx,
@@ -715,37 +801,20 @@ pub(super) async fn handle_server_message(
                             Some(err.message.clone()),
                         )
                         .await;
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: err.message,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
-                        }
+                        send_worktree_error(&tx, project_path, err.message).await;
                     }
                     Ok(Err(e)) => {
+                        let msg = format!("worktree create task panicked: {e}");
                         send_creation_progress(
                             &tx,
                             &project_path,
                             &job_id,
                             zremote_protocol::events::WorktreeCreationStage::Failed,
                             100,
-                            Some(format!("worktree create task panicked: {e}")),
+                            Some(msg.clone()),
                         )
                         .await;
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: format!("worktree create task panicked: {e}"),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
-                        }
+                        send_worktree_error(&tx, project_path, msg).await;
                     }
                     Err(_) => {
                         // Timed out — abort the blocking task so the
@@ -766,16 +835,7 @@ pub(super) async fn handle_server_message(
                             Some(msg.clone()),
                         )
                         .await;
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: msg,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
-                        }
+                        send_worktree_error(&tx, project_path, msg).await;
                     }
                 }
             });
@@ -790,106 +850,131 @@ pub(super) async fn handle_server_message(
             let worktree_path = worktree_path.clone();
             let force = *force;
             tokio::spawn(async move {
-                // Check for custom delete_command
-                let wt_settings = read_worktree_settings_server(&project_path).await;
+                let settings = read_project_settings_server(&project_path).await;
+                let worktree_name = std::path::Path::new(&worktree_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let ctx = ActionRunContext {
+                    project_path: project_path.clone(),
+                    worktree_path: Some(worktree_path.clone()),
+                    branch: None,
+                    worktree_name: Some(worktree_name.clone()),
+                    inputs: std::collections::HashMap::new(),
+                };
 
-                if let Some(delete_cmd) =
-                    wt_settings.as_ref().and_then(|s| s.delete_command.as_ref())
-                {
-                    // Run on_delete hook first
-                    let hook_result =
-                        run_worktree_hook_server(&project_path, &worktree_path, "", |wt| {
-                            wt.on_delete.as_deref()
-                        })
-                        .await;
-
-                    if let Some(ref hr) = hook_result {
-                        let _ = tx
-                            .send(AgentMessage::WorktreeHookResult {
-                                project_path: project_path.clone(),
-                                worktree_path: worktree_path.clone(),
-                                hook_type: "on_delete".to_string(),
-                                success: hr.success,
-                                output: hr.output.clone(),
-                                duration_ms: hr.duration_ms,
-                            })
-                            .await;
-                    }
-
-                    // Run custom delete command
-                    let worktree_name = std::path::Path::new(&worktree_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let cmd = delete_cmd
-                        .replace("{{project_path}}", &project_path)
-                        .replace("{{worktree_path}}", &worktree_path)
-                        .replace("{{worktree_name}}", &worktree_name)
-                        .replace("{{branch}}", "");
-
-                    let result = crate::project::hooks::execute_hook_async(
-                        cmd,
-                        std::path::PathBuf::from(&project_path),
-                        vec![],
-                        None,
+                // PreDelete runs first, bounded by SERVER_PRE_DELETE_HOOK_TIMEOUT
+                // so a stuck teardown cannot pin the dispatch task. Non-zero
+                // exit aborts the delete — same contract as local mode.
+                let pre_delete_result = if let Some(ref sett) = settings {
+                    match crate::project::hook_dispatcher::run_worktree_hook(
+                        sett,
+                        crate::project::hook_dispatcher::WorktreeSlot::PreDelete,
+                        ctx.clone(),
+                        Some(SERVER_PRE_DELETE_HOOK_TIMEOUT),
                     )
-                    .await;
-
-                    if result.success {
-                        if tx
-                            .send(AgentMessage::WorktreeDeleted {
-                                project_path,
-                                worktree_path,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeDeleted dropped");
-                        }
-                    } else {
-                        let msg = if result.output.is_empty() {
-                            "custom delete_command failed".to_string()
-                        } else {
-                            format!("custom delete_command failed: {}", result.output)
-                        };
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: msg,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
+                    .await
+                    {
+                        Ok(h) => h,
+                        Err(e) => {
+                            send_worktree_error(&tx, project_path, e.to_string()).await;
+                            return;
                         }
                     }
-                    return;
-                }
+                } else {
+                    None
+                };
 
-                // Default flow: existing behavior
-                // Run on_delete hook before removing worktree
-                let hook_result =
-                    run_worktree_hook_server(&project_path, &worktree_path, "", |wt| {
-                        wt.on_delete.as_deref()
-                    })
-                    .await;
-
-                if let Some(ref hr) = hook_result {
-                    // Send hook result to server
-                    let _ = tx
+                if let Some(ref hr) = pre_delete_result {
+                    if tx
                         .send(AgentMessage::WorktreeHookResult {
                             project_path: project_path.clone(),
                             worktree_path: worktree_path.clone(),
-                            hook_type: "on_delete".to_string(),
+                            hook_type: "pre_delete".to_string(),
                             success: hr.success,
                             output: hr.output.clone(),
                             duration_ms: hr.duration_ms,
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "outbound channel closed, pre_delete WorktreeHookResult dropped"
+                        );
+                    }
+                    if !hr.success {
+                        let msg = hr
+                            .output
+                            .clone()
+                            .unwrap_or_else(|| "pre_delete hook failed".to_string());
+                        send_worktree_error(&tx, project_path, msg).await;
+                        return;
+                    }
                 }
 
+                // Delete override (captured in server mode): replaces the
+                // default `git worktree remove` call. Success emits
+                // WorktreeDeleted; failure emits WorktreeError.
+                if let Some(ref sett) = settings {
+                    match crate::project::hook_dispatcher::run_worktree_hook(
+                        sett,
+                        crate::project::hook_dispatcher::WorktreeSlot::Delete,
+                        ctx.clone(),
+                        Some(SERVER_WORKTREE_HOOK_TIMEOUT),
+                    )
+                    .await
+                    {
+                        Ok(Some(hook_info)) => {
+                            if tx
+                                .send(AgentMessage::WorktreeHookResult {
+                                    project_path: project_path.clone(),
+                                    worktree_path: worktree_path.clone(),
+                                    hook_type: "delete".to_string(),
+                                    success: hook_info.success,
+                                    output: hook_info.output.clone(),
+                                    duration_ms: hook_info.duration_ms,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    "outbound channel closed, delete WorktreeHookResult dropped"
+                                );
+                            }
+
+                            if hook_info.success {
+                                if tx
+                                    .send(AgentMessage::WorktreeDeleted {
+                                        project_path,
+                                        worktree_path,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "outbound channel closed, WorktreeDeleted dropped"
+                                    );
+                                }
+                            } else {
+                                let msg = hook_info
+                                    .output
+                                    .unwrap_or_else(|| "custom delete hook failed".to_string());
+                                send_worktree_error(&tx, project_path, msg).await;
+                            }
+                            return;
+                        }
+                        Ok(None) => {
+                            // No delete override — fall through to default.
+                        }
+                        Err(e) => {
+                            send_worktree_error(&tx, project_path, e.to_string()).await;
+                            return;
+                        }
+                    }
+                }
+
+                // Default flow: `git worktree remove`.
                 let pp = project_path.clone();
                 let wp = worktree_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -914,28 +999,15 @@ pub(super) async fn handle_server_message(
                         }
                     }
                     Ok(Err(msg)) => {
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: msg,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
-                        }
+                        send_worktree_error(&tx, project_path, msg).await;
                     }
                     Err(e) => {
-                        if tx
-                            .send(AgentMessage::WorktreeError {
-                                project_path,
-                                message: format!("worktree delete task panicked: {e}"),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!("outbound channel closed, WorktreeError dropped");
-                        }
+                        send_worktree_error(
+                            &tx,
+                            project_path,
+                            format!("worktree delete task panicked: {e}"),
+                        )
+                        .await;
                     }
                 }
             });
@@ -1965,6 +2037,394 @@ mod tests {
         assert!(
             stages.contains(&Done),
             "missing Done progress event: saw {stages:?}"
+        );
+    }
+
+    /// Write a full `ProjectSettings` to disk in test dirs. Used by server-
+    /// mode hook tests to configure `hooks.worktree.*` overrides.
+    fn write_test_settings(
+        project_path: &std::path::Path,
+        settings: &zremote_protocol::ProjectSettings,
+    ) {
+        crate::project::settings::write_settings(project_path, settings).expect("write_settings");
+    }
+
+    fn settings_with_hook_action(
+        action_name: &str,
+        command: &str,
+        slot: &str,
+    ) -> zremote_protocol::ProjectSettings {
+        use std::collections::HashMap;
+        use zremote_protocol::{
+            ActionScope, HookRef, ProjectAction, ProjectHooks, ProjectSettings, WorktreeHooks,
+        };
+        let action = ProjectAction {
+            name: action_name.to_string(),
+            command: command.to_string(),
+            description: None,
+            icon: None,
+            working_dir: None,
+            env: HashMap::new(),
+            worktree_scoped: true,
+            scopes: vec![ActionScope::Worktree],
+            inputs: vec![],
+        };
+        let href = HookRef {
+            action: action_name.to_string(),
+            inputs: HashMap::new(),
+        };
+        let worktree_hooks = match slot {
+            "create" => WorktreeHooks {
+                create: Some(href),
+                ..Default::default()
+            },
+            "delete" => WorktreeHooks {
+                delete: Some(href),
+                ..Default::default()
+            },
+            "pre_delete" => WorktreeHooks {
+                pre_delete: Some(href),
+                ..Default::default()
+            },
+            "post_create" => WorktreeHooks {
+                post_create: Some(href),
+                ..Default::default()
+            },
+            other => panic!("unknown slot {other}"),
+        };
+        ProjectSettings {
+            actions: vec![action],
+            hooks: Some(ProjectHooks {
+                worktree: Some(worktree_hooks),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// `hooks.worktree.create` with a named action runs through the server
+    /// dispatcher. The hook writes a marker to prove it ran via the resolver;
+    /// we assert on the emitted `WorktreeHookResult` and the marker file.
+    ///
+    /// We intentionally do NOT drive a full `git worktree add` from the
+    /// hook: under parallel test load that path was flaky (branch-name
+    /// reuse across concurrent tokio::spawn tasks). The Create-slot's
+    /// "find worktree after hook" branch is already covered by the PTY
+    /// integration in local mode; here we are verifying the dispatcher
+    /// resolves and executes the hook in server mode.
+    #[tokio::test]
+    async fn server_worktree_create_named_action_runs_hook() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+
+        let marker = tmp.path().join("hook-ran.marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
+        // Simple hook that records it ran. No git state change — the
+        // dispatcher will see "hook succeeded" + "no worktree found" and
+        // emit `WorktreeError`; we treat that error as a success signal
+        // along with the `WorktreeHookResult`.
+        let command = format!("touch {marker_str}");
+        let settings = settings_with_hook_action("custom-add", &command, "create");
+        write_test_settings(&repo, &settings);
+
+        let msg = ServerMessage::WorktreeCreate {
+            project_path: repo.to_string_lossy().to_string(),
+            branch: "hook-branch".to_string(),
+            path: None,
+            new_branch: true,
+            base_ref: None,
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut saw_hook_result = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let sent = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out waiting for hook output")
+                .expect("channel closed");
+            match sent {
+                AgentMessage::WorktreeHookResult {
+                    hook_type,
+                    success,
+                    output,
+                    ..
+                } => {
+                    if hook_type == "create" {
+                        assert!(success, "create hook must succeed: {output:?}");
+                        saw_hook_result = true;
+                    }
+                }
+                AgentMessage::WorktreeError { .. } | AgentMessage::WorktreeCreated { .. } => {
+                    // Terminal event — whichever arrives, the hook flow
+                    // has finished. "Not found" is expected here since
+                    // our hook does not create a real worktree.
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_hook_result, "WorktreeHookResult for 'create' must fire");
+        assert!(marker.exists(), "hook command must have executed");
+    }
+
+    /// Leading-dash validation must fire before the hook path. Even with a
+    /// custom create hook configured, a `base_ref` like `--upload-pack=foo`
+    /// must be rejected at the API boundary (CWE-88).
+    #[tokio::test]
+    async fn server_worktree_create_rejects_leading_dash_with_hook() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+
+        // Even with a hook defined, validation fires first.
+        let settings = settings_with_hook_action("noop", "true", "create");
+        write_test_settings(&repo, &settings);
+
+        let msg = ServerMessage::WorktreeCreate {
+            project_path: repo.to_string_lossy().to_string(),
+            branch: "ok".to_string(),
+            path: None,
+            new_branch: true,
+            base_ref: Some("--upload-pack=evil".to_string()),
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(5), orx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        match sent {
+            AgentMessage::WorktreeError { message, .. } => {
+                assert!(
+                    message.contains("base_ref"),
+                    "error must mention base_ref: {message}"
+                );
+            }
+            other => panic!("expected WorktreeError, got {other:?}"),
+        }
+    }
+
+    /// A hook that references a non-existent action must surface as
+    /// `WorktreeError` with the action name in the message.
+    #[tokio::test]
+    async fn server_worktree_create_missing_action_errors() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+
+        // HookRef with no matching action.
+        use std::collections::HashMap;
+        use zremote_protocol::{HookRef, ProjectHooks, ProjectSettings, WorktreeHooks};
+        let settings = ProjectSettings {
+            actions: vec![],
+            hooks: Some(ProjectHooks {
+                worktree: Some(WorktreeHooks {
+                    create: Some(HookRef {
+                        action: "missing-action".to_string(),
+                        inputs: HashMap::new(),
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        write_test_settings(&repo, &settings);
+
+        let msg = ServerMessage::WorktreeCreate {
+            project_path: repo.to_string_lossy().to_string(),
+            branch: "x".to_string(),
+            path: None,
+            new_branch: true,
+            base_ref: None,
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let sent = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out")
+                .expect("channel closed");
+            match sent {
+                AgentMessage::WorktreeError { message, .. } => {
+                    assert!(
+                        message.contains("missing-action"),
+                        "error must name the missing action: {message}"
+                    );
+                    return;
+                }
+                // Ignore progress events (not expected on hook path but
+                // don't fail the test if they appear before the error).
+                _ => continue,
+            }
+        }
+    }
+
+    /// `hooks.worktree.pre_delete` runs before `git worktree remove` and its
+    /// result is reported via `WorktreeHookResult`. A non-zero exit aborts
+    /// the delete.
+    #[tokio::test]
+    async fn server_worktree_delete_pre_delete_blocks_on_failure() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+        let wt_path = tmp.path().join("wt-predelete");
+
+        // Create a real worktree so the delete has something to target.
+        std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "to-delete",
+                wt_path.to_string_lossy().as_ref(),
+            ])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", repo.to_string_lossy().to_string())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+
+        // pre_delete exits non-zero → delete must NOT proceed.
+        let settings = settings_with_hook_action("guard", "false", "pre_delete");
+        write_test_settings(&repo, &settings);
+
+        let msg = ServerMessage::WorktreeDelete {
+            project_path: repo.to_string_lossy().to_string(),
+            worktree_path: wt_path.to_string_lossy().to_string(),
+            force: false,
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut saw_hook_result = false;
+        let mut saw_error = false;
+        loop {
+            if saw_hook_result && saw_error {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let sent = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out")
+                .expect("channel closed");
+            match sent {
+                AgentMessage::WorktreeHookResult {
+                    hook_type, success, ..
+                } => {
+                    if hook_type == "pre_delete" {
+                        assert!(!success, "pre_delete must be reported as failed");
+                        saw_hook_result = true;
+                    }
+                }
+                AgentMessage::WorktreeError { .. } => {
+                    saw_error = true;
+                }
+                AgentMessage::WorktreeDeleted { .. } => {
+                    panic!("delete must not proceed when pre_delete fails");
+                }
+                _ => {}
+            }
+        }
+        // The worktree must still be on disk since the delete was blocked.
+        assert!(
+            wt_path.exists(),
+            "worktree must not be removed when pre_delete fails"
         );
     }
 }

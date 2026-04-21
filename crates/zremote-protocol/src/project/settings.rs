@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::actions::{ProjectAction, WorktreeSettings};
+use super::actions::{ProjectAction, ProjectHooks, WorktreeSettings};
 use super::linear::LinearSettings;
 use super::prompts::PromptTemplate;
 
@@ -34,6 +34,8 @@ pub struct ProjectSettings {
     pub actions: Vec<ProjectAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<ProjectHooks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear: Option<LinearSettings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

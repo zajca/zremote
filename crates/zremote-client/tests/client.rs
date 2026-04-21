@@ -912,6 +912,7 @@ async fn save_settings_sends_put() {
         agentic: zremote_client::types::AgenticSettings::default(),
         actions: vec![],
         worktree: None,
+        hooks: None,
         linear: None,
         prompts: vec![],
         claude: None,

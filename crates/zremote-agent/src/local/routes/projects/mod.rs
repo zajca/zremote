@@ -2,7 +2,7 @@ mod crud;
 mod git;
 mod scan;
 mod settings;
-mod worktree;
+pub(crate) mod worktree;
 
 pub use crud::{
     add_project, delete_project, get_project, list_project_sessions, list_projects, update_project,

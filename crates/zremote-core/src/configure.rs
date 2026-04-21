@@ -63,25 +63,16 @@ pub fn build_configure_prompt(
     prompt.push_str(
         "    - `script` (string, optional): Shell command that generates options dynamically.\n      Output: one option per line, tab-separated value\\tlabel. Example: \"0.2.4\\tPatch release\"\n",
     );
-    prompt.push_str("- `worktree` (object, optional):\n");
     prompt.push_str(
-        "  - `create_command` (string, optional): Custom command that replaces `git worktree add`. Runs in a terminal session so the user can see output. Use when the project has custom worktree setup scripts.\n",
+        "- `hooks` (object, optional): Hook configuration that references named actions.\n",
     );
-    prompt.push_str(
-        "  - `delete_command` (string, optional): Custom command that replaces `git worktree remove`. Runs in a terminal session.\n",
-    );
-    prompt.push_str(
-        "  - `on_create` (string, optional): Post-create hook command. Runs after worktree is created (by either git or create_command).\n",
-    );
-    prompt.push_str(
-        "  - `on_delete` (string, optional): Pre-delete hook command. Runs before worktree is deleted.\n",
-    );
-    prompt.push_str(
-        "  - Template variables: `{{project_path}}`, `{{worktree_path}}`, `{{branch}}`, `{{worktree_name}}`\n",
-    );
-    prompt.push_str(
-        "  - `{{worktree_name}}` is the basename of the worktree path (last path component)\n",
-    );
+    prompt.push_str("  - `worktree` (object, optional): Worktree lifecycle slots. Each slot is a `HookRef` pointing at a named entry in `actions` above:\n");
+    prompt.push_str("    - `create` (HookRef, optional): Replaces the default `git worktree add` flow. Runs in captured mode (agent streams output to the UI; no PTY).\n");
+    prompt.push_str("    - `delete` (HookRef, optional): Replaces the default `git worktree remove` flow. Runs in captured mode.\n");
+    prompt.push_str("    - `post_create` (HookRef, optional): Runs after the worktree is created (by either the default flow or a `create` hook). Captured mode.\n");
+    prompt.push_str("    - `pre_delete` (HookRef, optional): Runs before the worktree is deleted. Captured mode. A non-zero exit aborts deletion.\n");
+    prompt.push_str("  - `HookRef` shape: `{ \"action\": \"<action-name>\", \"inputs\": { \"<name>\": \"<value>\" } }`. The referenced action must exist in `actions`. `inputs` pre-fills the action's inputs without prompting the user; unspecified inputs fall back to the action's defaults.\n");
+    prompt.push_str("  - Template variables available in the resolved action command: `{{project_path}}`, `{{worktree_path}}`, `{{branch}}`, `{{worktree_name}}` (basename of the worktree path). `{{worktree_path}}` is empty for the `create` slot (the path does not exist yet).\n");
     prompt.push_str("- `claude` (object, optional): Default settings for Claude sessions started from this project:\n");
     prompt.push_str(
         "  - `model` (string, optional): Default model, e.g. \"sonnet\", \"opus\", \"haiku\"\n",
@@ -99,7 +90,7 @@ pub fn build_configure_prompt(
     prompt.push_str("3. Create actions for each identified workflow\n");
     prompt.push_str("4. Set appropriate environment variables if needed\n");
     prompt.push_str("5. Configure agentic auto-approve patterns for safe, read-only operations\n");
-    prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns). If found, configure `create_command` and `delete_command` to use them.\n");
+    prompt.push_str("6. Look for custom worktree management scripts (e.g., `scripts/worktree.sh`, Makefile worktree targets, per-worktree docker-compose patterns, install/bootstrap hooks). If found:\n   a. Define a named action under `actions` for each script (e.g., `worktree-create`, `worktree-bootstrap`). Mark them `worktree_scoped: true` or add `\"worktree\"` to `scopes` when appropriate.\n   b. Wire them under `hooks.worktree` via `HookRef` — use `create`/`delete` to replace the default git flow, `post_create`/`pre_delete` to augment it.\n");
     prompt.push_str("7. When a project has per-worktree infrastructure (Docker stacks, databases, port mappings), add `\"worktree\"` to the action's `scopes` for common operations (start, stop, expose).\n8. For frequently-used actions (build, test), add `\"sidebar\"` scope for quick access from the sidebar.\n9. For actions that need user input before running (e.g., release version, deploy target, branch name), define `inputs` with appropriate types. Use `script` for dynamic options that depend on project state (git tags, branches, environments).\n\n");
 
     // Section 4: Project-Type-Specific Guidance
@@ -137,7 +128,7 @@ pub fn build_configure_prompt(
             prompt.push_str(
                 "- Typecheck: run typecheck/tsc script if available (icon: \"check-circle\")\n",
             );
-            prompt.push_str("- For worktree on_create hook, consider: `<pkg_manager> install`\n\n");
+            prompt.push_str("- For a post-create worktree hook, define an action like `worktree-install` running `<pkg_manager> install` in `{{worktree_path}}`, then wire it as `hooks.worktree.post_create` via a `HookRef`.\n\n");
         }
         "python" => {
             prompt.push_str("## Python Project Guidance\n\n");
@@ -197,10 +188,16 @@ mod tests {
         assert!(prompt.contains("icon"));
         assert!(prompt.contains("worktree_scoped"));
         assert!(prompt.contains("worktree"));
-        assert!(prompt.contains("on_create"));
-        assert!(prompt.contains("on_delete"));
-        assert!(prompt.contains("create_command"));
-        assert!(prompt.contains("delete_command"));
+        // Hooks schema
+        assert!(prompt.contains("hooks"));
+        assert!(prompt.contains("HookRef"));
+        assert!(prompt.contains("post_create"));
+        assert!(prompt.contains("pre_delete"));
+        // Legacy worktree.{create_command,delete_command,on_create,on_delete}
+        // must NOT appear — CC should emit only the hooks-based schema.
+        assert!(!prompt.contains("create_command"));
+        assert!(!prompt.contains("delete_command"));
+        assert!(!prompt.contains("LEGACY"));
         assert!(prompt.contains("{{project_path}}"));
         assert!(prompt.contains("{{worktree_path}}"));
         assert!(prompt.contains("{{branch}}"));
@@ -267,12 +264,13 @@ mod tests {
     #[test]
     fn test_prompt_contains_custom_worktree_guidance() {
         let prompt = build_configure_prompt("/tmp/project", "unknown", None);
-        assert!(prompt.contains("create_command"));
-        assert!(prompt.contains("delete_command"));
         assert!(prompt.contains("{{worktree_name}}"));
         assert!(prompt.contains("worktree management scripts"));
         assert!(prompt.contains("sidebar"));
         assert!(prompt.contains("scopes"));
+        // Analysis instructions must steer toward hooks-based wiring
+        assert!(prompt.contains("hooks.worktree"));
+        assert!(prompt.contains("HookRef"));
     }
 
     #[test]

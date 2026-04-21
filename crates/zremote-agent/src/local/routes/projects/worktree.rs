@@ -10,14 +10,16 @@ use serde::Deserialize;
 use uuid::Uuid;
 use zremote_core::error::{AppError, AppJson};
 use zremote_core::queries::projects as q;
-use zremote_core::queries::sessions as sq;
-use zremote_core::state::{ServerEvent, SessionState};
+use zremote_core::state::ServerEvent;
 
 use crate::local::state::LocalAppState;
+use crate::project::action_runner::ActionRunContext;
 use crate::project::git::GitInspector;
+use crate::project::hook_dispatcher::{WorktreeSlot, run_worktree_hook, run_worktree_override};
 
 use super::ProjectResponse;
 use super::parse_project_id;
+use zremote_protocol::ProjectSettings;
 use zremote_protocol::events::WorktreeCreationStage;
 use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
 
@@ -27,12 +29,19 @@ use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
 /// the request so the client isn't left hanging forever.
 const WORKTREE_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Maximum wall time for the `pre_delete` captured hook. The delete handler
+/// blocks on this hook before touching git, so an unbounded run would pin the
+/// HTTP request indefinitely (a stuck teardown script would hang the GUI).
+/// 2 minutes matches typical Docker/compose teardowns while still guaranteeing
+/// forward progress.
+const PRE_DELETE_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Reject user-controlled git inputs that start with `-`. Without this guard
 /// a caller could smuggle additional git options through the worktree
 /// endpoint (CWE-88) — for example, passing `--upload-pack=evil` as a branch
 /// name. Enforced at the API boundary so the check is centralised and the
 /// git layer can assume its arguments are safe.
-fn reject_leading_dash(field: &str, value: &str) -> Result<(), WorktreeError> {
+pub(crate) fn reject_leading_dash(field: &str, value: &str) -> Result<(), WorktreeError> {
     if value.starts_with('-') {
         return Err(WorktreeError::new(
             WorktreeErrorCode::InvalidRef,
@@ -88,6 +97,30 @@ fn worktree_error_response(err: WorktreeError) -> axum::response::Response {
     (status, Json(err)).into_response()
 }
 
+/// Read full project settings via spawn_blocking. Returns `None` when no
+/// settings file exists or reading fails (treated as "no hooks configured").
+async fn read_project_settings(project_path: &str) -> Option<ProjectSettings> {
+    let pp = project_path.to_string();
+    tokio::task::spawn_blocking(move || crate::project::settings::read_settings(Path::new(&pp)))
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+}
+
+fn log_hook_result(slot: &str, target: &str, hr: &zremote_protocol::HookResultInfo) {
+    if hr.success {
+        tracing::info!(slot, worktree = target, "worktree hook succeeded");
+    } else {
+        tracing::warn!(
+            slot,
+            worktree = target,
+            output = %hr.output.as_deref().unwrap_or(""),
+            "worktree hook failed"
+        );
+    }
+}
+
 /// `GET /api/projects/:project_id/worktrees` - list worktree children.
 pub async fn list_worktrees(
     State(state): State<Arc<LocalAppState>>,
@@ -124,168 +157,195 @@ pub async fn create_worktree(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
-    // Check for custom create_command
-    let wt_settings = read_worktree_settings(&project_path).await;
-    if let Some(create_cmd) = wt_settings.as_ref().and_then(|s| s.create_command.as_ref()) {
-        let worktree_name = body.branch.replace('/', "-");
-        let cmd = create_cmd
-            .replace("{{project_path}}", &project_path)
-            .replace("{{branch}}", &body.branch)
-            .replace("{{worktree_name}}", &worktree_name);
+    // Validate user-controlled git inputs *before* any path branches. Without
+    // this guard, a caller with a configured `hooks.worktree.create` could
+    // smuggle leading-dash values through `{{branch}}` into the override
+    // action's command line (CWE-88). Enforcing at the entry point means the
+    // check cannot be bypassed by any downstream code path.
+    if let Err(err) = reject_leading_dash("branch", &body.branch) {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref p) = body.path
+        && let Err(err) = reject_leading_dash("path", p)
+    {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref b) = body.base_ref
+        && let Err(err) = reject_leading_dash("base_ref", b)
+    {
+        return Ok(worktree_error_response(err));
+    }
 
-        let project_id_ref = sq::resolve_project_id(&state.db, &host_id_str, &project_path).await?;
-        let (session_id_str, _session_uuid) = spawn_command_session(
+    // Read settings once up front — covers both the create override resolution
+    // and the post_create hook that fires after a successful default flow.
+    let settings = read_project_settings(&project_path).await;
+
+    // Check for custom create override
+    if let Some(ref sett) = settings {
+        let worktree_name = body.branch.replace('/', "-");
+        let ctx = ActionRunContext {
+            project_path: project_path.clone(),
+            worktree_path: None,
+            branch: Some(body.branch.clone()),
+            worktree_name: Some(worktree_name.clone()),
+            inputs: std::collections::HashMap::new(),
+        };
+        let session_name = format!("worktree: create {worktree_name}");
+        let spawned = run_worktree_override(
             &state,
             &host_id_str,
-            &format!("worktree: create {worktree_name}"),
-            &project_path,
-            project_id_ref.as_deref(),
-            &cmd,
+            sett,
+            WorktreeSlot::Create,
+            ctx,
+            &session_name,
         )
         .await?;
 
-        // Background task: monitor session completion, then update DB
-        let events = state.events.clone();
-        let db = state.db.clone();
-        let sid = session_id_str.clone();
-        let pp = project_path.clone();
-        let hid = host_id_str.clone();
-        let pid = project_id.clone();
-        let branch = body.branch.clone();
-        tokio::spawn(async move {
-            let mut rx = events.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(ServerEvent::SessionClosed {
-                        session_id,
-                        exit_code,
-                    }) if session_id == sid => {
-                        if exit_code == Some(0) {
-                            // Inspect git to find new worktrees
-                            let pp_clone = pp.clone();
-                            let inspect_result = tokio::task::spawn_blocking(move || {
-                                GitInspector::inspect(Path::new(&pp_clone))
-                            })
-                            .await;
+        if let Some(spawned) = spawned {
+            let session_id_str = spawned.session_id.clone();
 
-                            if let Ok(Some((_git_info, worktrees))) = inspect_result {
-                                // Get existing worktree paths from DB
-                                let existing =
-                                    q::list_worktrees(&db, &pid).await.unwrap_or_default();
-                                let existing_paths: HashSet<String> =
-                                    existing.iter().map(|w| w.path.clone()).collect();
+            // Background task: monitor session completion, then update DB and
+            // fire the post_create captured hook.
+            let events = state.events.clone();
+            let db = state.db.clone();
+            let sid = session_id_str.clone();
+            let pp = project_path.clone();
+            let hid = host_id_str.clone();
+            let pid = project_id.clone();
+            let branch = body.branch.clone();
+            let settings_for_task = sett.clone();
+            tokio::spawn(async move {
+                let mut rx = events.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(ServerEvent::SessionClosed {
+                            session_id,
+                            exit_code,
+                        }) if session_id == sid => {
+                            if exit_code == Some(0) {
+                                // Inspect git to find new worktrees
+                                let pp_clone = pp.clone();
+                                let inspect_result = tokio::task::spawn_blocking(move || {
+                                    GitInspector::inspect(Path::new(&pp_clone))
+                                })
+                                .await;
 
-                                for wt in &worktrees {
-                                    if !existing_paths.contains(&wt.path) && wt.path != pp {
-                                        let wt_id = Uuid::new_v4().to_string();
-                                        let wt_name = wt
-                                            .path
-                                            .rsplit('/')
-                                            .next()
-                                            .unwrap_or("worktree")
-                                            .to_string();
-                                        let _ = q::insert_project_with_parent(
-                                            &db,
-                                            &wt_id,
-                                            &hid,
-                                            &wt.path,
-                                            &wt_name,
-                                            Some(&pid),
-                                            "worktree",
-                                        )
-                                        .await;
+                                if let Ok(Some((_git_info, worktrees))) = inspect_result {
+                                    let existing =
+                                        q::list_worktrees(&db, &pid).await.unwrap_or_default();
+                                    let existing_paths: HashSet<String> =
+                                        existing.iter().map(|w| w.path.clone()).collect();
 
-                                        let _ = sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
-                                            .bind(&wt.branch)
-                                            .bind(&wt.commit_hash)
-                                            .bind(&wt_id)
-                                            .execute(&db)
+                                    let mut created_wt: Option<(String, Option<String>)> = None;
+                                    for wt in &worktrees {
+                                        if !existing_paths.contains(&wt.path) && wt.path != pp {
+                                            let wt_id = Uuid::new_v4().to_string();
+                                            let wt_name = wt
+                                                .path
+                                                .rsplit('/')
+                                                .next()
+                                                .unwrap_or("worktree")
+                                                .to_string();
+                                            let _ = q::insert_project_with_parent(
+                                                &db,
+                                                &wt_id,
+                                                &hid,
+                                                &wt.path,
+                                                &wt_name,
+                                                Some(&pid),
+                                                "worktree",
+                                            )
                                             .await;
+
+                                            let _ = sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
+                                                .bind(&wt.branch)
+                                                .bind(&wt.commit_hash)
+                                                .bind(&wt_id)
+                                                .execute(&db)
+                                                .await;
+
+                                            if created_wt.is_none() {
+                                                created_wt =
+                                                    Some((wt.path.clone(), wt.branch.clone()));
+                                            }
+                                        }
+                                    }
+
+                                    let _ = events.send(ServerEvent::ProjectsUpdated {
+                                        host_id: hid.clone(),
+                                    });
+
+                                    // Fire post_create captured hook for the new worktree
+                                    if let Some((wt_path, wt_branch)) = created_wt {
+                                        let wt_name = Path::new(&wt_path)
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(String::from);
+                                        let ctx = ActionRunContext {
+                                            project_path: pp.clone(),
+                                            worktree_path: Some(wt_path.clone()),
+                                            branch: wt_branch.or(Some(branch.clone())),
+                                            worktree_name: wt_name,
+                                            inputs: std::collections::HashMap::new(),
+                                        };
+                                        match run_worktree_hook(
+                                            &settings_for_task,
+                                            WorktreeSlot::PostCreate,
+                                            ctx,
+                                            None,
+                                        )
+                                        .await
+                                        {
+                                            Ok(Some(hr)) => {
+                                                log_hook_result("post_create", &wt_path, &hr);
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    worktree = %wt_path,
+                                                    error = %e,
+                                                    "post_create hook resolution failed"
+                                                );
+                                            }
+                                        }
                                     }
                                 }
-
-                                let _ = events.send(ServerEvent::ProjectsUpdated {
-                                    host_id: hid.clone(),
-                                });
-
-                                // Run on_create hook if configured
-                                if let Some(on_create) =
-                                    wt_settings.as_ref().and_then(|s| s.on_create.as_ref())
-                                    && let Some(new_wt) = worktrees
-                                        .iter()
-                                        .find(|w| !existing_paths.contains(&w.path) && w.path != pp)
-                                {
-                                    let wt_name_for_hook = std::path::Path::new(&new_wt.path)
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or("");
-                                    let hook_cmd = crate::project::hooks::expand_hook_template(
-                                        on_create,
-                                        &pp,
-                                        &new_wt.path,
-                                        new_wt.branch.as_deref().unwrap_or(&branch),
-                                        wt_name_for_hook,
-                                    );
-                                    let _ = crate::project::hooks::execute_hook_async(
-                                        hook_cmd,
-                                        std::path::PathBuf::from(&new_wt.path),
-                                        vec![],
-                                        None,
-                                    )
-                                    .await;
-                                }
+                            } else {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    exit_code = ?exit_code,
+                                    "worktree create override failed"
+                                );
                             }
-                        } else {
-                            tracing::warn!(
-                                session_id = %sid,
-                                exit_code = ?exit_code,
-                                "custom create_command failed"
-                            );
+                            break;
                         }
-                        break;
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        _ => continue,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    _ => continue,
                 }
-            }
-        });
+            });
 
-        return Ok((
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "session_id": session_id_str,
-                "mode": "custom_command",
-            })),
-        )
-            .into_response());
+            return Ok((
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "session_id": session_id_str,
+                    "mode": "custom_command",
+                })),
+            )
+                .into_response());
+        }
     }
 
     // Default flow: existing GitInspector behavior, wrapped in a 60s timeout
     // and bracketed by progress events so the GUI can show a pending spinner
-    // for large-repo creations.
+    // for large-repo creations. Leading-dash inputs were already rejected at
+    // the top of the handler so the blocking task can trust these values.
     let branch = body.branch.clone();
     let wt_path = body.path.clone();
     let new_branch = body.new_branch.unwrap_or(false);
     let base_ref = body.base_ref.clone();
     let repo_path = project_path.clone();
-
-    // Validate user-controlled git inputs at the API boundary. Leading-dash
-    // values would otherwise be interpreted as additional git options
-    // (CWE-88). Rejected inputs never reach the blocking task.
-    if let Err(err) = reject_leading_dash("branch", &branch) {
-        return Ok(worktree_error_response(err));
-    }
-    if let Some(ref p) = wt_path
-        && let Err(err) = reject_leading_dash("path", p)
-    {
-        return Ok(worktree_error_response(err));
-    }
-    if let Some(ref b) = base_ref
-        && let Err(err) = reject_leading_dash("base_ref", b)
-    {
-        return Ok(worktree_error_response(err));
-    }
 
     let job_id = Uuid::new_v4().to_string();
     emit_progress(
@@ -330,9 +390,6 @@ pub async fn create_worktree(
             res.map_err(|e| AppError::Internal(format!("worktree create task failed: {e}")))?
         }
         Err(_) => {
-            // Timeout fired: tell tokio to drop the blocking task (it will
-            // exit on next yield; synchronous git cannot be preempted, but
-            // the HTTP caller gets a prompt structured error either way).
             handle.abort();
             tracing::warn!(
                 job_id = %job_id,
@@ -375,7 +432,7 @@ pub async fn create_worktree(
         }
     };
 
-    // git has returned successfully; the work left is DB insert + on_create
+    // git has returned successfully; the work left is DB insert + post_create
     // hook. Surface that as Finalizing so the GUI can show a "wrapping up"
     // state distinct from the active git call.
     emit_progress(
@@ -387,7 +444,6 @@ pub async fn create_worktree(
         None,
     );
 
-    // Insert worktree as a child project
     let wt_id = Uuid::new_v4().to_string();
     let wt_name = result
         .path
@@ -407,7 +463,6 @@ pub async fn create_worktree(
     )
     .await?;
 
-    // Update git info on the new worktree
     sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
         .bind(&result.branch)
         .bind(&result.commit_hash)
@@ -416,21 +471,24 @@ pub async fn create_worktree(
         .await
         .map_err(AppError::Database)?;
 
-    // Run on_create hook if configured
-    let hook_result = run_worktree_hook(
-        &project_path,
-        &result.path,
-        result.branch.as_deref().unwrap_or_default(),
-        |wt_settings| wt_settings.on_create.as_deref(),
-    )
-    .await;
+    // Run post_create captured hook (new or legacy on_create) if configured.
+    // Resolution errors (e.g. hook references a missing action) surface as
+    // 400s so misconfiguration is visible immediately, not silently dropped.
+    let hook_result = if let Some(ref sett) = settings {
+        let ctx = ActionRunContext {
+            project_path: project_path.clone(),
+            worktree_path: Some(result.path.clone()),
+            branch: result.branch.clone(),
+            worktree_name: Some(wt_name.clone()),
+            inputs: std::collections::HashMap::new(),
+        };
+        run_worktree_hook(sett, WorktreeSlot::PostCreate, ctx, None).await?
+    } else {
+        None
+    };
 
     if let Some(ref hr) = hook_result {
-        if hr.success {
-            tracing::info!(worktree = %result.path, "on_create hook succeeded");
-        } else {
-            tracing::warn!(worktree = %result.path, output = %hr.output.as_deref().unwrap_or(""), "on_create hook failed");
-        }
+        log_hook_result("post_create", &result.path, hr);
     }
 
     let mut project = serde_json::to_value(q::get_project(&state.db, &wt_id).await?)
@@ -476,10 +534,7 @@ pub async fn delete_worktree(
     // touch the filesystem. Each session is shut down via the same code path
     // as `DELETE /api/sessions/:id` so the GUI observes a consistent
     // `SessionClosed` event instead of a terminal that silently stops
-    // responding. We look up sessions both by `project_id == worktree_id`
-    // (the canonical tag) and by working-dir prefix matching the worktree
-    // path (covers legacy rows tagged against the parent project when the
-    // worktree lives inside the parent repo).
+    // responding.
     let closed = crate::local::routes::sessions::close_sessions_for_project(
         &state,
         &host_id_str,
@@ -503,109 +558,123 @@ pub async fn delete_worktree(
         );
     }
 
-    // Check for custom delete_command
-    let wt_settings = read_worktree_settings(&project_path).await;
-    if let Some(delete_cmd) = wt_settings.as_ref().and_then(|s| s.delete_command.as_ref()) {
-        // Run on_delete hook first (before custom command)
-        let _ = run_worktree_hook(&project_path, &worktree_path, "", |wt_settings| {
-            wt_settings.on_delete.as_deref()
-        })
-        .await;
+    // Read settings once — drives both pre_delete hook and delete override.
+    let settings = read_project_settings(&project_path).await;
 
-        let worktree_name = std::path::Path::new(&worktree_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+    // Branch (if any) used for hook context.
+    let wt_branch: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT git_branch FROM projects WHERE id = ?")
+            .bind(&worktree_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
 
-        // Get branch from DB for template expansion
-        let wt_branch =
-            sqlx::query_scalar::<_, Option<String>>("SELECT git_branch FROM projects WHERE id = ?")
-                .bind(&worktree_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-                .unwrap_or_default();
+    let wt_name = Path::new(&worktree_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(String::from);
 
-        let cmd = delete_cmd
-            .replace("{{project_path}}", &project_path)
-            .replace("{{worktree_path}}", &worktree_path)
-            .replace("{{worktree_name}}", &worktree_name)
-            .replace("{{branch}}", &wt_branch);
-
-        let project_id_ref = sq::resolve_project_id(&state.db, &host_id_str, &project_path).await?;
-        let (session_id_str, _session_uuid) = spawn_command_session(
-            &state,
-            &host_id_str,
-            &format!("worktree: delete {worktree_name}"),
-            &project_path,
-            project_id_ref.as_deref(),
-            &cmd,
+    // Always run pre_delete hook first (if any). A stuck teardown would
+    // otherwise block the delete request indefinitely, so we impose a hard
+    // wall-time ceiling (PRE_DELETE_HOOK_TIMEOUT). Command failure and timeout
+    // are logged but do not abort the delete — the caller asked for deletion.
+    // Resolution failure (missing action) *does* abort with 400 so the
+    // misconfiguration surfaces.
+    if let Some(ref sett) = settings {
+        let ctx = ActionRunContext {
+            project_path: project_path.clone(),
+            worktree_path: Some(worktree_path.clone()),
+            branch: wt_branch.clone(),
+            worktree_name: wt_name.clone(),
+            inputs: std::collections::HashMap::new(),
+        };
+        if let Some(hr) = run_worktree_hook(
+            sett,
+            WorktreeSlot::PreDelete,
+            ctx,
+            Some(PRE_DELETE_HOOK_TIMEOUT),
         )
-        .await?;
-
-        // Background task: on success, remove worktree from DB
-        let events = state.events.clone();
-        let db = state.db.clone();
-        let sid = session_id_str.clone();
-        let wt_id = worktree_id.clone();
-        let hid = host_id_str.clone();
-        tokio::spawn(async move {
-            let mut rx = events.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(ServerEvent::SessionClosed {
-                        session_id,
-                        exit_code,
-                    }) if session_id == sid => {
-                        if exit_code == Some(0) {
-                            let _ = q::delete_project(&db, &wt_id).await;
-                            let _ = events.send(ServerEvent::ProjectsUpdated {
-                                host_id: hid.clone(),
-                            });
-                        } else {
-                            tracing::warn!(
-                                session_id = %sid,
-                                exit_code = ?exit_code,
-                                "custom delete_command failed"
-                            );
-                        }
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    _ => continue,
-                }
-            }
-        });
-
-        return Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "session_id": session_id_str,
-                "mode": "custom_command",
-            })),
-        )
-            .into_response());
-    }
-
-    // Default flow: existing behavior
-    // Run on_delete hook before removing worktree
-    let hook_result = run_worktree_hook(&project_path, &worktree_path, "", |wt_settings| {
-        wt_settings.on_delete.as_deref()
-    })
-    .await;
-
-    if let Some(ref hr) = hook_result {
-        if hr.success {
-            tracing::info!(worktree = %worktree_path, "on_delete hook succeeded");
-        } else {
-            tracing::warn!(worktree = %worktree_path, output = %hr.output.as_deref().unwrap_or(""), "on_delete hook failed");
+        .await?
+        {
+            log_hook_result("pre_delete", &worktree_path, &hr);
         }
     }
 
+    // Delete override
+    if let Some(ref sett) = settings {
+        let ctx = ActionRunContext {
+            project_path: project_path.clone(),
+            worktree_path: Some(worktree_path.clone()),
+            branch: wt_branch.clone(),
+            worktree_name: wt_name.clone(),
+            inputs: std::collections::HashMap::new(),
+        };
+        let session_name = format!(
+            "worktree: delete {}",
+            wt_name.as_deref().unwrap_or("worktree")
+        );
+        let spawned = run_worktree_override(
+            &state,
+            &host_id_str,
+            sett,
+            WorktreeSlot::Delete,
+            ctx,
+            &session_name,
+        )
+        .await?;
+
+        if let Some(spawned) = spawned {
+            let session_id_str = spawned.session_id.clone();
+
+            // Background task: on success, remove worktree from DB
+            let events = state.events.clone();
+            let db = state.db.clone();
+            let sid = session_id_str.clone();
+            let wt_id = worktree_id.clone();
+            let hid = host_id_str.clone();
+            tokio::spawn(async move {
+                let mut rx = events.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(ServerEvent::SessionClosed {
+                            session_id,
+                            exit_code,
+                        }) if session_id == sid => {
+                            if exit_code == Some(0) {
+                                let _ = q::delete_project(&db, &wt_id).await;
+                                let _ = events.send(ServerEvent::ProjectsUpdated {
+                                    host_id: hid.clone(),
+                                });
+                            } else {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    exit_code = ?exit_code,
+                                    "worktree delete override failed"
+                                );
+                            }
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        _ => continue,
+                    }
+                }
+            });
+
+            return Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": session_id_str,
+                    "mode": "custom_command",
+                })),
+            )
+                .into_response());
+        }
+    }
+
+    // Default flow
     let repo = project_path.clone();
     let wt = worktree_path.clone();
 
@@ -613,8 +682,7 @@ pub async fn delete_worktree(
     // silently discard any uncommitted changes in the worktree. We already
     // closed every session inside the worktree above, so the typical
     // remaining failure reason is a dirty tree — which the user should see
-    // and decide about explicitly. Propagate the error and let the GUI
-    // surface it; a future API flag can opt into forced removal.
+    // and decide about explicitly.
     tokio::task::spawn_blocking(move || {
         GitInspector::remove_worktree(Path::new(&repo), Path::new(&wt), false)
     })
@@ -622,170 +690,11 @@ pub async fn delete_worktree(
     .map_err(|e| AppError::Internal(format!("worktree delete task failed: {e}")))?
     .map_err(|e| AppError::BadRequest(format!("failed to delete worktree: {e}")))?;
 
-    // Remove from DB
     q::delete_project(&state.db, &worktree_id).await?;
 
-    // Notify clients: the sidebar keys off `ProjectsUpdated` to re-list
-    // projects after a worktree is added or removed. Without this the tree
-    // deletion would be invisible in the GUI until another event (host
-    // reconnect, session close, scan) incidentally refreshed it.
     let _ = state.events.send(ServerEvent::ProjectsUpdated {
         host_id: host_id_str.clone(),
     });
 
     Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-/// Read worktree settings for a project, if configured.
-pub(super) async fn read_worktree_settings(
-    project_path: &str,
-) -> Option<zremote_protocol::project::WorktreeSettings> {
-    let pp = project_path.to_string();
-    let settings = tokio::task::spawn_blocking(move || {
-        crate::project::settings::read_settings(Path::new(&pp))
-    })
-    .await
-    .ok()?
-    .ok()
-    .flatten()?;
-    settings.worktree
-}
-
-/// Spawn a PTY session and write a command to it. Returns (session_id_str, session_uuid).
-pub(super) async fn spawn_command_session(
-    state: &Arc<LocalAppState>,
-    host_id_str: &str,
-    name: &str,
-    working_dir: &str,
-    project_id_ref: Option<&str>,
-    command: &str,
-) -> Result<(String, Uuid), AppError> {
-    let session_id = Uuid::new_v4();
-    let session_id_str = session_id.to_string();
-
-    sq::insert_session(
-        &state.db,
-        &session_id_str,
-        host_id_str,
-        Some(name),
-        Some(working_dir),
-        project_id_ref,
-    )
-    .await?;
-
-    let shell = crate::shell::default_shell();
-
-    {
-        let parsed_host_id: Uuid = host_id_str
-            .parse()
-            .map_err(|_| AppError::Internal("invalid host_id".to_string()))?;
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(session_id, SessionState::new(session_id, parsed_host_id));
-    }
-
-    let manual_config = crate::pty::shell_integration::ShellIntegrationConfig::for_manual_session();
-    let pid = {
-        let mut mgr = state.session_manager.lock().await;
-        mgr.create(
-            session_id,
-            shell,
-            80,
-            24,
-            Some(working_dir),
-            None,
-            Some(&manual_config),
-        )
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
-    };
-
-    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
-        .bind(shell)
-        .bind(i64::from(pid))
-        .bind(&session_id_str)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
-
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.status = zremote_protocol::status::SessionStatus::Active;
-        }
-    }
-
-    let _ = state.events.send(ServerEvent::SessionCreated {
-        session: zremote_core::state::SessionInfo {
-            id: session_id_str.clone(),
-            host_id: host_id_str.to_string(),
-            shell: Some(shell.to_string()),
-            status: zremote_protocol::status::SessionStatus::Active,
-        },
-    });
-
-    // Write command with 200ms delay for PTY stabilization
-    let cmd_with_newline = format!("{command}\n");
-    let state_clone = state.clone();
-    let sid = session_id;
-    let cmd_bytes = cmd_with_newline.into_bytes();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let mut mgr = state_clone.session_manager.lock().await;
-        if let Err(e) = mgr.write_to(&sid, &cmd_bytes) {
-            tracing::warn!(session_id = %sid, error = %e, "failed to write command to PTY");
-        }
-    });
-
-    Ok((session_id_str, session_id))
-}
-
-/// Run a worktree lifecycle hook (on_create or on_delete) if configured in settings.
-///
-/// Returns `Some(HookResultInfo)` if a hook was executed, `None` if no hook is configured.
-pub(super) async fn run_worktree_hook(
-    project_path: &str,
-    worktree_path: &str,
-    branch: &str,
-    hook_selector: impl FnOnce(&zremote_protocol::project::WorktreeSettings) -> Option<&str>,
-) -> Option<zremote_protocol::HookResultInfo> {
-    let pp = project_path.to_string();
-    let settings = tokio::task::spawn_blocking(move || {
-        crate::project::settings::read_settings(Path::new(&pp))
-    })
-    .await
-    .ok()?
-    .ok()
-    .flatten()?;
-
-    let wt_settings = settings.worktree.as_ref()?;
-    let template = hook_selector(wt_settings)?;
-
-    let worktree_name = std::path::Path::new(worktree_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let cmd = crate::project::hooks::expand_hook_template(
-        template,
-        project_path,
-        worktree_path,
-        branch,
-        worktree_name,
-    );
-    let result = crate::project::hooks::execute_hook_async(
-        cmd,
-        std::path::PathBuf::from(worktree_path),
-        vec![],
-        None,
-    )
-    .await;
-
-    Some(zremote_protocol::HookResultInfo {
-        success: result.success,
-        output: if result.output.is_empty() {
-            None
-        } else {
-            Some(result.output)
-        },
-        duration_ms: result.duration.as_millis() as u64,
-    })
 }
