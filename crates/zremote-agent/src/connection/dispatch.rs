@@ -2173,11 +2173,9 @@ mod tests {
                     success,
                     output,
                     ..
-                } => {
-                    if hook_type == "create" {
-                        assert!(success, "create hook must succeed: {output:?}");
-                        saw_hook_result = true;
-                    }
+                } if hook_type == "create" => {
+                    assert!(success, "create hook must succeed: {output:?}");
+                    saw_hook_result = true;
                 }
                 AgentMessage::WorktreeError { .. } | AgentMessage::WorktreeCreated { .. } => {
                     // Terminal event — whichever arrives, the hook flow
@@ -2406,11 +2404,9 @@ mod tests {
             match sent {
                 AgentMessage::WorktreeHookResult {
                     hook_type, success, ..
-                } => {
-                    if hook_type == "pre_delete" {
-                        assert!(!success, "pre_delete must be reported as failed");
-                        saw_hook_result = true;
-                    }
+                } if hook_type == "pre_delete" => {
+                    assert!(!success, "pre_delete must be reported as failed");
+                    saw_hook_result = true;
                 }
                 AgentMessage::WorktreeError { .. } => {
                     saw_error = true;
