@@ -89,6 +89,12 @@ pub fn warning_border() -> Rgba {
 // Syntax highlight palette — used by the diff view's syntect bridge. Tuned to
 // the ZRemote dark palette (neutral base, muted accents) so highlighted code
 // sits visually inside the UI instead of competing with it.
+//
+// TODO(light-theme): these values are hardcoded for the current dark theme.
+// ZRemote does not yet ship a light theme; when it does, route these through
+// the same runtime dispatch used by `bg_primary()` / `text_primary()` so the
+// diff syntax palette tracks the active theme. Tracked in RFC-git-diff-ui P4
+// review (M5).
 // ---------------------------------------------------------------------------
 
 pub fn syntax_keyword() -> Rgba {

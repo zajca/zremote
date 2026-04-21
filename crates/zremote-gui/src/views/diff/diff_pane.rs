@@ -16,28 +16,23 @@
 //! highlighting is disabled for the file) the line renders plain with the
 //! diff background tint as its only colour cue.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-use zremote_protocol::project::{DiffFile, DiffHunk, DiffLine, DiffLineKind};
+use zremote_protocol::project::{DiffFile, DiffLine, DiffLineKind};
 
 use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::diff::highlight::{LineSpans, SideKey};
 use crate::views::diff::large_file::prepare_hunks;
+use crate::views::diff::side_pane::{build_side_by_side_rows, render_side_row};
 use crate::views::diff::state::ViewMode;
 
-/// Cached per-file highlight spans. Keyed by the logical identity of the
-/// pre- / post-image text that produced the spans — so a second call for
-/// the same file with an unchanged side is a cache hit.
-///
-/// Inner key (`SideKey`) disambiguates pre- vs post-image within a single
-/// cache entry, because a renamed file with new content still shares its
-/// outer `blob_sha` key with other cache lookups for that same side.
-pub type HighlightCache = HashMap<(String, String, SideKey), Arc<HashMap<u32, LineSpans>>>;
+pub use crate::views::diff::highlight_cache::HighlightCache;
+use crate::views::diff::side_pane::SideRow;
 
 pub struct DiffPane {
     file: Option<DiffFile>,
@@ -51,27 +46,15 @@ pub struct DiffPane {
 }
 
 #[derive(Default, Clone)]
-struct HighlightSlot {
-    old: Option<Arc<HashMap<u32, LineSpans>>>,
-    new: Option<Arc<HashMap<u32, LineSpans>>>,
+pub(crate) struct HighlightSlot {
+    pub(crate) old: Option<Arc<HashMap<u32, LineSpans>>>,
+    pub(crate) new: Option<Arc<HashMap<u32, LineSpans>>>,
 }
 
 #[derive(Clone)]
 enum UnifiedRow {
     HunkHeader(String),
     Line(DiffLine),
-}
-
-/// Side-by-side row. A hunk header spans the full width; data rows
-/// carry two independent slots so removals / additions / context can each
-/// land on the correct side with the opposite side blank.
-#[derive(Clone)]
-pub(crate) enum SideRow {
-    HunkHeader(String),
-    Data {
-        old: Option<DiffLine>,
-        new: Option<DiffLine>,
-    },
 }
 
 impl DiffPane {
@@ -231,79 +214,6 @@ fn build_unified_rows(file: &DiffFile) -> Vec<UnifiedRow> {
     out
 }
 
-/// Build side-by-side rows from hunks.
-///
-/// Alignment rules:
-/// - `Context` line: flush any pending removed/added buffers (pair them
-///   index-by-index, unmatched entries emit with the opposite side blank),
-///   then emit a `Data` row with the context on both sides.
-/// - `Removed` line: push onto removed-buffer.
-/// - `Added` line: push onto added-buffer.
-/// - `NoNewlineMarker`: flush buffers, then emit as an old-only row (git
-///   prints `\ No newline at end of file` attached to the side it applies
-///   to — for simplicity we dock it on the old side; visually distinct via
-///   its `fg = text_tertiary`).
-/// - End of hunk: flush buffers.
-///
-/// This is the same heuristic GitHub / GitLab / Okena use for side-by-side
-/// within a hunk.
-pub(crate) fn build_side_by_side_rows(hunks: &[DiffHunk]) -> Vec<SideRow> {
-    let mut out = Vec::new();
-    let prepared = prepare_hunks(hunks);
-    for hunk in prepared {
-        out.push(SideRow::HunkHeader(hunk.header.clone()));
-        let mut removed: VecDeque<DiffLine> = VecDeque::new();
-        let mut added: VecDeque<DiffLine> = VecDeque::new();
-        for line in hunk.lines {
-            match line.kind {
-                DiffLineKind::Context => {
-                    flush_side_buffers(&mut out, &mut removed, &mut added);
-                    out.push(SideRow::Data {
-                        old: Some(line.clone()),
-                        new: Some(line),
-                    });
-                }
-                DiffLineKind::Removed => removed.push_back(line),
-                DiffLineKind::Added => added.push_back(line),
-                DiffLineKind::NoNewlineMarker => {
-                    flush_side_buffers(&mut out, &mut removed, &mut added);
-                    out.push(SideRow::Data {
-                        old: Some(line),
-                        new: None,
-                    });
-                }
-            }
-        }
-        flush_side_buffers(&mut out, &mut removed, &mut added);
-    }
-    out
-}
-
-fn flush_side_buffers(
-    out: &mut Vec<SideRow>,
-    removed: &mut VecDeque<DiffLine>,
-    added: &mut VecDeque<DiffLine>,
-) {
-    while !removed.is_empty() && !added.is_empty() {
-        out.push(SideRow::Data {
-            old: removed.pop_front(),
-            new: added.pop_front(),
-        });
-    }
-    for line in removed.drain(..) {
-        out.push(SideRow::Data {
-            old: Some(line),
-            new: None,
-        });
-    }
-    for line in added.drain(..) {
-        out.push(SideRow::Data {
-            old: None,
-            new: Some(line),
-        });
-    }
-}
-
 fn render_file_header(file: &DiffFile) -> impl IntoElement {
     let path = file.summary.path.clone();
     let additions = file.summary.additions;
@@ -358,16 +268,7 @@ fn render_unified_row(row: &UnifiedRow, idx: usize, highlights: &HighlightSlot) 
     }
 }
 
-fn render_side_row(row: &SideRow, idx: usize, highlights: &HighlightSlot) -> AnyElement {
-    match row {
-        SideRow::HunkHeader(header) => render_hunk_header(header, idx).into_any_element(),
-        SideRow::Data { old, new } => {
-            render_side_data_row(old.as_ref(), new.as_ref(), idx, highlights).into_any_element()
-        }
-    }
-}
-
-fn render_hunk_header(header: &str, idx: usize) -> Stateful<Div> {
+pub(crate) fn render_hunk_header(header: &str, idx: usize) -> Stateful<Div> {
     div()
         .id(("hunk-header", idx))
         .flex()
@@ -385,7 +286,7 @@ fn render_hunk_header(header: &str, idx: usize) -> Stateful<Div> {
         .child(header.to_string())
 }
 
-fn kind_colors(kind: DiffLineKind) -> (&'static str, Rgba, Rgba) {
+pub(crate) fn kind_colors(kind: DiffLineKind) -> (&'static str, Rgba, Rgba) {
     match kind {
         DiffLineKind::Context => (" ", theme::bg_primary(), theme::text_primary()),
         DiffLineKind::Added => ("+", theme::success_bg(), theme::text_primary()),
@@ -434,72 +335,6 @@ fn render_unified_diff_line(
         )
 }
 
-fn render_side_data_row(
-    old: Option<&DiffLine>,
-    new: Option<&DiffLine>,
-    idx: usize,
-    highlights: &HighlightSlot,
-) -> Stateful<Div> {
-    div()
-        .id(("diff-side-row", idx))
-        .flex()
-        .items_center()
-        .h(px(18.0))
-        .text_size(px(12.0))
-        .font_family("monospace")
-        .child(render_side_half(old, SideKey::Old, highlights))
-        .child(render_side_divider())
-        .child(render_side_half(new, SideKey::New, highlights))
-}
-
-fn render_side_divider() -> Div {
-    div().w(px(1.0)).flex_shrink_0().bg(theme::border())
-}
-
-fn render_side_half(line: Option<&DiffLine>, side: SideKey, highlights: &HighlightSlot) -> Div {
-    let Some(line) = line else {
-        return div()
-            .flex_1()
-            .flex_basis(px(0.0))
-            .min_w(px(0.0))
-            .bg(theme::bg_primary());
-    };
-    let (prefix, bg, fg) = kind_colors(line.kind);
-    let lineno = match side {
-        SideKey::Old => line.old_lineno,
-        SideKey::New => line.new_lineno,
-    };
-    let label = fmt_lineno(lineno);
-
-    let spans = resolve_highlight_for_side(line, side, highlights);
-
-    div()
-        .flex()
-        .flex_1()
-        .flex_basis(px(0.0))
-        .min_w(px(0.0))
-        .items_center()
-        .bg(bg)
-        .child(render_gutter(&label))
-        .child(
-            div()
-                .w(px(16.0))
-                .flex_shrink_0()
-                .text_color(fg)
-                .text_align(gpui::TextAlign::Center)
-                .child(prefix.to_string()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_color(fg)
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(styled_line_content(&line.content, spans)),
-        )
-}
-
 /// Look up highlight spans for a `DiffLine` when rendering in UNIFIED mode.
 ///
 /// The GUI caches spans per-side keyed by 1-based line number (`old` maps
@@ -530,7 +365,7 @@ fn resolve_highlight_for_unified<'a>(
     }
 }
 
-fn resolve_highlight_for_side<'a>(
+pub(crate) fn resolve_highlight_for_side<'a>(
     line: &DiffLine,
     side: SideKey,
     highlights: &'a HighlightSlot,
@@ -559,7 +394,7 @@ fn lookup(
 /// that fall outside the byte length of `content` are skipped defensively —
 /// stale cache entries can theoretically outlive the hunk they were sized
 /// for.
-fn styled_line_content(
+pub(crate) fn styled_line_content(
     content: &str,
     spans: Option<&[(std::ops::Range<usize>, HighlightStyle)]>,
 ) -> StyledText {
@@ -581,7 +416,7 @@ fn styled_line_content(
     StyledText::new(text).with_highlights(filtered)
 }
 
-fn render_gutter(label: &str) -> Div {
+pub(crate) fn render_gutter(label: &str) -> Div {
     div()
         .w(px(48.0))
         .flex_shrink_0()
@@ -593,7 +428,7 @@ fn render_gutter(label: &str) -> Div {
         .child(label.to_string())
 }
 
-fn fmt_lineno(n: Option<u32>) -> String {
+pub(crate) fn fmt_lineno(n: Option<u32>) -> String {
     n.map_or_else(String::new, |v| format!("{v}"))
 }
 
@@ -658,7 +493,7 @@ fn render_info_card(title: &str, body: &str) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{SideRow, UnifiedRow, build_side_by_side_rows, build_unified_rows, fmt_lineno};
+    use super::{UnifiedRow, build_unified_rows, fmt_lineno};
     use zremote_protocol::project::{
         DiffFile, DiffFileStatus, DiffFileSummary, DiffHunk, DiffLine, DiffLineKind,
     };
@@ -725,7 +560,6 @@ mod tests {
     fn build_unified_rows_flattens_hunks_and_lines() {
         let f = file_with_hunks();
         let rows = build_unified_rows(&f);
-        // 1 header + 3 lines
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0], UnifiedRow::HunkHeader(_)));
         assert!(matches!(rows[1], UnifiedRow::Line(_)));
@@ -735,113 +569,5 @@ mod tests {
     fn fmt_lineno_empty_for_none() {
         assert_eq!(fmt_lineno(None), "");
         assert_eq!(fmt_lineno(Some(12)), "12");
-    }
-
-    #[test]
-    fn side_by_side_pairs_adjacent_removed_and_added() {
-        // Classic modification pair: - immediately followed by +.
-        let hunks = vec![DiffHunk {
-            old_start: 1,
-            old_lines: 1,
-            new_start: 1,
-            new_lines: 1,
-            header: "@@ -1 +1 @@".to_string(),
-            lines: vec![removed(1, "old"), added(1, "new")],
-        }];
-        let rows = build_side_by_side_rows(&hunks);
-        assert_eq!(rows.len(), 2); // header + 1 paired row
-        match &rows[1] {
-            SideRow::Data { old, new } => {
-                assert_eq!(old.as_ref().unwrap().content, "old");
-                assert_eq!(new.as_ref().unwrap().content, "new");
-            }
-            SideRow::HunkHeader(_) => panic!("expected Data row"),
-        }
-    }
-
-    #[test]
-    fn side_by_side_emits_context_on_both_sides() {
-        let hunks = vec![DiffHunk {
-            old_start: 1,
-            old_lines: 1,
-            new_start: 1,
-            new_lines: 1,
-            header: "@@ -1 +1 @@".to_string(),
-            lines: vec![ctx(1, 1, "ctx")],
-        }];
-        let rows = build_side_by_side_rows(&hunks);
-        assert_eq!(rows.len(), 2);
-        match &rows[1] {
-            SideRow::Data { old, new } => {
-                assert_eq!(old.as_ref().unwrap().content, "ctx");
-                assert_eq!(new.as_ref().unwrap().content, "ctx");
-            }
-            SideRow::HunkHeader(_) => panic!("expected Data row"),
-        }
-    }
-
-    #[test]
-    fn side_by_side_unmatched_removed_has_blank_new() {
-        // Pure deletion, no counterpart addition.
-        let hunks = vec![DiffHunk {
-            old_start: 1,
-            old_lines: 2,
-            new_start: 1,
-            new_lines: 0,
-            header: "@@ -1,2 +1,0 @@".to_string(),
-            lines: vec![removed(1, "x"), removed(2, "y")],
-        }];
-        let rows = build_side_by_side_rows(&hunks);
-        assert_eq!(rows.len(), 3); // header + 2 old-only rows
-        for row in rows.iter().skip(1) {
-            match row {
-                SideRow::Data { old, new } => {
-                    assert!(old.is_some());
-                    assert!(new.is_none());
-                }
-                SideRow::HunkHeader(_) => panic!("expected Data row"),
-            }
-        }
-    }
-
-    #[test]
-    fn side_by_side_mixed_context_modification_deletion_addition() {
-        // Order: ctx / -a / -b / +A / ctx / +C.
-        // Expected alignment: ctx-on-both, (-a,+A), (-b, blank), ctx-on-both,
-        // (blank, +C).
-        let hunks = vec![DiffHunk {
-            old_start: 1,
-            old_lines: 3,
-            new_start: 1,
-            new_lines: 3,
-            header: "@@ -1,3 +1,3 @@".to_string(),
-            lines: vec![
-                ctx(1, 1, "c1"),
-                removed(2, "a"),
-                removed(3, "b"),
-                added(2, "A"),
-                ctx(4, 3, "c2"),
-                added(4, "C"),
-            ],
-        }];
-        let rows = build_side_by_side_rows(&hunks);
-        // header + c1 + (a,A) + (b,_) + c2 + (_,C) = 6
-        assert_eq!(rows.len(), 6);
-        let expect_sides: Vec<(Option<&str>, Option<&str>)> = vec![
-            (Some("c1"), Some("c1")),
-            (Some("a"), Some("A")),
-            (Some("b"), None),
-            (Some("c2"), Some("c2")),
-            (None, Some("C")),
-        ];
-        for (row, (eo, en)) in rows.iter().skip(1).zip(expect_sides.iter()) {
-            match row {
-                SideRow::Data { old, new } => {
-                    assert_eq!(old.as_ref().map(|l| l.content.as_str()), *eo);
-                    assert_eq!(new.as_ref().map(|l| l.content.as_str()), *en);
-                }
-                SideRow::HunkHeader(_) => panic!("expected Data row"),
-            }
-        }
     }
 }

@@ -797,6 +797,15 @@ session, sees the rendered markdown appear in the target terminal.
    MCP resource for read-only consumption by external Claude sessions? Out
    of scope for this RFC.
 
+## 12a. Deviations
+
+- **ViewMode persistence deferred to Phase 6 (project UX polish).** RFC §2
+  goal "per-project persisted preference" for unified vs side-by-side mode
+  is not delivered in P4 scope by design — P4 surface is limited to the
+  syntect highlight engine and the side-by-side renderer. Current behaviour:
+  ViewMode defaults to `Unified` on every diff open; user toggle via Alt+S
+  persists only for the open view instance.
+
 ## 13. References
 
 - Research report — `docs/rfc/research-git-diff-ui.md`

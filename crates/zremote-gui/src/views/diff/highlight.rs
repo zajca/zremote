@@ -14,7 +14,7 @@
 
 use std::ops::Range;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use gpui::{FontStyle as GpuiFontStyle, FontWeight, HighlightStyle};
 use syntect::easy::HighlightLines;
@@ -59,9 +59,17 @@ pub struct HighlightEngine {
 }
 
 impl HighlightEngine {
-    pub fn global() -> &'static Arc<Self> {
-        static INSTANCE: OnceLock<Arc<HighlightEngine>> = OnceLock::new();
-        INSTANCE.get_or_init(|| Arc::new(Self::new()))
+    pub fn global() -> &'static Self {
+        static INSTANCE: OnceLock<HighlightEngine> = OnceLock::new();
+        INSTANCE.get_or_init(Self::new)
+    }
+
+    /// Warm up the process-wide engine off the render path. Callers that
+    /// want to front-load the ~50 ms `SyntaxSet::load_defaults_newlines`
+    /// cost call this from a background task on startup; subsequent
+    /// `global()` calls from render paths are then synchronous no-ops.
+    pub fn prime() {
+        let _ = Self::global();
     }
 
     fn new() -> Self {
