@@ -28,14 +28,24 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
         return false;
     };
 
-    // Check statusLine command matches what we would generate for the current binary.
-    // This catches stale worktree paths and unified-vs-standalone binary mismatches.
-    let expected_command = build_ccline_command();
-    let status_ok = settings
+    // Consider statusLine already installed if it points at ANY working zremote
+    // ccline binary. This keeps a user's manually-chosen stable path (e.g.
+    // `/etc/profiles/.../zremote agent ccline`) intact across rebuilds and
+    // prevents re-writing the file on every start.
+    //
+    // Only fall back to matching against the current binary if no valid
+    // statusLine is present, so broken `(deleted)` paths or non-zremote
+    // configurations still get fixed.
+    let existing_command = settings
         .get("statusLine")
         .and_then(|s| s.get("command"))
-        .and_then(|c| c.as_str())
-        .is_some_and(|cmd| expected_command.as_deref() == Some(cmd));
+        .and_then(|c| c.as_str());
+
+    let status_ok = match existing_command {
+        Some(cmd) if existing_status_line_is_valid(cmd) => true,
+        Some(cmd) => build_ccline_command().as_deref() == Some(cmd),
+        None => false,
+    };
 
     if !status_ok {
         return false;
@@ -375,14 +385,49 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
     Ok(())
 }
 
-/// Build the statusLine command string for the current binary.
-/// Uses compile-time `CARGO_BIN_NAME` to distinguish the unified `zremote`
-/// binary (needs `agent ccline`) from the standalone `zremote-agent` (just `ccline`).
-fn build_ccline_command() -> Option<String> {
+/// Resolve the path of the currently running binary to a stable, on-disk path.
+///
+/// On Linux, `std::env::current_exe()` reads `/proc/self/exe`, which returns a
+/// path with a trailing `" (deleted)"` marker if the original file was replaced
+/// or removed after the process started (common after `cargo build` or a
+/// package upgrade). Writing such a path into `settings.json` permanently
+/// breaks the status line. We strip the marker and verify the resulting path
+/// still refers to an existing file; if not, we refuse to build a command.
+fn resolved_current_exe() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    let cleaned = strip_deleted_marker(&exe);
+    if cleaned.is_file() {
+        Some(cleaned)
+    } else {
+        None
+    }
+}
+
+/// Strip the Linux `" (deleted)"` suffix from a path returned by
+/// `current_exe()` / `/proc/self/exe` when the backing file no longer exists.
+/// This is a no-op on other platforms; Windows and macOS do not emit the
+/// marker, and a genuine filename ending in ` (deleted)` is extremely
+/// unlikely (and would be rejected downstream when the file existence check
+/// fails anyway).
+fn strip_deleted_marker(exe: &Path) -> std::path::PathBuf {
+    const MARKER: &str = " (deleted)";
+    exe.to_str()
+        .and_then(|s| s.strip_suffix(MARKER))
+        .map_or_else(|| exe.to_path_buf(), std::path::PathBuf::from)
+}
+
+/// Build the statusLine command string for the current binary.
+///
+/// Uses runtime filename inspection to distinguish the unified `zremote`
+/// binary (needs `agent ccline`) from the standalone `zremote-agent` (just
+/// `ccline`). Returns `None` when the current binary path cannot be resolved
+/// to a real file on disk — this keeps stale `(deleted)` paths out of
+/// `settings.json`.
+fn build_ccline_command() -> Option<String> {
+    let exe = resolved_current_exe()?;
     let exe_str = exe.to_str()?;
 
-    if is_standalone_agent() {
+    if is_standalone_agent_path(&exe) {
         Some(format!("{exe_str} ccline"))
     } else {
         Some(format!("{exe_str} agent ccline"))
@@ -395,7 +440,17 @@ fn build_ccline_command() -> Option<String> {
 fn is_standalone_agent() -> bool {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .map(|p| strip_deleted_marker(&p))
+        .as_deref()
+        .is_some_and(is_standalone_agent_path)
+}
+
+/// Classify a resolved binary path as standalone `zremote-agent` vs. unified
+/// `zremote`. Split out so callers that already resolved `current_exe()` (e.g.
+/// `build_ccline_command`) don't have to read `/proc/self/exe` twice.
+fn is_standalone_agent_path(path: &Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
         .is_some_and(|name| {
             // Match "zremote-agent" but not "zremote-agent-<hash>" (test binary)
             // or just "zremote" (unified binary)
@@ -403,39 +458,103 @@ fn is_standalone_agent() -> bool {
         })
 }
 
-/// Install the `statusLine` config pointing to `zremote-agent ccline`.
-/// Always overwrites any existing statusLine configuration.
+/// Return `true` if the statusLine `command` string points at an existing,
+/// executable zremote ccline binary. Accepts both `"<path> ccline"` (standalone
+/// agent) and `"<path> agent ccline"` (unified binary); the longer suffix is
+/// checked first so a unified-binary path is not misparsed as `-agent`.
+///
+/// Limitation: the parser does not strip surrounding shell quotes, so a
+/// command like `"\"/opt/my path/zremote\" agent ccline"` would fail the
+/// existence check and be rejected. Users with spaces in the install path
+/// should not wrap the command in quotes — Claude Code passes the whole
+/// string to `/bin/sh -c`, which handles an unquoted path with spaces
+/// identically to the one zremote itself writes.
+fn existing_status_line_is_valid(command: &str) -> bool {
+    if !command.contains("ccline") {
+        return false;
+    }
+    let binary_path = command
+        .strip_suffix(" agent ccline")
+        .or_else(|| command.strip_suffix(" ccline"));
+    let Some(path) = binary_path else {
+        return false;
+    };
+    // Reject Linux `(deleted)` marker or any path whose file no longer exists.
+    if path.ends_with(" (deleted)") {
+        return false;
+    }
+    let p = Path::new(path);
+    if !p.is_file() {
+        return false;
+    }
+    // Best-effort: ensure the file has execute bits on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(p)
+            && meta.permissions().mode() & 0o111 == 0
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Install the `statusLine` config pointing to the current zremote binary.
+///
+/// Behavior:
+/// - If an existing `statusLine.command` already points at a working zremote
+///   ccline binary, leave it alone. This keeps manually-chosen stable paths
+///   across rebuilds and avoids rewriting `settings.json` on every start.
+/// - If the current binary path cannot be resolved (e.g. Linux `(deleted)`
+///   marker with no backing file), skip the write entirely rather than
+///   persist a broken command.
+/// - Otherwise install the command built from the current binary.
 fn install_status_line(settings: &mut serde_json::Value) {
-    let Some(command) = build_ccline_command() else {
-        tracing::warn!("cannot determine agent binary path, skipping statusLine install");
+    let Some(obj) = settings.as_object_mut() else {
         return;
     };
 
-    if let Some(obj) = settings.as_object_mut() {
-        // Log if overwriting a non-zremote statusLine
-        if let Some(existing) = obj.get("statusLine") {
-            let existing_cmd = existing
-                .get("command")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            if !existing_cmd.contains("zremote") {
-                tracing::warn!(
-                    existing = existing_cmd,
-                    "overwriting existing statusLine config"
-                );
-            }
-        }
-
-        obj.insert(
-            "statusLine".to_string(),
-            serde_json::json!({
-                "type": "command",
-                "command": command,
-                "padding": 0
-            }),
+    if let Some(existing_cmd) = obj
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        && existing_status_line_is_valid(existing_cmd)
+    {
+        tracing::debug!(
+            command = existing_cmd,
+            "existing statusLine is valid, preserving"
         );
-        tracing::info!(command, "statusLine configured");
+        return;
     }
+
+    let Some(command) = build_ccline_command() else {
+        tracing::warn!("cannot determine a valid agent binary path, skipping statusLine install");
+        return;
+    };
+
+    if let Some(existing) = obj.get("statusLine") {
+        let existing_cmd = existing
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if !existing_cmd.contains("zremote") {
+            tracing::warn!(
+                existing = existing_cmd,
+                "overwriting existing statusLine config"
+            );
+        }
+    }
+
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": command,
+            "padding": 0
+        }),
+    );
+    tracing::info!(command, "statusLine configured");
 }
 
 /// Remove zremote hooks from Claude Code settings.
@@ -538,6 +657,135 @@ mod tests {
         assert!(cmd.is_some(), "build_ccline_command should return Some");
         let cmd = cmd.unwrap();
         assert!(cmd.contains("ccline"), "command must contain ccline");
+        assert!(
+            !cmd.contains("(deleted)"),
+            "command must never embed Linux `(deleted)` marker"
+        );
+    }
+
+    #[test]
+    fn strip_deleted_marker_removes_suffix() {
+        let p = Path::new("/usr/local/bin/zremote (deleted)");
+        let stripped = strip_deleted_marker(p);
+        assert_eq!(stripped, Path::new("/usr/local/bin/zremote"));
+    }
+
+    #[test]
+    fn strip_deleted_marker_leaves_clean_path() {
+        let p = Path::new("/usr/local/bin/zremote");
+        let stripped = strip_deleted_marker(p);
+        assert_eq!(stripped, p);
+    }
+
+    #[test]
+    fn existing_status_line_rejects_deleted_marker() {
+        assert!(!existing_status_line_is_valid(
+            "/home/x/target/debug/zremote (deleted) agent ccline"
+        ));
+    }
+
+    #[test]
+    fn existing_status_line_rejects_nonexistent_path() {
+        assert!(!existing_status_line_is_valid(
+            "/nonexistent/path/zremote agent ccline"
+        ));
+        assert!(!existing_status_line_is_valid(
+            "/nonexistent/path/zremote-agent ccline"
+        ));
+    }
+
+    #[test]
+    fn existing_status_line_rejects_non_ccline_command() {
+        assert!(!existing_status_line_is_valid("/bin/sh echo hi"));
+        assert!(!existing_status_line_is_valid(""));
+    }
+
+    #[test]
+    fn existing_status_line_accepts_real_executable() {
+        // The current test binary exists and is executable; treat it as the
+        // "zremote" binary to verify the `<path> ccline` form is accepted.
+        let exe = resolved_current_exe().expect("test binary should resolve");
+        let cmd_standalone = format!("{} ccline", exe.display());
+        assert!(existing_status_line_is_valid(&cmd_standalone));
+
+        let cmd_unified = format!("{} agent ccline", exe.display());
+        assert!(existing_status_line_is_valid(&cmd_unified));
+    }
+
+    #[tokio::test]
+    async fn install_preserves_existing_valid_status_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Pre-seed settings.json with a statusLine pointing at a REAL executable
+        // (the test binary). The file intentionally has NO `hooks` section, so
+        // `is_already_installed` returns false and the full install path runs.
+        // This verifies that even during a full rewrite, `install_status_line`
+        // preserves a pre-existing valid command instead of overwriting it.
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let exe = resolved_current_exe().expect("test binary must resolve");
+        let stable_cmd = format!("{} agent ccline", exe.display());
+        let settings = serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": stable_cmd,
+                "padding": 0
+            }
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        install_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let cmd = updated["statusLine"]["command"].as_str().unwrap();
+        assert_eq!(
+            cmd, stable_cmd,
+            "installer must not overwrite an already-valid statusLine"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_replaces_deleted_marker_status_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        let claude_dir = home.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        let settings = serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": "/home/u/target/debug/zremote (deleted) agent ccline",
+                "padding": 0
+            }
+        });
+        tokio::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        install_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(claude_dir.join("settings.json"))
+            .await
+            .unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let cmd = updated["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            !cmd.contains("(deleted)"),
+            "broken `(deleted)` statusLine must be replaced, got: {cmd}"
+        );
+        assert!(cmd.contains("ccline"));
     }
 
     #[test]
