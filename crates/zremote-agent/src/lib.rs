@@ -26,18 +26,25 @@ mod bridge;
 mod ccline;
 mod channel;
 mod claude;
-mod config;
+// `config` is `pub` so integration tests can pass the `PersistenceBackend`
+// enum into `LocalAppState::new`.
+pub mod config;
 mod connection;
 mod daemon;
 mod hooks;
 mod knowledge;
 mod linear;
+// `local` is `pub` so integration tests (e.g. tests/review_integration.rs)
+// can bootstrap a runnable `LocalAppState` via `LocalAppState::new` +
+// `upsert_local_host`. The individual submodules remain `pub(crate)`.
 #[cfg(feature = "local")]
-mod local;
+pub mod local;
 mod mcp;
 mod project;
 mod pty;
-mod session;
+// `session` is `pub` so integration tests can call `SessionManager::create`
+// to spawn a PTY before exercising the review-send endpoint end-to-end.
+pub mod session;
 mod shell;
 
 use std::path::PathBuf;

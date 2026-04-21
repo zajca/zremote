@@ -44,6 +44,11 @@ pub enum PaletteAction {
         project_id: String,
         project_name: String,
     },
+    /// Send the current review drafts from the active diff view to its
+    /// selected target session. Only appears when a diff view is open
+    /// and has at least one pending draft (palette gating decided by
+    /// the caller via the snapshot).
+    SendReview,
     /// Launch an agent. If `host_id` + `working_dir` are provided, the launch
     /// skips the resolver and targets that project directly — used from the
     /// project drill-down where the target is already known. Otherwise the
@@ -96,6 +101,7 @@ impl PaletteAction {
             Self::NewWorktree { .. } => "NewWorktree",
             Self::DeleteWorktree { .. } => "DeleteWorktree",
             Self::OpenDiffForProject { .. } => "OpenDiffForProject",
+            Self::SendReview => "SendReview",
         }
     }
 }
@@ -250,6 +256,9 @@ impl CommandPalette {
                             project_id: project_id.clone(),
                         });
                     }
+                    PaletteAction::SendReview => {
+                        cx.emit(CommandPaletteEvent::SendReview);
+                    }
                 }
                 // Record recent action usage (only fires when the action
                 // actually executes — early returns above skip this).
@@ -317,6 +326,7 @@ mod tests {
                 project_id: "a".into(),
                 project_name: "a".into(),
             },
+            PaletteAction::SendReview,
         ];
         let keys: std::collections::HashSet<&str> =
             actions.iter().map(|a| a.action_key()).collect();

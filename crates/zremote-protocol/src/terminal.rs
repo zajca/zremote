@@ -1462,7 +1462,6 @@ mod tests {
             response: Some(Box::new(SendReviewResponse {
                 session_id: Uuid::new_v4(),
                 delivered: 2,
-                prompt: "## Review\n".to_string(),
             })),
             error: None,
         });

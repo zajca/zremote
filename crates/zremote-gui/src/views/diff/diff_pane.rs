@@ -22,17 +22,31 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-use zremote_protocol::project::{DiffFile, DiffLine, DiffLineKind};
+use zremote_protocol::project::{DiffFile, DiffLine, DiffLineKind, ReviewSide};
 
 use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::diff::highlight::{LineSpans, SideKey};
 use crate::views::diff::large_file::prepare_hunks;
-use crate::views::diff::side_pane::{build_side_by_side_rows, render_side_row};
+use crate::views::diff::review_comment::infer_side_from_kind;
+use crate::views::diff::review_composer::ComposerTarget;
+use crate::views::diff::side_pane::{
+    SideRow, build_side_by_side_rows, render_side_data_row, render_side_row,
+};
 use crate::views::diff::state::ViewMode;
 
 pub use crate::views::diff::highlight_cache::HighlightCache;
-use crate::views::diff::side_pane::SideRow;
+
+/// Events emitted by `DiffPane` upward to the parent `DiffView`. Only
+/// used for review-flow interaction — line selection, view-mode, etc.
+/// remain driven via reducer events plumbed through `set_*` methods.
+pub enum DiffPaneEvent {
+    /// The user clicked the gutter `+` (or pressed `C` on a line) — open
+    /// an inline composer targeting the given anchor.
+    OpenComposer(ComposerTarget),
+}
+
+impl EventEmitter<DiffPaneEvent> for DiffPane {}
 
 pub struct DiffPane {
     file: Option<DiffFile>,
@@ -43,6 +57,9 @@ pub struct DiffPane {
     /// displayed file. The outer DiffView owns the canonical cache; it
     /// pushes updates here via `set_highlights`.
     highlights: HighlightSlot,
+    /// Commit SHA the current diff is anchored to. Threaded from parent
+    /// so click-to-comment builds a self-contained [`ComposerTarget`].
+    commit_id: String,
 }
 
 #[derive(Default, Clone)]
@@ -65,7 +82,49 @@ impl DiffPane {
             unified_rows: Vec::new(),
             side_rows: Vec::new(),
             highlights: HighlightSlot::default(),
+            commit_id: String::new(),
         }
+    }
+
+    pub fn set_commit_id(&mut self, commit_id: String, cx: &mut Context<Self>) {
+        if self.commit_id == commit_id {
+            return;
+        }
+        self.commit_id = commit_id;
+        cx.notify();
+    }
+
+    fn build_composer_target_unified(&self, line: &DiffLine) -> Option<ComposerTarget> {
+        let file = self.file.as_ref()?;
+        let side = infer_side_from_kind(line.kind);
+        let anchor_line = match side {
+            ReviewSide::Left => line.old_lineno,
+            ReviewSide::Right => line.new_lineno,
+        }?;
+        Some(ComposerTarget {
+            path: file.summary.path.clone(),
+            side,
+            line: anchor_line,
+            start_line: None,
+            start_side: None,
+            commit_id: self.commit_id.clone(),
+        })
+    }
+
+    fn build_composer_target_side(&self, line: &DiffLine, side: SideKey) -> Option<ComposerTarget> {
+        let file = self.file.as_ref()?;
+        let (review_side, anchor) = match side {
+            SideKey::Old => (ReviewSide::Left, line.old_lineno?),
+            SideKey::New => (ReviewSide::Right, line.new_lineno?),
+        };
+        Some(ComposerTarget {
+            path: file.summary.path.clone(),
+            side: review_side,
+            line: anchor,
+            start_line: None,
+            start_side: None,
+            commit_id: self.commit_id.clone(),
+        })
     }
 
     pub fn set_file(&mut self, file: Option<DiffFile>, cx: &mut Context<Self>) {
@@ -164,16 +223,24 @@ impl DiffPane {
         uniform_list(
             "diff-line-list",
             count,
-            cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
-                let mut out = Vec::with_capacity(range.len());
-                for idx in range {
-                    let Some(row) = rows.get(idx) else {
-                        continue;
-                    };
-                    out.push(render_unified_row(row, idx, &highlights));
-                }
-                out
-            }),
+            cx.processor(
+                move |this: &mut Self, range: std::ops::Range<usize>, _window, cx| {
+                    let mut out = Vec::with_capacity(range.len());
+                    for idx in range {
+                        let Some(row) = rows.get(idx) else {
+                            continue;
+                        };
+                        out.push(render_unified_row_interactive(
+                            this,
+                            row,
+                            idx,
+                            &highlights,
+                            cx,
+                        ));
+                    }
+                    out
+                },
+            ),
         )
         .flex_1()
         .into_any_element()
@@ -186,16 +253,18 @@ impl DiffPane {
         uniform_list(
             "diff-side-list",
             count,
-            cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
-                let mut out = Vec::with_capacity(range.len());
-                for idx in range {
-                    let Some(row) = rows.get(idx) else {
-                        continue;
-                    };
-                    out.push(render_side_row(row, idx, &highlights));
-                }
-                out
-            }),
+            cx.processor(
+                move |this: &mut Self, range: std::ops::Range<usize>, _window, cx| {
+                    let mut out = Vec::with_capacity(range.len());
+                    for idx in range {
+                        let Some(row) = rows.get(idx) else {
+                            continue;
+                        };
+                        out.push(render_side_row_interactive(this, row, idx, &highlights, cx));
+                    }
+                    out
+                },
+            ),
         )
         .flex_1()
         .into_any_element()
@@ -489,6 +558,66 @@ fn render_info_card(title: &str, body: &str) -> impl IntoElement {
                         .child(body.to_string()),
                 ),
         )
+}
+
+/// Wrap an unified row with a click handler that opens a comment
+/// composer targeting the clicked line. Non-data rows (hunk headers,
+/// no-newline markers) just render without the handler.
+fn render_unified_row_interactive(
+    pane: &DiffPane,
+    row: &UnifiedRow,
+    idx: usize,
+    highlights: &HighlightSlot,
+    cx: &mut Context<DiffPane>,
+) -> AnyElement {
+    match row {
+        UnifiedRow::HunkHeader(_) => render_unified_row(row, idx, highlights),
+        UnifiedRow::Line(line) => {
+            let target = pane.build_composer_target_unified(line);
+            let element = render_unified_diff_line(line, idx, highlights);
+            match target {
+                None => element.into_any_element(),
+                Some(target) => element
+                    .on_click(cx.listener(move |_this, _e: &ClickEvent, _w, cx| {
+                        cx.emit(DiffPaneEvent::OpenComposer(target.clone()));
+                    }))
+                    .into_any_element(),
+            }
+        }
+    }
+}
+
+fn render_side_row_interactive(
+    pane: &DiffPane,
+    row: &SideRow,
+    idx: usize,
+    highlights: &HighlightSlot,
+    cx: &mut Context<DiffPane>,
+) -> AnyElement {
+    match row {
+        SideRow::HunkHeader(_) => render_side_row(row, idx, highlights),
+        SideRow::Data { old, new } => {
+            // Prefer new-side clicks when both sides populate the same row
+            // (modification pair). Falls back to old-side when only that
+            // side has a line (pure deletion).
+            let target = new
+                .as_ref()
+                .and_then(|l| pane.build_composer_target_side(l, SideKey::New))
+                .or_else(|| {
+                    old.as_ref()
+                        .and_then(|l| pane.build_composer_target_side(l, SideKey::Old))
+                });
+            let element = render_side_data_row(old.as_ref(), new.as_ref(), idx, highlights);
+            match target {
+                None => element.into_any_element(),
+                Some(target) => element
+                    .on_click(cx.listener(move |_this, _e: &ClickEvent, _w, cx| {
+                        cx.emit(DiffPaneEvent::OpenComposer(target.clone()));
+                    }))
+                    .into_any_element(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

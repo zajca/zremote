@@ -113,7 +113,7 @@ pub(crate) fn render_side_row(row: &SideRow, idx: usize, highlights: &HighlightS
     }
 }
 
-fn render_side_data_row(
+pub(crate) fn render_side_data_row(
     old: Option<&DiffLine>,
     new: Option<&DiffLine>,
     idx: usize,

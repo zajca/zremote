@@ -1141,6 +1141,11 @@ impl MainView {
             .unwrap_or_default();
         let cc_states = snapshot.cc_states().clone();
         let cc_metrics = snapshot.cc_metrics().clone();
+        let review_pending = self
+            .diff
+            .as_ref()
+            .map(|d| d.read(cx).pending_review_count())
+            .unwrap_or(0);
         let palette_snapshot = PaletteSnapshot::capture(
             Rc::clone(snapshot.hosts_rc()),
             Rc::clone(snapshot.sessions_rc()),
@@ -1153,7 +1158,8 @@ impl MainView {
             cc_metrics,
             Rc::clone(snapshot.agent_profiles_rc()),
             Rc::clone(snapshot.agent_kinds_rc()),
-        );
+        )
+        .with_review_pending_count(review_pending);
         let path_api: Arc<dyn PathAutocompleteApi> = Arc::new(self.app_state.api.clone());
         let palette =
             cx.new(|cx| CommandPalette::new(palette_snapshot, tab, path_api, recent_add_paths, cx));
@@ -1559,6 +1565,13 @@ impl MainView {
             }
             CommandPaletteEvent::OpenDiff { project_id } => {
                 self.open_diff(project_id.clone(), cx);
+            }
+            CommandPaletteEvent::SendReview => {
+                if let Some(diff) = self.diff.clone() {
+                    diff.update(cx, |d, cx| {
+                        d.send_review_from_palette(cx);
+                    });
+                }
             }
             CommandPaletteEvent::Close => {}
         }

@@ -126,6 +126,10 @@ pub struct PaletteSnapshot {
     pub active_session_id: Option<String>,
     pub agent_profiles: Rc<Vec<AgentProfile>>,
     pub agent_kinds: Rc<Vec<AgentKindInfo>>,
+    /// Set by `MainView` when a diff view is open AND has at least one
+    /// pending draft comment. Gates the `SendReview` palette entry so it
+    /// only appears when the action is meaningful (RFC §10 P5).
+    pub review_pending_count: u32,
     pub(super) host_names: HashMap<String, String>,
     pub(super) project_names: HashMap<String, String>,
     pub(super) project_names_by_path: HashMap<(String, String), String>,
@@ -178,6 +182,7 @@ impl PaletteSnapshot {
             active_session_id,
             agent_profiles,
             agent_kinds,
+            review_pending_count: 0,
             host_names,
             project_names,
             project_names_by_path,
@@ -186,6 +191,14 @@ impl PaletteSnapshot {
             cc_metrics,
             recent_action_keys,
         }
+    }
+
+    /// Set the count of pending review drafts in the currently active
+    /// diff view. The palette uses this to conditionally render a
+    /// "Send review" entry (RFC §10 P5).
+    pub fn with_review_pending_count(mut self, count: u32) -> Self {
+        self.review_pending_count = count;
+        self
     }
 
     pub(super) fn host_name(&self, host_id: &str) -> String {
@@ -387,6 +400,16 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
         subtitle: String::new(),
         selectable: true,
     });
+
+    // Send review: only appears when a diff view has pending drafts.
+    if snapshot.review_pending_count > 0 {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::SendReview),
+            title: format!("Send review ({} pending)", snapshot.review_pending_count),
+            subtitle: "Inject draft comments into the target session".to_string(),
+            selectable: true,
+        });
+    }
 
     for p in snapshot.projects.iter() {
         let label = if p.pinned {

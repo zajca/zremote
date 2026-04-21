@@ -11,6 +11,11 @@ pub mod file_tree;
 pub mod highlight;
 pub mod highlight_cache;
 pub mod large_file;
+pub mod review_comment;
+pub mod review_composer;
+pub mod review_flow;
+pub mod review_panel;
+pub mod review_render;
 pub mod side_pane;
 pub mod source_picker;
 pub mod state;
@@ -19,8 +24,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
+use uuid::Uuid;
 
+use zremote_client::Session;
 use zremote_client::diff::{DiffEventWire, get_diff_sources, stream_diff};
 use zremote_protocol::project::{DiffFile, DiffRequest, DiffSource};
 
@@ -28,12 +36,15 @@ use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
 
-use self::diff_pane::{DiffPane, HighlightCache};
+use self::diff_pane::{DiffPane, DiffPaneEvent, HighlightCache};
 use self::file_tree::{FileTree, FileTreeEvent};
 use self::highlight::{HighlightEngine, SideKey, should_highlight};
 use self::highlight_cache::{highlight_by_lineno, side_cache_key_for_text, side_lines};
+use self::review_composer::ReviewComposer;
+use self::review_panel::ReviewPanel;
+use self::review_render::DiffTextTooltip;
 use self::source_picker::{SourcePicker, SourcePickerEvent};
-use self::state::{DiffEvent, DiffState, ViewMode, apply};
+use self::state::{DiffEvent, DiffState, ViewMode, apply, commit_id_for_source};
 
 /// Events emitted by [`DiffView`] to its parent (`MainView`).
 pub enum DiffViewEvent {
@@ -44,11 +55,30 @@ pub enum DiffViewEvent {
 pub struct DiffView {
     app_state: Arc<AppState>,
     project_id: String,
+    /// Host owning this project; learned on mount from `get_project`.
+    /// `None` until the metadata fetch returns. Used for the persistence
+    /// key `diff_drafts:<host_id>:<project_id>`.
+    host_id: Option<String>,
     state: DiffState,
     focus_handle: FocusHandle,
     source_picker: Entity<SourcePicker>,
     file_tree: Entity<FileTree>,
     diff_pane: Entity<DiffPane>,
+    review_panel: Entity<ReviewPanel>,
+    /// Active composer attached under some diff line. `None` when the
+    /// user has no open editor.
+    active_composer: Option<Entity<ReviewComposer>>,
+    /// Sessions returned by `list_project_sessions` — used to populate
+    /// the drawer's target dropdown. Refreshed on drawer expand.
+    candidate_sessions: Vec<Session>,
+    /// Currently selected target session for Send. Persisted only for the
+    /// duration of the view — picked fresh on next open.
+    selected_session_id: Option<Uuid>,
+    /// True while the drawer is open. Closed by default (matches RFC
+    /// §9.3 — pill → expanded panel).
+    drawer_expanded: bool,
+    /// True while the inline target dropdown is open.
+    target_picker_open: bool,
     /// Background stream consumer for the current diff request. Replacing
     /// this field cancels the previous task, which in turn drops the
     /// `DiffEventStream` and cancels the HTTP response on the agent side.
@@ -60,12 +90,27 @@ pub struct DiffView {
     /// file. Replacing this field drops (and cancels) the previous task,
     /// which is important when the user navigates file → file quickly.
     highlighter_task: Option<Task<()>>,
+    /// Long-lived task for the send-review call. Dropping cancels the
+    /// HTTP request (RFC §8.2 async-task ownership convention).
+    review_sender_task: Option<Task<()>>,
+    /// Initial metadata load + draft hydration. Fires once on mount.
+    hydrate_task: Option<Task<()>>,
+    /// Debounce timer for persisting drafts (RFC §9.2: 500 ms).
+    drafts_saver_task: Option<Task<()>>,
+    /// Session-list refresh task. Fires when the drawer opens.
+    sessions_task: Option<Task<()>>,
     /// Per-file, per-side highlight cache. Key is
     /// `(blob_sha_or_content_hash, syntax_name, SideKey)`. Cleared on
     /// project switch / source change so old hunks don't bleed into a new
     /// diff.
     highlight_cache: HighlightCache,
-    _child_subs: Vec<Subscription>,
+    /// Permanent subscriptions to the four child entities wired up in
+    /// `new()`. Their lifetime matches the view; never pushed after init.
+    child_subs: Vec<Subscription>,
+    /// Subscription to the currently-open composer, if any. Replacing the
+    /// `Option` drops the previous subscription, so we never accumulate one
+    /// per open/close cycle.
+    active_composer_sub: Option<Subscription>,
 }
 
 impl EventEmitter<DiffViewEvent> for DiffView {}
@@ -82,6 +127,7 @@ impl DiffView {
         let source_picker = cx.new(|_| SourcePicker::new());
         let file_tree = cx.new(|_| FileTree::new());
         let diff_pane = cx.new(|_| DiffPane::new());
+        let review_panel = cx.new(|_| ReviewPanel::new());
 
         // Kick off HighlightEngine init in the background so the first diff
         // open doesn't pay the ~50 ms `SyntaxSet::load_defaults_newlines`
@@ -112,10 +158,20 @@ impl DiffView {
                 }
             },
         ));
+        subs.push(cx.subscribe(
+            &diff_pane,
+            |this, _e, event: &DiffPaneEvent, cx| match event {
+                DiffPaneEvent::OpenComposer(target) => {
+                    this.open_composer_for_new(target.clone(), cx);
+                }
+            },
+        ));
+        subs.push(cx.subscribe(&review_panel, Self::on_review_panel_event));
 
         let mut view = Self {
             app_state,
             project_id,
+            host_id: None,
             state: DiffState {
                 view_mode: ViewMode::Unified,
                 loading: true,
@@ -126,15 +182,27 @@ impl DiffView {
             source_picker,
             file_tree,
             diff_pane,
+            review_panel,
+            active_composer: None,
+            candidate_sessions: Vec::new(),
+            selected_session_id: None,
+            drawer_expanded: false,
+            target_picker_open: false,
             stream_task: None,
             sources_task: None,
             highlighter_task: None,
+            review_sender_task: None,
+            hydrate_task: None,
+            drafts_saver_task: None,
+            sessions_task: None,
             highlight_cache: HashMap::new(),
-            _child_subs: subs,
+            child_subs: subs,
+            active_composer_sub: None,
         };
 
         view.fetch_sources(cx);
         view.start_diff_stream(DiffSource::WorkingTreeVsHead, cx);
+        view.start_hydrate(cx);
         view
     }
 
@@ -204,8 +272,15 @@ impl DiffView {
             .as_ref()
             .and_then(|p| self.state.loaded_files.get(p))
             .cloned();
+        let head_sha = self
+            .state
+            .source_options
+            .as_ref()
+            .and_then(|o| o.head_sha.as_deref());
+        let commit_id = commit_id_for_source(self.state.current_source.as_ref(), head_sha);
         self.diff_pane.update(cx, |pane, cx| {
             pane.set_file(file.clone(), cx);
+            pane.set_commit_id(commit_id, cx);
         });
         // Always push the latest highlight snapshot alongside the file so
         // the pane never paints with stale spans from a previous file.
@@ -652,12 +727,20 @@ impl DiffView {
 impl Render for DiffView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = self.render_main_body(cx);
+        let composer_overlay = self.render_composer_overlay();
         div()
             .track_focus(&self.focus_handle)
             .key_context("DiffView")
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key == "escape" {
-                    this.request_close(cx);
+                    // If a composer is open, Esc cancels it rather than
+                    // closing the diff view.
+                    if this.active_composer.is_some() {
+                        this.close_active_composer();
+                        cx.notify();
+                    } else {
+                        this.request_close(cx);
+                    }
                     cx.stop_propagation();
                 } else if event.keystroke.key == "s" && event.keystroke.modifiers.alt {
                     this.apply_event(DiffEvent::ToggleViewMode, cx);
@@ -670,6 +753,8 @@ impl Render for DiffView {
             .bg(theme::bg_primary())
             .child(self.render_header(cx))
             .child(body)
+            .when_some(composer_overlay, Div::child)
+            .child(self.render_review_drawer())
     }
 }
 
@@ -686,25 +771,5 @@ impl DiffView {
             return self.render_empty_state().into_any_element();
         }
         self.render_body().into_any_element()
-    }
-}
-
-/// Local text tooltip used by the close button. Duplicated intentionally from
-/// `sidebar::SidebarTextTooltip` since that type is private to the sidebar
-/// module; a shared component would require wider refactoring out of P3 scope.
-struct DiffTextTooltip(String);
-
-impl Render for DiffTextTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .bg(theme::bg_tertiary())
-            .border_1()
-            .border_color(theme::border())
-            .text_size(px(11.0))
-            .text_color(theme::text_secondary())
-            .child(self.0.clone())
     }
 }

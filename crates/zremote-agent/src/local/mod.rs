@@ -1,6 +1,9 @@
 mod router;
-pub(crate) mod routes;
-pub(crate) mod state;
+// `routes` and `state` are `pub` so integration tests can construct a
+// working router with `post_send_review` alongside a `LocalAppState`.
+// Individual items remain `pub` only where already exported.
+pub mod routes;
+pub mod state;
 mod tasks;
 
 use std::net::SocketAddr;
@@ -334,7 +337,11 @@ pub async fn run_local(
 }
 
 /// Insert or update the local host row in the database.
-pub(crate) async fn upsert_local_host(
+///
+/// Exposed publicly so integration tests (e.g. `tests/review_integration.rs`)
+/// can bootstrap a runnable `LocalAppState` without reaching into crate
+/// internals.
+pub async fn upsert_local_host(
     pool: &sqlx::SqlitePool,
     host_id: &Uuid,
     hostname: &str,

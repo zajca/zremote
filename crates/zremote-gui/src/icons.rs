@@ -36,6 +36,9 @@ pub enum Icon {
     Clock,
     Columns,
     Rows,
+    Send,
+    Trash,
+    Pencil,
 }
 
 impl Icon {
@@ -75,6 +78,9 @@ impl Icon {
             Self::Clock => "icons/clock.svg",
             Self::Columns => "icons/columns-2.svg",
             Self::Rows => "icons/rows-2.svg",
+            Self::Send => "icons/send.svg",
+            Self::Trash => "icons/trash-2.svg",
+            Self::Pencil => "icons/pencil.svg",
         }
     }
 }

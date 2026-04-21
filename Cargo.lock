@@ -9358,6 +9358,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "zremote-client",
  "zremote-protocol",
 ]

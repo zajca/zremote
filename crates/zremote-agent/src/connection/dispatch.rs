@@ -1547,8 +1547,7 @@ async fn handle_project_send_review(
         return;
     };
 
-    let rendered = crate::project::review::render_review_prompt(&request);
-    let mut payload = rendered.clone();
+    let mut payload = crate::project::review::render_review_prompt(&request);
     if !payload.ends_with('\n') {
         payload.push('\n');
     }
@@ -1567,7 +1566,6 @@ async fn handle_project_send_review(
     let response = SendReviewResponse {
         session_id,
         delivered,
-        prompt: rendered,
     };
     let _ = outbound_tx
         .send(AgentMessage::SendReviewResult {

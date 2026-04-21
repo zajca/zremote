@@ -29,6 +29,13 @@ pub fn accent() -> Rgba {
     rgb(0x5e6ad2)
 }
 
+/// Accent colour shade used on hover. A touch lighter than `accent()` so
+/// primary buttons (Send, Save) give visible feedback when the cursor
+/// enters. Paired with `accent()` as the resting colour.
+pub fn accent_hover() -> Rgba {
+    rgb(0x7683dd)
+}
+
 pub fn border() -> Rgba {
     rgb(0x2a2a2e)
 }

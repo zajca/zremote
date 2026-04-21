@@ -13,65 +13,77 @@ use zremote_protocol::project::{DiffSource, ReviewComment, ReviewSide, SendRevie
 /// deliberately conservative: we drop anything that could re-enable a
 /// terminal attribute, move the cursor, or clear the screen.
 pub fn sanitize_body(s: &str) -> String {
+    // Iterate by `char` so multi-byte UTF-8 scalars (e.g. U+0082 encoded as
+    // `C2 82`) are decoded first and the C1 control range is matched against
+    // the code point — not the raw continuation byte. Byte-level detection
+    // would both miss genuine C1 escapes expressed via their UTF-8 encoding
+    // AND drop harmless continuation bytes of non-control scalars.
     let mut out = String::with_capacity(s.len());
-    let mut bytes = s.as_bytes().iter().copied().peekable();
-    while let Some(b) = bytes.next() {
-        if b == 0x1b {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{001b}' {
             // ESC — CSI starts with ESC '['; we also drop lone ESCs + OSC/SS3.
-            // Consume a bracket if present, then consume until the sequence
-            // terminator. For CSI the final byte is 0x40..=0x7E; for OSC it
-            // ends with BEL (0x07) or ESC '\\'. For any other ESC-prefixed
-            // sequence we drop the one following byte if any — good enough
-            // defence in depth for comment bodies.
-            match bytes.peek().copied() {
-                Some(b'[') => {
-                    bytes.next();
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
                     // CSI: drop params + final byte in 0x40..=0x7E.
-                    for nb in bytes.by_ref() {
+                    for nc in chars.by_ref() {
+                        let nb = nc as u32;
                         if (0x40..=0x7e).contains(&nb) {
                             break;
                         }
                     }
                 }
-                Some(b']') => {
-                    bytes.next();
+                Some(']') => {
+                    chars.next();
                     // OSC: terminated by BEL (0x07) or ST (ESC '\').
-                    while let Some(nb) = bytes.next() {
-                        if nb == 0x07 {
+                    while let Some(nc) = chars.next() {
+                        if nc == '\u{0007}' {
                             break;
                         }
-                        if nb == 0x1b {
-                            if let Some(b'\\') = bytes.peek().copied() {
-                                bytes.next();
+                        if nc == '\u{001b}' {
+                            if chars.peek().copied() == Some('\\') {
+                                chars.next();
                             }
                             break;
                         }
                     }
                 }
                 Some(_) => {
-                    // ESC + single byte (e.g. SS3). Drop the byte.
-                    bytes.next();
+                    // ESC + single char (e.g. SS3). Drop the char.
+                    chars.next();
                 }
                 None => {}
             }
             continue;
         }
-        // Keep printable and the two whitespace bytes we want through.
-        if b == b'\n' || b == b'\t' {
-            out.push(b as char);
+        // Keep the two whitespace bytes we want through.
+        if c == '\n' || c == '\t' {
+            out.push(c);
             continue;
         }
-        // Drop other ASCII control chars (0..0x20 except LF/TAB, and DEL).
-        if b < 0x20 || b == 0x7f {
+        // Drop C0 control chars (0..0x20 except LF/TAB), DEL (0x7f), and
+        // C1 control chars (0x80..=0x9f). In UTF-8 terminals the C1 range
+        // includes working single-byte aliases for ESC-prefixed sequences:
+        // 0x9b == CSI, 0x9d == OSC, 0x8f == SS3, etc. Dropping the ESC-form
+        // alone (above) would leave the C1-form available for injection.
+        let cp = c as u32;
+        if cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp) {
             continue;
         }
-        out.push(b as char);
+        out.push(c);
     }
     out
 }
 
 /// Render a markdown prompt from a `SendReviewRequest`. Terminating newline
 /// is included (the PTY injector uses it as submission).
+///
+/// SECURITY: the rendered output is written verbatim into a PTY. Any new
+/// `ReviewComment` field added to the output below MUST be passed through
+/// `sanitize_body()` first — otherwise a CSI / OSC / C1 escape in an
+/// attacker-controlled field can re-enter the PTY as an active terminal
+/// escape (CWE-79 / CWE-116).
 ///
 /// Format:
 ///
@@ -232,6 +244,28 @@ mod tests {
         let input = "a\x07b\x08c\x7fd";
         let cleaned = sanitize_body(input);
         assert_eq!(cleaned, "abcd");
+    }
+
+    /// CWE-116: C1 control characters (0x80..=0x9F) are single-byte
+    /// aliases for ESC-prefixed sequences in UTF-8 terminals — 0x9b == CSI,
+    /// 0x9d == OSC, 0x8f == SS3. Stripping only the 7-bit ESC form would
+    /// leave these bypasses usable.
+    #[test]
+    fn sanitize_body_strips_c1_control_bytes() {
+        // C1 CSI (U+009B), C1 OSC (U+009D), C1 SS3 (U+008F). All three must
+        // be dropped by the sanitizer — printable tokens around them survive.
+        let input = "foo\u{009b}31mbar\u{009d}0;evil\u{0007}\u{008f}baz";
+        let cleaned = sanitize_body(input);
+        for c in cleaned.chars() {
+            let cp = c as u32;
+            assert!(
+                !(0x80..=0x9f).contains(&cp),
+                "C1 control scalar leaked: U+{cp:04X} in {cleaned:?}"
+            );
+        }
+        assert!(cleaned.contains("foo"));
+        assert!(cleaned.contains("bar"));
+        assert!(cleaned.contains("baz"));
     }
 
     #[test]

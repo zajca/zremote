@@ -77,8 +77,6 @@ pub struct SendReviewResponse {
     pub session_id: Uuid,
     /// Number of comments actually delivered.
     pub delivered: u32,
-    /// Rendered prompt text that was written to the PTY (audit trail).
-    pub prompt: String,
 }
 
 #[cfg(test)]
@@ -259,7 +257,6 @@ mod tests {
         roundtrip(&SendReviewResponse {
             session_id: Uuid::new_v4(),
             delivered: 5,
-            prompt: "## Code review comments\n\n".to_string(),
         });
     }
 }

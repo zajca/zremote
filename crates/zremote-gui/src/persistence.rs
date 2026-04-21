@@ -112,6 +112,12 @@ pub struct GuiState {
     /// Stored as-given by the caller (no canonicalization).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_add_paths: Vec<String>,
+    /// Review comment drafts keyed by `<host_id>:<project_id>`. Values are
+    /// JSON-serialised `Vec<ReviewComment>` — stringified to avoid coupling
+    /// this persistence crate to the protocol crate's type layout.
+    /// See RFC §9.2.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub diff_drafts: std::collections::BTreeMap<String, String>,
 }
 
 impl GuiState {
@@ -126,6 +132,35 @@ impl GuiState {
             && self.expanded_projects.is_empty()
             && self.collapsed_projects.is_empty()
             && self.recent_add_paths.is_empty()
+            && self.diff_drafts.is_empty()
+    }
+
+    /// Build the per-project draft key (`<host_id>:<project_id>`).
+    #[must_use]
+    pub fn diff_draft_key(host_id: &str, project_id: &str) -> String {
+        format!("{host_id}:{project_id}")
+    }
+
+    /// Store a serialised drafts payload for the given project, or remove
+    /// the entry when `payload` is empty / contains no drafts. Caller must
+    /// pre-serialise to JSON so this module stays decoupled from the
+    /// protocol crate.
+    pub fn set_diff_drafts(&mut self, host_id: &str, project_id: &str, payload: String) {
+        let key = Self::diff_draft_key(host_id, project_id);
+        // "[]" (empty JSON array) is semantically "no drafts" — clean up
+        // rather than keep growing the map for projects the user cleared.
+        if payload.is_empty() || payload == "[]" {
+            self.diff_drafts.remove(&key);
+        } else {
+            self.diff_drafts.insert(key, payload);
+        }
+    }
+
+    /// Look up the stored drafts JSON for the given project, if any.
+    #[must_use]
+    pub fn get_diff_drafts(&self, host_id: &str, project_id: &str) -> Option<&str> {
+        let key = Self::diff_draft_key(host_id, project_id);
+        self.diff_drafts.get(&key).map(String::as_str)
     }
 
     /// Record a path entered in the "Add project" autocomplete: dedupe against
@@ -410,6 +445,24 @@ impl Persistence {
                 state.recent_actions.truncate(20);
             }
         });
+    }
+
+    /// Persist the current review drafts for `(host_id, project_id)`. The
+    /// caller passes an already-serialised JSON payload to keep this module
+    /// independent of the protocol crate. Empty / `"[]"` payloads remove
+    /// the map entry so cleared drawers don't keep state on disk.
+    pub fn set_diff_drafts(&mut self, host_id: &str, project_id: &str, payload: String) {
+        self.update(|state| {
+            state.set_diff_drafts(host_id, project_id, payload);
+        });
+    }
+
+    /// Look up the drafts JSON for the given project, if any.
+    #[must_use]
+    pub fn get_diff_drafts(&self, host_id: &str, project_id: &str) -> Option<String> {
+        self.state
+            .get_diff_drafts(host_id, project_id)
+            .map(str::to_string)
     }
 
     /// Clear all recent palette actions (used from settings UI).
@@ -1143,6 +1196,7 @@ mod tests {
             expanded_projects: HashSet::new(),
             collapsed_projects: HashSet::new(),
             recent_add_paths: Vec::new(),
+            diff_drafts: std::collections::BTreeMap::new(),
         };
 
         FileWriter.write(&path, &state).expect("write");
@@ -1391,6 +1445,65 @@ mod tests {
             state.recent_add_paths()[RECENT_ADD_PATHS_CAP - 1],
             "/path/5"
         );
+    }
+
+    #[test]
+    fn diff_drafts_set_and_get_roundtrip() {
+        let mut state = GuiState::default();
+        state.set_diff_drafts("h1", "p1", "[{\"id\":\"abc\"}]".to_string());
+        assert_eq!(
+            state.get_diff_drafts("h1", "p1"),
+            Some("[{\"id\":\"abc\"}]")
+        );
+        assert!(state.get_diff_drafts("h1", "other").is_none());
+        assert!(state.get_diff_drafts("other", "p1").is_none());
+    }
+
+    #[test]
+    fn diff_drafts_empty_payload_removes_entry() {
+        let mut state = GuiState::default();
+        state.set_diff_drafts("h1", "p1", "[{\"id\":\"abc\"}]".to_string());
+        assert!(state.get_diff_drafts("h1", "p1").is_some());
+        state.set_diff_drafts("h1", "p1", "[]".to_string());
+        assert!(state.get_diff_drafts("h1", "p1").is_none());
+        // An explicit empty string also removes.
+        state.set_diff_drafts("h1", "p1", "[{\"id\":\"x\"}]".to_string());
+        state.set_diff_drafts("h1", "p1", String::new());
+        assert!(state.get_diff_drafts("h1", "p1").is_none());
+    }
+
+    #[test]
+    fn diff_drafts_persistence_roundtrip_via_filewriter() {
+        // Save → reload via FileWriter; drafts must round-trip with identical
+        // JSON payload. Guards the RFC §9.2 persistence contract.
+        let path = temp_path("diff-drafts-roundtrip");
+        {
+            let mut p = Persistence::with_writer(
+                path.clone(),
+                Box::new(FileWriter),
+                Duration::from_millis(10),
+            );
+            p.set_diff_drafts(
+                "host-abc",
+                "proj-1",
+                "[{\"id\":\"550e8400-e29b-41d4-a716-446655440000\",\"body\":\"nit\"}]".to_string(),
+            );
+            p.flush_blocking(Duration::from_secs(1)).expect("flush");
+        }
+        let reloaded = load_state_from_disk(&path);
+        let drafts = reloaded
+            .get_diff_drafts("host-abc", "proj-1")
+            .expect("drafts survive restart");
+        assert!(drafts.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(drafts.contains("\"body\":\"nit\""));
+    }
+
+    #[test]
+    fn deserialize_without_diff_drafts_field() {
+        // Legacy state file without `diff_drafts` must still load.
+        let legacy_json = r#"{"version":2,"recent_sessions":[],"expanded_projects":["pa"]}"#;
+        let state: GuiState = serde_json::from_str(legacy_json).unwrap();
+        assert!(state.diff_drafts.is_empty());
     }
 
     #[test]

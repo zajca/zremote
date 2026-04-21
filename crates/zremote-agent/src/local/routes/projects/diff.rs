@@ -41,6 +41,15 @@ use super::parse_project_id;
 /// a handful of files while the client drains.
 const DIFF_STREAM_CHANNEL_DEPTH: usize = 32;
 
+/// Hard ceiling on a single review comment body, in bytes. 64 KiB comfortably
+/// fits a long code review comment but prevents a compromised client from
+/// shipping a multi-megabyte payload into a PTY write.
+const MAX_COMMENT_BODY_BYTES: usize = 65_536;
+
+/// Hard ceiling on the number of comments per review batch. Drafts past this
+/// count indicate either a client bug or an abusive caller.
+const MAX_COMMENT_COUNT: usize = 100;
+
 fn diff_error_to_response(err: &DiffError) -> Response {
     let status = match err.code {
         DiffErrorCode::NotGitRepo | DiffErrorCode::PathMissing | DiffErrorCode::RefNotFound => {
@@ -197,29 +206,57 @@ pub async fn post_send_review(
         }
     }
 
+    // SEC-M1: bound attacker-controlled batch size + per-comment body length
+    // BEFORE rendering. A rendered prompt of millions of bytes would block the
+    // PTY write under a lock, starving other sessions.
+    if body.comments.len() > MAX_COMMENT_COUNT {
+        return Err(AppError::BadRequest(format!(
+            "too many comments in batch ({}, max {MAX_COMMENT_COUNT})",
+            body.comments.len()
+        )));
+    }
+    for c in &body.comments {
+        if c.body.len() > MAX_COMMENT_BODY_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "comment body too large ({} bytes, max {MAX_COMMENT_BODY_BYTES})",
+                c.body.len()
+            )));
+        }
+    }
+
     let session_id = body.session_id.ok_or_else(|| {
         AppError::BadRequest("session_id is required for inject_session delivery".to_string())
     })?;
 
-    let rendered = render_review_prompt(&body);
-    let mut payload = rendered.clone();
-    if !payload.ends_with('\n') {
-        payload.push('\n');
+    // SEC-H2: session ownership check. Without this, a caller who knows the
+    // project_id of project A and the session_id of a session under project
+    // B can inject review text into B's PTY. Resolve the session's owning
+    // project_id and reject if it does not match the route project.
+    let session = sq::get_session(&state.db, &session_id.to_string()).await?;
+    match session.project_id.as_deref() {
+        Some(sp) if sp == project_id => {}
+        _ => {
+            tracing::warn!(
+                session_id = %session_id,
+                project_id = %project_id,
+                session_project_id = ?session.project_id,
+                "review send rejected: session does not belong to this project",
+            );
+            return Err(AppError::Forbidden(format!(
+                "session {session_id} does not belong to project {project_id}"
+            )));
+        }
+    }
+    if session.status != "active" {
+        return Err(AppError::Conflict(format!(
+            "session {session_id} is not active (status: {}), cannot inject review",
+            session.status,
+        )));
     }
 
-    let session_status = sq::get_session_status(&state.db, &session_id.to_string()).await?;
-    match session_status {
-        None => {
-            return Err(AppError::NotFound(format!(
-                "session {session_id} not found"
-            )));
-        }
-        Some(s) if s != "active" => {
-            return Err(AppError::Conflict(format!(
-                "session {session_id} is not active (status: {s}), cannot inject review"
-            )));
-        }
-        _ => {}
+    let mut payload = render_review_prompt(&body);
+    if !payload.ends_with('\n') {
+        payload.push('\n');
     }
 
     {
@@ -237,10 +274,10 @@ pub async fn post_send_review(
         }
     }
 
+    let delivered = u32::try_from(body.comments.len()).unwrap_or(u32::MAX);
     let response = SendReviewResponse {
         session_id,
-        delivered: body.comments.len() as u32,
-        prompt: rendered,
+        delivered,
     };
     Ok(Json(response).into_response())
 }
@@ -551,6 +588,154 @@ mod tests {
             MAX_COMMITS_QUERY,
             parsed.recent_commits.len()
         );
+    }
+
+    /// SEC-H2: the session referenced by `session_id` must belong to the
+    /// project in the route path. A session under project B, referenced from
+    /// a URL that pins project A, must be rejected with 403 Forbidden even
+    /// though the session exists and is active.
+    #[tokio::test]
+    async fn review_send_rejects_cross_project_session() {
+        let tmp_a = tempfile::TempDir::new().unwrap();
+        init_isolated_git_repo(tmp_a.path());
+        let tmp_b = tempfile::TempDir::new().unwrap();
+        init_isolated_git_repo(tmp_b.path());
+
+        let state = test_state().await;
+        let project_a = seed_project(&state, tmp_a.path()).await;
+        let project_b = seed_project(&state, tmp_b.path()).await;
+        // Session belongs to project_b.
+        let session_id = Uuid::new_v4();
+        sq::insert_session(
+            &state.db,
+            &session_id.to_string(),
+            &state.host_id.to_string(),
+            Some("s"),
+            None,
+            Some(&project_b),
+        )
+        .await
+        .unwrap();
+        // Activate it so the check order is project → status.
+        sqlx::query("UPDATE sessions SET status = 'active' WHERE id = ?")
+            .bind(session_id.to_string())
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let req = SendReviewRequest {
+            project_id: project_a.clone(),
+            source: DiffSource::WorkingTree,
+            comments: vec![],
+            delivery: ReviewDelivery::InjectSession,
+            session_id: Some(session_id),
+            preamble: None,
+        };
+        // Request the session from project_a's route — must be rejected.
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/projects/{project_a}/review/send"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// SEC-M1: batch size cap. 101 comments must be rejected with 400.
+    #[tokio::test]
+    async fn review_send_rejects_oversize_batch() {
+        use chrono::Utc;
+        use zremote_protocol::project::{ReviewComment, ReviewSide};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_isolated_git_repo(tmp.path());
+
+        let state = test_state().await;
+        let project_id = seed_project(&state, tmp.path()).await;
+        let app = router(state);
+
+        let comments: Vec<ReviewComment> = (0..=MAX_COMMENT_COUNT)
+            .map(|i| ReviewComment {
+                id: Uuid::new_v4(),
+                path: format!("file{i}.rs"),
+                commit_id: "abc".to_string(),
+                side: ReviewSide::Right,
+                line: 1,
+                start_side: None,
+                start_line: None,
+                body: "short".to_string(),
+                created_at: Utc::now(),
+            })
+            .collect();
+        assert!(comments.len() > MAX_COMMENT_COUNT);
+
+        let req = SendReviewRequest {
+            project_id: project_id.clone(),
+            source: DiffSource::WorkingTree,
+            comments,
+            delivery: ReviewDelivery::InjectSession,
+            session_id: Some(Uuid::new_v4()),
+            preamble: None,
+        };
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/projects/{project_id}/review/send"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// SEC-M1: per-comment body length cap. A single 64 KiB + 1 byte body
+    /// must be rejected with 400.
+    #[tokio::test]
+    async fn review_send_rejects_oversize_body() {
+        use chrono::Utc;
+        use zremote_protocol::project::{ReviewComment, ReviewSide};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_isolated_git_repo(tmp.path());
+
+        let state = test_state().await;
+        let project_id = seed_project(&state, tmp.path()).await;
+        let app = router(state);
+
+        let huge = "x".repeat(MAX_COMMENT_BODY_BYTES + 1);
+        let req = SendReviewRequest {
+            project_id: project_id.clone(),
+            source: DiffSource::WorkingTree,
+            comments: vec![ReviewComment {
+                id: Uuid::new_v4(),
+                path: "a.rs".to_string(),
+                commit_id: "abc".to_string(),
+                side: ReviewSide::Right,
+                line: 1,
+                start_side: None,
+                start_line: None,
+                body: huge,
+                created_at: Utc::now(),
+            }],
+            delivery: ReviewDelivery::InjectSession,
+            session_id: Some(Uuid::new_v4()),
+            preamble: None,
+        };
+        let response = app
+            .oneshot(
+                Request::post(format!("/api/projects/{project_id}/review/send"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
