@@ -70,6 +70,11 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
         .route("/api/auth/ws-ticket", post(routes::auth::ws_ticket))
+        .route(
+            "/api/admin/config",
+            get(routes::admin::get_config).put(routes::admin::update_config),
+        )
+        .route("/api/admin/rotate-token", post(routes::admin::rotate_token))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             auth_mw::auth_mw,

@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod agent_profiles;
 pub mod agent_tasks;
 pub mod agentic;
