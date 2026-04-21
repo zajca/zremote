@@ -1,10 +1,14 @@
 //! Bearer-auth middleware for local-mode routes (RFC auth-overhaul Phase 6).
 //!
 //! Applied to every REST and WebSocket route except `/health` and
-//! `/api/mode`. Compares `Authorization: Bearer <token>` against the agent's
-//! `local_token` in constant time. WebSocket upgrade requests accept the
-//! token via `?token=` query param when `require_admin_token` is set,
-//! because GPUI's WS client can't add arbitrary headers to the handshake.
+//! `/api/mode`. WebSocket upgrades may authenticate via
+//! `Authorization: Bearer` or `?token=` query param. REST routes require
+//! `Authorization: Bearer` — query-param auth is rejected.
+//!
+//! The `?token=` fallback exists solely for WebSocket handshakes, because
+//! browsers and GPUI's WS client cannot attach arbitrary headers to the
+//! upgrade request. Accepting it on REST routes would leak the bearer into
+//! server logs, browser history, and referrer headers.
 //!
 //! Failure returns an opaque `401 { "error": "unauthorized" }` — no
 //! `WWW-Authenticate: Bearer`, no reason field — to avoid leaking whether
@@ -15,7 +19,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
+use axum::http::{StatusCode, header::AUTHORIZATION, header::UPGRADE};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
@@ -26,9 +30,9 @@ use super::token::verify_constant_time;
 /// Axum middleware that gates a router on the agent's `local_token`.
 ///
 /// Accepts the token via:
-/// - `Authorization: Bearer <token>` header (preferred), or
-/// - `?token=<token>` query param (fallback for WebSocket upgrades, where
-///   the client can't attach arbitrary headers).
+/// - `Authorization: Bearer <token>` header (all routes), or
+/// - `?token=<token>` query param (WebSocket upgrade requests ONLY — REST
+///   requests with only a query-param token are rejected).
 ///
 /// Returns `401 { "error": "unauthorized" }` on any failure.
 pub(crate) async fn require_local_token(
@@ -56,18 +60,26 @@ pub(crate) async fn require_local_token(
         return next.run(request).await;
     }
 
-    // Fallback: `?token=<token>` query param. Used by WebSocket upgrade
-    // requests because browsers / GPUI can't add headers to WS handshakes.
-    let query_tok = request
-        .uri()
-        .query()
-        .and_then(parse_token_query_param)
-        .filter(|t| !t.is_empty());
+    // Query-param fallback: accepted ONLY for WebSocket upgrade requests.
+    // Checking `Upgrade: websocket` keeps the bearer out of logs / history
+    // for every REST route.
+    let is_ws_upgrade = request.headers().get(UPGRADE).is_some_and(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.eq_ignore_ascii_case("websocket"))
+    });
 
-    if let Some(tok) = query_tok
-        && verify_constant_time(&tok, expected)
-    {
-        return next.run(request).await;
+    if is_ws_upgrade {
+        let query_tok = request
+            .uri()
+            .query()
+            .and_then(parse_token_query_param)
+            .filter(|t| !t.is_empty());
+
+        if let Some(tok) = query_tok
+            && verify_constant_time(&tok, expected)
+        {
+            return next.run(request).await;
+        }
     }
 
     unauthorized()
@@ -77,7 +89,9 @@ pub(crate) async fn require_local_token(
 /// Returns the URL-decoded token or `None` if the key is absent.
 fn parse_token_query_param(query: &str) -> Option<String> {
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         if k == "token" {
             return Some(url_decode(v));
         }
@@ -150,5 +164,15 @@ mod tests {
     fn parse_query_missing_token() {
         assert_eq!(parse_token_query_param("foo=bar"), None);
         assert_eq!(parse_token_query_param(""), None);
+    }
+
+    #[test]
+    fn parse_token_query_param_skips_valueless_keys() {
+        // A valueless key like `foo&` must not short-circuit the search — we
+        // must still find `token=abc` later in the string.
+        assert_eq!(
+            parse_token_query_param("foo&token=abc"),
+            Some("abc".to_string())
+        );
     }
 }

@@ -44,7 +44,6 @@ pub async fn run_local(
     db_path: &str,
     bind: &str,
     allow_remote: bool,
-    require_admin_token: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_file = expand_tilde(db_path);
 
@@ -70,6 +69,7 @@ pub async fn run_local(
     // `~/.zremote/local.token` 0o600 on first run.
     let local_token = token::load_or_create_token()
         .map_err(|e| format!("failed to load or create local-mode token: {e}"))?;
+    tracing::debug!("local token ready before health endpoint binds");
 
     // Clean up stale bridge port file from server-mode runs.
     // In local mode the GUI connects directly to this server, not via a bridge.
@@ -171,7 +171,6 @@ pub async fn run_local(
         socket_dir,
         agent_instance_id,
         local_token.clone(),
-        require_admin_token,
     );
 
     // === Session recovery ===
@@ -615,7 +614,6 @@ mod tests {
             "/tmp/zremote-phase6-never-created.db",
             "0.0.0.0",
             false,
-            false,
         )
         .await
         .expect_err("non-loopback bind must be rejected");
@@ -659,7 +657,6 @@ mod tests {
             std::path::PathBuf::from("/tmp/zremote-phase6-mw"),
             Uuid::new_v4(),
             "secret-token".to_string(),
-            false,
         );
 
         let router = build_router(state).unwrap();
@@ -710,8 +707,10 @@ mod tests {
         );
     }
 
-    /// Query-param token (`?token=`) is accepted as a fallback — used by
-    /// WebSocket upgrade requests that can't attach `Authorization` headers.
+    /// Query-param token (`?token=`) is accepted ONLY on WebSocket upgrade
+    /// requests (detected via `Upgrade: websocket`), because browsers and
+    /// GPUI can't attach `Authorization` headers to the WS handshake. A REST
+    /// request with the same query param must still be rejected.
     #[tokio::test]
     async fn protected_route_accepts_query_param_token() {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
@@ -726,11 +725,12 @@ mod tests {
             std::path::PathBuf::from("/tmp/zremote-phase6-query"),
             Uuid::new_v4(),
             "qp-secret".to_string(),
-            true,
         );
 
         let router = build_router(state).unwrap();
 
+        // REST request with only query-param token → REJECTED. Prevents the
+        // bearer from leaking into logs, browser history, referrers.
         let resp = router
             .clone()
             .oneshot(
@@ -740,15 +740,38 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "REST routes must not accept query-param auth (logs/history leak)"
+        );
+
+        // WebSocket upgrade with query-param token → ACCEPTED (passes auth mw).
+        // The actual WS handshake still fails because oneshot doesn't do WS,
+        // but the middleware layer must not return 401.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::get("/ws/events?token=qp-secret")
+                    .header("Upgrade", "websocket")
+                    .header("Connection", "Upgrade")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_ne!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
-            "query-param token must be accepted as fallback"
+            "WS upgrade with correct query-param token must pass the middleware"
         );
 
+        // WS upgrade with wrong query-param token → 401.
         let resp = router
             .oneshot(
-                Request::get("/api/loops?token=wrong")
+                Request::get("/ws/events?token=wrong")
+                    .header("Upgrade", "websocket")
+                    .header("Connection", "Upgrade")
                     .body(Body::empty())
                     .unwrap(),
             )

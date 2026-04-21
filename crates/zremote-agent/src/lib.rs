@@ -78,10 +78,12 @@ pub enum Commands {
         /// interface without token enforcement would be an open proxy.
         #[arg(long)]
         allow_remote: bool,
-        /// Enforce bearer-token auth on every `/api/*` and `/ws/*` route
-        /// (except `/health`). Required when `--allow-remote` is passed;
-        /// optional otherwise (the token file is still generated either way,
-        /// so the GUI uses it uniformly).
+        /// Acknowledges that bearer-token auth on every `/api/*` and `/ws/*`
+        /// route (except `/health` and `/api/mode`) is enforced when binding
+        /// to a non-loopback address. REQUIRED with `--allow-remote` — this
+        /// flag is now purely a safety gate (the middleware already enforces
+        /// the token unconditionally). On a loopback bind the flag is a
+        /// no-op; the token is still generated and required.
         #[arg(long)]
         require_admin_token: bool,
     },
@@ -324,9 +326,11 @@ async fn async_main(command: Option<Commands>) {
                 );
                 std::process::exit(2);
             }
-            if let Err(e) =
-                local::run_local(port, &db, &bind, allow_remote, require_admin_token).await
-            {
+            // `require_admin_token` is only validated above — the middleware
+            // enforces the token unconditionally, so the flag no longer flows
+            // into `run_local`.
+            let _ = require_admin_token;
+            if let Err(e) = local::run_local(port, &db, &bind, allow_remote).await {
                 tracing::error!(error = %e, "local mode failed");
                 std::process::exit(1);
             }

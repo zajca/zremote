@@ -19,6 +19,17 @@ pub(crate) fn token_path() -> Option<PathBuf> {
     Some(home.join(".zremote").join("local.token"))
 }
 
+/// Human-readable rendering of `token_path()`, used by the local-mode
+/// bootstrap error panel. Falls back to the literal `~/.zremote/local.token`
+/// when the home directory isn't resolvable.
+#[must_use]
+pub fn token_path_display() -> String {
+    token_path().map_or_else(
+        || "~/.zremote/local.token".to_string(),
+        |p| p.display().to_string(),
+    )
+}
+
 /// Read the agent's local-mode bearer token from `~/.zremote/local.token`.
 ///
 /// Returns `None` when the file is missing or empty. Whitespace and trailing

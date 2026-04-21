@@ -311,7 +311,18 @@ pub(crate) fn build_router(
 
     let router = public_router
         .merge(protected_router)
-        .layer(TraceLayer::new_for_http())
+        // Strip the query string from the tracing span: WS upgrade requests
+        // carry `?token=<bearer>` and must NOT be written to access logs.
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %req.method(),
+                    uri = req.uri().path(),
+                    version = ?req.version(),
+                )
+            }),
+        )
         .layer(axum::middleware::from_fn(request_id_middleware))
         // No CORS layer: the GUI uses reqwest (not a browser) so cross-origin
         // preflight is irrelevant. `CorsLayer::permissive()` previously enabled

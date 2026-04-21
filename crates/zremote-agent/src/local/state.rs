@@ -57,11 +57,6 @@ pub struct LocalAppState {
     /// compares caller-supplied `Authorization: Bearer` tokens against this
     /// with `subtle::ConstantTimeEq`.
     pub local_token: Arc<String>,
-    /// When `--require-admin-token` is passed, WebSocket upgrade requests
-    /// also require the token (via `?token=` query param, since browsers and
-    /// GPUI can't add arbitrary headers to WS handshakes). REST routes are
-    /// gated unconditionally by the middleware; this flag only affects WS.
-    pub require_admin_token: bool,
 }
 
 impl Drop for LocalAppState {
@@ -92,7 +87,6 @@ impl LocalAppState {
         socket_dir: PathBuf,
         agent_instance_id: Uuid,
         local_token: String,
-        require_admin_token: bool,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
@@ -133,13 +127,12 @@ impl LocalAppState {
             launcher_registry: Arc::new(crate::agents::LauncherRegistry::with_builtins()),
             git_refresh_task: Mutex::new(None),
             local_token: Arc::new(local_token),
-            require_admin_token,
         })
     }
 
     /// Test-only constructor: forwards to [`Self::new`] with a fixed dummy
-    /// token and `require_admin_token=false`. Centralised so Phase-6 state
-    /// additions don't require touching every route-level test at once.
+    /// token. Centralised so Phase-6 state additions don't require touching
+    /// every route-level test at once.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_for_test(
@@ -160,7 +153,6 @@ impl LocalAppState {
             socket_dir,
             agent_instance_id,
             "test-local-token".to_string(),
-            false,
         )
     }
 }

@@ -144,10 +144,26 @@ fn run_gui(server: &str, local: bool, port: u16, exit_after: Option<u64>) {
         zremote_gui::extract_base_url(server)
     };
 
+    // Local mode: read the agent's bearer with a short retry. The agent
+    // writes the token BEFORE its /health listener binds, so by the time we
+    // get here the file should already exist. The retry loop is defence in
+    // depth against filesystem races on slow CI / network home dirs.
+    let local_token = if local {
+        (0..3).find_map(|i| {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            zremote_gui::local::read_local_token()
+        })
+    } else {
+        None
+    };
+
     zremote_gui::run(zremote_gui::GuiConfig {
         server_url,
         exit_after,
         is_local: local,
+        local_token,
     });
 }
 

@@ -86,8 +86,16 @@ fn generate_token() -> io::Result<String> {
 
 #[cfg(unix)]
 fn create_private_dir(parent: &std::path::Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     if parent.exists() {
+        // Defense-in-depth: if the parent dir predates this tightening (or
+        // the user relaxed perms by hand), clamp back to 0o700 so the token
+        // file inside isn't world-readable via a loose ancestor.
+        let meta = fs::metadata(parent)?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
         return Ok(());
     }
     fs::DirBuilder::new()
@@ -210,5 +218,25 @@ mod tests {
         assert!(!verify_constant_time("abcDEF", "abcDEFG"));
         assert!(!verify_constant_time("abc", "xyz"));
         assert!(!verify_constant_time("", "nonempty"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tightens_existing_parent_dir_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let parent = dir.path().join("loose-parent");
+        fs::create_dir(&parent).unwrap();
+        // Relax permissions to a world-readable default.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // create_private_dir should clamp the existing dir back to 0o700.
+        create_private_dir(&parent).unwrap();
+
+        let mode = fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "existing loose parent dir must be tightened to 0o700, was 0o{mode:o}"
+        );
     }
 }
