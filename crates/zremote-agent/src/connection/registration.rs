@@ -26,7 +26,8 @@ pub(super) async fn register(
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        token: config.token.clone(),
+        // token is Some when v2 creds are absent (the only path that calls this fn)
+        token: config.token.clone().unwrap_or_default(),
         supports_persistent_sessions: supports_persistence,
     };
 
