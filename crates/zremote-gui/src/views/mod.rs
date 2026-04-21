@@ -1,4 +1,5 @@
 pub mod activity_panel;
+pub mod add_host;
 pub mod cc_widgets;
 pub mod command_palette;
 pub mod components;
@@ -6,6 +7,7 @@ pub mod double_shift;
 pub mod fuzzy;
 pub mod help_modal;
 pub mod key_bindings;
+pub mod login;
 pub mod main_view;
 pub mod search_overlay;
 pub mod session_switcher;

@@ -693,3 +693,43 @@ impl std::error::Error for WorktreeCreateError {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Auth types
+// ---------------------------------------------------------------------------
+
+/// Response from `POST /api/auth/admin-token` and `POST /api/auth/oidc/callback`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionTokenResponse {
+    pub session_token: String,
+    pub expires_at: String,
+}
+
+/// Response from `POST /api/auth/oidc/init`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcInitResponse {
+    pub auth_url: String,
+    pub state: String,
+}
+
+/// Response from `GET /api/auth/oidc/status`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcStatus {
+    pub configured: bool,
+    #[serde(default)]
+    pub issuer: Option<String>,
+}
+
+/// Request body for `POST /api/admin/enroll/create`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateEnrollmentRequest {
+    pub hostname: Option<String>,
+    pub expires_in_secs: Option<u64>,
+}
+
+/// Response from `POST /api/admin/enroll/create`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnrollmentCodeResponse {
+    pub code: String,
+    pub expires_at: String,
+}

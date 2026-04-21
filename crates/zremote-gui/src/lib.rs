@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "2048"]
 // Pre-existing pedantic clippy lints — suppress at crate level for now
 #![allow(
     clippy::unreadable_literal,       // hex color codes in theme.rs
@@ -29,6 +29,7 @@
 #[allow(dead_code)]
 mod app_state;
 mod assets;
+mod auth_state;
 mod icons;
 mod notifications;
 mod persistence;
@@ -46,6 +47,7 @@ use zremote_client::ApiClient;
 use app_state::AppState;
 use assets::Assets;
 use persistence::Persistence;
+use views::login::{LoginEvent, LoginView};
 use views::main_view::MainView;
 
 // Re-export from client for callers that used `zremote_gui::extract_base_url`.
@@ -55,6 +57,76 @@ pub use zremote_client::extract_base_url;
 pub struct GuiConfig {
     pub server_url: String,
     pub exit_after: Option<u64>,
+}
+
+/// Top-level view that switches between `LoginView` (unauthenticated) and
+/// `MainView` (authenticated). Stored as the GPUI window root so swapping
+/// views doesn't require closing and re-opening the window.
+enum RootState {
+    Login(Entity<LoginView>),
+    /// Transition state: login succeeded, MainView will be created on next render
+    /// when `&mut Window` is available.
+    PendingMain,
+    Main(Entity<MainView>),
+}
+
+struct RootView {
+    state: RootState,
+    app_state: Arc<AppState>,
+    focus_handle: FocusHandle,
+}
+
+impl RootView {
+    fn authed(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let main = cx.new(|cx| MainView::new(app_state.clone(), window, cx));
+        Self {
+            state: RootState::Main(main),
+            app_state,
+            focus_handle,
+        }
+    }
+
+    fn login(app_state: Arc<AppState>, server_url: String, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        let login = cx.new(|cx| LoginView::new(app_state.clone(), cx));
+        cx.subscribe(&login, {
+            let server_url = server_url.clone();
+            move |this: &mut Self, _entity, event: &LoginEvent, cx| {
+                let LoginEvent::LoggedIn(entry) = event;
+                auth_state::save(&server_url, entry);
+                // Transition to PendingMain — render() will create MainView with Window.
+                this.state = RootState::PendingMain;
+                cx.notify();
+                tracing::info!("session saved, switching to main view");
+            }
+        })
+        .detach();
+        Self {
+            state: RootState::Login(login),
+            app_state,
+            focus_handle,
+        }
+    }
+}
+
+impl Render for RootView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Resolve PendingMain: we now have &mut Window so we can create MainView.
+        if matches!(self.state, RootState::PendingMain) {
+            let app_state = self.app_state.clone();
+            let main = cx.new(|cx| MainView::new(app_state, window, cx));
+            self.state = RootState::Main(main);
+        }
+        match &self.state {
+            RootState::Login(login) => login.clone().into_any_element(),
+            RootState::PendingMain => {
+                // Should not reach here after the block above, but provide a fallback.
+                div().into_any_element()
+            }
+            RootState::Main(main) => main.clone().into_any_element(),
+        }
+    }
 }
 
 /// Launch the GPUI application. This function blocks until the window is closed.
@@ -113,6 +185,7 @@ pub fn run(config: GuiConfig) {
     });
 
     let exit_after = config.exit_after;
+    let has_session = auth_state::load(&server_url).is_some();
 
     // Launch GPUI application on main thread
     Application::new()
@@ -120,9 +193,16 @@ pub fn run(config: GuiConfig) {
         .run(move |cx: &mut App| {
             let app_state_for_quit = app_state.clone();
             let app_state_clone = app_state.clone();
+            let server_url_for_login = server_url.clone();
             cx.open_window(
                 window_options(restored_width, restored_height),
-                move |window, cx| cx.new(|cx| MainView::new(app_state_clone, window, cx)),
+                move |window, cx| {
+                    if has_session {
+                        cx.new(|cx| RootView::authed(app_state_clone, window, cx))
+                    } else {
+                        cx.new(|cx| RootView::login(app_state_clone, server_url_for_login, cx))
+                    }
+                },
             )
             .expect("failed to open window");
 

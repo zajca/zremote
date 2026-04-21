@@ -7,13 +7,13 @@ use crate::terminal::TerminalSession;
 use crate::types::{
     ActionsResponse, AddProjectRequest, AgentKindInfo, AgentProfile, AgenticLoop,
     ClaudeSessionInfo, ClaudeTask, ConfigValue, CreateAgentProfileRequest, CreateClaudeTaskRequest,
-    CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest, DirectoryEntry,
-    ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase, ListClaudeTasksFilter,
-    ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project, ProjectSettings,
-    ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest, Session,
-    SessionPreviewsResponse, SetConfigRequest, StartAgentRequest, StartAgentResponse,
-    UpdateAgentProfileRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
-    UpdateSessionRequest,
+    CreateEnrollmentRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
+    DirectoryEntry, EnrollmentCodeResponse, ExtractRequest, ExtractedMemory, Host, IndexRequest,
+    KnowledgeBase, ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, OidcInitResponse,
+    OidcStatus, PreviewSnapshot, Project, ProjectSettings, ResumeClaudeTaskRequest, SearchRequest,
+    SearchResult, ServiceControlRequest, Session, SessionPreviewsResponse, SessionTokenResponse,
+    SetConfigRequest, StartAgentRequest, StartAgentResponse, UpdateAgentProfileRequest,
+    UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest, UpdateSessionRequest,
 };
 
 /// Percent-encode a single URL path segment (RFC 3986 unreserved characters preserved).
@@ -1604,6 +1604,98 @@ impl ApiClient {
                 encode_path(host_id)
             ))
             .query(&[("project_path", project_path)])
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// List all hosts with an explicit session Bearer token.
+    pub async fn list_hosts_authed(&self, session_token: &str) -> Result<Vec<Host>, ApiError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/hosts", self.base_url))
+            .header("Authorization", format!("Bearer {session_token}"))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Exchange the admin token for a session token.
+    pub async fn login_admin_token(&self, token: String) -> Result<SessionTokenResponse, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/auth/admin-token", self.base_url))
+            .json(&serde_json::json!({ "token": token }))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Start an OIDC login flow. Returns the authorization URL to open in browser.
+    pub async fn login_oidc_init(&self, redirect_uri: &str) -> Result<OidcInitResponse, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/auth/oidc/init", self.base_url))
+            .json(&serde_json::json!({ "redirect_uri": redirect_uri }))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Complete an OIDC login flow with the code and state from the callback.
+    pub async fn login_oidc_callback(
+        &self,
+        code: String,
+        state: String,
+    ) -> Result<SessionTokenResponse, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/auth/oidc/callback", self.base_url))
+            .json(&serde_json::json!({ "code": code, "state": state }))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Log out the current session.
+    pub async fn logout(&self, session_token: &str) -> Result<(), ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/auth/logout", self.base_url))
+            .header("Authorization", format!("Bearer {session_token}"))
+            .send()
+            .await?;
+        self.check_response(resp).await?;
+        Ok(())
+    }
+
+    /// Check whether the server has OIDC configured (public endpoint, no auth required).
+    pub async fn oidc_status(&self) -> Result<OidcStatus, ApiError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/auth/oidc/status", self.base_url))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Create an enrollment code for a new host (requires Bearer token).
+    pub async fn admin_enroll_create(
+        &self,
+        session_token: &str,
+        req: &CreateEnrollmentRequest,
+    ) -> Result<EnrollmentCodeResponse, ApiError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/admin/enroll/create", self.base_url))
+            .header("Authorization", format!("Bearer {session_token}"))
+            .json(req)
             .send()
             .await?;
         let resp = self.check_response(resp).await?;
