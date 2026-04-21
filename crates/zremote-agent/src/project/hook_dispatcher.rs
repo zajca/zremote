@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use zremote_core::error::AppError;
 use zremote_protocol::{
@@ -44,15 +45,19 @@ pub struct HookResolution {
 ///
 /// Resolution order:
 /// 1. `settings.hooks.worktree.<slot>` references a named action → look it up.
-///    Missing action name logs a warning and returns `None`.
+///    Missing action name returns `Err(AppError::BadRequest)` so the failure
+///    surfaces at the hook trigger (RFC 008 Phase 3).
 /// 2. Legacy `settings.worktree.<legacy_field>` is set → synthesise an
 ///    ephemeral `ProjectAction` wrapping the raw command string.
-/// 3. Neither → `None`.
-#[must_use]
+/// 3. Neither → `Ok(None)`.
+///
+/// # Errors
+/// Returns `AppError::BadRequest` when a configured hook references an action
+/// name that does not exist in `settings.actions`.
 pub fn resolve_worktree_hook(
     settings: &ProjectSettings,
     slot: WorktreeSlot,
-) -> Option<HookResolution> {
+) -> Result<Option<HookResolution>, AppError> {
     // New-style hook ref: look up named action.
     if let Some(hook_ref) = settings
         .hooks
@@ -66,27 +71,28 @@ pub fn resolve_worktree_hook(
         })
     {
         return match find_action_by_name(settings, &hook_ref.action) {
-            Some(action) => Some(HookResolution {
+            Some(action) => Ok(Some(HookResolution {
                 action: action.clone(),
                 inputs: hook_ref.inputs.clone(),
-            }),
-            None => {
-                tracing::warn!(
-                    slot = ?slot,
-                    action = %hook_ref.action,
-                    "hook references missing action"
-                );
-                None
-            }
+            })),
+            None => Err(AppError::BadRequest(format!(
+                "hook {slot:?} references missing action '{}'",
+                hook_ref.action
+            ))),
         };
     }
 
     // Legacy fallback: synthesise ephemeral action from raw command string.
-    let legacy_command = legacy_command_for(settings.worktree.as_ref()?, slot)?;
-    Some(HookResolution {
+    let Some(wt) = settings.worktree.as_ref() else {
+        return Ok(None);
+    };
+    let Some(legacy_command) = legacy_command_for(wt, slot) else {
+        return Ok(None);
+    };
+    Ok(Some(HookResolution {
         action: synth_legacy_action(slot, legacy_command),
         inputs: HashMap::new(),
-    })
+    }))
 }
 
 fn legacy_command_for(wt: &WorktreeSettings, slot: WorktreeSlot) -> Option<&str> {
@@ -132,11 +138,8 @@ fn apply_resolution_inputs(
 /// exit and updating state on success.
 ///
 /// # Errors
-/// Propagates any error from `spawn_action_pty`.
-///
-/// # Panics
-/// Panics if `slot` is not `Create` or `Delete` — the captured entry point
-/// (`run_worktree_hook`) is for `PostCreate`/`PreDelete`.
+/// Propagates any error from `resolve_worktree_hook` (missing action) or
+/// `spawn_action_pty`.
 pub async fn run_worktree_override(
     state: &Arc<LocalAppState>,
     host_id: &str,
@@ -145,11 +148,11 @@ pub async fn run_worktree_override(
     mut ctx: ActionRunContext,
     session_name: &str,
 ) -> Result<Option<SpawnedSession>, AppError> {
-    assert!(
+    debug_assert!(
         matches!(slot, WorktreeSlot::Create | WorktreeSlot::Delete),
         "run_worktree_override only handles Create/Delete",
     );
-    let Some(resolution) = resolve_worktree_hook(settings, slot) else {
+    let Some(resolution) = resolve_worktree_hook(settings, slot)? else {
         return Ok(None);
     };
     apply_resolution_inputs(&mut ctx, &resolution.inputs);
@@ -169,24 +172,32 @@ pub async fn run_worktree_override(
 
 /// Run a captured hook (`PostCreate` / `PreDelete`).
 ///
-/// Returns `None` when no hook is configured for the slot. Hook failures are
-/// captured in `HookResultInfo.success` — they do not surface as errors.
+/// Returns `Ok(None)` when no hook is configured for the slot. Hook command
+/// failures (non-zero exit, timeout) are captured in `HookResultInfo.success`
+/// rather than returned as errors. `timeout` bounds how long the captured
+/// command may run before it is killed — callers that block a user-facing
+/// request (e.g. `pre_delete` in the delete handler) must pass a finite
+/// duration so the HTTP handler cannot stall indefinitely on a stuck hook.
 ///
-/// # Panics
-/// Panics if `slot` is not `PostCreate` or `PreDelete`.
+/// # Errors
+/// Returns `Err` only when resolution itself fails — i.e. a configured
+/// `HookRef` names an action that does not exist in `settings.actions`.
 pub async fn run_worktree_hook(
     settings: &ProjectSettings,
     slot: WorktreeSlot,
     mut ctx: ActionRunContext,
-) -> Option<HookResultInfo> {
-    assert!(
+    timeout: Option<Duration>,
+) -> Result<Option<HookResultInfo>, AppError> {
+    debug_assert!(
         matches!(slot, WorktreeSlot::PostCreate | WorktreeSlot::PreDelete),
         "run_worktree_hook only handles PostCreate/PreDelete",
     );
-    let resolution = resolve_worktree_hook(settings, slot)?;
+    let Some(resolution) = resolve_worktree_hook(settings, slot)? else {
+        return Ok(None);
+    };
     apply_resolution_inputs(&mut ctx, &resolution.inputs);
-    let result = run_action_captured(&resolution.action, &settings.env, &ctx, None).await;
-    Some(HookResultInfo {
+    let result = run_action_captured(&resolution.action, &settings.env, &ctx, timeout).await;
+    Ok(Some(HookResultInfo {
         success: result.success,
         output: if result.output.is_empty() {
             None
@@ -195,7 +206,7 @@ pub async fn run_worktree_hook(
         },
         #[allow(clippy::cast_possible_truncation)]
         duration_ms: result.duration.as_millis() as u64,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -237,13 +248,15 @@ mod tests {
             }),
         });
 
-        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::Create).unwrap();
+        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::Create)
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.action.name, "wt-add");
         assert_eq!(resolved.action.command, "scripts/add.sh {{branch}}");
     }
 
     #[test]
-    fn missing_action_name_returns_none() {
+    fn missing_action_name_returns_error() {
         let settings = ProjectSettings {
             hooks: Some(ProjectHooks {
                 worktree: Some(WorktreeHooks {
@@ -257,7 +270,17 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(resolve_worktree_hook(&settings, WorktreeSlot::Create).is_none());
+        let err = resolve_worktree_hook(&settings, WorktreeSlot::Create)
+            .expect_err("missing action should error");
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(
+                    msg.contains("does-not-exist"),
+                    "error message should name the missing action: {msg}"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -270,7 +293,9 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::PreDelete).unwrap();
+        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::PreDelete)
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.action.command, "rm -rf stuff");
         assert!(resolved.action.name.starts_with("__legacy_"));
         assert!(resolved.action.scopes.contains(&ActionScope::Worktree));
@@ -281,10 +306,26 @@ mod tests {
     #[test]
     fn no_hooks_no_legacy_returns_none() {
         let settings = ProjectSettings::default();
-        assert!(resolve_worktree_hook(&settings, WorktreeSlot::Create).is_none());
-        assert!(resolve_worktree_hook(&settings, WorktreeSlot::Delete).is_none());
-        assert!(resolve_worktree_hook(&settings, WorktreeSlot::PostCreate).is_none());
-        assert!(resolve_worktree_hook(&settings, WorktreeSlot::PreDelete).is_none());
+        assert!(
+            resolve_worktree_hook(&settings, WorktreeSlot::Create)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_worktree_hook(&settings, WorktreeSlot::Delete)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_worktree_hook(&settings, WorktreeSlot::PostCreate)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_worktree_hook(&settings, WorktreeSlot::PreDelete)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -303,7 +344,9 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::PostCreate).unwrap();
+        let resolved = resolve_worktree_hook(&settings, WorktreeSlot::PostCreate)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             resolved.inputs.get("tag").map(String::as_str),
             Some("v1.0.0")
@@ -323,34 +366,17 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            resolve_worktree_hook(&settings, WorktreeSlot::Create)
+        let cmd_for = |slot| {
+            resolve_worktree_hook(&settings, slot)
+                .unwrap()
                 .unwrap()
                 .action
-                .command,
-            "c"
-        );
-        assert_eq!(
-            resolve_worktree_hook(&settings, WorktreeSlot::Delete)
-                .unwrap()
-                .action
-                .command,
-            "d"
-        );
-        assert_eq!(
-            resolve_worktree_hook(&settings, WorktreeSlot::PostCreate)
-                .unwrap()
-                .action
-                .command,
-            "pc"
-        );
-        assert_eq!(
-            resolve_worktree_hook(&settings, WorktreeSlot::PreDelete)
-                .unwrap()
-                .action
-                .command,
-            "pd"
-        );
+                .command
+        };
+        assert_eq!(cmd_for(WorktreeSlot::Create), "c");
+        assert_eq!(cmd_for(WorktreeSlot::Delete), "d");
+        assert_eq!(cmd_for(WorktreeSlot::PostCreate), "pc");
+        assert_eq!(cmd_for(WorktreeSlot::PreDelete), "pd");
     }
 
     #[tokio::test]
@@ -381,8 +407,9 @@ mod tests {
             inputs: HashMap::new(),
         };
 
-        let info = run_worktree_hook(&settings, WorktreeSlot::PostCreate, ctx)
+        let info = run_worktree_hook(&settings, WorktreeSlot::PostCreate, ctx, None)
             .await
+            .expect("hook resolves")
             .expect("hook runs");
         assert!(info.success, "output: {:?}", info.output);
 
@@ -401,9 +428,75 @@ mod tests {
             inputs: HashMap::new(),
         };
         assert!(
-            run_worktree_hook(&settings, WorktreeSlot::PostCreate, ctx)
+            run_worktree_hook(&settings, WorktreeSlot::PostCreate, ctx, None)
                 .await
+                .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn captured_hook_missing_action_propagates_error() {
+        let settings = ProjectSettings {
+            hooks: Some(ProjectHooks {
+                worktree: Some(WorktreeHooks {
+                    post_create: Some(HookRef {
+                        action: "no-such-action".to_string(),
+                        inputs: HashMap::new(),
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let ctx = ActionRunContext {
+            project_path: "/tmp".to_string(),
+            worktree_path: None,
+            branch: None,
+            worktree_name: None,
+            inputs: HashMap::new(),
+        };
+        let err = run_worktree_hook(&settings, WorktreeSlot::PostCreate, ctx, None)
+            .await
+            .expect_err("missing action should surface as error");
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("no-such-action")),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_hook_respects_caller_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = ProjectSettings {
+            actions: vec![action("slow", "sleep 60")],
+            hooks: Some(ProjectHooks {
+                worktree: Some(WorktreeHooks {
+                    pre_delete: Some(HookRef {
+                        action: "slow".to_string(),
+                        inputs: HashMap::new(),
+                    }),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let ctx = ActionRunContext {
+            project_path: dir.path().to_string_lossy().to_string(),
+            worktree_path: None,
+            branch: None,
+            worktree_name: None,
+            inputs: HashMap::new(),
+        };
+        let info = run_worktree_hook(
+            &settings,
+            WorktreeSlot::PreDelete,
+            ctx,
+            Some(Duration::from_millis(200)),
+        )
+        .await
+        .expect("resolves")
+        .expect("runs");
+        assert!(!info.success, "timed-out hook must report failure");
     }
 }

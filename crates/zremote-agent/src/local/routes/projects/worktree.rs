@@ -29,6 +29,13 @@ use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
 /// the request so the client isn't left hanging forever.
 const WORKTREE_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Maximum wall time for the `pre_delete` captured hook. The delete handler
+/// blocks on this hook before touching git, so an unbounded run would pin the
+/// HTTP request indefinitely (a stuck teardown script would hang the GUI).
+/// 2 minutes matches typical Docker/compose teardowns while still guaranteeing
+/// forward progress.
+const PRE_DELETE_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Reject user-controlled git inputs that start with `-`. Without this guard
 /// a caller could smuggle additional git options through the worktree
 /// endpoint (CWE-88) — for example, passing `--upload-pack=evil` as a branch
@@ -150,6 +157,25 @@ pub async fn create_worktree(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("project {project_id} not found")))?;
 
+    // Validate user-controlled git inputs *before* any path branches. Without
+    // this guard, a caller with a configured `hooks.worktree.create` could
+    // smuggle leading-dash values through `{{branch}}` into the override
+    // action's command line (CWE-88). Enforcing at the entry point means the
+    // check cannot be bypassed by any downstream code path.
+    if let Err(err) = reject_leading_dash("branch", &body.branch) {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref p) = body.path
+        && let Err(err) = reject_leading_dash("path", p)
+    {
+        return Ok(worktree_error_response(err));
+    }
+    if let Some(ref b) = body.base_ref
+        && let Err(err) = reject_leading_dash("base_ref", b)
+    {
+        return Ok(worktree_error_response(err));
+    }
+
     // Read settings once up front — covers both the create override resolution
     // and the post_create hook that fires after a successful default flow.
     let settings = read_project_settings(&project_path).await;
@@ -262,14 +288,25 @@ pub async fn create_worktree(
                                             worktree_name: wt_name,
                                             inputs: std::collections::HashMap::new(),
                                         };
-                                        if let Some(hr) = run_worktree_hook(
+                                        match run_worktree_hook(
                                             &settings_for_task,
                                             WorktreeSlot::PostCreate,
                                             ctx,
+                                            None,
                                         )
                                         .await
                                         {
-                                            log_hook_result("post_create", &wt_path, &hr);
+                                            Ok(Some(hr)) => {
+                                                log_hook_result("post_create", &wt_path, &hr);
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    worktree = %wt_path,
+                                                    error = %e,
+                                                    "post_create hook resolution failed"
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -302,29 +339,13 @@ pub async fn create_worktree(
 
     // Default flow: existing GitInspector behavior, wrapped in a 60s timeout
     // and bracketed by progress events so the GUI can show a pending spinner
-    // for large-repo creations.
+    // for large-repo creations. Leading-dash inputs were already rejected at
+    // the top of the handler so the blocking task can trust these values.
     let branch = body.branch.clone();
     let wt_path = body.path.clone();
     let new_branch = body.new_branch.unwrap_or(false);
     let base_ref = body.base_ref.clone();
     let repo_path = project_path.clone();
-
-    // Validate user-controlled git inputs at the API boundary. Leading-dash
-    // values would otherwise be interpreted as additional git options
-    // (CWE-88). Rejected inputs never reach the blocking task.
-    if let Err(err) = reject_leading_dash("branch", &branch) {
-        return Ok(worktree_error_response(err));
-    }
-    if let Some(ref p) = wt_path
-        && let Err(err) = reject_leading_dash("path", p)
-    {
-        return Ok(worktree_error_response(err));
-    }
-    if let Some(ref b) = base_ref
-        && let Err(err) = reject_leading_dash("base_ref", b)
-    {
-        return Ok(worktree_error_response(err));
-    }
 
     let job_id = Uuid::new_v4().to_string();
     emit_progress(
@@ -451,6 +472,8 @@ pub async fn create_worktree(
         .map_err(AppError::Database)?;
 
     // Run post_create captured hook (new or legacy on_create) if configured.
+    // Resolution errors (e.g. hook references a missing action) surface as
+    // 400s so misconfiguration is visible immediately, not silently dropped.
     let hook_result = if let Some(ref sett) = settings {
         let ctx = ActionRunContext {
             project_path: project_path.clone(),
@@ -459,7 +482,7 @@ pub async fn create_worktree(
             worktree_name: Some(wt_name.clone()),
             inputs: std::collections::HashMap::new(),
         };
-        run_worktree_hook(sett, WorktreeSlot::PostCreate, ctx).await
+        run_worktree_hook(sett, WorktreeSlot::PostCreate, ctx, None).await?
     } else {
         None
     };
@@ -553,8 +576,12 @@ pub async fn delete_worktree(
         .and_then(|n| n.to_str())
         .map(String::from);
 
-    // Always run pre_delete hook first (if any). Hook failure is logged but
-    // does not abort the delete — the caller asked for deletion.
+    // Always run pre_delete hook first (if any). A stuck teardown would
+    // otherwise block the delete request indefinitely, so we impose a hard
+    // wall-time ceiling (PRE_DELETE_HOOK_TIMEOUT). Command failure and timeout
+    // are logged but do not abort the delete — the caller asked for deletion.
+    // Resolution failure (missing action) *does* abort with 400 so the
+    // misconfiguration surfaces.
     if let Some(ref sett) = settings {
         let ctx = ActionRunContext {
             project_path: project_path.clone(),
@@ -563,7 +590,14 @@ pub async fn delete_worktree(
             worktree_name: wt_name.clone(),
             inputs: std::collections::HashMap::new(),
         };
-        if let Some(hr) = run_worktree_hook(sett, WorktreeSlot::PreDelete, ctx).await {
+        if let Some(hr) = run_worktree_hook(
+            sett,
+            WorktreeSlot::PreDelete,
+            ctx,
+            Some(PRE_DELETE_HOOK_TIMEOUT),
+        )
+        .await?
+        {
             log_hook_result("pre_delete", &worktree_path, &hr);
         }
     }
