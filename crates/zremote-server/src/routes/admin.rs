@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -236,8 +236,19 @@ pub async fn rotate_token(
                 invalidated,
                 "admin token rotated"
             );
+            // Response body carries the plaintext token exactly once.
+            // `no-store` prevents any intermediate cache (browser, proxy)
+            // from retaining it. `Pragma: no-cache` is belt-and-braces for
+            // HTTP/1.0 caches that don't honour `Cache-Control`.
             (
                 StatusCode::OK,
+                [
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-store, max-age=0"),
+                    ),
+                    (header::PRAGMA, HeaderValue::from_static("no-cache")),
+                ],
                 Json(RotateTokenResponse {
                     admin_token: plaintext,
                     sessions_invalidated: invalidated,
@@ -640,6 +651,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The plaintext token in the rotate-token response body must never
+    /// be cached. A caching proxy or browser-side storage that honoured
+    /// the default `Cache-Control` heuristics could retain the credential
+    /// long after the caller has persisted it to the keyring.
+    #[tokio::test]
+    async fn rotate_token_response_is_not_cacheable() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "POST",
+                "/api/admin/rotate-token",
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .expect("Cache-Control must be set on rotate-token success")
+            .to_str()
+            .unwrap();
+        assert!(
+            cache.contains("no-store"),
+            "rotate-token Cache-Control must include no-store, got {cache:?}"
+        );
+        let pragma = response
+            .headers()
+            .get(header::PRAGMA)
+            .expect("Pragma must be set on rotate-token success")
+            .to_str()
+            .unwrap();
+        assert_eq!(pragma, "no-cache");
     }
 
     /// The returned token_hash from the DB must equal the hash of the
