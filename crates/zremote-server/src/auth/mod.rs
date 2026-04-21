@@ -17,11 +17,11 @@ pub mod ws_ticket;
 // Phase 3 replaces it.
 pub use legacy::{hash_token, verify_token};
 
-// Surfaced at module level so Phase 2 (auth_mw, routes::auth) can import them
-// via `crate::auth::AuthContext` etc. Held behind `allow` because nothing in
-// Phase 1 consumes them yet — clippy -D warnings would otherwise trip on the
-// unused public re-export.
-#[allow(unused_imports)]
-pub use bearer::{AuthContext, AuthErr};
-#[allow(unused_imports)]
+// Re-exports for convenient imports from `auth_mw`, `routes::auth`, and
+// tests. Phase 2 consumers now reference them directly via these paths.
+// `AuthErr` stays qualified through `bearer::AuthErr` because only the
+// middleware touches the error type and keeping it scoped makes the
+// oracle-collapse path locally obvious. If a future consumer needs
+// `AuthErr` at crate-auth level, add it here with a concrete caller.
+pub use bearer::AuthContext;
 pub use ws_ticket::{TicketErr, TicketStore};

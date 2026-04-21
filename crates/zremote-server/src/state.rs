@@ -187,6 +187,8 @@ pub struct AppState {
     pub settings_save_requests: Arc<DashMap<uuid::Uuid, PendingRequest<SettingsSaveResponse>>>,
     pub action_inputs_requests:
         Arc<DashMap<uuid::Uuid, PendingRequest<ActionInputsResolveResponse>>>,
+    /// In-memory single-use WS upgrade tickets (RFC auth-overhaul §4).
+    pub ticket_store: crate::auth::TicketStore,
 }
 
 impl AppState {
@@ -448,6 +450,7 @@ mod tests {
             settings_get_requests: Arc::new(DashMap::new()),
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
+            ticket_store: crate::auth::ws_ticket::TicketStore::new(),
         }
     }
 

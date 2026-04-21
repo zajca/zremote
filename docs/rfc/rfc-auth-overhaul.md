@@ -102,9 +102,7 @@ Single owner. Two methods, both produce the same opaque server-side session toke
 
 **Method A — Admin token (always available, the bootstrap path):**
 
-- On first server start, if `admin_config` is empty, generate 32 random bytes (`OsRng`), write base64url to:
-  - `stdout` once with a clear banner
-  - `logs/admin-token.txt` (mode 0600, dir 0700)
+- On first server start, if `admin_config` is empty, generate 32 random bytes (`OsRng`) and base64url-encode. Print the plaintext to **stderr** inside a highly visible banner (bold + heavy-bar framing when stderr is a TTY, plain ASCII otherwise) and emit a single `tracing::info!` line **without the token** so log consumers see the bootstrap event. Do **not** write the plaintext to disk — `logs/` is a scraped directory and persisting secrets there regresses the threat model. A non-interactive bootstrap path is planned for Phase 5 (`zremote admin set-token --from-stdin`); recovery if the banner is missed is `zremote admin rotate-token` also in Phase 5.
 - Store SHA-256 hash in `admin_config.token_hash`.
 - GUI's setup screen accepts the token, exchanges via `POST /api/auth/admin-token { token }` → `{ session_token, expires_at }`.
 - GUI persists `session_token` in OS keyring (`keyring` crate; fallback `~/.config/zremote/credentials.age` with passphrase on headless Linux).
