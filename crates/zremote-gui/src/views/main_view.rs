@@ -1199,17 +1199,59 @@ impl MainView {
                 return;
             }
             CommandPaletteEvent::ToggleProjectPin { project_id, pinned } => {
+                let ctx =
+                    self.resolve_toast_context(None, None, None, Some(project_id), None, None, cx);
                 let api = self.app_state.api.clone();
-                let project_id = project_id.clone();
+                let handle = self.app_state.tokio_handle.clone();
+                let pid = project_id.clone();
                 let pinned = *pinned;
-                self.app_state.tokio_handle.spawn(async move {
-                    let req = zremote_client::UpdateProjectRequest {
-                        pinned: Some(pinned),
-                    };
-                    if let Err(e) = api.update_project(&project_id, &req).await {
-                        tracing::error!("Failed to toggle project pin: {e}");
-                    }
-                });
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let result = handle
+                        .spawn(async move {
+                            let req = zremote_client::UpdateProjectRequest {
+                                pinned: Some(pinned),
+                            };
+                            api.update_project(&pid, &req).await
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| match result {
+                        Ok(Ok(project)) => {
+                            let msg = if pinned {
+                                format!("Pinned {}", project.name)
+                            } else {
+                                format!("Unpinned {}", project.name)
+                            };
+                            this.show_toast(
+                                &msg,
+                                ToastLevel::Success,
+                                Some(Icon::Pin),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "toggle_project_pin failed");
+                            this.show_toast(
+                                "Failed to toggle project pin",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!(error = %join_err, "toggle_project_pin task join failed");
+                            this.show_toast(
+                                "Failed to toggle project pin",
+                                ToastLevel::Error,
+                                Some(Icon::AlertTriangle),
+                                ctx.clone(),
+                                cx,
+                            );
+                        }
+                    });
+                })
+                .detach();
             }
             CommandPaletteEvent::AddProject { host_id, path } => {
                 let ctx = self.resolve_toast_context(
