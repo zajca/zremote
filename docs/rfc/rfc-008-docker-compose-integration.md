@@ -109,6 +109,61 @@ This subsection is the main answer to: "what happens when a project is a git wor
 
    Scanner notices the tree is gone and triggers the existing project-delete path. Before deletion we fire-and-forget `docker compose down` for that project row, if any services are running, to avoid orphan containers. Best-effort only — user is not blocked on shutdown.
 
+9. **Split stacks: main runs shared services, worktree runs app** (opt-in cross-stack references).
+
+   Real workflow that motivated this subsection: the main repo's compose defines `postgres`, `redis`, `mailhog` and the app; a worktree-creation hook trims the compose file to keep only the app service(s) and declares `external: true` on the shared network / named volumes so the worktree's app talks to the main repo's database without running a second copy. Isolation (decision #1) ensures stacks are independent processes, but the *user* must be able to reference the main stack's network and volumes from within the worktree's compose — which means they need the main stack's effective project name.
+
+   Because we mint `COMPOSE_PROJECT_NAME` deterministically (`zremote-<hash(parent.id)>`), the name is stable but not obvious. We expose it to every compose command run under a worktree via environment variables, so user compose files can reference them with the usual `${VAR}` interpolation:
+
+   ```
+   ZREMOTE_PARENT_PROJECT_NAME  = zremote-<hash(parent.id)>   # empty if no parent
+   ZREMOTE_PARENT_PROJECT_PATH  = absolute filesystem path    # empty if no parent
+   ZREMOTE_PROJECT_NAME         = zremote-<hash(self.id)>     # always set
+   ZREMOTE_PROJECT_PATH         = absolute filesystem path    # always set
+   ```
+
+   Example worktree `compose.yml`:
+
+   ```yaml
+   services:
+     app:
+       image: my-app:dev
+       networks: [ shared ]
+       volumes:
+         - appcode:/src
+         - pgdata:/var/lib/postgresql/data:ro  # read-only view of parent's data
+   networks:
+     shared:
+       name: ${ZREMOTE_PARENT_PROJECT_NAME}_default
+       external: true
+   volumes:
+     pgdata:
+       name: ${ZREMOTE_PARENT_PROJECT_NAME}_pgdata
+       external: true
+     appcode:
+   ```
+
+   Worktree's init hook (user-provided, run when the worktree is first created) is free to write this file. ZRemote does not auto-generate it.
+
+   **Startup ordering**: If the worktree's compose references external networks/volumes matching `${ZREMOTE_PARENT_PROJECT_NAME}_*`, the parent's stack must be up before the worktree's. We enforce this opportunistically:
+
+   - On `Up` for a worktree we run `docker compose config --format json` first and inspect `networks` / `volumes` for `external: true` entries whose `name` starts with `${ZREMOTE_PARENT_PROJECT_NAME}`. If any are found, we check the parent stack's status via `docker compose ls` (already on the DockerService).
+   - If the parent is *not* running, the `ComposeActionResult` returned carries a structured `missing_dependency: Some(ComposeDependency { parent_project_id, missing_resources: Vec<String> })` field. The GUI offers a one-click "Start parent stack first".
+   - No auto-start. The user always confirms (explicit is safer and matches the rest of the action UX).
+
+   **Shutdown ordering**: `Down` on a parent whose children are running will fail at the network-delete step with "network has active endpoints". Before executing `down` on a parent project, we enumerate child projects (same `host_id`, `parent_project_id == this.id`) and query their stack status. If any child has running containers, we return `ComposeActionResult { success: false, stderr: "child stack running: <worktree name>" }` without executing the command. GUI offers "Stop child stacks too".
+
+   **Detection heuristic (capabilities column)**: When scanning a worktree's compose we record one boolean on `project_compose_files` per row:
+
+   ```sql
+   -- 021_compose_files.sql (revised)
+   references_parent INTEGER NOT NULL DEFAULT 0
+   ```
+
+   Set to 1 when `docker compose config` shows any `external: true` network/volume whose `name` starts with the parent's effective project prefix. Cached at compose-file-refresh time (`POST /compose/refresh`), re-computed on `Up`. Used by the Stacks view to render a "depends on parent" badge and by the pre-action checks above.
+
+   **Stacks overview impact**: `ComposeStackSummary` gains `depends_on: Option<String>` (parent project id when `references_parent` is true for any of the project's compose files). The Stacks view groups parent + dependent worktrees visually so the topology is visible at a glance.
+
 ### Impact on data model
 
 Inherit mode is a property of the *project row*, not of the compose file. New migration:
@@ -159,6 +214,17 @@ fn compose_project_name(project: &ProjectRow) -> String {
 
 `build_argv` always adds `--project-directory <project_path>` so relative paths in inherited compose files resolve against the worktree, not the parent.
 
+`DockerService::run_action` and the log/event streamers inject the following environment variables into every `docker compose` invocation (merged on top of process env, never logged at info level):
+
+```
+ZREMOTE_PROJECT_NAME           = ctx.project_name
+ZREMOTE_PROJECT_PATH           = ctx.project_path.display()
+ZREMOTE_PARENT_PROJECT_NAME    = parent_ctx.project_name     (only if project has parent)
+ZREMOTE_PARENT_PROJECT_PATH    = parent_ctx.project_path     (only if project has parent)
+```
+
+User compose files can then reference `${ZREMOTE_PARENT_PROJECT_NAME}_default` to attach to the parent's network, etc. (see Worktree Handling decision #9).
+
 ### Impact on GUI
 
 - Each worktree's Compose tab shows a small header pill: "Inherited from parent" (with a link to the parent's Compose tab) or "Own compose files".
@@ -202,6 +268,7 @@ CREATE TABLE IF NOT EXISTS project_compose_files (
     relative_path TEXT NOT NULL,    -- e.g. "compose.yml", "deploy/compose.prod.yml"
     is_base INTEGER NOT NULL,       -- 1 for canonical, 0 for overrides
     is_enabled INTEGER NOT NULL DEFAULT 1,
+    references_parent INTEGER NOT NULL DEFAULT 0, -- set when `external: true` refs match parent's zremote-<hash> prefix
     discovered_at TEXT NOT NULL,
     UNIQUE(project_id, relative_path)
 );
@@ -275,6 +342,8 @@ pub struct ComposeStackSummary {
     pub is_worktree: bool,
     pub service_count: usize,
     pub running_count: usize,
+    #[serde(default)]
+    pub depends_on: Option<String>,         // parent project id if references_parent set
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -298,6 +367,16 @@ pub struct ComposeActionResult {
     pub stdout: String,                 // captured tail (last 64 KB)
     pub stderr: String,
     pub exit_code: i32,
+    #[serde(default)]
+    pub missing_dependency: Option<ComposeDependency>, // parent not running / resources absent
+    #[serde(default)]
+    pub blocked_by_children: Vec<String>,               // project ids of child stacks running
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeDependency {
+    pub parent_project_id: String,
+    pub missing_resources: Vec<String>, // "network zremote-abc123_default", etc.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,6 +503,7 @@ REST endpoints:
 | PATCH | `/api/projects/:project_id/compose/files/:file_id` | `files::patch` | `ComposeFileInfo` |
 | PATCH | `/api/projects/:project_id/compose/inherit` | `inherit::patch` | `ComposeProject` — body `{ inherit: bool }`; 400 if project has no parent |
 | POST | `/api/projects/:project_id/compose/actions` | `actions::post` | `ComposeActionResult` |
+| POST | `/api/projects/:project_id/compose/refresh` | `refresh::post` | `ComposeProject` — runs `docker compose config`, recomputes `references_parent`, caches normalized service list |
 | GET | `/api/hosts/:host_id/compose/stacks` | `stacks::list` | `Vec<ComposeStackSummary>` — cross-worktree overview |
 
 `actions::post` body = `ComposeActionRequest` minus `project_id` (taken from path).
@@ -524,6 +604,7 @@ Tests:
 - `ComposeContext::build` — inherit=false uses own absolute paths; inherit=true uses parent absolute paths with worktree `project_directory`; failure to resolve parent propagates error.
 - Integration test behind `#[ignore]` that runs real `docker compose up -d` against a tiny nginx compose fixture (CI opt-in).
 - Integration test behind `#[ignore]`: spin up *two* stacks (one from a fake "main repo" temp dir, one from a fake "worktree" temp dir inheriting it) and assert both run simultaneously without container-name or network collisions.
+- Integration test behind `#[ignore]` for **split stacks**: parent stack declares a named network + named volume; worktree stack references them via `${ZREMOTE_PARENT_PROJECT_NAME}_*` as `external: true`. Assert: (a) worktree `Up` fails with `missing_dependency` when parent is down; (b) after parent `Up`, worktree `Up` succeeds; (c) parent `Down` while worktree runs returns `blocked_by_children`; (d) `references_parent` flag is set correctly on the worktree's compose file row after `POST /compose/refresh`.
 
 ### Phase 3 — Local routes (1 teammate, ~1.5 days)
 
@@ -603,6 +684,9 @@ Tests:
 | Inherit flag flipped while stack is running | `PATCH /compose/inherit` does not restart containers. GUI shows an info banner "Stack still tagged with previous project name; run Down to reconcile". Next `Up` creates new containers under the new effective name. |
 | Worktree inherits a parent whose compose file uses `build:` with a relative context that does not exist in the worktree | Pass `--project-directory <worktree_path>`; `build` resolves against the worktree. If the context directory is missing in the worktree, Compose errors out at `build` time; stderr shown in GUI. We do not pre-validate. |
 | `docker compose ls` names correlate back to wrong project row | Stacks view joins on `COMPOSE_PROJECT_NAME == "zremote-<hash>"`; unknown names are listed under a "Foreign stacks" section so the user can still see them without surprising the join. |
+| User hard-codes parent project name in compose instead of using `${ZREMOTE_PARENT_PROJECT_NAME}` | Works until the parent row's UUID changes (re-scan after path rename). Docs warn against hard-coding; the env var is canonical. |
+| Parent down while child stack has running containers — network stuck | Pre-check blocks the `down`; if the user forces it outside ZRemote, Docker leaves the network; our next `Down` on the child cleans it. Surfacing this condition via `docker network ls --filter label=com.docker.compose.project=<name>` is left for a follow-up. |
+| `docker compose config` is slow on large compose files (dependency detection path) | Run once per `compose refresh`; cache `references_parent` on the row. Not re-run on every `Up` unless the file mtime changed. |
 
 ## Acceptance Criteria
 
@@ -614,6 +698,7 @@ Tests:
 6. Integration test (behind `#[ignore]`) starts + stops an nginx-only compose fixture in CI on demand.
 7. Worktree parity: a worktree without its own compose files auto-inherits from its parent and its stack runs simultaneously with the parent's stack (different container names, networks, named volumes). Integration test (`#[ignore]`) demonstrates two stacks running in parallel.
 8. Host-level Stacks overview lists stacks from both main repos and worktrees, with a "Worktree" marker where applicable, and running counts match `docker compose ls`.
+9. Split-stack workflow: a worktree whose compose references `${ZREMOTE_PARENT_PROJECT_NAME}_default` as external network can attach to the parent's DB/Redis/etc. `Up` on the worktree surfaces `missing_dependency` when the parent is down; `Down` on the parent surfaces `blocked_by_children` when any worktree stack is running. Both GUI flows (Start parent first, Stop children too) are reachable.
 
 ## References
 
