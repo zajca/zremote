@@ -135,13 +135,14 @@ async fn run_worktree_hook_server(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    let cmd = crate::project::hooks::expand_hook_template(
-        template,
-        project_path,
-        worktree_path,
-        branch,
-        worktree_name,
-    );
+    let tpl_ctx = crate::project::actions::TemplateContext {
+        project_path: project_path.to_string(),
+        worktree_path: Some(worktree_path.to_string()),
+        branch: Some(branch.to_string()),
+        worktree_name: Some(worktree_name.to_string()),
+        custom_inputs: std::collections::HashMap::new(),
+    };
+    let cmd = crate::project::actions::expand_template(template, &tpl_ctx);
     let result = crate::project::hooks::execute_hook_async(
         cmd,
         std::path::PathBuf::from(worktree_path),
