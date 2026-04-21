@@ -98,7 +98,7 @@ impl RootView {
                 // Transition to PendingMain — render() will create MainView with Window.
                 this.state = RootState::PendingMain;
                 cx.notify();
-                tracing::info!("session saved, switching to main view");
+                tracing::debug!("session saved, switching to main view");
             }
         })
         .detach();

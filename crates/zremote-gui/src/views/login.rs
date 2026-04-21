@@ -5,6 +5,8 @@
 //! Emits `LoginEvent::LoggedIn(SessionEntry)` on successful authentication.
 //! The OIDC button is hidden unless the server reports `oidc_status.configured = true`.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
@@ -43,6 +45,11 @@ pub struct LoginView {
     oidc_configured: Option<bool>,
     issuer_domain: Option<String>,
 
+    /// CSRF state token from `oidc_init` — validated against callback query param.
+    pending_oidc_state: Option<String>,
+    /// Loopback listener for the OIDC redirect; held until callback received.
+    oidc_listener: Option<TcpListener>,
+
     oidc_probe_task: Option<Task<()>>,
     login_task: Option<Task<()>>,
 }
@@ -57,6 +64,8 @@ impl LoginView {
             error: None,
             oidc_configured: None,
             issuer_domain: None,
+            pending_oidc_state: None,
+            oidc_listener: None,
             oidc_probe_task: None,
             login_task: None,
         };
@@ -124,6 +133,28 @@ impl LoginView {
         if self.loading != Loading::Idle {
             return;
         }
+
+        // Bind an OS-assigned loopback port before initiating the flow so we
+        // know the redirect URI before we call the server.
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => {
+                self.error = Some(format!("Could not bind loopback port: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        let port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => {
+                self.error = Some(format!("Could not get loopback port: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        let redirect_uri = format!("http://127.0.0.1:{port}/oidc/callback");
+
+        self.oidc_listener = Some(listener);
         self.loading = Loading::Oidc;
         self.error = None;
         cx.notify();
@@ -132,29 +163,107 @@ impl LoginView {
         let handle = self.app_state.tokio_handle.clone();
         self.login_task = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                // Phase 4: minimal OIDC — just open the browser at the auth URL.
-                // Full loopback callback + token exchange is deferred to Phase 7.
+                let redirect_uri_clone = redirect_uri.clone();
                 let result = handle
-                    .spawn(async move {
-                        api.login_oidc_init("http://127.0.0.1:9876/oidc/callback")
-                            .await
-                    })
+                    .spawn(async move { api.login_oidc_init(&redirect_uri_clone).await })
                     .await;
-                let _ = this.update(cx, |this, cx| {
+
+                let (init, listener) = match this.update(cx, |this, cx| {
                     this.loading = Loading::Idle;
                     match result {
                         Ok(Ok(init)) => {
-                            if let Err(e) = open::that(&init.auth_url) {
-                                this.error = Some(format!("Could not open browser: {e}"));
-                            }
+                            this.pending_oidc_state = Some(init.state.clone());
+                            let listener = this.oidc_listener.take();
                             cx.notify();
+                            Ok((init, listener))
                         }
                         Ok(Err(err)) => {
                             this.error = Some(format!("OIDC init failed: {err}"));
+                            this.oidc_listener = None;
                             cx.notify();
+                            Err(())
                         }
                         Err(_) => {
                             this.error = Some("Internal error. Please try again.".to_string());
+                            this.oidc_listener = None;
+                            cx.notify();
+                            Err(())
+                        }
+                    }
+                }) {
+                    Ok(Ok(pair)) => pair,
+                    _ => return,
+                };
+
+                let Some(listener) = listener else {
+                    return;
+                };
+
+                if let Err(e) = open::that(&init.auth_url) {
+                    let _ = this.update(cx, |this, cx| {
+                        this.error = Some(format!("Could not open browser: {e}"));
+                        this.pending_oidc_state = None;
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                // Wait for the loopback callback on a blocking thread.
+                let expected_state = init.state.clone();
+                let api2 = {
+                    // Snapshot the api pointer before moving into blocking task.
+                    match this.update(cx, |this, _cx| this.app_state.api.clone()) {
+                        Ok(a) => a,
+                        Err(_) => return,
+                    }
+                };
+                let handle2 = match this.update(cx, |this, _cx| this.app_state.tokio_handle.clone())
+                {
+                    Ok(h) => h,
+                    Err(_) => return,
+                };
+
+                let callback_result = handle2
+                    .spawn_blocking(move || accept_oidc_callback(listener, &expected_state))
+                    .await;
+
+                let code = match callback_result {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.error = Some(format!("OIDC callback error: {e}"));
+                            this.pending_oidc_state = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.error = Some("OIDC callback task panicked.".to_string());
+                            this.pending_oidc_state = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+
+                // Exchange code for token.
+                let exchange_result = handle2
+                    .spawn(async move { api2.login_oidc_callback(code, redirect_uri).await })
+                    .await;
+
+                let _ = this.update(cx, |this, cx| {
+                    this.pending_oidc_state = None;
+                    match exchange_result {
+                        Ok(Ok(resp)) => {
+                            cx.emit(LoginEvent::LoggedIn(session_entry_from_response(resp)));
+                        }
+                        Ok(Err(err)) => {
+                            this.error = Some(format!("OIDC token exchange failed: {err}"));
+                            cx.notify();
+                        }
+                        Err(_) => {
+                            this.error = Some("Internal error during OIDC exchange.".to_string());
                             cx.notify();
                         }
                     }
@@ -440,6 +549,98 @@ impl Render for LoginView {
                     ),
             )
     }
+}
+
+/// Accepts one TCP connection on `listener`, reads the HTTP request line,
+/// extracts `code` and `state` from the query string, validates `state` against
+/// `expected_state`, writes a minimal 200 HTML response, and returns `code`.
+///
+/// Runs on a blocking thread (called via `spawn_blocking`).
+fn accept_oidc_callback(listener: TcpListener, expected_state: &str) -> Result<String, String> {
+    listener
+        .set_nonblocking(false)
+        .map_err(|e| format!("set_nonblocking: {e}"))?;
+
+    let (stream, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .map_err(|e| format!("read_line: {e}"))?;
+
+    // Drain remaining headers so the browser gets a proper response.
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("drain headers: {e}"))?;
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+
+    // Parse: "GET /oidc/callback?code=X&state=Y HTTP/1.1"
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or("malformed request line")?;
+
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    for param in query.split('&') {
+        if let Some((k, v)) = param.split_once('=') {
+            match k {
+                "code" => code = Some(percent_decode(v)),
+                "state" => state = Some(percent_decode(v)),
+                _ => {}
+            }
+        }
+    }
+
+    let code = code.ok_or("missing code parameter")?;
+    let state = state.ok_or("missing state parameter")?;
+
+    if state != expected_state {
+        write_http_response(&stream, 400, "State mismatch — possible CSRF attack.");
+        return Err("OIDC state mismatch".to_string());
+    }
+
+    write_http_response(
+        &stream,
+        200,
+        "<html><body><h2>Authentication successful — you may close this tab.</h2></body></html>",
+    );
+
+    Ok(code)
+}
+
+fn write_http_response(mut stream: impl Write, status: u16, body: &str) {
+    let reason = if status == 200 { "OK" } else { "Bad Request" };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hi = chars.next().unwrap_or('0');
+            let lo = chars.next().unwrap_or('0');
+            if let Ok(byte) = u8::from_str_radix(&format!("{hi}{lo}"), 16) {
+                out.push(byte as char);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn session_entry_from_response(resp: SessionTokenResponse) -> SessionEntry {

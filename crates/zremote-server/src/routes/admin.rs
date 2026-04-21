@@ -289,6 +289,7 @@ pub async fn revoke_host(
     // Validate host_id as UUID to stop SQL-parameter abuse & produce a
     // useful 400 when a UI sends a nonsense value.
     if Uuid::parse_str(&host_id).is_err() {
+        log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Denied, 0).await;
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid_host_id" })),
@@ -304,6 +305,7 @@ pub async fn revoke_host(
         .await;
     match exists {
         Ok(0) => {
+            log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Denied, 0).await;
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "host_not_found" })),
@@ -313,6 +315,7 @@ pub async fn revoke_host(
         Ok(_) => {}
         Err(err) => {
             tracing::error!(error = ?err, "host lookup failed");
+            log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Error, 0).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal_error" })),
@@ -363,6 +366,7 @@ pub async fn revoke_session(
     let ip = addr.ip().to_string();
 
     if Uuid::parse_str(&session_id).is_err() {
+        log_session_revoke(&state, &ip, &ctx, &session_id, Outcome::Denied, 0).await;
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid_session_id" })),

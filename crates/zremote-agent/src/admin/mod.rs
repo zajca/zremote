@@ -72,15 +72,35 @@ impl From<io::Error> for AdminError {
 #[derive(Debug, Clone, Args)]
 pub struct AdminGlobal {
     /// SQLite database URL. Defaults to the `DATABASE_URL` environment
-    /// variable, falling back to `sqlite:zremote.db` — same precedence the
-    /// server uses, so a single `DATABASE_URL` env var covers both.
-    #[arg(
-        long,
-        env = "DATABASE_URL",
-        default_value = "sqlite:zremote.db",
-        global = true
-    )]
-    pub database_url: String,
+    /// variable; if neither the flag nor the env var is set, falls back to
+    /// `sqlite:zremote.db` (matching the server's default) with a warning
+    /// on stderr so operators notice they are talking to the local-cwd DB.
+    #[arg(long, env = "DATABASE_URL", global = true)]
+    pub database_url: Option<String>,
+}
+
+/// Default database URL matching the server's own fallback. Kept here so
+/// the CLI and server never drift apart on "where does zremote store state
+/// when nothing is configured".
+const DEFAULT_DATABASE_URL: &str = "sqlite:zremote.db";
+
+impl AdminGlobal {
+    /// Resolve the effective database URL, printing a warning to stderr
+    /// the first time the default fires. Centralizes the "silent-default"
+    /// guardrail so every subcommand behaves identically.
+    #[must_use]
+    pub fn resolve_database_url(&self) -> String {
+        match self.database_url.as_deref() {
+            Some(url) if !url.is_empty() => url.to_string(),
+            _ => {
+                eprintln!(
+                    "warning: using default database path {DEFAULT_DATABASE_URL} \
+                     — set DATABASE_URL to override"
+                );
+                DEFAULT_DATABASE_URL.to_string()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -163,7 +183,7 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
         | AdminCommand::RevokeSession { global, .. }
         | AdminCommand::ListSessions { global }
         | AdminCommand::ListHosts { global }
-        | AdminCommand::AuditTail { global, .. } => global.database_url.clone(),
+        | AdminCommand::AuditTail { global, .. } => global.resolve_database_url(),
     };
 
     let pool = db::init_db(&database_url)
@@ -304,7 +324,7 @@ fn print_rotate_banner(plaintext: &str, invalidated: u64) -> Result<(), AdminErr
 // set-oidc / clear-oidc
 // ============================================================================
 
-#[tracing::instrument(skip(pool, actor))]
+#[tracing::instrument(skip(pool, actor, issuer, client_id, email))]
 async fn set_oidc(
     pool: &SqlitePool,
     actor: &str,
@@ -358,6 +378,7 @@ async fn set_oidc(
     )
     .await;
 
+    tracing::info!(actor, "set_oidc: configuration updated");
     eprintln!("OIDC configuration updated.");
     Ok(())
 }
@@ -613,10 +634,16 @@ async fn audit_tail(pool: &SqlitePool, limit: i64, event: Option<&str>) -> Resul
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        // Byte-index slicing in the middle of a UTF-8 codepoint panics.
+        // Walk by `char_indices` and cut at the nearest char boundary.
+        let truncation_point = s
+            .char_indices()
+            .nth(max.saturating_sub(1))
+            .map_or_else(|| s.len(), |(i, _)| i);
+        format!("{}…", &s[..truncation_point])
     }
 }
 
@@ -936,6 +963,47 @@ mod tests {
         let cut = truncate("abcdefghij", 5);
         assert_eq!(cut.chars().count(), 5);
         assert!(cut.ends_with('…'));
+    }
+
+    /// Byte-index slicing panics when the cut point lands inside a
+    /// multibyte UTF-8 codepoint. Regression guard: `truncate` must handle
+    /// non-ASCII strings without panicking and must produce a valid UTF-8
+    /// result of the requested character count.
+    #[test]
+    fn truncate_handles_multibyte_utf8() {
+        let s = "žluťoučký kůň";
+        // `s.len()` is 18 bytes, `s.chars().count()` is 13 — at max=5
+        // the naive byte-slice would cut mid-codepoint and panic.
+        let cut = truncate(s, 5);
+        assert_eq!(cut.chars().count(), 5);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_multibyte_short_string_untouched() {
+        let s = "žluť";
+        assert_eq!(truncate(s, 10), s);
+    }
+
+    #[test]
+    fn resolve_database_url_uses_provided_value() {
+        let g = AdminGlobal {
+            database_url: Some("sqlite:/tmp/custom.db".to_string()),
+        };
+        assert_eq!(g.resolve_database_url(), "sqlite:/tmp/custom.db");
+    }
+
+    #[test]
+    fn resolve_database_url_falls_back_to_default() {
+        // Empty string must be treated as "unset" so `--database-url=""`
+        // doesn't silently point at an invalid URL.
+        let g = AdminGlobal { database_url: None };
+        assert_eq!(g.resolve_database_url(), DEFAULT_DATABASE_URL);
+
+        let empty = AdminGlobal {
+            database_url: Some(String::new()),
+        };
+        assert_eq!(empty.resolve_database_url(), DEFAULT_DATABASE_URL);
     }
 
     #[test]

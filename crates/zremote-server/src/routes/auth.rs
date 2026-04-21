@@ -274,7 +274,14 @@ pub async fn oidc_status(State(state): State<Arc<AppState>>) -> Response {
             });
             (has_oidc, domain)
         }
-        Ok(None) | Err(_) => (false, None),
+        Ok(None) => (false, None),
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "oidc_status: admin_config read failed, reporting unconfigured"
+            );
+            (false, None)
+        }
     };
     (
         StatusCode::OK,
@@ -1420,6 +1427,74 @@ mod tests {
                 && r.details.contains("flow_unknown_state")),
             "callback failure must carry reason=flow_unknown_state, got rows={rows:?}"
         );
+    }
+
+    // -- oidc_status ---------------------------------------------------
+
+    fn oidc_status_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/auth/oidc/status", get(super::oidc_status))
+            .with_state(state)
+    }
+
+    async fn get_status(state: Arc<AppState>) -> serde_json::Value {
+        let response = oidc_status_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/oidc/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        parse_body_json(response).await
+    }
+
+    #[tokio::test]
+    async fn oidc_status_reports_configured_when_triple_set() {
+        let state = test_state().await;
+        seed_admin_token(&state, "tok").await;
+        admin_config::set_oidc(
+            &state.db,
+            "https://issuer.example.com/realms/main",
+            "client-id",
+            "admin@example.com",
+        )
+        .await
+        .unwrap();
+
+        let body = get_status(Arc::clone(&state)).await;
+        assert_eq!(body["configured"], true);
+        assert_eq!(body["issuer"], "issuer.example.com");
+
+        // Response must never leak client_id or email — only the host
+        // portion of the issuer URL is safe to surface to unauthenticated
+        // callers.
+        let raw = body.to_string();
+        assert!(!raw.contains("client-id"), "body leaked client_id: {raw}");
+        assert!(
+            !raw.contains("client_id"),
+            "body contained client_id field: {raw}"
+        );
+        assert!(
+            !raw.contains("admin@example.com"),
+            "body leaked email: {raw}"
+        );
+        assert!(!raw.contains("email"), "body contained email field: {raw}");
+    }
+
+    #[tokio::test]
+    async fn oidc_status_reports_unconfigured_when_absent() {
+        let state = test_state().await;
+        let body = get_status(Arc::clone(&state)).await;
+        assert_eq!(body["configured"], false);
+        assert!(body["issuer"].is_null());
+
+        let raw = body.to_string();
+        assert!(!raw.contains("client_id"));
+        assert!(!raw.contains("email"));
     }
 
     /// OIDC init without admin_config must record a `not_configured`

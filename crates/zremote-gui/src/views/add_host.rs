@@ -8,11 +8,13 @@
 //!   3 s to detect when the new host appears.
 //! Step 3 — Success: host enrolled, show hostname + "Connect" / "Done".
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use zeroize::Zeroize;
 
 use crate::app_state::AppState;
 use crate::auth_state;
@@ -274,6 +276,14 @@ impl AddHostModal {
         })
     }
 
+    fn close(&mut self, cx: &mut Context<Self>) {
+        if let Some(enroll) = &mut self.enrollment {
+            enroll.code.zeroize();
+        }
+        self.enrollment = None;
+        cx.emit(AddHostModalEvent::Close);
+    }
+
     fn copy_code(&self, cx: &mut App) {
         if let Some(enroll) = &self.enrollment {
             cx.write_to_clipboard(ClipboardItem::new_string(enroll.code.clone()));
@@ -300,7 +310,7 @@ impl AddHostModal {
                     true
                 }
                 "escape" => {
-                    cx.emit(AddHostModalEvent::Close);
+                    self.close(cx);
                     true
                 }
                 ch => {
@@ -315,7 +325,7 @@ impl AddHostModal {
             },
             Step::Install | Step::Success => {
                 if event.keystroke.key == "escape" {
-                    cx.emit(AddHostModalEvent::Close);
+                    self.close(cx);
                     true
                 } else {
                     false
@@ -728,8 +738,8 @@ impl AddHostModal {
                             .text_color(theme::text_secondary())
                             .cursor_pointer()
                             .child("Done")
-                            .on_click(cx.listener(|_, _: &ClickEvent, _w, cx| {
-                                cx.emit(AddHostModalEvent::Close);
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.close(cx);
                             })),
                     )
                     .when(!host_id.is_empty(), |d| {
@@ -746,8 +756,8 @@ impl AddHostModal {
                                 .text_color(theme::text_primary())
                                 .cursor_pointer()
                                 .child("Connect now")
-                                .on_click(cx.listener(|_, _: &ClickEvent, _w, cx| {
-                                    cx.emit(AddHostModalEvent::Close);
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.close(cx);
                                 })),
                         )
                     }),
@@ -776,8 +786,8 @@ impl Render for AddHostModal {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _: &MouseDownEvent, _w, cx| {
-                    cx.emit(AddHostModalEvent::Close);
+                cx.listener(|this, _: &MouseDownEvent, _w, cx| {
+                    this.close(cx);
                 }),
             )
             .child(
@@ -821,8 +831,8 @@ impl Render for AddHostModal {
                                             .size(px(14.0))
                                             .text_color(theme::text_secondary()),
                                     )
-                                    .on_click(cx.listener(|_, _: &ClickEvent, _w, cx| {
-                                        cx.emit(AddHostModalEvent::Close);
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                        this.close(cx);
                                     })),
                             ),
                     )
@@ -844,8 +854,10 @@ impl Render for AddHostModal {
 }
 
 fn install_snippet(server_url: &str, code: &str) -> String {
+    let safe_url: Cow<str> = shell_escape::unix::escape(server_url.into());
+    let safe_code: Cow<str> = shell_escape::unix::escape(code.into());
     format!(
-        "export ZREMOTE_SERVER_URL=\"{server_url}\"\nexport ZREMOTE_ENROLLMENT_CODE=\"{code}\"\ncurl -fsSL \"$ZREMOTE_SERVER_URL/enroll.sh\" | bash"
+        "export ZREMOTE_SERVER_URL={safe_url}\nexport ZREMOTE_ENROLLMENT_CODE={safe_code}\ncurl -fsSL \"$ZREMOTE_SERVER_URL/enroll.sh\" | bash"
     )
 }
 
@@ -864,9 +876,37 @@ mod tests {
     #[test]
     fn install_snippet_contains_code_and_url() {
         let snippet = install_snippet("https://my.server", "AB12-CD34");
-        assert!(snippet.contains("https://my.server"), "missing server url");
+        assert!(snippet.contains("my.server"), "missing server url");
         assert!(snippet.contains("AB12-CD34"), "missing code");
         assert!(snippet.contains("enroll.sh"), "missing script path");
+    }
+
+    #[test]
+    fn install_snippet_escapes_injection() {
+        let url_with_injection = "https://evil.com\"; rm -rf /";
+        let code_with_injection = "code\"; rm -rf /";
+        let snippet = install_snippet(url_with_injection, code_with_injection);
+        // shell_escape::unix::escape wraps dangerous values in single quotes.
+        // The assignment must be `export VAR='...'` not `export VAR="..."`,
+        // so the double-quote in the value cannot break out of quoting.
+        //
+        // If double-quoted assignment were used, `export VAR="evil.com"; rm`
+        // would execute `rm`.  With single-quote escaping the assignment is
+        // `export VAR='evil.com"; rm -rf /'` which is safe.
+        //
+        // Verify: `export ZREMOTE_SERVER_URL="` (double-quote wrap) must NOT
+        // appear in the output.
+        assert!(
+            !snippet.contains("ZREMOTE_SERVER_URL=\""),
+            "url value must not be wrapped in double quotes"
+        );
+        assert!(
+            !snippet.contains("ZREMOTE_ENROLLMENT_CODE=\""),
+            "code value must not be wrapped in double quotes"
+        );
+        // The values must still be present (correctly single-quoted).
+        assert!(snippet.contains("evil.com"), "url not present in snippet");
+        assert!(snippet.contains("code"), "code not present in snippet");
     }
 
     #[test]

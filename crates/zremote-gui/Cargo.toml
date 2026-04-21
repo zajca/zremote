@@ -29,3 +29,6 @@ arboard.workspace = true
 png.workspace = true
 base64.workspace = true
 notify-rust.workspace = true
+keyring.workspace = true
+zeroize.workspace = true
+shell-escape = "0.1"
