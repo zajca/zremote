@@ -112,8 +112,9 @@ pub enum Commands {
     ChannelServer,
     /// Enroll this agent with a server using a one-time code
     Enroll {
-        /// One-time enrollment code
-        #[arg(long, env = "ZREMOTE_CODE")]
+        /// One-time enrollment code (prefer ZREMOTE_ENROLL_CODE env var to avoid
+        /// leaking the code into process argv / audit logs)
+        #[arg(long, env = "ZREMOTE_ENROLL_CODE")]
         code: String,
         /// Server URL (e.g. https://myserver.example.com)
         #[arg(long, env = "ZREMOTE_SERVER")]

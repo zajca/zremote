@@ -38,6 +38,8 @@ pub enum AuthError {
     Timeout,
     /// Payload could not be built (agent_id is not a valid UUID).
     InvalidAgentId,
+    /// OS CSPRNG unavailable — cannot generate a secure nonce.
+    CspRngUnavailable,
 }
 
 impl std::fmt::Display for AuthError {
@@ -48,6 +50,7 @@ impl std::fmt::Display for AuthError {
             Self::Rejected(r) => write!(f, "auth rejected by server: {r:?}"),
             Self::Timeout => write!(f, "auth handshake timed out"),
             Self::InvalidAgentId => write!(f, "agent_id is not a valid UUID"),
+            Self::CspRngUnavailable => write!(f, "OS CSPRNG unavailable — cannot generate nonce"),
         }
     }
 }
@@ -79,7 +82,7 @@ pub async fn authenticate(
     let mut nonce_agent = [0u8; 32];
     rand::rngs::OsRng
         .try_fill_bytes(&mut nonce_agent)
-        .expect("OS CSPRNG must be available");
+        .map_err(|_| AuthError::CspRngUnavailable)?;
     let nonce_agent_b64 = URL_SAFE_NO_PAD.encode(nonce_agent);
 
     // Step 1: send Hello.
@@ -108,6 +111,13 @@ pub async fn authenticate(
     let ns_arr: [u8; 32] = ns_bytes.try_into().map_err(|_| {
         ConnectionError::UnexpectedRegisterResponse("nonce_server wrong length".into())
     })?;
+    // Reject all-zero nonce: indicates a broken server RNG.
+    if ns_arr == [0u8; 32] {
+        return Err(ConnectionError::UnexpectedRegisterResponse(
+            "server sent all-zero nonce_server — server RNG appears broken".into(),
+        )
+        .into());
+    }
 
     // Step 3: build canonical payload and sign.
     let payload =

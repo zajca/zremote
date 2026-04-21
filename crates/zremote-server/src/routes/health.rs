@@ -28,14 +28,19 @@ pub async fn api_mode() -> Json<serde_json::Value> {
     }))
 }
 
-/// Serves the enrollment shell script as `text/x-shellscript`.
+/// Serves the enrollment shell script.
+/// Uses `text/plain` (not `text/x-shellscript`) to prevent browsers from
+/// auto-executing it, and `no-store` to prevent proxies serving stale scripts.
 pub async fn enroll_sh() -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
 
     const SCRIPT: &str = include_str!("../../public/enroll.sh");
     (
-        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         SCRIPT,
     )
         .into_response()

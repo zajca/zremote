@@ -1,17 +1,22 @@
-#!/bin/sh
+#!/bin/bash
 # ZRemote agent enrollment script.
-# Usage: ZREMOTE_CODE=<code> ZREMOTE_SERVER=<url> sh <(curl -fsSL "$ZREMOTE_SERVER/enroll.sh")
+# Usage: ZREMOTE_ENROLL_CODE=<code> ZREMOTE_SERVER=<url> bash <(curl -fsSL "$ZREMOTE_SERVER/enroll.sh")
 #
 # Required environment variables:
-#   ZREMOTE_CODE    One-time enrollment code from the server admin panel
-#   ZREMOTE_SERVER  Server base URL (e.g. https://myserver.example.com)
+#   ZREMOTE_ENROLL_CODE  One-time enrollment code from the server admin panel
+#   ZREMOTE_SERVER       Server base URL (e.g. https://myserver.example.com)
 #
 # Optional:
 #   ZREMOTE_INSTALL_DIR  Installation directory (default: $HOME/.local/bin)
 #   ZREMOTE_ARCH         CPU architecture override (auto-detected if unset)
 #   ZREMOTE_OS           OS override (auto-detected if unset)
+#
+# Security note: checksum verification below protects against partial downloads
+# and accidental corruption. It does NOT protect against a compromised server —
+# if the server is malicious, it can serve both a bad binary and a matching checksum.
+# Use this script only from a server you trust.
 
-set -e
+set -euo pipefail
 
 die() {
     echo "error: $*" >&2
@@ -19,8 +24,8 @@ die() {
 }
 
 # Validate required env vars.
-[ -n "$ZREMOTE_CODE" ]   || die "ZREMOTE_CODE is required"
-[ -n "$ZREMOTE_SERVER" ] || die "ZREMOTE_SERVER is required"
+[[ -n "${ZREMOTE_ENROLL_CODE:-}" ]] || die "ZREMOTE_ENROLL_CODE is required"
+[[ -n "${ZREMOTE_SERVER:-}" ]]      || die "ZREMOTE_SERVER is required"
 
 SERVER="${ZREMOTE_SERVER%/}"
 INSTALL_DIR="${ZREMOTE_INSTALL_DIR:-$HOME/.local/bin}"
@@ -49,15 +54,14 @@ echo "    os/arch: $OS/$ARCH"
 echo "    install: $INSTALL_DIR"
 
 # Check for required tools.
-for tool in curl sha256sum; do
-    command -v "$tool" >/dev/null 2>&1 || {
-        # macOS uses shasum instead of sha256sum.
-        if [ "$tool" = "sha256sum" ] && command -v shasum >/dev/null 2>&1; then
-            continue
-        fi
-        die "required tool not found: $tool"
-    }
-done
+SHA_CMD=""
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_CMD="shasum -a 256"
+else
+    die "neither sha256sum nor shasum found"
+fi
 
 mkdir -p "$INSTALL_DIR"
 
@@ -72,13 +76,9 @@ curl -fsSL --progress-bar "$BINARY_URL" -o "$BINARY_TMP"
 curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_TMP"
 
 echo "==> Verifying checksum..."
-EXPECTED="$(cat "$CHECKSUM_TMP" | awk '{print $1}')"
-if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL="$(sha256sum "$BINARY_TMP" | awk '{print $1}')"
-else
-    ACTUAL="$(shasum -a 256 "$BINARY_TMP" | awk '{print $1}')"
-fi
-[ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch (expected $EXPECTED, got $ACTUAL)"
+EXPECTED="$(awk '{print $1}' "$CHECKSUM_TMP")"
+ACTUAL="$($SHA_CMD "$BINARY_TMP" | awk '{print $1}')"
+[[ "$EXPECTED" == "$ACTUAL" ]] || die "checksum mismatch (expected $EXPECTED, got $ACTUAL)"
 
 chmod +x "$BINARY_TMP"
 mv "$BINARY_TMP" "$INSTALL_DIR/zremote-agent"
@@ -91,10 +91,11 @@ case ":$PATH:" in
     *) echo "    (add $INSTALL_DIR to your PATH if needed)" ;;
 esac
 
-# Run enrollment.
+# Run enrollment. Pass the code via env var to avoid leaking it into
+# process argv (visible in /proc/<pid>/cmdline, captured by auditd/systemd journal).
 echo "==> Running enrollment..."
-ZREMOTE_SERVER="$SERVER" "$INSTALL_DIR/zremote-agent" enroll \
-    --code "$ZREMOTE_CODE" \
+ZREMOTE_ENROLL_CODE="$ZREMOTE_ENROLL_CODE" \
+    "$INSTALL_DIR/zremote-agent" enroll \
     --server "$SERVER"
 
 # Install systemd user unit (Linux) or launchd plist (macOS).

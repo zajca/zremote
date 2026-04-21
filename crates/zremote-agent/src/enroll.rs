@@ -9,6 +9,7 @@
 //! 5. Exit 0 on success, 1 on rejection.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,8 +51,9 @@ struct EnrollRequest<'a> {
 #[derive(Deserialize)]
 struct EnrollResponse {
     agent_id: String,
+    // Reserved for forward compat; agent authenticates via WS handshake post-enroll.
     #[allow(dead_code)]
-    session_token: String,
+    session_token: Option<String>,
 }
 
 /// Run the enrollment flow. Exits 0 on success, returns Err on failure.
@@ -76,7 +78,15 @@ pub async fn run_enroll(
     let base_url = server.trim_end_matches('/');
     let url = format!("{base_url}/api/enroll");
 
-    let client = reqwest::Client::new();
+    // No redirects: a 3xx would silently forward enrollment_code + public_key
+    // to an attacker-controlled host. Timeouts prevent indefinite hangs.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(EnrollError::Network)?;
+
     let resp = client
         .post(&url)
         .json(&EnrollRequest {
@@ -96,8 +106,17 @@ pub async fn run_enroll(
         )));
     }
 
-    // Step 3: parse response.
-    let enroll_resp: EnrollResponse = resp.json().await.map_err(EnrollError::Network)?;
+    // Step 3: parse response (bounded to 8 KiB to prevent OOM on hostile servers).
+    const MAX_ENROLL_RESPONSE: usize = 8192;
+    let bytes = resp.bytes().await.map_err(EnrollError::Network)?;
+    if bytes.len() > MAX_ENROLL_RESPONSE {
+        return Err(EnrollError::ServerRejected(format!(
+            "response body too large ({} bytes, max {MAX_ENROLL_RESPONSE})",
+            bytes.len()
+        )));
+    }
+    let enroll_resp: EnrollResponse =
+        serde_json::from_slice(&bytes).map_err(|e| EnrollError::ServerRejected(e.to_string()))?;
     let agent_id = enroll_resp.agent_id;
 
     // Step 4: persist credentials.
@@ -113,16 +132,20 @@ pub async fn run_enroll(
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     /// Enroll with a mock HTTP server; credentials must be persisted to file
-    /// with mode 0600.
+    /// with mode 0600. Sets ZREMOTE_ALLOW_FILE_KEY_FALLBACK=1 because CI has no keyring.
     #[tokio::test]
     async fn enroll_happy_path_persists_secret_to_file() {
         use httpmock::prelude::*;
+
+        // SAFETY: test-only env var mutation; test is single-threaded (tokio::test).
+        unsafe { std::env::set_var("ZREMOTE_ALLOW_FILE_KEY_FALLBACK", "1") };
 
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
@@ -138,16 +161,37 @@ mod tests {
         let dir = tempdir().unwrap();
         let key_path = dir.path().join("agent.key");
 
-        run_enroll("test-code", &server.base_url(), Some(key_path.clone()))
-            .await
-            .expect("enroll should succeed");
+        let result = run_enroll("test-code", &server.base_url(), Some(key_path.clone())).await;
 
+        // SAFETY: same thread
+        unsafe { std::env::remove_var("ZREMOTE_ALLOW_FILE_KEY_FALLBACK") };
+
+        result.expect("enroll should succeed");
         mock.assert();
 
         assert!(key_path.exists(), "key file must be created");
         let meta = std::fs::metadata(&key_path).unwrap();
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "key file must be mode 0600, got {mode:o}");
+    }
+
+    /// Enroll returns a redirect-as-error when server responds with 3xx.
+    #[tokio::test]
+    async fn enroll_redirect_returns_network_error() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/api/enroll");
+            then.status(302)
+                .header("location", "https://attacker.example.com/collect");
+        });
+
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("agent.key");
+        let result = run_enroll("code", &server.base_url(), Some(key_path)).await;
+        // redirect=none means 302 is treated as a non-success response
+        assert!(result.is_err(), "3xx must not be silently followed");
     }
 
     /// If the server returns a non-2xx, run_enroll must return an error.
