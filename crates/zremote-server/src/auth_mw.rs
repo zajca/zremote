@@ -68,8 +68,9 @@ pub async fn auth_mw(
     // still run a real hash + DB lookup (against a dummy) so an attacker
     // cannot distinguish "no header" from "wrong header" from "stale token"
     // by wall-clock. `DUMMY_BEARER` is a fixed string that will never match
-    // any issued session (32 bytes of 0xff base64url-encoded).
-    const DUMMY_BEARER: &str = "________________________________________ww";
+    // any issued session: 43 base64url chars (same length the session issuer
+    // emits, so bearer length-checks don't short-circuit before hash+lookup).
+    const DUMMY_BEARER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let token = maybe_token.unwrap_or(DUMMY_BEARER);
     let header_was_valid = maybe_token.is_some();
 
@@ -82,14 +83,11 @@ pub async fn auth_mw(
         // would mean a session exists for the literal dummy string; treat
         // as failure so the attacker cannot benefit from a wiring bug.
         Ok(_) => {
-            tracing::error!("auth_mw dummy-token path unexpectedly accepted — audit auth_sessions",);
+            tracing::error!("auth_mw dummy-token path unexpectedly accepted — audit auth_sessions");
             unauthorized_after(started).await
         }
         Err(err) => {
-            tracing::debug!(
-                audit = %format!("{err:?}"),
-                "auth_mw rejected request",
-            );
+            tracing::debug!(err = ?err, "auth_mw rejected request");
             unauthorized_after(started).await
         }
     }
@@ -101,7 +99,11 @@ pub async fn auth_mw(
 /// real constant-time work (hash + index lookup, always executed in
 /// [`auth_mw`]) is the primary defense; this sleep is secondary. Sleep
 /// jitter is ~1 ms, observable; do not rely on it alone.
-async fn unauthorized_after(started: Instant) -> Response {
+///
+/// Exposed `pub(crate)` so `routes::auth` handlers can reuse exactly the
+/// same padding + response shape — a single source of truth prevents the
+/// two surfaces drifting apart.
+pub(crate) async fn unauthorized_after(started: Instant) -> Response {
     let elapsed = started.elapsed();
     if let Some(pad) = AUTH_FAIL_MIN_LATENCY.checked_sub(elapsed) {
         tokio::time::sleep(pad).await;

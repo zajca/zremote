@@ -6,6 +6,16 @@
 //! attempting brute force well before 2^32 guesses matter. Phase 3 will
 //! differentiate by endpoint (enrollment tighter, OIDC callback looser).
 //!
+//! **IP source — TCP peer address only.** We use [`PeerIpKeyExtractor`]
+//! unconditionally. `X-Forwarded-For` / `X-Real-IP` / `Forwarded` are
+//! client-controlled headers: if the server is ever directly reachable
+//! (the default), an attacker can rotate the header per request and
+//! trivially sidestep a rate limit keyed on them. If ZRemote is later
+//! deployed behind a trusted reverse proxy, a future phase will gate
+//! header-based extraction on an explicit opt-in such as
+//! `ZREMOTE_BEHIND_PROXY=1`. Until then, the peer address is the only
+//! identifier we trust.
+//!
 //! **Test-harness note:** production callers invoke [`apply_rate_limits`];
 //! unit test routers skip it intentionally. Using a stateful governor inside
 //! `cargo test` (which runs test bodies across worker threads) would share
@@ -19,7 +29,7 @@ use std::sync::Arc;
 use axum::Router;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::key_extractor::PeerIpKeyExtractor;
 
 use crate::state::AppState;
 
@@ -28,9 +38,8 @@ pub const AUTH_REFILL_PERIOD_SECS: u64 = 6;
 /// Max tokens in the bucket (burst size).
 pub const AUTH_BURST: u32 = 5;
 
-/// Attach the standard auth-surface rate limiter to `router`. The limiter
-/// keys on client IP via `SmartIpKeyExtractor` (honours `X-Forwarded-For`,
-/// `X-Real-IP`, and falls back to the socket peer).
+/// Attach the standard auth-surface rate limiter to `router`. Keyed on the
+/// TCP peer address (see module-level doc for the proxy discussion).
 ///
 /// The resulting router returns HTTP 429 with an empty body once the bucket
 /// for a given IP is exhausted. Production wiring should apply this to the
@@ -45,7 +54,7 @@ pub fn apply_rate_limits(router: Router<Arc<AppState>>) -> Router<Arc<AppState>>
     let config = GovernorConfigBuilder::default()
         .per_second(AUTH_REFILL_PERIOD_SECS)
         .burst_size(AUTH_BURST)
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(PeerIpKeyExtractor)
         .finish()
         .expect("auth governor config must validate at startup");
 

@@ -10,7 +10,8 @@
 //! - `GET  /api/auth/me` — which session is authed + what methods the
 //!   server supports (so the GUI can hide the OIDC button when unused).
 //! - `POST /api/auth/ws-ticket` — single-use short-lived ticket for WS
-//!   upgrade (admin-only, 30 s TTL, one redemption).
+//!   upgrade (30 s TTL, one redemption; available to any authed session
+//!   regardless of how it was issued).
 //!
 //! **Oracle caution (RFC T-5, T-9):** every failure on the public
 //! admin-token path flattens to `401 { "error": "unauthorized" }` with a
@@ -26,19 +27,34 @@ use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header::USER_AGENT};
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
+use zremote_core::queries::audit::{self, AuditEvent, Outcome};
 use zremote_core::queries::{admin_config, auth_sessions};
 
 use crate::auth::{AuthContext, TicketErr, admin_token, session};
+#[cfg(test)]
 use crate::auth_mw::AUTH_FAIL_MIN_LATENCY;
+use crate::auth_mw::unauthorized_after;
 use crate::state::AppState;
 
-/// Body: `POST /api/auth/admin-token`.
-#[derive(Debug, Deserialize)]
+/// Body: `POST /api/auth/admin-token`. Manual `Debug` impl scrubs the
+/// plaintext token, so accidental logging of the request body never leaks
+/// the admin credential. Mirrors the [`SessionRow`](zremote_core::queries::auth_sessions::SessionRow)
+/// redaction pattern.
+#[derive(Deserialize)]
 pub struct AdminTokenRequest {
     pub token: String,
+}
+
+impl std::fmt::Debug for AdminTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminTokenRequest")
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Body: `POST /api/auth/ws-ticket`.
@@ -93,6 +109,7 @@ pub async fn admin_token_login(
     Json(req): Json<AdminTokenRequest>,
 ) -> Response {
     let started = Instant::now();
+    let ip = addr.ip().to_string();
 
     // Always fetch admin_config; never short-circuit on DB error. If the
     // lookup fails for any reason, treat it as "no config" so the path
@@ -111,6 +128,7 @@ pub async fn admin_token_login(
     // Constant-time hash compare happens on every request path.
     let accepted = admin_token::verify(&req.token, &stored_hash);
     if !accepted {
+        log_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
         return unauthorized_after(started).await;
     }
 
@@ -118,7 +136,6 @@ pub async fn admin_token_login(
         .get(USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let ip = addr.ip().to_string();
 
     match session::issue(
         &state.db,
@@ -128,18 +145,61 @@ pub async fn admin_token_login(
     )
     .await
     {
-        Ok((token, row)) => (
-            StatusCode::OK,
-            Json(AdminTokenResponse {
-                session_token: token,
-                expires_at: row.expires_at,
-            }),
-        )
-            .into_response(),
+        Ok((token, row)) => {
+            log_login(&state, &ip, Some(&row.id), Outcome::Ok, "login_ok").await;
+            (
+                StatusCode::OK,
+                Json(AdminTokenResponse {
+                    session_token: token,
+                    expires_at: row.expires_at,
+                }),
+            )
+                .into_response()
+        }
         Err(err) => {
             tracing::error!(error = ?err, "session issue failed on admin-token login");
+            // Treat session-issue failure as a denied login for audit
+            // purposes: the token was valid but the server could not mint
+            // a session, which is an error the operator needs to see.
+            log_login(&state, &ip, None, Outcome::Error, "login_fail").await;
             unauthorized_after(started).await
         }
+    }
+}
+
+/// Emit a `login_ok` / `login_fail` audit row. Failures are logged but
+/// deliberately never surfaced to the client — a missing audit row must
+/// not change the HTTP response shape or timing. The actor string is
+/// `"admin"` on success (we know it's the single owner after a valid
+/// token) and `""` on failure (the column is NOT NULL; we use the empty
+/// string as the "unknown / unauthenticated" sentinel).
+async fn log_login(
+    state: &AppState,
+    ip: &str,
+    session_id: Option<&str>,
+    outcome: Outcome,
+    event: &str,
+) {
+    let actor = if matches!(outcome, Outcome::Ok) {
+        "admin"
+    } else {
+        ""
+    };
+    let result = audit::log_event(
+        &state.db,
+        AuditEvent {
+            ts: Utc::now(),
+            actor: actor.to_string(),
+            ip: Some(ip.to_string()),
+            event: event.to_string(),
+            target: session_id.map(str::to_string),
+            outcome,
+            details: Some(json!({ "method": "admin_token" })),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, event, "audit log_event failed");
     }
 }
 
@@ -195,6 +255,9 @@ pub async fn logout(
 
 /// `POST /api/auth/ws-ticket` — issue a short-lived single-use ticket for
 /// the following WS upgrade (never send the session bearer on the WS URL).
+/// Available to any authed session; `auth_mw` already enforces the only
+/// precondition (a valid bearer). Phase 3 may tighten scoping once more
+/// session-issuance paths exist.
 pub async fn ws_ticket(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<AuthContext>,
@@ -260,24 +323,6 @@ pub async fn oidc_callback_placeholder() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(json!({ "error": "oidc_not_implemented_in_phase_2" })),
-    )
-        .into_response()
-}
-
-/// Uniform 401 with the latency floor, mirroring `auth_mw::unauthorized_after`.
-///
-/// belt-and-suspenders: pad to ≥100 ms so DB variance is masked. Real
-/// constant-time work above (admin_config fetch + constant-time hash
-/// compare) is the primary defense. Sleep jitter is ~1 ms, observable;
-/// do not rely on it alone.
-async fn unauthorized_after(started: Instant) -> Response {
-    let elapsed = started.elapsed();
-    if let Some(pad) = AUTH_FAIL_MIN_LATENCY.checked_sub(elapsed) {
-        tokio::time::sleep(pad).await;
-    }
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": "unauthorized" })),
     )
         .into_response()
 }
@@ -815,6 +860,142 @@ mod tests {
         assert!(
             rate_limited >= 1,
             "expected at least one 429 once burst exhausted: {statuses:?}"
+        );
+    }
+
+    // -- AdminTokenRequest Debug redaction ------------------------------
+
+    #[test]
+    fn admin_token_request_debug_redacts_token() {
+        let req = AdminTokenRequest {
+            token: "super-secret-admin-token".to_string(),
+        };
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("super-secret-admin-token"),
+            "Debug must not contain the plaintext token, got: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug must contain the redaction marker, got: {debug}"
+        );
+    }
+
+    // -- login audit logging --------------------------------------------
+
+    #[tokio::test]
+    async fn admin_token_login_success_writes_audit_row() {
+        use zremote_core::queries::audit;
+        let state = test_state().await;
+        seed_admin_token(&state, "correct-horse").await;
+        let app = auth_router(Arc::clone(&state));
+
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/admin-token",
+                Body::from(r#"{"token":"correct-horse"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        let login_oks: Vec<_> = rows.iter().filter(|r| r.event == "login_ok").collect();
+        assert_eq!(
+            login_oks.len(),
+            1,
+            "expected exactly one login_ok audit row, got {rows:?}"
+        );
+        let row = login_oks[0];
+        assert_eq!(row.actor, "admin");
+        assert_eq!(row.outcome, "ok");
+        assert_eq!(row.ip.as_deref(), Some("127.0.0.1"));
+        assert!(
+            row.details.contains("admin_token"),
+            "expected method marker in details, got: {}",
+            row.details
+        );
+        assert!(
+            row.target.is_some(),
+            "success row should carry the session id as target"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_token_login_failure_writes_audit_row() {
+        use zremote_core::queries::audit;
+        let state = test_state().await;
+        seed_admin_token(&state, "correct-horse").await;
+        let app = auth_router(Arc::clone(&state));
+
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/admin-token",
+                Body::from(r#"{"token":"definitely-wrong"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        let login_fails: Vec<_> = rows.iter().filter(|r| r.event == "login_fail").collect();
+        assert_eq!(
+            login_fails.len(),
+            1,
+            "expected exactly one login_fail audit row, got {rows:?}"
+        );
+        let row = login_fails[0];
+        // Actor is the empty-string sentinel for "unauthenticated" (schema
+        // column is NOT NULL, so None is represented as "" by convention).
+        assert_eq!(row.actor, "");
+        assert_eq!(row.outcome, "denied");
+        assert_eq!(row.ip.as_deref(), Some("127.0.0.1"));
+        assert!(row.details.contains("admin_token"));
+        assert!(
+            row.target.is_none(),
+            "failure row must not leak a session id via target"
+        );
+    }
+
+    // -- auth body-size cap ---------------------------------------------
+
+    /// `DefaultBodyLimit` is scoped in `build_auth_routes`; wire the full
+    /// auth subtree the way production does so the layer actually runs.
+    fn auth_router_with_body_limit(state: Arc<AppState>) -> Router {
+        use axum::extract::DefaultBodyLimit;
+        let protected = Router::new()
+            .route("/api/auth/me", get(me))
+            .route("/api/auth/logout", post(logout))
+            .route("/api/auth/ws-ticket", post(ws_ticket))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                crate::auth_mw::auth_mw,
+            ));
+
+        Router::new()
+            .route("/api/auth/admin-token", post(admin_token_login))
+            .merge(protected)
+            .layer(DefaultBodyLimit::max(4096))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn admin_token_login_rejects_oversized_body() {
+        let state = test_state().await;
+        seed_admin_token(&state, "correct-horse").await;
+        let app = auth_router_with_body_limit(state);
+
+        // 8 KiB blob — well above the 4 KiB cap.
+        let junk = "x".repeat(8192);
+        let body = format!(r#"{{"token":"{junk}"}}"#);
+        let response = app
+            .oneshot(post_with_addr("/api/auth/admin-token", Body::from(body)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "oversized auth body must be rejected before reaching the handler"
         );
     }
 }

@@ -42,6 +42,13 @@ const MAX_WS_CONNECTIONS: usize = 200;
 /// this ceiling.
 const AGENT_PROFILES_BODY_LIMIT: usize = 1_048_576; // 1 MiB
 
+/// Tight body cap for the `/api/auth/*` surface. Every payload we accept on
+/// auth endpoints is a small JSON object (≤ a handful of short string
+/// fields); 4 KiB is far more than we ever need and a hard ceiling that
+/// drops oversized requests before they reach the constant-time hash
+/// compare or the audit logger.
+const AUTH_BODY_LIMIT: usize = 4096; // 4 KiB
+
 /// Configuration for running the multi-host server.
 pub struct ServerConfig {
     pub token: String,
@@ -78,7 +85,8 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/auth/oidc/callback",
             get(routes::auth::oidc_callback_placeholder),
         )
-        .merge(protected);
+        .merge(protected)
+        .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT));
 
     rate_limit::apply_rate_limits(auth_subtree)
 }
