@@ -186,6 +186,16 @@ mod tests {
     }
 
     #[test]
+    fn idle_status_does_not_notify() {
+        let event = ServerEvent::LoopStatusChanged {
+            loop_info: make_loop_info(zremote_protocol::AgenticStatus::Idle),
+            host_id: "h1".to_string(),
+            hostname: "host".to_string(),
+        };
+        assert!(format_event(&event).is_none());
+    }
+
+    #[test]
     fn loop_ended_produces_notification() {
         let mut info = make_loop_info(zremote_protocol::AgenticStatus::Completed);
         info.ended_at = Some("2026-01-01T01:00:00Z".to_string());

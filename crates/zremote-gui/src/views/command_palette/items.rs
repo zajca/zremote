@@ -258,12 +258,13 @@ pub(super) fn build_session_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem>
         if let PaletteItem::Session { session_idx } = &item.item {
             let session = &snapshot.sessions[*session_idx];
             match snapshot.cc_states.get(&session.id).map(|c| c.status) {
-                Some(AgenticStatus::WaitingForInput) => 0,
+                Some(AgenticStatus::WaitingForInput | AgenticStatus::RequiresAction) => 0,
                 Some(AgenticStatus::Working) => 1,
-                _ => 2,
+                Some(AgenticStatus::Idle) => 2,
+                _ => 3,
             }
         } else {
-            2
+            3
         }
     });
 

@@ -219,7 +219,10 @@ impl SidebarView {
                     || self.cc_states.get(&s.id).is_some_and(|cc| {
                         matches!(
                             cc.status,
-                            AgenticStatus::Working | AgenticStatus::WaitingForInput
+                            AgenticStatus::Working
+                                | AgenticStatus::WaitingForInput
+                                | AgenticStatus::Idle
+                                | AgenticStatus::RequiresAction
                         )
                     }))
         })
@@ -711,9 +714,19 @@ impl SidebarView {
                         status: Some("waiting_for_input".into()),
                         ..ListLoopsFilter::default()
                     };
-                    let (working, waiting) = tokio::join!(
+                    let idle_filter = ListLoopsFilter {
+                        status: Some("idle".into()),
+                        ..ListLoopsFilter::default()
+                    };
+                    let requires_action_filter = ListLoopsFilter {
+                        status: Some("requires_action".into()),
+                        ..ListLoopsFilter::default()
+                    };
+                    let (working, waiting, idle, requires_action) = tokio::join!(
                         api.list_loops(&working_filter),
                         api.list_loops(&waiting_filter),
+                        api.list_loops(&idle_filter),
+                        api.list_loops(&requires_action_filter),
                     );
                     let mut loops = working
                         .inspect_err(
@@ -727,11 +740,27 @@ impl SidebarView {
                             )
                             .unwrap_or_default(),
                     );
+                    loops.extend(
+                        idle.inspect_err(
+                            |e| tracing::warn!(error = %e, "failed to fetch idle loops"),
+                        )
+                        .unwrap_or_default(),
+                    );
+                    loops.extend(
+                        requires_action
+                            .inspect_err(|e| {
+                                tracing::warn!(error = %e, "failed to fetch requires_action loops");
+                            })
+                            .unwrap_or_default(),
+                    );
                     // Client-side safety net in case server returns unexpected statuses
                     loops.retain(|l| {
                         matches!(
                             l.status,
-                            AgenticStatus::Working | AgenticStatus::WaitingForInput
+                            AgenticStatus::Working
+                                | AgenticStatus::WaitingForInput
+                                | AgenticStatus::Idle
+                                | AgenticStatus::RequiresAction
                         )
                     });
                     loops

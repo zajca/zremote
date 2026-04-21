@@ -145,10 +145,16 @@ async fn handle_analyzer_event(
             if session_mapper.is_hook_mode(&session_id) {
                 return;
             }
+            // PTY silence is not a reliable signal that the agent is
+            // waiting for user input: long-running tools (cargo, test
+            // suites) produce natural pauses. Map silence to `Idle` -- a
+            // non-notifying hint state. Only CC `Notification` /
+            // `Elicitation` hooks may escalate to `WaitingForInput` /
+            // `RequiresAction`.
             let status = match phase {
                 AnalyzerPhase::Busy => zremote_protocol::AgenticStatus::Working,
                 AnalyzerPhase::Idle | AnalyzerPhase::NeedsInput => {
-                    zremote_protocol::AgenticStatus::WaitingForInput
+                    zremote_protocol::AgenticStatus::Idle
                 }
                 _ => return,
             };

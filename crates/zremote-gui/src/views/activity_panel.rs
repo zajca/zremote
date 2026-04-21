@@ -418,9 +418,10 @@ fn status_label(status: AgenticStatus) -> &'static str {
         AgenticStatus::Working => "Working",
         AgenticStatus::RequiresAction => "Requires action",
         AgenticStatus::WaitingForInput => "Waiting for input",
+        AgenticStatus::Idle => "Idle",
         AgenticStatus::Error => "Error",
         AgenticStatus::Completed => "Completed",
-        AgenticStatus::Unknown => "Idle",
+        AgenticStatus::Unknown => "Unknown",
     }
 }
 
@@ -526,9 +527,10 @@ mod tests {
             status_label(AgenticStatus::WaitingForInput),
             "Waiting for input"
         );
+        assert_eq!(status_label(AgenticStatus::Idle), "Idle");
         assert_eq!(status_label(AgenticStatus::Error), "Error");
         assert_eq!(status_label(AgenticStatus::Completed), "Completed");
-        assert_eq!(status_label(AgenticStatus::Unknown), "Idle");
+        assert_eq!(status_label(AgenticStatus::Unknown), "Unknown");
     }
 
     #[test]

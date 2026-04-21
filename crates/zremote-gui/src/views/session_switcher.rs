@@ -516,9 +516,10 @@ fn build_entries(
 
 fn cc_sort_priority(cc: Option<&CcState>) -> u8 {
     match cc.map(|c| c.status) {
-        Some(AgenticStatus::WaitingForInput) => 0,
+        Some(AgenticStatus::WaitingForInput | AgenticStatus::RequiresAction) => 0,
         Some(AgenticStatus::Working) => 1,
-        _ => 2,
+        Some(AgenticStatus::Idle) => 2,
+        _ => 3,
     }
 }
 

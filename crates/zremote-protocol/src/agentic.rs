@@ -3,12 +3,19 @@ use serde::{Deserialize, Serialize};
 use crate::{AgenticLoopId, SessionId};
 
 /// Status of an agentic loop.
+///
+/// `Idle` is a non-notifying heuristic fallback emitted by the output analyzer
+/// when the PTY has been silent for a short window but no explicit signal
+/// (e.g. a Claude Code `Notification` or `Elicitation` hook) has arrived. Only
+/// hook-driven `WaitingForInput` / `RequiresAction` statuses are authoritative
+/// for user-facing notifications (Telegram, toasts).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgenticStatus {
     Working,
     WaitingForInput,
     RequiresAction,
+    Idle,
     Error,
     Completed,
     #[serde(other)]
@@ -244,5 +251,19 @@ mod tests {
         let json = r#""some_future_status""#;
         let status: AgenticStatus = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(status, AgenticStatus::Unknown);
+    }
+
+    #[test]
+    fn idle_status_serialization() {
+        assert_eq!(
+            serde_json::to_string(&AgenticStatus::Idle).unwrap(),
+            r#""idle""#
+        );
+    }
+
+    #[test]
+    fn idle_status_roundtrip() {
+        let status: AgenticStatus = serde_json::from_str(r#""idle""#).expect("should deserialize");
+        assert_eq!(status, AgenticStatus::Idle);
     }
 }

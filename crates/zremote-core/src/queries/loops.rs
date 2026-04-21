@@ -406,6 +406,7 @@ mod tests {
         );
         assert_eq!(super::parse_status("error"), AgenticStatus::Error);
         assert_eq!(super::parse_status("completed"), AgenticStatus::Completed);
+        assert_eq!(super::parse_status("idle"), AgenticStatus::Idle);
     }
 
     #[test]

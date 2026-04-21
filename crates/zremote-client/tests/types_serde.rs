@@ -155,6 +155,8 @@ fn agentic_loop_all_statuses() {
     for (json_val, expected) in [
         ("working", AgenticStatus::Working),
         ("waiting_for_input", AgenticStatus::WaitingForInput),
+        ("requires_action", AgenticStatus::RequiresAction),
+        ("idle", AgenticStatus::Idle),
         ("error", AgenticStatus::Error),
         ("completed", AgenticStatus::Completed),
         ("some_future_status", AgenticStatus::Unknown),

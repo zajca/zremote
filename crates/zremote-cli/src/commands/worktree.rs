@@ -833,12 +833,13 @@ mod tests {
         // read at the cap. The resulting String's byte length must be
         // <= PROMPT_MAX_LEN.
         let mut out: Vec<u8> = Vec::new();
-        let long = vec![b'x'; (PROMPT_MAX_LEN as usize) * 4];
+        let cap = usize::try_from(PROMPT_MAX_LEN).expect("PROMPT_MAX_LEN fits in usize");
+        let long = vec![b'x'; cap * 4];
         let mut input: &[u8] = &long;
         let v = prompt(&mut out, &mut input, "Branch", None).unwrap();
         let got = v.expect("some value");
         assert!(
-            got.len() <= PROMPT_MAX_LEN as usize,
+            got.len() <= cap,
             "expected <= {PROMPT_MAX_LEN} bytes, got {}",
             got.len()
         );

@@ -141,7 +141,7 @@ pub fn cc_bot_icon(status: AgenticStatus, size: f32) -> gpui::Svg {
         AgenticStatus::RequiresAction | AgenticStatus::WaitingForInput => theme::warning(),
         AgenticStatus::Error => theme::error(),
         AgenticStatus::Completed => theme::success(),
-        _ => theme::text_tertiary(),
+        AgenticStatus::Idle | AgenticStatus::Unknown => theme::text_tertiary(),
     };
     icon(Icon::Bot).size(px(size)).text_color(color)
 }
@@ -172,9 +172,10 @@ pub fn render_cc_tooltip(
             AgenticStatus::Working => "Working",
             AgenticStatus::RequiresAction => "Requires action",
             AgenticStatus::WaitingForInput => "Waiting for input",
+            AgenticStatus::Idle => "Idle",
             AgenticStatus::Error => "Error",
             AgenticStatus::Completed => "Completed",
-            _ => "Unknown",
+            AgenticStatus::Unknown => "Unknown",
         };
         let mut line = format!("Status: {status_text}");
         if let Some(task) = task_name {

@@ -583,12 +583,15 @@ fn longest_common_prefix(names: &[&str]) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unused_async)]
 mod tests {
     // `use gpui::*` in the parent module re-exports `gpui::test`, which would
     // shadow the std `#[test]` attribute and panic inside `gpui_macros` for
     // non-async tests — same guard as views::toast::tests / settings tests.
     // We therefore import items by name (no wildcard) and fully-qualify
     // `gpui::test` attribute invocations via a non-shadowed path.
+    // The `unused_async` allow covers `#[gpui::test]` harnesses whose bodies
+    // happen to resolve synchronously — the macro still requires `async fn`.
     use super::PathAutocompleteApi;
     use super::PathAutocompleteEvent;
     use super::PathAutocompleteInput;
@@ -763,7 +766,8 @@ mod tests {
         let entity = view.root(cx).unwrap();
 
         // Subscribe to events so we can verify Submit fires synchronously.
-        let submitted: Arc<std::sync::Mutex<Option<String>>> = Arc::new(Default::default());
+        let submitted: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::default());
         let submitted_cb = submitted.clone();
         let _sub = cx.update(|cx| {
             cx.subscribe(&entity, move |_e, evt: &PathAutocompleteEvent, _cx| {
