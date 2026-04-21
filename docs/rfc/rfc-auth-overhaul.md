@@ -289,7 +289,7 @@ CREATE INDEX audit_event ON audit_log(event);
 
 | Crate | Purpose |
 |-------|---------|
-| `openidconnect` 0.14 | OIDC discovery, PKCE, nonce — correct-by-default |
+| `openidconnect` 4.0.1 | OIDC discovery, PKCE, nonce — correct-by-default |
 | `argon2` (RustCrypto) 0.5 | Code + secret hashing |
 | `hmac` 0.12, `sha2` 0.10 | Agent challenge-response MAC |
 | `subtle` 2.x | Constant-time comparisons |

@@ -9,6 +9,7 @@
 pub mod admin_token;
 pub mod bearer;
 pub mod legacy;
+pub mod oidc;
 pub mod session;
 pub mod ws_ticket;
 
@@ -24,4 +25,5 @@ pub use legacy::{hash_token, verify_token};
 // oracle-collapse path locally obvious. If a future consumer needs
 // `AuthErr` at crate-auth level, add it here with a concrete caller.
 pub use bearer::AuthContext;
+pub use oidc::OidcFlowStore;
 pub use ws_ticket::{TicketErr, TicketStore};

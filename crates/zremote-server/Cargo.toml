@@ -30,9 +30,12 @@ argon2.workspace = true
 hex.workspace = true
 rand.workspace = true
 secrecy.workspace = true
+openidconnect.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 reqwest = { workspace = true }
+httpmock.workspace = true

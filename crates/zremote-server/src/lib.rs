@@ -63,6 +63,9 @@ pub struct ServerConfig {
 /// and the per-IP bucket is sized for human login pacing.
 fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     use axum::routing::{get, post};
+
+    // Routes that require a valid session bearer. Grouped together so
+    // the `auth_mw` layer only runs for paths that actually need it.
     let protected: Router<Arc<AppState>> = Router::new()
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
@@ -77,14 +80,8 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/api/auth/admin-token",
             post(routes::auth::admin_token_login),
         )
-        .route(
-            "/api/auth/oidc/init",
-            post(routes::auth::oidc_init_placeholder),
-        )
-        .route(
-            "/api/auth/oidc/callback",
-            get(routes::auth::oidc_callback_placeholder),
-        )
+        .route("/api/auth/oidc/init", post(routes::auth::oidc_init))
+        .route("/api/auth/oidc/callback", post(routes::auth::oidc_callback))
         .merge(protected)
         .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT));
 
@@ -498,6 +495,7 @@ pub async fn run_server(config: ServerConfig) {
         settings_save_requests,
         action_inputs_requests,
         ticket_store: auth::ws_ticket::TicketStore::new(),
+        oidc_flows: auth::oidc::OidcFlowStore::new(),
     });
 
     // Spawn heartbeat monitor background task
@@ -631,6 +629,7 @@ mod tests {
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             ticket_store: auth::ws_ticket::TicketStore::new(),
+            oidc_flows: auth::oidc::OidcFlowStore::new(),
         })
     }
 

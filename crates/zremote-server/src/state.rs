@@ -189,6 +189,9 @@ pub struct AppState {
         Arc<DashMap<uuid::Uuid, PendingRequest<ActionInputsResolveResponse>>>,
     /// In-memory single-use WS upgrade tickets (RFC auth-overhaul §4).
     pub ticket_store: crate::auth::TicketStore,
+    /// In-flight OIDC login flows (RFC auth-overhaul §Phase 2, Method B).
+    /// Entries are single-use, TTL-bounded ([`crate::auth::oidc::OIDC_FLOW_TTL`]).
+    pub oidc_flows: crate::auth::OidcFlowStore,
 }
 
 impl AppState {
@@ -451,6 +454,7 @@ mod tests {
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
             ticket_store: crate::auth::ws_ticket::TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         }
     }
 

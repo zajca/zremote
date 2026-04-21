@@ -2,8 +2,12 @@
 //!
 //! **Public routes** (no `auth_mw`, reachable without a session):
 //! - `POST /api/auth/admin-token` — exchange the admin token for a session.
-//! - `POST /api/auth/oidc/init` / `GET /api/auth/oidc/callback` — OIDC login
-//!   (Phase 3 placeholder; returns 501 for now).
+//! - `POST /api/auth/oidc/init` — start an OIDC login flow; returns the
+//!   authorization URL for the GUI to open in the system browser plus a
+//!   one-time `state` token.
+//! - `POST /api/auth/oidc/callback` — the GUI POSTs `{ code, state }`
+//!   extracted from its loopback-bound OIDC redirect listener; on success
+//!   we mint a session with `issued_via = oidc`.
 //!
 //! **Authed routes** (behind `auth_mw`):
 //! - `POST /api/auth/logout` — delete the caller's session.
@@ -34,7 +38,7 @@ use std::net::SocketAddr;
 use zremote_core::queries::audit::{self, AuditEvent, Outcome};
 use zremote_core::queries::{admin_config, auth_sessions};
 
-use crate::auth::{AuthContext, TicketErr, admin_token, session};
+use crate::auth::{AuthContext, TicketErr, admin_token, oidc, session};
 #[cfg(test)]
 use crate::auth_mw::AUTH_FAIL_MIN_LATENCY;
 use crate::auth_mw::unauthorized_after;
@@ -309,22 +313,236 @@ pub async fn ws_ticket(
     }
 }
 
-/// Placeholder for `POST /api/auth/oidc/init` (Phase 3).
-pub async fn oidc_init_placeholder() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": "oidc_not_implemented_in_phase_2" })),
-    )
-        .into_response()
+/// Body: `POST /api/auth/oidc/init`. The GUI binds a loopback listener on
+/// an ephemeral port *before* calling this route and passes its callback
+/// URL as `redirect_uri`. We echo the URL back to the IdP, so the admin's
+/// OIDC client registration must allowlist every port range the GUI may
+/// pick — or the provider will reject the redirect exactly-match check.
+#[derive(Debug, Deserialize)]
+pub struct OidcInitRequest {
+    pub redirect_uri: String,
 }
 
-/// Placeholder for `GET /api/auth/oidc/callback` (Phase 3).
-pub async fn oidc_callback_placeholder() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({ "error": "oidc_not_implemented_in_phase_2" })),
+/// Response for `POST /api/auth/oidc/init`. The `state` field is the CSRF
+/// token the GUI must forward verbatim in the callback body.
+#[derive(Debug, Serialize)]
+pub struct OidcInitResponse {
+    pub auth_url: String,
+    pub state: String,
+}
+
+/// Body: `POST /api/auth/oidc/callback`. The GUI extracts `code` and
+/// `state` from the IdP-driven redirect query string and forwards both
+/// here. We deliberately never accept `code`/`state` on a GET query — the
+/// authenticated session token is minted in the response body, and query
+/// strings end up in access logs / browser history; a POST body keeps it
+/// out of both.
+#[derive(Debug, Deserialize)]
+pub struct OidcCallbackRequest {
+    pub code: String,
+    pub state: String,
+}
+
+/// `POST /api/auth/oidc/init` — start an OIDC login. Returns the
+/// authorization URL the GUI should open in the system browser plus the
+/// `state` CSRF token to echo back in the callback. Requires a configured
+/// `admin_config.oidc_*` triple; if OIDC is not configured we return the
+/// same uniform 401 so that "is OIDC enabled" is not a side-channel.
+///
+/// **Oracle-collapse (RFC T-5):** every failure path — OIDC disabled,
+/// discovery failure, DB error, bad redirect URI — maps to the uniform
+/// `401 unauthorized` with the min-latency floor. The concrete error is
+/// logged server-side via `tracing::warn!` at the per-variant branch.
+pub async fn oidc_init(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<OidcInitRequest>,
+) -> Response {
+    let started = Instant::now();
+    let ip = addr.ip().to_string();
+
+    let config = match load_oidc_config(&state).await {
+        Some(c) => c,
+        None => return unauthorized_after(started).await,
+    };
+
+    // Hardening: only loopback redirects are acceptable — the RFC requires
+    // the GUI to bind its own callback listener, and a non-loopback URI
+    // here would either mean a misconfigured client or an attempted open
+    // redirector. We enforce the check server-side in addition to the
+    // OIDC provider's allowlist so a bug in the GUI cannot silently widen
+    // the attack surface.
+    if !is_loopback_redirect(&req.redirect_uri) {
+        tracing::warn!(
+            ip,
+            redirect = %req.redirect_uri,
+            "oidc_init rejected non-loopback redirect_uri"
+        );
+        log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+        return unauthorized_after(started).await;
+    }
+
+    match oidc::init(&config, &req.redirect_uri, &state.oidc_flows).await {
+        Ok(flow) => (
+            StatusCode::OK,
+            Json(OidcInitResponse {
+                auth_url: flow.auth_url.to_string(),
+                state: flow.state,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, ip, "oidc_init failed");
+            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+            unauthorized_after(started).await
+        }
+    }
+}
+
+/// `POST /api/auth/oidc/callback` — complete an OIDC login. On success,
+/// mints a session via the same code path as [`admin_token_login`] and
+/// returns the same `{session_token, expires_at}` shape. Writes
+/// `login_ok` / `login_fail` audit events (matching the admin-token
+/// path, with `method: "oidc"` in the details JSON).
+pub async fn oidc_callback(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<OidcCallbackRequest>,
+) -> Response {
+    let started = Instant::now();
+    let ip = addr.ip().to_string();
+
+    let config = match load_oidc_config(&state).await {
+        Some(c) => c,
+        None => {
+            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+            return unauthorized_after(started).await;
+        }
+    };
+
+    let identity = match oidc::complete(&config, &req.code, &req.state, &state.oidc_flows).await {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(error = %err, ip, "oidc_callback verification failed");
+            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+            return unauthorized_after(started).await;
+        }
+    };
+
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    match session::issue(
+        &state.db,
+        auth_sessions::IssuedVia::Oidc,
+        user_agent.as_deref(),
+        Some(&ip),
     )
-        .into_response()
+    .await
+    {
+        Ok((token, row)) => {
+            log_oidc_login(&state, &ip, Some(&row.id), Outcome::Ok, "login_ok").await;
+            tracing::info!(
+                session_id = %row.id,
+                email = %identity.email,
+                "oidc login succeeded"
+            );
+            (
+                StatusCode::OK,
+                Json(AdminTokenResponse {
+                    session_token: token,
+                    expires_at: row.expires_at,
+                }),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "session issue failed on oidc callback");
+            log_oidc_login(&state, &ip, None, Outcome::Error, "login_fail").await;
+            unauthorized_after(started).await
+        }
+    }
+}
+
+/// Build the [`oidc::OidcConfig`] from the admin row, or `None` if OIDC
+/// is not configured / the row is missing. Oracle-collapse: callers must
+/// map `None` to the uniform 401.
+async fn load_oidc_config(state: &AppState) -> Option<oidc::OidcConfig> {
+    let cfg = match admin_config::get(&state.db).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::error!(error = ?err, "admin_config fetch failed on oidc path");
+            return None;
+        }
+    };
+    let issuer = cfg.oidc_issuer_url?;
+    let client_id = cfg.oidc_client_id?;
+    let email = cfg.oidc_email?;
+    Some(oidc::OidcConfig {
+        issuer_url: issuer,
+        client_id,
+        allowed_email: email,
+    })
+}
+
+/// Reject any `redirect_uri` that isn't a loopback HTTP URL. Matches both
+/// `http://127.0.0.1:<port>/...` and `http://[::1]:<port>/...`. Rejects
+/// `localhost` explicitly because Windows DNS shenanigans + captive
+/// portals can resolve it to non-loopback addresses, and the RFC pins
+/// the GUI to an ephemeral loopback bind.
+fn is_loopback_redirect(uri: &str) -> bool {
+    use openidconnect::url::{Host, Url};
+    let Ok(parsed) = Url::parse(uri) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    match host {
+        Host::Ipv4(addr) => addr.is_loopback(),
+        Host::Ipv6(addr) => addr.is_loopback(),
+        Host::Domain(_) => false,
+    }
+}
+
+/// Variant of [`log_login`] that stamps `method: "oidc"` into the audit
+/// row's details JSON. Kept distinct so the event discriminator in
+/// dashboards / filters is unambiguous.
+async fn log_oidc_login(
+    state: &AppState,
+    ip: &str,
+    session_id: Option<&str>,
+    outcome: Outcome,
+    event: &str,
+) {
+    let actor = if matches!(outcome, Outcome::Ok) {
+        "admin"
+    } else {
+        ""
+    };
+    let result = audit::log_event(
+        &state.db,
+        AuditEvent {
+            ts: Utc::now(),
+            actor: actor.to_string(),
+            ip: Some(ip.to_string()),
+            event: event.to_string(),
+            target: session_id.map(str::to_string),
+            outcome,
+            details: Some(json!({ "method": "oidc" })),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, event, "audit log_event failed (oidc)");
+    }
 }
 
 /// Bootstrap: if `admin_config` is empty, generate an admin token, persist
@@ -462,6 +680,7 @@ mod tests {
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
             ticket_store: TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         })
     }
 
@@ -741,27 +960,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    // -- OIDC placeholders --------------------------------------------
-
-    #[tokio::test]
-    async fn oidc_placeholder_returns_501() {
-        let state = test_state().await;
-        let app = Router::new()
-            .route("/api/auth/oidc/init", post(super::oidc_init_placeholder))
-            .with_state(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/auth/oidc/init")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    }
-
     // -- bootstrap ----------------------------------------------------
 
     #[tokio::test]
@@ -996,6 +1194,133 @@ mod tests {
             response.status(),
             StatusCode::PAYLOAD_TOO_LARGE,
             "oversized auth body must be rejected before reaching the handler"
+        );
+    }
+
+    // -- OIDC route layer ----------------------------------------------
+
+    fn oidc_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/auth/oidc/init", post(super::oidc_init))
+            .route("/api/auth/oidc/callback", post(super::oidc_callback))
+            .with_state(state)
+    }
+
+    /// With no admin_config at all, the init path must return the same
+    /// opaque 401 as any other failure (RFC oracle collapse).
+    #[tokio::test]
+    async fn oidc_init_returns_401_without_admin_config() {
+        let state = test_state().await;
+        let app = oidc_router(state);
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/oidc/init",
+                Body::from(r#"{"redirect_uri":"http://127.0.0.1:12345/oidc/callback"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = parse_body_json(response).await;
+        assert_eq!(body, serde_json::json!({ "error": "unauthorized" }));
+    }
+
+    /// Even with admin_config present, a non-loopback redirect URI must
+    /// be rejected before we touch the network. Guards against a
+    /// misconfigured GUI leaking the OIDC callback to an external host.
+    #[tokio::test]
+    async fn oidc_init_rejects_non_loopback_redirect() {
+        let state = test_state().await;
+        seed_admin_token(&state, "tok").await;
+        // Set OIDC fields directly; the issuer doesn't matter — we never
+        // reach it because the redirect check runs first.
+        admin_config::set_oidc(
+            &state.db,
+            "https://issuer.example",
+            "client-id",
+            "admin@example.com",
+        )
+        .await
+        .unwrap();
+
+        let app = oidc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/oidc/init",
+                Body::from(r#"{"redirect_uri":"https://evil.example.com/callback"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // And the audit row must record the denial.
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.event == "login_fail" && r.details.contains("oidc")),
+            "non-loopback redirect must be audited with method=oidc, got rows={rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_init_rejects_localhost_redirect() {
+        // `localhost` resolves non-loopback in some network stacks. We
+        // refuse it deliberately; loopback literals only.
+        let state = test_state().await;
+        seed_admin_token(&state, "tok").await;
+        admin_config::set_oidc(
+            &state.db,
+            "https://issuer.example",
+            "client-id",
+            "admin@example.com",
+        )
+        .await
+        .unwrap();
+
+        let app = oidc_router(state);
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/oidc/init",
+                Body::from(r#"{"redirect_uri":"http://localhost:12345/oidc/callback"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `/api/auth/oidc/callback` with a `state` we never issued must 401.
+    /// Guards against an attacker POSTing a forged callback hoping to
+    /// ride an administrator's session.
+    #[tokio::test]
+    async fn oidc_callback_unknown_state_returns_401() {
+        let state = test_state().await;
+        seed_admin_token(&state, "tok").await;
+        admin_config::set_oidc(
+            &state.db,
+            "https://issuer.example",
+            "client-id",
+            "admin@example.com",
+        )
+        .await
+        .unwrap();
+
+        let app = oidc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/oidc/callback",
+                Body::from(r#"{"code":"c","state":"never-issued"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = parse_body_json(response).await;
+        assert_eq!(body, serde_json::json!({ "error": "unauthorized" }));
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.event == "login_fail"
+                && r.outcome == "denied"
+                && r.details.contains("oidc")),
+            "callback failure must be audited with method=oidc, got rows={rows:?}"
         );
     }
 }
