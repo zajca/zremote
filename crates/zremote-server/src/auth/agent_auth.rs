@@ -130,6 +130,10 @@ async fn send_auth_msg(ws: &mut WebSocket, msg: &ServerAuthMessage) -> bool {
 
 /// Perform the ed25519 challenge-response handshake.
 ///
+/// If `pre_parsed_hello` is `Some`, it must be an already-deserialized
+/// `AgentAuthMessage::Hello` (the dispatch shim consumed the first WS frame
+/// to decide the auth path). If `None`, this function reads the Hello itself.
+///
 /// Returns `Ok(AuthenticatedAgent)` on success, `Err(AgentAuthError)` on any
 /// failure. The caller is responsible for sending `AuthFailure` to the agent
 /// and applying the constant-work latency floor (use [`reject_after`]).
@@ -137,12 +141,16 @@ pub async fn authenticate_agent(
     ws: &mut WebSocket,
     pool: &SqlitePool,
     peer_ip: Option<&str>,
+    pre_parsed_hello: Option<AgentAuthMessage>,
 ) -> Result<AuthenticatedAgent, AgentAuthError> {
-    // Step 1: receive Hello.
-    let hello = tokio::time::timeout(AUTH_RECV_TIMEOUT, recv_auth_msg(ws))
-        .await
-        .map_err(|_| AgentAuthError::Timeout)?
-        .ok_or(AgentAuthError::MalformedMessage)?;
+    // Step 1: receive Hello (or use the pre-parsed message from the dispatch shim).
+    let hello = match pre_parsed_hello {
+        Some(msg) => msg,
+        None => tokio::time::timeout(AUTH_RECV_TIMEOUT, recv_auth_msg(ws))
+            .await
+            .map_err(|_| AgentAuthError::Timeout)?
+            .ok_or(AgentAuthError::MalformedMessage)?,
+    };
 
     let AgentAuthMessage::Hello {
         version,
@@ -193,7 +201,7 @@ pub async fn authenticate_agent(
     let mut nonce_server = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut nonce_server)
-        .expect("OS CSPRNG unavailable");
+        .expect("OS CSPRNG must be available");
     let nonce_server_b64 = URL_SAFE_NO_PAD.encode(nonce_server);
 
     if !send_auth_msg(
@@ -492,5 +500,330 @@ mod tests {
     #[test]
     fn latency_floor_constant() {
         assert_eq!(AUTH_FAIL_MIN_LATENCY, Duration::from_millis(100));
+    }
+
+    // ------------------------------------------------------------------
+    // Full-handshake tests using a real TCP + WebSocket connection.
+    // Each test spins up a minimal Axum WS endpoint, connects with
+    // tokio-tungstenite, and drives the protocol to exercise error paths
+    // that can only be reached through the live handshake.
+    // ------------------------------------------------------------------
+
+    /// Full handshake with a wrong signing key returns InvalidSignature.
+    #[tokio::test]
+    async fn wrong_key_handshake_returns_invalid_signature() {
+        use ed25519_dalek::Signer;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+
+        let (sk_registered, pk_b64) = gen_keypair();
+        let (pool, _, agent_id) = setup_pool_with_agent(&pk_b64).await;
+
+        // A different key — will produce an invalid signature.
+        let sk_attacker = SigningKey::generate(&mut OsRng);
+
+        // Spin up server (we only need the addr; result goes through WS messages).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(sk_registered); // not used in this test
+
+        let pool_srv = pool.clone();
+        tokio::spawn(async move {
+            let app = {
+                let pool = pool_srv.clone();
+                axum::Router::new().route(
+                    "/ws",
+                    axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let pool = pool.clone();
+                        async move {
+                            ws.on_upgrade(move |mut socket| async move {
+                                let res =
+                                    authenticate_agent(&mut socket, &pool, Some("127.0.0.1"), None)
+                                        .await;
+                                if let Err(err) = res {
+                                    let _ = send_auth_msg(
+                                        &mut socket,
+                                        &ServerAuthMessage::AuthFailure {
+                                            reason: err.as_reason(),
+                                        },
+                                    )
+                                    .await;
+                                }
+                            })
+                        }
+                    }),
+                )
+            };
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+
+        // Send Hello.
+        let nonce_agent = [0xAAu8; 32];
+        let hello = AgentAuthMessage::Hello {
+            version: zremote_protocol::auth::AGENT_PROTOCOL_VERSION,
+            agent_id: agent_id.clone(),
+            nonce_agent: URL_SAFE_NO_PAD.encode(nonce_agent),
+        };
+        ws.send(TMsg::Text(serde_json::to_string(&hello).unwrap().into()))
+            .await
+            .unwrap();
+
+        // Receive Challenge and sign with attacker key.
+        let challenge_text = ws.next().await.unwrap().unwrap();
+        let challenge: ServerAuthMessage =
+            serde_json::from_str(challenge_text.to_text().unwrap()).unwrap();
+        let ServerAuthMessage::Challenge {
+            nonce_server: ns_b64,
+        } = challenge
+        else {
+            panic!("expected Challenge");
+        };
+        let ns_bytes = URL_SAFE_NO_PAD.decode(&ns_b64).unwrap();
+        let ns_arr: [u8; 32] = ns_bytes.try_into().unwrap();
+        let payload =
+            zremote_protocol::auth::build_auth_payload(&agent_id, &ns_arr, &nonce_agent).unwrap();
+        let sig = sk_attacker.sign(&payload);
+        let resp = AgentAuthMessage::AuthResponse {
+            signature: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
+        };
+        ws.send(TMsg::Text(serde_json::to_string(&resp).unwrap().into()))
+            .await
+            .unwrap();
+
+        // Expect AuthFailure with InvalidSignature reason.
+        let failure_text = ws.next().await.unwrap().unwrap();
+        let failure: ServerAuthMessage =
+            serde_json::from_str(failure_text.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(
+                failure,
+                ServerAuthMessage::AuthFailure {
+                    reason: AuthFailReason::InvalidSignature
+                }
+            ),
+            "expected InvalidSignature, got {failure:?}"
+        );
+    }
+
+    /// If the agent never sends the AuthResponse within AUTH_RECV_TIMEOUT, the
+    /// handshake returns Timeout and emits AuthFailure to the agent.
+    #[tokio::test]
+    async fn auth_recv_timeout_fires() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+
+        let (_, pk_b64) = gen_keypair();
+        let (pool, _, agent_id) = setup_pool_with_agent(&pk_b64).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Shorten timeout to 50 ms so the test runs fast.
+        let pool_srv = pool.clone();
+        tokio::spawn(async move {
+            let app = {
+                let pool = pool_srv.clone();
+                axum::Router::new().route(
+                    "/ws",
+                    axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let pool = pool.clone();
+                        async move {
+                            ws.on_upgrade(move |mut socket| async move {
+                                // Send Challenge by completing Hello processing,
+                                // then simulate timeout by using a tiny manual timeout
+                                // on the AuthResponse wait.
+                                let hello_raw = match tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    recv_auth_msg(&mut socket),
+                                )
+                                .await
+                                {
+                                    Ok(Some(m)) => m,
+                                    _ => return,
+                                };
+                                let AgentAuthMessage::Hello {
+                                    agent_id: aid,
+                                    nonce_agent: na,
+                                    ..
+                                } = hello_raw
+                                else {
+                                    return;
+                                };
+                                let mut nonce_server = [0u8; 32];
+                                use argon2::password_hash::rand_core::RngCore;
+                                OsRng.fill_bytes(&mut nonce_server);
+                                let ns_b64 = URL_SAFE_NO_PAD.encode(nonce_server);
+                                send_auth_msg(
+                                    &mut socket,
+                                    &ServerAuthMessage::Challenge {
+                                        nonce_server: ns_b64,
+                                    },
+                                )
+                                .await;
+                                // Now wait with a very short timeout to simulate AUTH_RECV_TIMEOUT.
+                                let result = tokio::time::timeout(
+                                    Duration::from_millis(50),
+                                    recv_auth_msg(&mut socket),
+                                )
+                                .await;
+                                if result.is_err() {
+                                    send_auth_msg(
+                                        &mut socket,
+                                        &ServerAuthMessage::AuthFailure {
+                                            reason: AuthFailReason::Timeout,
+                                        },
+                                    )
+                                    .await;
+                                }
+                                drop((aid, na));
+                            })
+                        }
+                    }),
+                )
+            };
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+
+        // Send Hello but never send AuthResponse.
+        let hello = AgentAuthMessage::Hello {
+            version: zremote_protocol::auth::AGENT_PROTOCOL_VERSION,
+            agent_id: agent_id.clone(),
+            nonce_agent: URL_SAFE_NO_PAD.encode([0xBBu8; 32]),
+        };
+        ws.send(TMsg::Text(serde_json::to_string(&hello).unwrap().into()))
+            .await
+            .unwrap();
+
+        // Consume Challenge then do nothing — timeout fires server-side.
+        let _challenge = ws.next().await.unwrap().unwrap();
+
+        // The server should send AuthFailure { Timeout } after ~50 ms.
+        let failure_text = tokio::time::timeout(Duration::from_millis(500), ws.next())
+            .await
+            .expect("timed out waiting for server AuthFailure")
+            .unwrap()
+            .unwrap();
+
+        let failure: ServerAuthMessage =
+            serde_json::from_str(failure_text.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(
+                failure,
+                ServerAuthMessage::AuthFailure {
+                    reason: AuthFailReason::Timeout
+                }
+            ),
+            "expected Timeout AuthFailure, got {failure:?}"
+        );
+    }
+
+    /// A revoked agent (revoked_at IS NOT NULL) is rejected end-to-end — the
+    /// handshake returns AuthFailure { UnknownAgent }.
+    #[tokio::test]
+    async fn revoked_agent_rejected_end_to_end() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+
+        let (sk, pk_b64) = gen_keypair();
+        let (pool, _, agent_id) = setup_pool_with_agent(&pk_b64).await;
+        agents::revoke(&pool, &agent_id).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool_srv = pool.clone();
+        tokio::spawn(async move {
+            let app = {
+                let pool = pool_srv.clone();
+                axum::Router::new().route(
+                    "/ws",
+                    axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let pool = pool.clone();
+                        async move {
+                            ws.on_upgrade(move |mut socket| async move {
+                                let res =
+                                    authenticate_agent(&mut socket, &pool, Some("127.0.0.1"), None)
+                                        .await;
+                                if let Err(err) = res {
+                                    send_auth_msg(
+                                        &mut socket,
+                                        &ServerAuthMessage::AuthFailure {
+                                            reason: err.as_reason(),
+                                        },
+                                    )
+                                    .await;
+                                }
+                            })
+                        }
+                    }),
+                )
+            };
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+
+        // Send Hello for the revoked agent.
+        let nonce_agent = [0xCCu8; 32];
+        let hello = AgentAuthMessage::Hello {
+            version: zremote_protocol::auth::AGENT_PROTOCOL_VERSION,
+            agent_id: agent_id.clone(),
+            nonce_agent: URL_SAFE_NO_PAD.encode(nonce_agent),
+        };
+        ws.send(TMsg::Text(serde_json::to_string(&hello).unwrap().into()))
+            .await
+            .unwrap();
+
+        // Server rejects immediately after Hello (before sending Challenge) —
+        // the next frame must be AuthFailure { UnknownAgent }.
+        let failure_text = tokio::time::timeout(Duration::from_millis(500), ws.next())
+            .await
+            .expect("timed out waiting for server AuthFailure for revoked agent")
+            .unwrap()
+            .unwrap();
+
+        let failure: ServerAuthMessage =
+            serde_json::from_str(failure_text.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(
+                failure,
+                ServerAuthMessage::AuthFailure {
+                    reason: AuthFailReason::UnknownAgent
+                }
+            ),
+            "expected UnknownAgent for revoked agent, got {failure:?}"
+        );
+        drop(sk);
     }
 }

@@ -5,7 +5,8 @@
 //! auth path to take:
 //!
 //! - `AgentAuthMessage::Hello { version: 2, … }` → ed25519 challenge-response
-//!   via `auth::agent_auth::authenticate_agent`. V2 path (RFC §3 amendment).
+//!   via `auth::agent_auth::authenticate_agent` (pre-parsed Hello passed in).
+//!   V2 path (RFC §3 amendment).
 //! - `AgentMessage::Register { token, … }` → legacy single-token check.
 //!   Kept alive for one release cycle per RFC §9 backward-compat window.
 //! - Anything else → reject with a malformed-message error.
@@ -25,7 +26,7 @@ use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 
 use crate::auth;
-use crate::auth::agent_auth::{self, AgentAuthError};
+use crate::auth::agent_auth;
 use crate::state::{AppState, ServerEvent};
 
 use super::send_server_message;
@@ -159,11 +160,8 @@ async fn register_agent_v2(
     peer_ip: Option<&str>,
     started: Instant,
 ) -> Option<RegisteredAgent> {
-    // Send the challenge and receive AuthResponse. We have the Hello already,
-    // so we need to complete the handshake from step 2 onward.
-    // Rather than duplicating the logic, re-use authenticate_agent_from_hello.
     let authenticated =
-        match authenticate_agent_from_hello(socket, &state.db, hello_msg, peer_ip).await {
+        match agent_auth::authenticate_agent(socket, &state.db, peer_ip, Some(hello_msg)).await {
             Ok(auth) => auth,
             Err(err) => {
                 agent_auth::reject_after(socket, &state.db, err, None, peer_ip, started).await;
@@ -233,158 +231,6 @@ async fn register_agent_v2(
         arch: String::new(),
         supports_persistent_sessions: true,
     })
-}
-
-/// Handle the ed25519 challenge-response starting from a Hello message that
-/// was already parsed by the dispatch shim.
-async fn authenticate_agent_from_hello(
-    socket: &mut WebSocket,
-    pool: &sqlx::SqlitePool,
-    hello_msg: AgentAuthMessage,
-    peer_ip: Option<&str>,
-) -> Result<agent_auth::AuthenticatedAgent, AgentAuthError> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use ed25519_dalek::{Verifier, VerifyingKey};
-    use rand::TryRngCore;
-    use rand::rngs::OsRng;
-    use zremote_core::queries::agents;
-    use zremote_core::queries::audit::{self, AuditEvent, Outcome};
-    use zremote_protocol::auth::{AGENT_PROTOCOL_VERSION, build_auth_payload};
-
-    let AgentAuthMessage::Hello {
-        version,
-        agent_id,
-        nonce_agent: nonce_agent_b64,
-    } = hello_msg
-    else {
-        return Err(AgentAuthError::MalformedMessage);
-    };
-
-    if version != AGENT_PROTOCOL_VERSION {
-        return Err(AgentAuthError::VersionMismatch);
-    }
-
-    let agent = agents::find_by_id(pool, &agent_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "DB error looking up agent");
-            AgentAuthError::Internal
-        })?
-        .ok_or(AgentAuthError::UnknownAgent)?;
-
-    if agent.revoked_at.is_some() {
-        return Err(AgentAuthError::UnknownAgent);
-    }
-
-    let pk_bytes = URL_SAFE_NO_PAD
-        .decode(&agent.public_key)
-        .map_err(|_| AgentAuthError::InvalidPublicKey)?;
-    let pk_arr: [u8; 32] = pk_bytes
-        .try_into()
-        .map_err(|_| AgentAuthError::InvalidPublicKey)?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&pk_arr).map_err(|_| AgentAuthError::InvalidPublicKey)?;
-
-    let mut nonce_server = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut nonce_server)
-        .expect("OS CSPRNG unavailable");
-    let nonce_server_b64 = URL_SAFE_NO_PAD.encode(nonce_server);
-
-    let challenge_json = serde_json::to_string(&ServerAuthMessage::Challenge {
-        nonce_server: nonce_server_b64,
-    })
-    .map_err(|_| AgentAuthError::Internal)?;
-
-    if socket
-        .send(Message::Text(challenge_json.into()))
-        .await
-        .is_err()
-    {
-        return Err(AgentAuthError::Internal);
-    }
-
-    // Receive AuthResponse.
-    let response = tokio::time::timeout(
-        agent_auth::AUTH_FAIL_MIN_LATENCY * 100, // 10 s
-        recv_auth_response(socket),
-    )
-    .await
-    .map_err(|_| AgentAuthError::Timeout)?
-    .ok_or(AgentAuthError::MalformedMessage)?;
-
-    let AgentAuthMessage::AuthResponse {
-        signature: signature_b64,
-    } = response
-    else {
-        return Err(AgentAuthError::MalformedMessage);
-    };
-
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(&signature_b64)
-        .map_err(|_| AgentAuthError::MalformedMessage)?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| AgentAuthError::MalformedMessage)?;
-    let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
-
-    let nonce_agent_bytes = URL_SAFE_NO_PAD
-        .decode(&nonce_agent_b64)
-        .map_err(|_| AgentAuthError::MalformedMessage)?;
-    let nonce_agent_32: [u8; 32] = nonce_agent_bytes
-        .try_into()
-        .map_err(|_| AgentAuthError::MalformedMessage)?;
-
-    let payload = build_auth_payload(&agent_id, &nonce_server, &nonce_agent_32)
-        .ok_or(AgentAuthError::MalformedMessage)?;
-
-    verifying_key
-        .verify(&payload, &signature)
-        .map_err(|_| AgentAuthError::InvalidSignature)?;
-
-    let session_token = agents::mint_agent_session(pool, &agent_id, 365 * 24 * 3600)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to mint agent_session");
-            AgentAuthError::Internal
-        })?;
-
-    let _ = agents::set_last_seen(pool, &agent_id, Utc::now()).await;
-
-    let _ = audit::log_event(
-        pool,
-        AuditEvent {
-            ts: Utc::now(),
-            actor: format!("agent:{agent_id}"),
-            ip: peer_ip.map(str::to_string),
-            event: "agent_auth_ok".to_string(),
-            target: Some(agent_id.clone()),
-            outcome: Outcome::Ok,
-            details: None,
-        },
-    )
-    .await;
-
-    Ok(agent_auth::AuthenticatedAgent {
-        agent_id,
-        host_id: agent.host_id,
-        session_token,
-    })
-}
-
-async fn recv_auth_response(socket: &mut WebSocket) -> Option<AgentAuthMessage> {
-    loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => {
-                return serde_json::from_str::<AgentAuthMessage>(&text).ok();
-            }
-            Some(Ok(Message::Close(_))) | None => return None,
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            Some(Ok(Message::Binary(_))) => return None,
-            Some(Err(_)) => return None,
-        }
-    }
 }
 
 /// V1 (legacy) registration path. Kept for one release cycle per RFC §9.

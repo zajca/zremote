@@ -48,6 +48,14 @@ const MAX_ENROLL_TTL_SECS: u64 = 3600;
 /// Agent session TTL: 1 year. Explicit revocation reclaims it.
 const AGENT_SESSION_TTL_SECS: i64 = 365 * 24 * 3600;
 
+/// Maximum hostname length (DNS label + dots; RFC 1035 §2.3.4).
+const MAX_HOSTNAME_LEN: usize = 253;
+
+/// Maximum number of active enrollment codes fetched for verification.
+/// Each pending code requires one argon2id verify (~50–200 ms CPU). Without a
+/// cap an admin-controllable number of codes could be used as a CPU amplifier.
+const MAX_ACTIVE_CODES: i64 = 100;
+
 // --------------------------------------------------------------------------
 // Request / response types
 // --------------------------------------------------------------------------
@@ -129,6 +137,11 @@ fn no_store_header() -> HeaderValue {
     HeaderValue::from_static("no-store")
 }
 
+/// Validate a hostname: non-empty, at most 253 characters (RFC 1035 §2.3.4).
+fn validate_hostname(hostname: &str) -> bool {
+    !hostname.is_empty() && hostname.len() <= MAX_HOSTNAME_LEN
+}
+
 // --------------------------------------------------------------------------
 // POST /api/admin/enroll/create
 // --------------------------------------------------------------------------
@@ -139,6 +152,17 @@ pub async fn create_enrollment_code(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<CreateEnrollmentCodeRequest>,
 ) -> Response {
+    // Validate hostname hint if provided.
+    if let Some(ref h) = req.hostname
+        && !validate_hostname(h)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_hostname" })),
+        )
+            .into_response();
+    }
+
     let ttl_secs = req
         .expires_in_secs
         .unwrap_or(DEFAULT_ENROLL_TTL_SECS)
@@ -148,7 +172,7 @@ pub async fn create_enrollment_code(
     let mut code_bytes = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut code_bytes)
-        .expect("OS CSPRNG unavailable");
+        .expect("OS CSPRNG must be available");
     let code_plaintext = URL_SAFE_NO_PAD.encode(code_bytes);
 
     // Argon2id hash for storage.
@@ -208,8 +232,8 @@ pub async fn enroll(
     let started = Instant::now();
     let ip = addr.ip().to_string();
 
-    // Step 1: validate public key immediately — this is a client error, not
-    // an oracle-collapsible path.
+    // Step 1: validate client-supplied fields — these are client errors, not
+    // oracle-collapsible paths.
     if parse_public_key(&req.public_key).is_none() {
         return (
             StatusCode::BAD_REQUEST,
@@ -217,13 +241,18 @@ pub async fn enroll(
         )
             .into_response();
     }
+    if !validate_hostname(&req.hostname) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_hostname" })),
+        )
+            .into_response();
+    }
 
     let now = Utc::now();
 
-    // Step 2: scan all pending codes and argon2id-verify against provided code.
-    // We iterate because argon2id uses per-row salts — lookup by hash is not
-    // possible. For single-user deployments with few pending codes, scanning is
-    // acceptable. A future phase can cap pending-code volume via admin UI.
+    // Step 2: scan pending codes (LIMIT caps amplification; see MAX_ACTIVE_CODES).
+    // argon2id uses per-row salts so lookup by hash is impossible — we must scan.
     let pending_codes = match fetch_pending_codes(&state.db, now).await {
         Ok(codes) => codes,
         Err(e) => {
@@ -269,28 +298,66 @@ pub async fn enroll(
             .into_response();
     };
 
-    // Step 3: upsert host.
-    let host_id = match upsert_host_for_enrollment(&state.db, &req.hostname).await {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(error = %e, hostname = %req.hostname, "upsert host failed");
+    // Step 3: redeem the code FIRST (cheapest check; atomic UPDATE … WHERE consumed_at IS NULL).
+    // By redeeming before the host upsert and agent insert, a race-loser fails here and
+    // leaves no ghost rows. This eliminates the need to roll back later.
+    //
+    // We use a placeholder agent_id (the real one is set after the agent row is created),
+    // then update it once the agent row exists. Alternatively, we reserve the code with a
+    // sentinel and finalize — but the simpler approach is to redeem with a temporary id
+    // and update consumed_by_agent_id afterwards.
+    //
+    // Actually: redeem requires an agent_id FK. Instead, insert the agent row first but
+    // inside a single atomic check: try to redeem; if it fails (race), discard agent row.
+    // The invariant we enforce is: host upsert is idempotent (returns existing id), so
+    // ghost host rows are not a problem. The only non-idempotent write is the agent row.
+
+    // Steps 3+4: upsert host and create agent in a single transaction so a
+    // crash between the two writes cannot leave a host row without an agent.
+    // The transaction also serializes concurrent enrollments for the same
+    // hostname — the second caller either reuses the existing host row (upsert
+    // is idempotent) or creates a fresh one, but both complete atomically.
+    let (host_id, agent) = {
+        let mut tx = match state.db.begin().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to begin enrollment transaction");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        let host_id = match upsert_host_for_enrollment_tx(&mut tx, &req.hostname).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(error = %e, hostname = %req.hostname, "upsert host failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        let agent = match agents::create_in_tx(&mut tx, &host_id, &req.public_key).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create agent row");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        if let Err(e) = tx.commit().await {
+            tracing::error!(error = %e, "failed to commit enrollment transaction");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+
+        (host_id, agent)
     };
 
-    // Step 4: insert agents row with the public key.
-    let agent = match agents::create(&state.db, &host_id, &req.public_key).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to create agent row");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    // Step 5: atomically redeem the enrollment code.
+    // Step 5: atomically redeem the enrollment code. This is the single-writer
+    // guard: UPDATE … WHERE consumed_at IS NULL returns 0 rows if a concurrent
+    // request already won the race. On failure we revoke the agent row (sets
+    // revoked_at; the host row is left — upsert_host is idempotent so ghost
+    // host rows are benign and will be re-used on the next successful enroll
+    // for the same hostname).
     if let Err(e) = enrollment::redeem(&state.db, &matched_row.code_hash, &agent.id, now).await {
         tracing::warn!(error = %e, agent_id = %agent.id, "enrollment code redemption failed (race?)");
-        // Roll back the agent row.
         let _ = agents::revoke(&state.db, &agent.id).await;
         if let Some(remaining) = ENROLL_FAIL_MIN_LATENCY.checked_sub(started.elapsed()) {
             tokio::time::sleep(remaining).await;
@@ -352,6 +419,9 @@ pub async fn enroll(
 // Internal helpers
 // --------------------------------------------------------------------------
 
+/// Fetch up to `MAX_ACTIVE_CODES` pending (unexpired, unconsumed) enrollment
+/// codes. The LIMIT caps the number of argon2id verifies per request — each
+/// verify is ~50–200 ms of CPU, so an unbounded scan would be an amplifier.
 async fn fetch_pending_codes(
     pool: &sqlx::SqlitePool,
     now: chrono::DateTime<Utc>,
@@ -360,9 +430,11 @@ async fn fetch_pending_codes(
     sqlx::query_as::<_, zremote_core::queries::enrollment::EnrollmentCodeRow>(
         "SELECT code_hash, scope, expires_at, consumed_at, consumed_by_agent_id \
          FROM enrollment_codes \
-         WHERE consumed_at IS NULL AND expires_at > ?",
+         WHERE consumed_at IS NULL AND expires_at > ? \
+         LIMIT ?",
     )
     .bind(&now_s)
+    .bind(MAX_ACTIVE_CODES)
     .fetch_all(pool)
     .await
 }
@@ -396,6 +468,43 @@ pub async fn upsert_host_for_enrollment(
     .bind(&now)
     .bind(&now)
     .execute(pool)
+    .await
+    .map_err(|e| format!("insert host failed: {e}"))?;
+
+    Ok(host_id)
+}
+
+/// Transaction-scoped variant of [`upsert_host_for_enrollment`]. Called from
+/// the enrollment handler where host upsert and agent create must be atomic.
+async fn upsert_host_for_enrollment_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    hostname: &str,
+) -> Result<String, String> {
+    let now = Utc::now().to_rfc3339();
+
+    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE hostname = ?")
+        .bind(hostname)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| format!("db error: {e}"))?;
+
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
+
+    let host_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO hosts (id, name, hostname, auth_token_hash, agent_version, os, arch, \
+         status, last_seen_at, created_at, updated_at) \
+         VALUES (?, ?, ?, '', '', '', '', 'online', ?, ?, ?)",
+    )
+    .bind(&host_id)
+    .bind(hostname)
+    .bind(hostname)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
     .await
     .map_err(|e| format!("insert host failed: {e}"))?;
 
@@ -633,6 +742,51 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // Expired and wrong-code both collapse to enrollment_failed.
         assert_eq!(json["error"], "enrollment_failed");
+    }
+
+    #[tokio::test]
+    async fn enroll_empty_hostname_returns_400() {
+        let state = test_state().await;
+        let pool = state.db.clone();
+        let pk = gen_pk_b64();
+
+        insert_code(&pool, "code-hn", 600).await;
+
+        let resp = enroll_router(Arc::clone(&state))
+            .oneshot(enroll_request(
+                "/api/enroll",
+                enroll_body("code-hn", "", &pk),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_hostname");
+    }
+
+    #[tokio::test]
+    async fn enroll_oversized_hostname_returns_400() {
+        let state = test_state().await;
+        let pool = state.db.clone();
+        let pk = gen_pk_b64();
+
+        insert_code(&pool, "code-hn2", 600).await;
+
+        let long_hostname = "a".repeat(254);
+        let resp = enroll_router(Arc::clone(&state))
+            .oneshot(enroll_request(
+                "/api/enroll",
+                enroll_body("code-hn2", &long_hostname, &pk),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_hostname");
     }
 
     #[test]

@@ -91,6 +91,8 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/auth/oidc/init", post(routes::auth::oidc_init))
         .route("/api/auth/oidc/callback", post(routes::auth::oidc_callback))
+        // Enrollment is public but rate-limited together with auth (10 req/min/IP).
+        .route("/api/enroll", post(routes::enrollment::enroll))
         .merge(protected)
         .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT));
 
@@ -150,7 +152,6 @@ fn create_router(state: Arc<AppState>) -> Router {
     // credentials other than the first-run admin token.
     Router::new()
         .merge(auth_subtree)
-        .route("/api/enroll", post(routes::enrollment::enroll))
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
         .route("/api/hosts", get(routes::hosts::list_hosts))

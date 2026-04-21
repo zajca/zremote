@@ -85,6 +85,32 @@ pub async fn create(
     })
 }
 
+/// Same as [`create`] but operates inside an existing transaction.
+pub async fn create_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    host_id: &str,
+    public_key: &str,
+) -> Result<AgentRow, AgentQueryError> {
+    let id = Uuid::now_v7().to_string();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO agents (id, host_id, public_key, created_at) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(host_id)
+        .bind(public_key)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+    Ok(AgentRow {
+        id,
+        host_id: host_id.to_string(),
+        public_key: public_key.to_string(),
+        created_at: now,
+        last_seen: None,
+        revoked_at: None,
+        rotated_from: None,
+    })
+}
+
 pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<AgentRow>, AgentQueryError> {
     let row = sqlx::query_as::<_, AgentRow>(
         "SELECT id, host_id, public_key, created_at, last_seen, revoked_at, rotated_from \

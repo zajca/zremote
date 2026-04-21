@@ -40,3 +40,5 @@ tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 reqwest = { workspace = true }
 httpmock.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
