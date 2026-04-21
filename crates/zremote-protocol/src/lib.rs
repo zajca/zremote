@@ -16,8 +16,8 @@ pub use agents::{
     supported_kinds,
 };
 pub use auth::{
-    AGENT_PROTOCOL_VERSION, AgentAuthMessage, AuthRejectReason, EnrollRejectReason,
-    ServerAuthMessage,
+    AGENT_PROTOCOL_VERSION, AgentAuthMessage, AuthFailReason, EnrollRejectReason,
+    ServerAuthMessage, build_auth_payload,
 };
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};

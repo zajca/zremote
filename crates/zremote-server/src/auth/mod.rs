@@ -7,6 +7,7 @@
 //! flow and then delete `legacy.rs`.
 
 pub mod admin_token;
+pub mod agent_auth;
 pub mod bearer;
 pub mod legacy;
 pub mod oidc;

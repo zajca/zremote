@@ -47,6 +47,7 @@ portable-pty = "0.9"
 hostname = "0.4"
 url = "2"
 rand = "0.9"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 sysinfo = "0.34"
 base64 = "0.22"
 regex = "1"

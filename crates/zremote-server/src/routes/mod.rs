@@ -7,6 +7,7 @@ pub mod auth;
 pub mod channel;
 pub mod claude_sessions;
 pub mod config;
+pub mod enrollment;
 pub mod events;
 pub mod health;
 pub mod hosts;

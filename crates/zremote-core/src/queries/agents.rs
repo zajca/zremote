@@ -1,4 +1,4 @@
-//! Queries for the `agents` table — per-host credentials issued on enrollment.
+//! Queries for the `agents` table — per-host ed25519 credentials issued on enrollment.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -32,12 +32,14 @@ impl From<sqlx::Error> for AgentQueryError {
     }
 }
 
-/// Agent credential row. `secret_hash` (argon2id) is redacted in Debug.
+/// Agent credential row. `public_key` is the ed25519 verifying key (base64url,
+/// 32 bytes). Public keys are safe to store in plaintext — a DB read no longer
+/// grants agent impersonation (RFC amendment Phase 3, threat T-8).
 #[derive(Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct AgentRow {
     pub id: String,
     pub host_id: String,
-    pub secret_hash: String,
+    pub public_key: String,
     pub created_at: String,
     pub last_seen: Option<String>,
     pub revoked_at: Option<String>,
@@ -49,7 +51,7 @@ impl std::fmt::Debug for AgentRow {
         f.debug_struct("AgentRow")
             .field("id", &self.id)
             .field("host_id", &self.host_id)
-            .field("secret_hash", &"<redacted>")
+            .field("public_key_len", &self.public_key.len())
             .field("created_at", &self.created_at)
             .field("last_seen", &self.last_seen)
             .field("revoked_at", &self.revoked_at)
@@ -61,21 +63,21 @@ impl std::fmt::Debug for AgentRow {
 pub async fn create(
     pool: &SqlitePool,
     host_id: &str,
-    secret_hash: &str,
+    public_key: &str,
 ) -> Result<AgentRow, AgentQueryError> {
     let id = Uuid::now_v7().to_string();
     let now = Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO agents (id, host_id, secret_hash, created_at) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO agents (id, host_id, public_key, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(host_id)
-        .bind(secret_hash)
+        .bind(public_key)
         .bind(&now)
         .execute(pool)
         .await?;
     Ok(AgentRow {
         id,
         host_id: host_id.to_string(),
-        secret_hash: secret_hash.to_string(),
+        public_key: public_key.to_string(),
         created_at: now,
         last_seen: None,
         revoked_at: None,
@@ -85,7 +87,7 @@ pub async fn create(
 
 pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<AgentRow>, AgentQueryError> {
     let row = sqlx::query_as::<_, AgentRow>(
-        "SELECT id, host_id, secret_hash, created_at, last_seen, revoked_at, rotated_from \
+        "SELECT id, host_id, public_key, created_at, last_seen, revoked_at, rotated_from \
          FROM agents WHERE id = ?",
     )
     .bind(id)
@@ -94,17 +96,15 @@ pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<AgentRow>,
     Ok(row)
 }
 
-/// Update the `secret_hash` in place. For rotate, a caller that wants an audit
-/// trail should prefer [`create`] with `rotated_from = old_id` then
-/// [`revoke`] the old row. This in-place update is provided for tests and
-/// for simple rotation flows that don't need that lineage.
-pub async fn update_secret_hash(
+/// Update the public key in place. For rotation, prefer [`create_rotated`] with
+/// `rotated_from` lineage and then [`revoke`] the old row.
+pub async fn update_public_key(
     pool: &SqlitePool,
     id: &str,
-    new_secret_hash: &str,
+    new_public_key: &str,
 ) -> Result<u64, AgentQueryError> {
-    let result = sqlx::query("UPDATE agents SET secret_hash = ? WHERE id = ?")
-        .bind(new_secret_hash)
+    let result = sqlx::query("UPDATE agents SET public_key = ? WHERE id = ?")
+        .bind(new_public_key)
         .bind(id)
         .execute(pool)
         .await?;
@@ -116,17 +116,17 @@ pub async fn update_secret_hash(
 pub async fn create_rotated(
     pool: &SqlitePool,
     host_id: &str,
-    secret_hash: &str,
+    public_key: &str,
     rotated_from: &str,
 ) -> Result<AgentRow, AgentQueryError> {
     let id = Uuid::now_v7().to_string();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
-        "INSERT INTO agents (id, host_id, secret_hash, created_at, rotated_from) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, host_id, public_key, created_at, rotated_from) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(host_id)
-    .bind(secret_hash)
+    .bind(public_key)
     .bind(&now)
     .bind(rotated_from)
     .execute(pool)
@@ -134,7 +134,7 @@ pub async fn create_rotated(
     Ok(AgentRow {
         id,
         host_id: host_id.to_string(),
-        secret_hash: secret_hash.to_string(),
+        public_key: public_key.to_string(),
         created_at: now,
         last_seen: None,
         revoked_at: None,
@@ -172,13 +172,50 @@ pub async fn list_for_host(
     host_id: &str,
 ) -> Result<Vec<AgentRow>, AgentQueryError> {
     let rows = sqlx::query_as::<_, AgentRow>(
-        "SELECT id, host_id, secret_hash, created_at, last_seen, revoked_at, rotated_from \
+        "SELECT id, host_id, public_key, created_at, last_seen, revoked_at, rotated_from \
          FROM agents WHERE host_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
     )
     .bind(host_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/// Mint an `agent_session` row and return the session token plaintext.
+/// The stored token is SHA-256 hashed (same pattern as `auth_sessions`).
+pub async fn mint_agent_session(
+    pool: &SqlitePool,
+    agent_id: &str,
+    ttl_secs: i64,
+) -> Result<String, AgentQueryError> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rand::TryRngCore;
+    use rand::rngs::OsRng;
+    use sha2::{Digest, Sha256};
+
+    let mut token_bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut token_bytes)
+        .expect("OS CSPRNG unavailable");
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+
+    let id = Uuid::now_v7().to_string();
+    let expires_at = (Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, agent_id, reconnect_token_hash, expires_at) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(agent_id)
+    .bind(&token_hash)
+    .bind(&expires_at)
+    .execute(pool)
+    .await?;
+
+    Ok(token)
 }
 
 #[cfg(test)]
@@ -202,29 +239,32 @@ mod tests {
     #[tokio::test]
     async fn create_and_lookup() {
         let (pool, host_id) = setup().await;
-        let agent = create(&pool, &host_id, "secret-hash").await.unwrap();
+        let agent = create(&pool, &host_id, "pubkey-base64url").await.unwrap();
         let found = find_by_id(&pool, &agent.id).await.unwrap().unwrap();
         assert_eq!(found.id, agent.id);
         assert_eq!(found.host_id, host_id);
+        assert_eq!(found.public_key, "pubkey-base64url");
         assert!(found.revoked_at.is_none());
     }
 
     #[tokio::test]
-    async fn update_secret_hash_changes_row() {
+    async fn update_public_key_changes_row() {
         let (pool, host_id) = setup().await;
-        let agent = create(&pool, &host_id, "old").await.unwrap();
-        let n = update_secret_hash(&pool, &agent.id, "new").await.unwrap();
+        let agent = create(&pool, &host_id, "old-pubkey").await.unwrap();
+        let n = update_public_key(&pool, &agent.id, "new-pubkey")
+            .await
+            .unwrap();
         assert_eq!(n, 1);
 
         let found = find_by_id(&pool, &agent.id).await.unwrap().unwrap();
-        assert_eq!(found.secret_hash, "new");
+        assert_eq!(found.public_key, "new-pubkey");
     }
 
     #[tokio::test]
     async fn create_rotated_links_lineage() {
         let (pool, host_id) = setup().await;
-        let orig = create(&pool, &host_id, "s1").await.unwrap();
-        let new = create_rotated(&pool, &host_id, "s2", &orig.id)
+        let orig = create(&pool, &host_id, "pk1").await.unwrap();
+        let new = create_rotated(&pool, &host_id, "pk2", &orig.id)
             .await
             .unwrap();
         assert_eq!(new.rotated_from.as_deref(), Some(orig.id.as_str()));
@@ -233,8 +273,8 @@ mod tests {
     #[tokio::test]
     async fn revoke_sets_timestamp_and_filters_list() {
         let (pool, host_id) = setup().await;
-        let a1 = create(&pool, &host_id, "s1").await.unwrap();
-        let _a2 = create(&pool, &host_id, "s2").await.unwrap();
+        let a1 = create(&pool, &host_id, "pk1").await.unwrap();
+        let _a2 = create(&pool, &host_id, "pk2").await.unwrap();
 
         assert_eq!(revoke(&pool, &a1.id).await.unwrap(), 1);
         // Revoking again is a no-op.
@@ -248,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn set_last_seen_updates_row() {
         let (pool, host_id) = setup().await;
-        let a = create(&pool, &host_id, "s").await.unwrap();
+        let a = create(&pool, &host_id, "pk").await.unwrap();
         assert!(a.last_seen.is_none());
 
         let t = DateTime::parse_from_rfc3339("2026-04-01T12:00:00Z")
@@ -260,19 +300,36 @@ mod tests {
         assert!(found.last_seen.is_some());
     }
 
+    #[tokio::test]
+    async fn mint_agent_session_creates_row() {
+        let (pool, host_id) = setup().await;
+        let agent = create(&pool, &host_id, "pk").await.unwrap();
+        let token = mint_agent_session(&pool, &agent.id, 3600).await.unwrap();
+        assert_eq!(token.len(), 43); // base64url of 32 bytes, no padding
+        // Verify the row exists
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM agent_sessions WHERE agent_id = ?")
+                .bind(&agent.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+
     #[test]
-    fn debug_redacts_secret_hash() {
+    fn debug_does_not_leak_public_key_bytes() {
         let row = AgentRow {
             id: "a".into(),
             host_id: "h".into(),
-            secret_hash: "argon2-leaky".into(),
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
             created_at: "t".into(),
             last_seen: None,
             revoked_at: None,
             rotated_from: None,
         };
         let dbg = format!("{row:?}");
-        assert!(!dbg.contains("argon2-leaky"));
-        assert!(dbg.contains("<redacted>"));
+        // Debug shows length, not value
+        assert!(dbg.contains("public_key_len"));
+        assert!(!dbg.contains("AAAAAAAAAAAAA"));
     }
 }

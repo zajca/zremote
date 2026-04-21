@@ -204,7 +204,7 @@ mod tests {
         .unwrap();
         let agent_id = "a1".to_string();
         sqlx::query(
-            "INSERT INTO agents (id, host_id, secret_hash, created_at) VALUES (?, 'h1', 'sh', ?)",
+            "INSERT INTO agents (id, host_id, public_key, created_at) VALUES (?, 'h1', 'pk', ?)",
         )
         .bind(&agent_id)
         .bind(Utc::now().to_rfc3339())
@@ -280,7 +280,7 @@ mod tests {
 
         // Second agent so both calls have a distinct FK target.
         sqlx::query(
-            "INSERT INTO agents (id, host_id, secret_hash, created_at) VALUES ('a2', 'h1', 'sh2', ?)",
+            "INSERT INTO agents (id, host_id, public_key, created_at) VALUES ('a2', 'h1', 'pk2', ?)",
         )
         .bind(Utc::now().to_rfc3339())
         .execute(&pool)

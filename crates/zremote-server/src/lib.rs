@@ -75,6 +75,10 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(routes::admin::get_config).put(routes::admin::update_config),
         )
         .route("/api/admin/rotate-token", post(routes::admin::rotate_token))
+        .route(
+            "/api/admin/enroll/create",
+            post(routes::enrollment::create_enrollment_code),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             auth_mw::auth_mw,
@@ -146,6 +150,7 @@ fn create_router(state: Arc<AppState>) -> Router {
     // credentials other than the first-run admin token.
     Router::new()
         .merge(auth_subtree)
+        .route("/api/enroll", post(routes::enrollment::enroll))
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
         .route("/api/hosts", get(routes::hosts::list_hosts))

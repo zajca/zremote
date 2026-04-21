@@ -7,9 +7,10 @@ mod lifecycle;
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
+use std::net::SocketAddr;
 use zremote_protocol::agentic::AgenticAgentMessage;
 use zremote_protocol::status::HostStatus;
 use zremote_protocol::{AgentMessage, ServerMessage};
@@ -17,7 +18,7 @@ use zremote_protocol::{AgentMessage, ServerMessage};
 use crate::state::{AppState, HostInfo, ServerEvent};
 
 use dispatch::{handle_agent_message, handle_agentic_message};
-use lifecycle::{RegisteredAgent, cleanup_agent, register_agent};
+use lifecycle::{RegisteredAgent, cleanup_agent, register_agent_dispatch};
 
 pub use heartbeat::spawn_heartbeat_monitor;
 
@@ -26,13 +27,15 @@ pub use heartbeat::spawn_heartbeat_monitor;
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_agent_connection(socket, state))
+    let peer_ip = addr.ip().to_string();
+    ws.on_upgrade(move |socket| handle_agent_connection(socket, state, peer_ip))
 }
 
 /// Main agent connection handler. Runs the full lifecycle:
 /// register -> message loop -> cleanup.
-async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>, peer_ip: String) {
     let Some(RegisteredAgent {
         host_id,
         generation,
@@ -42,7 +45,7 @@ async fn handle_agent_connection(mut socket: WebSocket, state: Arc<AppState>) {
         os,
         arch,
         supports_persistent_sessions,
-    }) = register_agent(&mut socket, &state).await
+    }) = register_agent_dispatch(&mut socket, &state, Some(&peer_ip)).await
     else {
         return;
     };

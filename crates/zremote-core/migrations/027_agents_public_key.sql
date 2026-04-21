@@ -1,0 +1,12 @@
+-- RFC docs/rfc/rfc-auth-overhaul.md §6 (amended Phase 3): rename agents.secret_hash
+-- to agents.public_key.
+--
+-- The original RFC §6 annotated secret_hash as "argon2id-hashed", which is
+-- cryptographically incompatible with server-side HMAC verification (argon2id
+-- is one-way; HMAC requires the plaintext key). Phase 3 diverges from the draft:
+-- agent auth uses ed25519 signature challenge-response. The server stores only
+-- the public key (safe to store in plaintext — a DB read no longer grants
+-- agent impersonation, addressing threat T-8 and T-2).
+--
+-- Phase 2 did not write any rows into agents, so no data migration is required.
+ALTER TABLE agents RENAME COLUMN secret_hash TO public_key;
