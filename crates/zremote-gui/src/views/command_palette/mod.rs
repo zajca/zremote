@@ -163,6 +163,10 @@ pub enum CommandPaletteEvent {
     RecordRecentAction {
         action_key: String,
     },
+    /// Open the diff viewer for a project. Handled by `MainView`.
+    OpenDiff {
+        project_id: String,
+    },
     Close,
 }
 
@@ -1153,6 +1157,7 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
             },
         };
 
@@ -2150,6 +2155,7 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
             },
         };
 
@@ -2245,6 +2251,7 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
             },
         };
 

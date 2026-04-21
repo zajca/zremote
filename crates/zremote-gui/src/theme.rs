@@ -37,8 +37,28 @@ pub fn success() -> Rgba {
     rgb(0x4ade80)
 }
 
+/// Subtle green tint for added-line backgrounds in diff views.
+pub fn success_bg() -> Rgba {
+    Rgba {
+        r: 0.290,
+        g: 0.871,
+        b: 0.502,
+        a: 0.10,
+    }
+}
+
 pub fn error() -> Rgba {
     rgb(0xef4444)
+}
+
+/// Subtle red tint for removed-line backgrounds in diff views.
+pub fn error_bg() -> Rgba {
+    Rgba {
+        r: 0.937,
+        g: 0.267,
+        b: 0.267,
+        a: 0.10,
+    }
 }
 
 pub fn warning() -> Rgba {

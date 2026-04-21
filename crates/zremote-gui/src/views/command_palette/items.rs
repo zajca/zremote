@@ -542,6 +542,19 @@ pub(super) fn build_project_drill_items_from(
         action_indices.push(idx);
     }
 
+    // "View Diff"
+    let diff_idx = items.len();
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::OpenDiffForProject {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+        }),
+        title: format!("View Diff for {}", project.name),
+        subtitle: String::new(),
+        selectable: true,
+    });
+    action_indices.push(diff_idx);
+
     // "Pin/Unpin"
     let pin_idx = items.len();
     let pin_label = if project.pinned {

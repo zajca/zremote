@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 // Pre-existing pedantic clippy lints — suppress at crate level for now
 #![allow(
     clippy::unreadable_literal,       // hex color codes in theme.rs

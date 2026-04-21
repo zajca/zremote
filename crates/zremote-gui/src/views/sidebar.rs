@@ -1401,6 +1401,15 @@ impl SidebarView {
 
         let mut container = div().flex().flex_col().w_full().child(row);
 
+        // "Diff" sub-row only when the project is a git repo. Non-git
+        // projects have no meaningful diff so we hide the entry point.
+        if node.project.git_branch.is_some() {
+            container = container.child(
+                self.render_diff_subrow(&project_id, indents.session, cx)
+                    .into_any_element(),
+            );
+        }
+
         // Parent's own sessions appear directly below the parent row.
         for session in &node.sessions {
             container = container.child(
@@ -1442,6 +1451,12 @@ impl SidebarView {
             cx,
         );
         let mut container = div().flex().flex_col().w_full().child(row);
+        if node.project.git_branch.is_some() {
+            container = container.child(
+                self.render_diff_subrow(&project_id, indents.worktree_session, cx)
+                    .into_any_element(),
+            );
+        }
         for session in &node.sessions {
             container = container.child(
                 self.render_session_item(session, host_id, px(indents.worktree_session), cx)
@@ -1449,6 +1464,50 @@ impl SidebarView {
             );
         }
         container
+    }
+
+    /// "Diff" child row under a project. Clicking opens the diff viewer
+    /// for that project in the main content area.
+    fn render_diff_subrow(
+        &self,
+        project_id: &str,
+        indent: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let row_id = SharedString::from(format!("diff-sub-{project_id}"));
+        let pid_for_click = project_id.to_string();
+        div()
+            .id(row_id)
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .pl(px(indent))
+            .pr(px(8.0))
+            .h(px(22.0))
+            .mx(px(4.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::bg_tertiary()))
+            .child(
+                icon(Icon::GitBranch)
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(theme::text_tertiary()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme::text_secondary())
+                    .child("Diff"),
+            )
+            .on_click(cx.listener(
+                move |_this, _event: &ClickEvent, _window, cx: &mut Context<Self>| {
+                    cx.stop_propagation();
+                    cx.emit(SidebarEvent::OpenDiff {
+                        project_id: pid_for_click.clone(),
+                    });
+                },
+            ))
     }
 
     fn render_project_row(

@@ -22,6 +22,7 @@ zremote-protocol.workspace = true
 gpui.workspace = true
 alacritty_terminal.workspace = true
 flume.workspace = true
+futures-util.workspace = true
 rust-embed.workspace = true
 dirs = "6"
 open = "5"

@@ -39,6 +39,11 @@ pub enum PaletteAction {
         project_id: String,
         project_name: String,
     },
+    /// Open the git diff viewer for a project. Added in P3 MVP.
+    OpenDiffForProject {
+        project_id: String,
+        project_name: String,
+    },
     /// Launch an agent. If `host_id` + `working_dir` are provided, the launch
     /// skips the resolver and targets that project directly — used from the
     /// project drill-down where the target is already known. Otherwise the
@@ -90,6 +95,7 @@ impl PaletteAction {
             Self::ManageAgentProfiles => "ManageAgentProfiles",
             Self::NewWorktree { .. } => "NewWorktree",
             Self::DeleteWorktree { .. } => "DeleteWorktree",
+            Self::OpenDiffForProject { .. } => "OpenDiffForProject",
         }
     }
 }
@@ -239,6 +245,11 @@ impl CommandPalette {
                             worktree_name: worktree_name.clone(),
                         });
                     }
+                    PaletteAction::OpenDiffForProject { project_id, .. } => {
+                        cx.emit(CommandPaletteEvent::OpenDiff {
+                            project_id: project_id.clone(),
+                        });
+                    }
                 }
                 // Record recent action usage (only fires when the action
                 // actually executes — early returns above skip this).
@@ -301,6 +312,10 @@ mod tests {
                 worktree_id: "a".into(),
                 parent_project_id: "b".into(),
                 worktree_name: "a".into(),
+            },
+            PaletteAction::OpenDiffForProject {
+                project_id: "a".into(),
+                project_name: "a".into(),
             },
         ];
         let keys: std::collections::HashSet<&str> =

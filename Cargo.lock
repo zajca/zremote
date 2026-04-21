@@ -9268,6 +9268,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "flume",
+ "futures-util",
  "gpui",
  "notify-rust",
  "open",

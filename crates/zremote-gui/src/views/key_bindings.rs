@@ -68,6 +68,8 @@ pub enum KeyAction {
     /// Phase 2 ships a single-step shortcut; the D4 leader chord (`Cmd+K, n`)
     /// lands once the leader dispatch infrastructure is in place (Phase 3).
     OpenNewWorktree,
+    /// Open the git diff viewer for the currently-selected project.
+    OpenDiff,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +149,14 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::OpenNewWorktree,
         label: "Ctrl+Shift+N",
         description: "New worktree",
+    },
+    KeyBinding {
+        key: "d",
+        modifiers: KeyModifiers::new(true, true, false),
+        scope: KeyScope::Global,
+        action: KeyAction::OpenDiff,
+        label: "Ctrl+Shift+D",
+        description: "Open diff for project",
     },
     KeyBinding {
         key: "escape",
