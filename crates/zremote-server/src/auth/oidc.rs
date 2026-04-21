@@ -137,7 +137,7 @@ impl OidcFlowStore {
     /// attacker-triggered failure on a single request.
     pub fn insert(
         &self,
-        state: CsrfToken,
+        state: &CsrfToken,
         pkce_verifier: PkceCodeVerifier,
         nonce: Nonce,
         redirect_uri: RedirectUrl,
@@ -295,10 +295,15 @@ impl std::fmt::Display for OidcError {
 impl std::error::Error for OidcError {}
 
 /// Build the reqwest client used for every OIDC HTTP call. Redirects are
-/// disabled (SSRF guard — see module-level doc).
+/// disabled (SSRF guard — see module-level doc). A 10-second per-request
+/// timeout bounds discovery / JWKS / token calls so a wedged IdP cannot
+/// pin an OIDC flow indefinitely; the flow store TTL would sweep the
+/// entry anyway, but without a request timeout the task holding the
+/// connection stays alive.
 fn build_reqwest_client() -> Result<OidcReqwestClient, OidcError> {
     OidcReqwestClient::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| OidcError::Discovery(format!("reqwest client build failed: {e}")))
 }
@@ -311,6 +316,17 @@ fn parse_config(
 ) -> Result<(IssuerUrl, ClientId, RedirectUrl), OidcError> {
     let issuer = IssuerUrl::new(config.issuer_url.clone())
         .map_err(|e| OidcError::Configuration(format!("issuer_url: {e}")))?;
+    // Production issuers must be HTTPS. Discovery, JWKS, and the token
+    // endpoint all flow over this origin, so an `http://` issuer would
+    // let a network-positioned attacker swap JWKS or tokens. The `cfg(test)`
+    // escape lets unit tests point at `httpmock`'s `http://127.0.0.1:N`
+    // without weakening production.
+    #[cfg(not(test))]
+    if issuer.url().scheme() != "https" {
+        return Err(OidcError::Configuration(
+            "issuer_url must use https".to_string(),
+        ));
+    }
     let client_id = ClientId::new(config.client_id.clone());
     let redirect = RedirectUrl::new(redirect_uri.to_string())
         .map_err(|e| OidcError::Configuration(format!("redirect_uri: {e}")))?;
@@ -356,7 +372,7 @@ pub async fn init(
         .url();
 
     let state_token = csrf_state.secret().clone();
-    store.insert(csrf_state, pkce_verifier, nonce, redirect)?;
+    store.insert(&csrf_state, pkce_verifier, nonce, redirect)?;
 
     Ok(InitiatedFlow {
         auth_url,
@@ -424,6 +440,14 @@ pub async fn complete(
 /// same constant-time allowlist check, so the fallback only widens the
 /// source of the comparison — never what it compares against.
 fn extract_email(claims: &IdTokenClaims<EmptyAdditionalClaims, CoreGenderClaim>) -> Option<String> {
+    // If the IdP chooses to include `email_verified`, honour it: an IdP
+    // saying "we accepted this email but did not verify ownership" is not
+    // good enough to bind a ZRemote session. If the claim is absent we
+    // fall back to accepting the email (many enterprise IdPs omit it when
+    // the directory is authoritative), but when present it must be true.
+    if matches!(claims.email_verified(), Some(false)) {
+        return None;
+    }
     if let Some(email) = claims.email() {
         let s: &str = email.as_str();
         if !s.is_empty() {
@@ -503,9 +527,7 @@ mod tests {
         let redirect =
             RedirectUrl::new("http://127.0.0.1:12345/oidc/callback".to_string()).unwrap();
 
-        store
-            .insert(state.clone(), verifier, nonce, redirect)
-            .unwrap();
+        store.insert(&state, verifier, nonce, redirect).unwrap();
         let entry = store.redeem(state.secret()).unwrap();
         assert_eq!(entry.nonce.secret(), "n1");
         // Single-use: second redeem fails.
@@ -519,7 +541,7 @@ mod tests {
         let state = CsrfToken::new("expired".to_string());
         store
             .insert(
-                state.clone(),
+                &state,
                 PkceCodeVerifier::new("v".to_string()),
                 Nonce::new("n".to_string()),
                 RedirectUrl::new("http://127.0.0.1:1/x".to_string()).unwrap(),
@@ -537,7 +559,7 @@ mod tests {
         for i in 0..2 {
             store
                 .insert(
-                    CsrfToken::new(format!("s{i}")),
+                    &CsrfToken::new(format!("s{i}")),
                     PkceCodeVerifier::new("v".into()),
                     Nonce::new("n".into()),
                     RedirectUrl::new("http://127.0.0.1:1/x".into()).unwrap(),
@@ -546,7 +568,7 @@ mod tests {
         }
         let err = store
             .insert(
-                CsrfToken::new("overflow".into()),
+                &CsrfToken::new("overflow".into()),
                 PkceCodeVerifier::new("v".into()),
                 Nonce::new("n".into()),
                 RedirectUrl::new("http://127.0.0.1:1/x".into()).unwrap(),
@@ -917,11 +939,20 @@ OhPlUgxLFgTyTP0+jKuF+bOzOk8v4i4C60PGl7aed3UT2NHUUf4=\n\
                 .unwrap()
                 .to_string();
             let mut parts: Vec<&str> = raw.split('.').collect();
-            // Replace last char of signature segment with a different one.
+            // Flip a character in the *middle* of the signature segment.
+            // Earlier we flipped the last char, but base64url-encoded
+            // RSA-2048 signatures (342 chars = 2052 bits) have 4 padding
+            // bits in the final char; flipping those is a no-op, so the
+            // test was flaky based on which char the signature ended on.
+            // A mid-string byte is always meaningful.
             let sig = parts[2];
             let mut chars: Vec<char> = sig.chars().collect();
-            let last = chars.len() - 1;
-            chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+            assert!(
+                chars.len() > 20,
+                "signature too short for mid-string tampering"
+            );
+            let mid = chars.len() / 2;
+            chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
             let new_sig: String = chars.into_iter().collect();
             parts[2] = &new_sig;
             let tampered = parts.join(".");

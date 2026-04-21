@@ -361,9 +361,17 @@ pub async fn oidc_init(
     let started = Instant::now();
     let ip = addr.ip().to_string();
 
-    let config = match load_oidc_config(&state).await {
-        Some(c) => c,
-        None => return unauthorized_after(started).await,
+    let Some(config) = load_oidc_config(&state).await else {
+        log_oidc_login(
+            &state,
+            &ip,
+            None,
+            Outcome::Denied,
+            "login_fail",
+            "not_configured",
+        )
+        .await;
+        return unauthorized_after(started).await;
     };
 
     // Hardening: only loopback redirects are acceptable — the RFC requires
@@ -378,7 +386,15 @@ pub async fn oidc_init(
             redirect = %req.redirect_uri,
             "oidc_init rejected non-loopback redirect_uri"
         );
-        log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+        log_oidc_login(
+            &state,
+            &ip,
+            None,
+            Outcome::Denied,
+            "login_fail",
+            "redirect_uri_not_loopback",
+        )
+        .await;
         return unauthorized_after(started).await;
     }
 
@@ -393,7 +409,15 @@ pub async fn oidc_init(
             .into_response(),
         Err(err) => {
             tracing::warn!(error = %err, ip, "oidc_init failed");
-            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+            log_oidc_login(
+                &state,
+                &ip,
+                None,
+                Outcome::Denied,
+                "login_fail",
+                oidc_error_reason(&err),
+            )
+            .await;
             unauthorized_after(started).await
         }
     }
@@ -413,19 +437,32 @@ pub async fn oidc_callback(
     let started = Instant::now();
     let ip = addr.ip().to_string();
 
-    let config = match load_oidc_config(&state).await {
-        Some(c) => c,
-        None => {
-            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
-            return unauthorized_after(started).await;
-        }
+    let Some(config) = load_oidc_config(&state).await else {
+        log_oidc_login(
+            &state,
+            &ip,
+            None,
+            Outcome::Denied,
+            "login_fail",
+            "not_configured",
+        )
+        .await;
+        return unauthorized_after(started).await;
     };
 
     let identity = match oidc::complete(&config, &req.code, &req.state, &state.oidc_flows).await {
         Ok(id) => id,
         Err(err) => {
             tracing::warn!(error = %err, ip, "oidc_callback verification failed");
-            log_oidc_login(&state, &ip, None, Outcome::Denied, "login_fail").await;
+            log_oidc_login(
+                &state,
+                &ip,
+                None,
+                Outcome::Denied,
+                "login_fail",
+                oidc_error_reason(&err),
+            )
+            .await;
             return unauthorized_after(started).await;
         }
     };
@@ -444,7 +481,7 @@ pub async fn oidc_callback(
     .await
     {
         Ok((token, row)) => {
-            log_oidc_login(&state, &ip, Some(&row.id), Outcome::Ok, "login_ok").await;
+            log_oidc_login(&state, &ip, Some(&row.id), Outcome::Ok, "login_ok", "ok").await;
             tracing::info!(
                 session_id = %row.id,
                 email = %identity.email,
@@ -461,7 +498,15 @@ pub async fn oidc_callback(
         }
         Err(err) => {
             tracing::error!(error = ?err, "session issue failed on oidc callback");
-            log_oidc_login(&state, &ip, None, Outcome::Error, "login_fail").await;
+            log_oidc_login(
+                &state,
+                &ip,
+                None,
+                Outcome::Error,
+                "login_fail",
+                "session_issue_error",
+            )
+            .await;
             unauthorized_after(started).await
         }
     }
@@ -512,15 +557,38 @@ fn is_loopback_redirect(uri: &str) -> bool {
     }
 }
 
-/// Variant of [`log_login`] that stamps `method: "oidc"` into the audit
-/// row's details JSON. Kept distinct so the event discriminator in
-/// dashboards / filters is unambiguous.
+/// Map an [`oidc::OidcError`] to a stable, PII-free reason token for the
+/// audit row. These tokens are part of the operator contract (dashboards
+/// / alert rules pivot on them), so they must not drift with refactors
+/// and must not embed provider-specific strings.
+fn oidc_error_reason(err: &oidc::OidcError) -> &'static str {
+    match err {
+        oidc::OidcError::Discovery(_) => "discovery_failed",
+        oidc::OidcError::Configuration(_) => "configuration_error",
+        oidc::OidcError::TokenExchange(_) => "token_exchange_failed",
+        oidc::OidcError::MissingIdToken => "missing_id_token",
+        oidc::OidcError::ClaimsVerification(_) => "claims_verification_failed",
+        oidc::OidcError::MissingEmail => "missing_email",
+        oidc::OidcError::EmailMismatch => "email_mismatch",
+        oidc::OidcError::UnknownState => "flow_unknown_state",
+        oidc::OidcError::Expired => "flow_expired",
+        oidc::OidcError::Full => "flow_store_saturated",
+    }
+}
+
+/// Variant of [`log_login`] that stamps `method: "oidc"` + a coarse
+/// `reason` discriminator into the audit row's details JSON. The reason
+/// is a short stable token (`not_configured`, `flow_unknown_state`, …)
+/// intended for dashboards / alert rules, never the raw error text —
+/// that would leak token-exchange nonce values or IdP hostnames into
+/// audit logs. The set of reasons is defined by [`oidc_error_reason`].
 async fn log_oidc_login(
     state: &AppState,
     ip: &str,
     session_id: Option<&str>,
     outcome: Outcome,
     event: &str,
+    reason: &str,
 ) {
     let actor = if matches!(outcome, Outcome::Ok) {
         "admin"
@@ -536,7 +604,7 @@ async fn log_oidc_login(
             event: event.to_string(),
             target: session_id.map(str::to_string),
             outcome,
-            details: Some(json!({ "method": "oidc" })),
+            details: Some(json!({ "method": "oidc", "reason": reason })),
         },
     )
     .await;
@@ -1252,12 +1320,15 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        // And the audit row must record the denial.
+        // And the audit row must record the denial with the specific
+        // reason discriminator so dashboards can tell a redirect bug apart
+        // from an IdP outage.
         let rows = audit::list_recent(&state.db, 10).await.unwrap();
         assert!(
-            rows.iter()
-                .any(|r| r.event == "login_fail" && r.details.contains("oidc")),
-            "non-loopback redirect must be audited with method=oidc, got rows={rows:?}"
+            rows.iter().any(|r| r.event == "login_fail"
+                && r.details.contains("oidc")
+                && r.details.contains("redirect_uri_not_loopback")),
+            "non-loopback redirect must be audited with reason=redirect_uri_not_loopback, got rows={rows:?}"
         );
     }
 
@@ -1319,8 +1390,37 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.event == "login_fail"
                 && r.outcome == "denied"
-                && r.details.contains("oidc")),
-            "callback failure must be audited with method=oidc, got rows={rows:?}"
+                && r.details.contains("oidc")
+                && r.details.contains("flow_unknown_state")),
+            "callback failure must carry reason=flow_unknown_state, got rows={rows:?}"
+        );
+    }
+
+    /// OIDC init without admin_config must record a `not_configured`
+    /// audit row — operators need to distinguish "admin forgot to
+    /// configure OIDC" from "a valid config was rejected at runtime".
+    #[tokio::test]
+    async fn oidc_init_without_config_records_not_configured_reason() {
+        let state = test_state().await;
+        seed_admin_token(&state, "tok").await;
+        // Intentionally no admin_config::set_oidc — the row is absent.
+
+        let app = oidc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(post_with_addr(
+                "/api/auth/oidc/init",
+                Body::from(r#"{"redirect_uri":"http://127.0.0.1:12345/oidc/callback"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.event == "login_fail"
+                && r.details.contains("oidc")
+                && r.details.contains("not_configured")),
+            "missing config must be audited with reason=not_configured, got rows={rows:?}"
         );
     }
 }

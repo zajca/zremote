@@ -55,6 +55,10 @@ pub struct AdminConfigView {
 /// send the full triple to enable/update OIDC, send every field null to
 /// clear. Partial updates (e.g. issuer without client_id) are rejected
 /// with 400 — a half-configured OIDC is worse than no OIDC at all.
+// Field names mirror the `admin_config.oidc_*` columns so the JSON
+// payload is a direct mapping. Stripping the `oidc_` prefix here would
+// break the payload contract with the GUI.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Deserialize)]
 pub struct UpdateAdminConfigRequest {
     #[serde(default)]
