@@ -23,15 +23,18 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
+use uuid::Uuid;
 use zremote_core::queries::admin_config;
+use zremote_core::queries::agents as agents_q;
 use zremote_core::queries::audit::{self, AuditEvent, Outcome};
+use zremote_core::queries::auth_sessions;
 
 use crate::auth::{AuthContext, admin_token};
 use crate::state::AppState;
@@ -268,6 +271,190 @@ pub async fn rotate_token(
     }
 }
 
+/// `DELETE /api/admin/hosts/:host_id`. Revoke every non-revoked agent
+/// credential for a host (sets `agents.revoked_at = now()`). Emits a
+/// `host_revoke` audit row with the number of agents revoked in details.
+/// Does NOT delete the `hosts` row itself — revocation is reversible at
+/// the DB level (re-enroll produces a new agent row), whereas deletion
+/// would orphan historical session metadata. If the host does not exist
+/// the route returns 404.
+pub async fn revoke_host(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    axum::Extension(ctx): axum::Extension<AuthContext>,
+    Path(host_id): Path<String>,
+) -> Response {
+    let ip = addr.ip().to_string();
+
+    // Validate host_id as UUID to stop SQL-parameter abuse & produce a
+    // useful 400 when a UI sends a nonsense value.
+    if Uuid::parse_str(&host_id).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_host_id" })),
+        )
+            .into_response();
+    }
+
+    // Confirm the host actually exists — otherwise we silently audit a
+    // no-op revoke of a non-existent row, which muddies forensics.
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM hosts WHERE id = ?")
+        .bind(&host_id)
+        .fetch_one(&state.db)
+        .await;
+    match exists {
+        Ok(0) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "host_not_found" })),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::error!(error = ?err, "host lookup failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal_error" })),
+            )
+                .into_response();
+        }
+    }
+
+    match agents_q::revoke_all_for_host(&state.db, &host_id).await {
+        Ok(revoked) => {
+            // Drop any live WS connection for this host so revocation is
+            // immediate rather than "takes effect on next reconnect".
+            if let Ok(parsed) = Uuid::parse_str(&host_id) {
+                state.connections.unregister(&parsed).await;
+            }
+            log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Ok, revoked).await;
+            tracing::info!(
+                session_id = %ctx.session_id,
+                host_id = %host_id,
+                revoked,
+                "agents revoked for host"
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, host_id = %host_id, "host revoke failed");
+            log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Error, 0).await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal_error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `DELETE /api/admin/sessions/:session_id`. Revoke one admin session
+/// (any live bearer for that row is immediately invalidated by the
+/// `auth_mw` lookup). Emits a `session_revoke` audit row. Deleting a
+/// session the caller holds will 401 the caller's next request — that's
+/// the designed behaviour.
+pub async fn revoke_session(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    axum::Extension(ctx): axum::Extension<AuthContext>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let ip = addr.ip().to_string();
+
+    if Uuid::parse_str(&session_id).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_session_id" })),
+        )
+            .into_response();
+    }
+
+    match auth_sessions::delete(&state.db, &session_id).await {
+        Ok(0) => {
+            // Audit the denied attempt so forensics can reconstruct "tried
+            // to revoke a session that did not exist" — potentially
+            // interesting for spotting stale admin UIs.
+            log_session_revoke(&state, &ip, &ctx, &session_id, Outcome::Denied, 0).await;
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "session_not_found" })),
+            )
+                .into_response()
+        }
+        Ok(n) => {
+            log_session_revoke(&state, &ip, &ctx, &session_id, Outcome::Ok, n).await;
+            tracing::info!(
+                actor = %ctx.session_id,
+                target = %session_id,
+                "admin session revoked"
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "session revoke failed");
+            log_session_revoke(&state, &ip, &ctx, &session_id, Outcome::Error, 0).await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal_error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn log_host_revoke(
+    state: &AppState,
+    ip: &str,
+    ctx: &AuthContext,
+    host_id: &str,
+    outcome: Outcome,
+    revoked: u64,
+) {
+    let result = audit::log_event(
+        &state.db,
+        AuditEvent {
+            ts: Utc::now(),
+            actor: ctx.session_id.to_string(),
+            ip: Some(ip.to_string()),
+            event: "host_revoke".to_string(),
+            target: Some(host_id.to_string()),
+            outcome,
+            details: Some(json!({ "agents_revoked": revoked })),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, "audit host_revoke failed");
+    }
+}
+
+async fn log_session_revoke(
+    state: &AppState,
+    ip: &str,
+    ctx: &AuthContext,
+    target_session: &str,
+    outcome: Outcome,
+    affected: u64,
+) {
+    let result = audit::log_event(
+        &state.db,
+        AuditEvent {
+            ts: Utc::now(),
+            actor: ctx.session_id.to_string(),
+            ip: Some(ip.to_string()),
+            event: "session_revoke".to_string(),
+            target: Some(target_session.to_string()),
+            outcome,
+            details: Some(json!({ "rows_deleted": affected })),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, "audit session_revoke failed");
+    }
+}
+
 /// Emit a `config_change` audit row. Always logs the caller's session
 /// id in `target` so the audit trail is unambiguous even across rotations.
 async fn log_config_change(
@@ -367,9 +554,12 @@ mod tests {
 
     /// Build the admin router behind `auth_mw` the way production does.
     fn admin_router(state: Arc<AppState>) -> Router {
+        use axum::routing::delete;
         let protected: Router<Arc<AppState>> = Router::new()
             .route("/api/admin/config", get(get_config).put(update_config))
             .route("/api/admin/rotate-token", post(rotate_token))
+            .route("/api/admin/hosts/{host_id}", delete(revoke_host))
+            .route("/api/admin/sessions/{session_id}", delete(revoke_session))
             .route_layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
                 crate::auth_mw::auth_mw,
@@ -736,6 +926,192 @@ mod tests {
                 "/api/admin/config",
                 &bearer,
                 Body::from(body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -- DELETE /api/admin/hosts/:id (revoke-host) -----------------------
+
+    async fn insert_test_host(state: &AppState, id: &str) {
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES (?, 'h', 'h', 'legacy', 'online')",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_test_agent(state: &AppState, host_id: &str) -> String {
+        let agent = zremote_core::queries::agents::create(&state.db, host_id, "pk")
+            .await
+            .unwrap();
+        agent.id
+    }
+
+    #[tokio::test]
+    async fn revoke_host_flips_agent_rows_and_audits() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let host_id = uuid::Uuid::now_v7().to_string();
+        insert_test_host(&state, &host_id).await;
+        let _a1 = insert_test_agent(&state, &host_id).await;
+        let _a2 = insert_test_agent(&state, &host_id).await;
+
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "DELETE",
+                &format!("/api/admin/hosts/{host_id}"),
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let active = zremote_core::queries::agents::list_for_host(&state.db, &host_id)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 0);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event == "host_revoke")
+            .expect("host_revoke row expected");
+        assert_eq!(row.outcome, "ok");
+        assert_eq!(row.target.as_deref(), Some(host_id.as_str()));
+        assert!(row.details.contains("agents_revoked"));
+    }
+
+    #[tokio::test]
+    async fn revoke_host_not_found_returns_404() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let missing = uuid::Uuid::now_v7().to_string();
+        let response = admin_router(state)
+            .oneshot(req_with_addr(
+                "DELETE",
+                &format!("/api/admin/hosts/{missing}"),
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_host_invalid_uuid_returns_400() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let response = admin_router(state)
+            .oneshot(req_with_addr(
+                "DELETE",
+                "/api/admin/hosts/not-a-uuid",
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn revoke_host_requires_bearer() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::now_v7().to_string();
+        insert_test_host(&state, &host_id).await;
+        let response = admin_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/admin/hosts/{host_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -- DELETE /api/admin/sessions/:id (revoke-session) -----------------
+
+    #[tokio::test]
+    async fn revoke_session_deletes_row_and_audits() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+
+        // Seed a second session (not our bearer) so we don't revoke ourselves
+        // in the same request — makes the audit log easier to reason about.
+        let (_other_plaintext, other_row) =
+            session::issue(&state.db, IssuedVia::AdminToken, None, None)
+                .await
+                .unwrap();
+
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "DELETE",
+                &format!("/api/admin/sessions/{}", other_row.id),
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM auth_sessions WHERE id = ?")
+            .bind(&other_row.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event == "session_revoke")
+            .expect("session_revoke audit row expected");
+        assert_eq!(row.outcome, "ok");
+        assert_eq!(row.target.as_deref(), Some(other_row.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn revoke_session_not_found_returns_404() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let missing = uuid::Uuid::now_v7().to_string();
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "DELETE",
+                &format!("/api/admin/sessions/{missing}"),
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.event == "session_revoke" && r.outcome == "denied")
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_session_invalid_uuid_returns_400() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let response = admin_router(state)
+            .oneshot(req_with_addr(
+                "DELETE",
+                "/api/admin/sessions/not-a-uuid",
+                &bearer,
+                Body::empty(),
             ))
             .await
             .unwrap();

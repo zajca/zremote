@@ -20,6 +20,7 @@
     unused_imports
 )]
 
+mod admin;
 mod agentic;
 mod agents;
 mod bridge;
@@ -110,6 +111,11 @@ pub enum Commands {
     #[command(hide = true)]
     #[cfg(feature = "channel")]
     ChannelServer,
+    /// Direct-to-DB administrative commands (run on the server host).
+    Admin {
+        #[command(subcommand)]
+        command: admin::AdminCommand,
+    },
     /// Enroll this agent with a server using a one-time code
     Enroll {
         /// One-time enrollment code (prefer ZREMOTE_ENROLL_CODE env var to avoid
@@ -319,6 +325,13 @@ async fn async_main(command: Option<Commands>) {
             skip_permissions,
         } => {
             run_configure(&project, &model, skip_permissions);
+        }
+        Commands::Admin { command } => {
+            if let Err(e) = admin::run(command).await {
+                tracing::error!(error = %e, "admin command failed");
+                eprintln!("admin command failed: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Enroll {
             code,

@@ -62,7 +62,7 @@ pub struct ServerConfig {
 /// subtree is rate-limited together because the attack surface is narrow
 /// and the per-IP bucket is sized for human login pacing.
 fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post};
 
     // Routes that require a valid session bearer. Grouped together so
     // the `auth_mw` layer only runs for paths that actually need it.
@@ -75,6 +75,14 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(routes::admin::get_config).put(routes::admin::update_config),
         )
         .route("/api/admin/rotate-token", post(routes::admin::rotate_token))
+        .route(
+            "/api/admin/hosts/{host_id}",
+            delete(routes::admin::revoke_host),
+        )
+        .route(
+            "/api/admin/sessions/{session_id}",
+            delete(routes::admin::revoke_session),
+        )
         .route(
             "/api/admin/enroll/create",
             post(routes::enrollment::create_enrollment_code),
@@ -91,6 +99,7 @@ fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/auth/oidc/init", post(routes::auth::oidc_init))
         .route("/api/auth/oidc/callback", post(routes::auth::oidc_callback))
+        .route("/api/auth/oidc/status", get(routes::auth::oidc_status))
         // Enrollment is public but rate-limited together with auth (10 req/min/IP).
         .route("/api/enroll", post(routes::enrollment::enroll))
         .merge(protected)

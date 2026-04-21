@@ -9768,6 +9768,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "glob-match",
+ "hex",
  "hostname",
  "httpmock",
  "indexmap 2.13.0",

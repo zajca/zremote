@@ -179,6 +179,22 @@ pub async fn revoke(pool: &SqlitePool, id: &str) -> Result<u64, AgentQueryError>
     Ok(result.rows_affected())
 }
 
+/// Revoke every non-revoked agent row for a host. Returns the number of
+/// rows newly marked revoked (not the total). Callers: admin CLI's
+/// `revoke-host` and the server's `DELETE /api/admin/hosts/:id` — both
+/// logically "invalidate every credential this host could use to
+/// authenticate further".
+pub async fn revoke_all_for_host(pool: &SqlitePool, host_id: &str) -> Result<u64, AgentQueryError> {
+    let now = Utc::now().to_rfc3339();
+    let result =
+        sqlx::query("UPDATE agents SET revoked_at = ? WHERE host_id = ? AND revoked_at IS NULL")
+            .bind(&now)
+            .bind(host_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn set_last_seen(
     pool: &SqlitePool,
     id: &str,

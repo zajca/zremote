@@ -123,6 +123,28 @@ pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<AuditRow>,
     Ok(rows)
 }
 
+/// List the most-recent audit rows, optionally filtered to a single event
+/// name. `limit` is clamped by the caller; this query trusts it.
+pub async fn list_recent_filtered(
+    pool: &SqlitePool,
+    limit: i64,
+    event: Option<&str>,
+) -> Result<Vec<AuditRow>, AuditError> {
+    let rows = if let Some(event) = event {
+        sqlx::query_as::<_, AuditRow>(
+            "SELECT id, ts, actor, ip, event, target, outcome, details FROM audit_log \
+             WHERE event = ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(event)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        list_recent(pool, limit).await?
+    };
+    Ok(rows)
+}
+
 pub async fn count_by_event(
     pool: &SqlitePool,
     event: &str,

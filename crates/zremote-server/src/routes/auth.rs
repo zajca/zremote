@@ -257,6 +257,32 @@ pub async fn logout(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `GET /api/auth/oidc/status` — public endpoint; returns whether OIDC is
+/// configured so the GUI can decide whether to show the SSO button.
+pub async fn oidc_status(State(state): State<Arc<AppState>>) -> Response {
+    let (configured, issuer) = match admin_config::get(&state.db).await {
+        Ok(Some(cfg)) => {
+            let has_oidc = cfg.oidc_issuer_url.is_some()
+                && cfg.oidc_client_id.is_some()
+                && cfg.oidc_email.is_some();
+            let domain = cfg.oidc_issuer_url.as_deref().and_then(|u| {
+                if let Ok(parsed) = openidconnect::url::Url::parse(u) {
+                    parsed.host_str().map(str::to_string)
+                } else {
+                    None
+                }
+            });
+            (has_oidc, domain)
+        }
+        Ok(None) | Err(_) => (false, None),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "configured": configured, "issuer": issuer })),
+    )
+        .into_response()
+}
+
 /// `POST /api/auth/ws-ticket` — issue a short-lived single-use ticket for
 /// the following WS upgrade (never send the session bearer on the WS URL).
 /// Available to any authed session; `auth_mw` already enforces the only
