@@ -298,25 +298,10 @@ pub async fn enroll(
             .into_response();
     };
 
-    // Step 3: redeem the code FIRST (cheapest check; atomic UPDATE … WHERE consumed_at IS NULL).
-    // By redeeming before the host upsert and agent insert, a race-loser fails here and
-    // leaves no ghost rows. This eliminates the need to roll back later.
-    //
-    // We use a placeholder agent_id (the real one is set after the agent row is created),
-    // then update it once the agent row exists. Alternatively, we reserve the code with a
-    // sentinel and finalize — but the simpler approach is to redeem with a temporary id
-    // and update consumed_by_agent_id afterwards.
-    //
-    // Actually: redeem requires an agent_id FK. Instead, insert the agent row first but
-    // inside a single atomic check: try to redeem; if it fails (race), discard agent row.
-    // The invariant we enforce is: host upsert is idempotent (returns existing id), so
-    // ghost host rows are not a problem. The only non-idempotent write is the agent row.
-
-    // Steps 3+4: upsert host and create agent in a single transaction so a
-    // crash between the two writes cannot leave a host row without an agent.
-    // The transaction also serializes concurrent enrollments for the same
-    // hostname — the second caller either reuses the existing host row (upsert
-    // is idempotent) or creates a fresh one, but both complete atomically.
+    // Steps 3-5: upsert host, create agent, and redeem code inside ONE transaction.
+    // If redeem returns zero rows (race loser — another request won the same code),
+    // rollback discards the host upsert and agent insert atomically. No ghost agent
+    // rows are ever committed; the revoke-on-failure path is gone.
     let (host_id, agent) = {
         let mut tx = match state.db.begin().await {
             Ok(t) => t,
@@ -329,6 +314,7 @@ pub async fn enroll(
         let host_id = match upsert_host_for_enrollment_tx(&mut tx, &req.hostname).await {
             Ok(id) => id,
             Err(e) => {
+                let _ = tx.rollback().await;
                 tracing::error!(error = %e, hostname = %req.hostname, "upsert host failed");
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
@@ -337,10 +323,40 @@ pub async fn enroll(
         let agent = match agents::create_in_tx(&mut tx, &host_id, &req.public_key).await {
             Ok(a) => a,
             Err(e) => {
+                let _ = tx.rollback().await;
                 tracing::error!(error = %e, "failed to create agent row");
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
+
+        match enrollment::redeem_in_tx(&mut tx, &matched_row.code_hash, &agent.id, now).await {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = tx.rollback().await;
+                tracing::warn!(error = %e, "enrollment code redemption failed (race?)");
+                let _ = audit::log_event(
+                    &state.db,
+                    AuditEvent {
+                        ts: now,
+                        actor: "unknown".to_string(),
+                        ip: Some(ip.clone()),
+                        event: "enroll_failed_race".to_string(),
+                        target: None,
+                        outcome: Outcome::Denied,
+                        details: None,
+                    },
+                )
+                .await;
+                if let Some(remaining) = ENROLL_FAIL_MIN_LATENCY.checked_sub(started.elapsed()) {
+                    tokio::time::sleep(remaining).await;
+                }
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "enrollment_failed" })),
+                )
+                    .into_response();
+            }
+        }
 
         if let Err(e) = tx.commit().await {
             tracing::error!(error = %e, "failed to commit enrollment transaction");
@@ -349,25 +365,6 @@ pub async fn enroll(
 
         (host_id, agent)
     };
-
-    // Step 5: atomically redeem the enrollment code. This is the single-writer
-    // guard: UPDATE … WHERE consumed_at IS NULL returns 0 rows if a concurrent
-    // request already won the race. On failure we revoke the agent row (sets
-    // revoked_at; the host row is left — upsert_host is idempotent so ghost
-    // host rows are benign and will be re-used on the next successful enroll
-    // for the same hostname).
-    if let Err(e) = enrollment::redeem(&state.db, &matched_row.code_hash, &agent.id, now).await {
-        tracing::warn!(error = %e, agent_id = %agent.id, "enrollment code redemption failed (race?)");
-        let _ = agents::revoke(&state.db, &agent.id).await;
-        if let Some(remaining) = ENROLL_FAIL_MIN_LATENCY.checked_sub(started.elapsed()) {
-            tokio::time::sleep(remaining).await;
-        }
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "enrollment_failed" })),
-        )
-            .into_response();
-    }
 
     // Step 6: mint initial agent_session.
     let session_token =
@@ -798,5 +795,61 @@ mod tests {
     fn default_and_max_ttl_values() {
         assert_eq!(DEFAULT_ENROLL_TTL_SECS, 600);
         assert_eq!(MAX_ENROLL_TTL_SECS, 3600);
+    }
+
+    /// Regression: a race-loser (second enrollment attempt on the same code)
+    /// must leave ZERO revoked agent rows. Previously the agent row was
+    /// committed and then immediately revoked, accumulating garbage on brute-force.
+    /// With redeem inside the transaction, rollback discards the agent insert.
+    #[tokio::test]
+    async fn race_loser_leaves_no_revoked_agent_rows() {
+        let state = test_state().await;
+        let pool = state.db.clone();
+
+        insert_code(&pool, "race-code", 600).await;
+
+        let pk1 = gen_pk_b64();
+        let pk2 = gen_pk_b64();
+
+        // First request wins.
+        let r1 = enroll_router(Arc::clone(&state))
+            .oneshot(enroll_request(
+                "/api/enroll",
+                enroll_body("race-code", "host-a", &pk1),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::CREATED);
+
+        // Second request uses the same code — race loser.
+        let r2 = enroll_router(Arc::clone(&state))
+            .oneshot(enroll_request(
+                "/api/enroll",
+                enroll_body("race-code", "host-b", &pk2),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+
+        // The losing attempt must NOT have left any revoked agent row.
+        let (revoked_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM agents WHERE revoked_at IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            revoked_count, 0,
+            "race loser must not commit a revoked agent row (got {revoked_count})"
+        );
+
+        // Exactly one agent row total (the winner).
+        let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agents")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            total_count, 1,
+            "exactly one agent row must exist after race"
+        );
     }
 }

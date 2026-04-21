@@ -173,6 +173,52 @@ pub async fn redeem(
     }
 }
 
+/// Transaction-scoped variant of [`redeem`]. The UPDATE runs inside `tx` so
+/// host-upsert, agent-insert, and code-redeem are all in one atomic boundary.
+/// If the UPDATE matches zero rows the caller must call `tx.rollback()`.
+pub async fn redeem_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    code_hash: &str,
+    agent_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), RedeemError> {
+    let now_s = now.to_rfc3339();
+    let affected = sqlx::query(
+        "UPDATE enrollment_codes \
+         SET consumed_at = ?, consumed_by_agent_id = ? \
+         WHERE code_hash = ? \
+           AND consumed_at IS NULL \
+           AND expires_at > ?",
+    )
+    .bind(&now_s)
+    .bind(agent_id)
+    .bind(code_hash)
+    .bind(&now_s)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    if affected == 1 {
+        return Ok(());
+    }
+
+    // Zero rows — classify for audit. Query runs inside the same tx so it
+    // sees the pre-commit snapshot; the classification is correct.
+    let row = sqlx::query_as::<_, EnrollmentCodeRow>(
+        "SELECT code_hash, scope, expires_at, consumed_at, consumed_by_agent_id \
+         FROM enrollment_codes WHERE code_hash = ?",
+    )
+    .bind(code_hash)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    match row {
+        None => Err(RedeemError::NotFound),
+        Some(row) if row.consumed_at.is_some() => Err(RedeemError::AlreadyConsumed),
+        Some(_) => Err(RedeemError::Expired),
+    }
+}
+
 pub async fn find_by_hash(
     pool: &SqlitePool,
     code_hash: &str,
