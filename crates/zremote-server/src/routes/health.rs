@@ -28,6 +28,19 @@ pub async fn api_mode() -> Json<serde_json::Value> {
     }))
 }
 
+/// Serves the enrollment shell script as `text/x-shellscript`.
+pub async fn enroll_sh() -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    const SCRIPT: &str = include_str!("../../public/enroll.sh");
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        SCRIPT,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

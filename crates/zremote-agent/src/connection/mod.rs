@@ -1,3 +1,4 @@
+pub mod auth;
 mod dispatch;
 mod heartbeat;
 mod registration;
@@ -16,7 +17,8 @@ use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::BridgeCommand;
 use crate::bridge::{self, BridgeSenders};
 use crate::claude::ChannelDialogDetector;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, CredentialStore};
+use crate::connection::auth::AuthError;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
@@ -88,6 +90,48 @@ async fn connect(config: &AgentConfig) -> Result<WsStream, ConnectionError> {
         .await
         .map_err(ConnectionError::Connect)?;
     Ok(ws_stream)
+}
+
+/// Authenticate and register with the server.
+/// Tries v2 ed25519 auth if credentials exist; falls back to v1 legacy token.
+/// On `AuthError::Revoked`, logs a fatal message and exits 1 (no retry).
+async fn connect_and_register(
+    ws: &mut WsStream,
+    config: &AgentConfig,
+    supports_persistence: bool,
+) -> Result<zremote_protocol::HostId, ConnectionError> {
+    // Try v2 if a CredentialStore yields credentials.
+    let store = CredentialStore::new(None);
+    if let Ok(creds) = store.load() {
+        tracing::info!(agent_id = %creds.agent_id, "using v2 ed25519 auth");
+        match auth::authenticate(ws, &creds.agent_id, &creds.signing_key).await {
+            Ok(success) => {
+                tracing::info!(session_id = %success.session_id, "v2 auth succeeded");
+                // The server sends host_id as session_id in AuthSuccess for v2.
+                // Parse it as HostId; fall back to a placeholder UUID if needed.
+                return success.session_id.parse().map_err(|_| {
+                    ConnectionError::UnexpectedRegisterResponse(
+                        "AuthSuccess.session_id is not a valid HostId".into(),
+                    )
+                });
+            }
+            Err(AuthError::Revoked) => {
+                tracing::error!(
+                    agent_id = %creds.agent_id,
+                    "agent credentials revoked — re-enroll required (zremote agent enroll)"
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "v2 auth failed, falling back to v1 legacy");
+            }
+        }
+    } else {
+        tracing::warn!("no v2 credentials found, using v1 legacy token auth");
+    }
+
+    // v1 legacy path.
+    registration::register(ws, config, supports_persistence).await
 }
 
 /// Send a JSON-encoded agent message over the WebSocket.
@@ -239,7 +283,8 @@ pub async fn run_connection(
     let mut ws = connect(config).await?;
     tracing::info!("WebSocket connection established");
 
-    let host_id = registration::register(&mut ws, config, supports_persistence).await?;
+    // Try v2 ed25519 auth if credentials are available; fall back to v1 legacy token.
+    let host_id = connect_and_register(&mut ws, config, supports_persistence).await?;
 
     // Write host_id for GUI bridge discovery (skip bridge for non-local sessions)
     bridge::write_host_id_file(&host_id).await;

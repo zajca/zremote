@@ -42,6 +42,7 @@ openidconnect = { version = "4.0.1", default-features = false, features = ["reqw
 
 # Agent-only
 tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-native-roots"] }
+keyring = { version = "3", features = ["linux-native"] }
 futures-util = "0.3"
 portable-pty = "0.9"
 hostname = "0.4"

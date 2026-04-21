@@ -154,6 +154,7 @@ fn create_router(state: Arc<AppState>) -> Router {
         .merge(auth_subtree)
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
+        .route("/enroll.sh", get(routes::health::enroll_sh))
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route(
             "/api/hosts/{host_id}",

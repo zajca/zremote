@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use ed25519_dalek::SigningKey;
 use url::Url;
 
 /// Agent configuration loaded from environment variables.
@@ -150,6 +153,181 @@ pub fn detect_persistence_backend() -> PersistenceBackend {
     PersistenceBackend::Daemon
 }
 
+// ---------------------------------------------------------------------------
+// Credential persistence: keyring (primary) + file fallback
+// ---------------------------------------------------------------------------
+
+const KEYRING_SERVICE: &str = "zremote-agent";
+const KEYRING_USER: &str = "signing-key";
+
+/// Errors from credential store operations.
+#[derive(Debug)]
+pub enum StoreError {
+    Io(std::io::Error),
+    Keyring(String),
+    InvalidKey(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Keyring(e) => write!(f, "keyring error: {e}"),
+            Self::InvalidKey(e) => write!(f, "invalid key data: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Loaded agent credentials.
+pub struct AgentCredentials {
+    pub agent_id: String,
+    pub signing_key: SigningKey,
+}
+
+impl std::fmt::Debug for AgentCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentCredentials")
+            .field("agent_id", &self.agent_id)
+            .field("signing_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Credential storage: keyring primary, file fallback at `key_file`.
+/// Default file path is `~/.zremote/agent.key`.
+pub struct CredentialStore {
+    key_file: PathBuf,
+}
+
+impl CredentialStore {
+    /// Create a new store. If `key_file` is `None`, uses `~/.zremote/agent.key`.
+    pub fn new(key_file: Option<PathBuf>) -> Self {
+        let key_file = key_file.unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".zremote")
+                .join("agent.key")
+        });
+        Self { key_file }
+    }
+
+    /// Persist `agent_id` and `signing_key`. Tries keyring first; falls back
+    /// to the key file (mode 0600) if keyring is unavailable.
+    pub fn save(&self, agent_id: &str, signing_key: &SigningKey) -> Result<(), StoreError> {
+        // Encode as `<agent_id>:<base64url-key>` so both fields survive in one
+        // keyring entry / one file line.
+        use base64::Engine;
+        let key_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing_key.as_bytes());
+        let payload = format!("{agent_id}:{key_b64}");
+
+        // Try keyring first.
+        match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            Ok(entry) => match entry.set_password(&payload) {
+                Ok(()) => {
+                    tracing::info!("credentials saved to system keyring");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "keyring unavailable, falling back to file");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "could not access keyring, falling back to file");
+            }
+        }
+
+        // File fallback.
+        self.save_to_file(&payload)
+    }
+
+    /// Load credentials. Tries keyring first, then file.
+    /// Returns `Err` if neither source yields valid credentials.
+    pub fn load(&self) -> Result<AgentCredentials, StoreError> {
+        // Try keyring.
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            && let Ok(payload) = entry.get_password()
+        {
+            return self.parse_payload(&payload);
+        }
+
+        // Try file.
+        let payload = std::fs::read_to_string(&self.key_file).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StoreError::InvalidKey(format!(
+                    "no credentials found in keyring or file '{}' — run `zremote agent enroll` first",
+                    self.key_file.display()
+                ))
+            } else {
+                StoreError::Io(e)
+            }
+        })?;
+
+        self.verify_file_mode()?;
+        self.parse_payload(payload.trim())
+    }
+
+    fn parse_payload(&self, payload: &str) -> Result<AgentCredentials, StoreError> {
+        use base64::Engine;
+        let (agent_id, key_b64) = payload.split_once(':').ok_or_else(|| {
+            StoreError::InvalidKey("credential payload malformed (missing ':')".into())
+        })?;
+        let key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(key_b64)
+            .map_err(|e| StoreError::InvalidKey(format!("base64 decode failed: {e}")))?;
+        let key_arr: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| StoreError::InvalidKey("signing key must be 32 bytes".into()))?;
+        Ok(AgentCredentials {
+            agent_id: agent_id.to_string(),
+            signing_key: SigningKey::from_bytes(&key_arr),
+        })
+    }
+
+    fn save_to_file(&self, payload: &str) -> Result<(), StoreError> {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(parent) = self.key_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Write atomically: write to temp file first, then rename.
+        let tmp = self.key_file.with_extension("tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(payload.as_bytes())?;
+            f.flush()?;
+            // Set 0600 before rename so there is no window with wrong perms.
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, &self.key_file)?;
+        tracing::info!(path = %self.key_file.display(), "credentials saved to file");
+        Ok(())
+    }
+
+    fn verify_file_mode(&self) -> Result<(), StoreError> {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&self.key_file)?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(StoreError::InvalidKey(format!(
+                "key file '{}' has insecure permissions {mode:o} — expected 0600",
+                self.key_file.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -276,5 +454,60 @@ mod tests {
             remove_env("ZREMOTE_SERVER_URL");
             remove_env("ZREMOTE_TOKEN");
         }
+    }
+
+    // CredentialStore file-backend tests (no keyring in CI).
+
+    #[test]
+    fn enroll_happy_path_persists_secret_to_file_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.key");
+        let store = super::CredentialStore::new(Some(path.clone()));
+
+        let sk = ed25519_dalek::SigningKey::generate(
+            &mut ed25519_dalek::ed25519::signature::rand_core::OsRng,
+        );
+        store.save("test-agent-id", &sk).unwrap();
+
+        assert!(path.exists());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "key file must be 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn enroll_rejects_file_with_bad_mode_on_startup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.key");
+
+        // Write a file with wrong permissions.
+        std::fs::write(&path, "test-id:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let store = super::CredentialStore::new(Some(path.clone()));
+        let err = store.load().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("insecure permissions") || msg.contains("0600"),
+            "error must mention bad permissions: {msg}"
+        );
+    }
+
+    #[test]
+    fn credential_store_round_trips_through_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.key");
+        let store = super::CredentialStore::new(Some(path.clone()));
+
+        let sk = ed25519_dalek::SigningKey::generate(
+            &mut ed25519_dalek::ed25519::signature::rand_core::OsRng,
+        );
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        store.save(&agent_id, &sk).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.agent_id, agent_id);
+        assert_eq!(loaded.signing_key.as_bytes(), sk.as_bytes());
     }
 }

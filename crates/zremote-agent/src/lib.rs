@@ -29,6 +29,8 @@ mod claude;
 mod config;
 mod connection;
 mod daemon;
+mod enroll;
+mod fingerprint;
 mod hooks;
 mod knowledge;
 mod linear;
@@ -108,6 +110,18 @@ pub enum Commands {
     #[command(hide = true)]
     #[cfg(feature = "channel")]
     ChannelServer,
+    /// Enroll this agent with a server using a one-time code
+    Enroll {
+        /// One-time enrollment code
+        #[arg(long, env = "ZREMOTE_CODE")]
+        code: String,
+        /// Server URL (e.g. https://myserver.example.com)
+        #[arg(long, env = "ZREMOTE_SERVER")]
+        server: String,
+        /// Path to store the signing key (default: ~/.zremote/agent.key)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Internal: Claude Code status line handler (reads JSON from stdin, outputs formatted status)
     #[command(hide = true)]
     Ccline,
@@ -304,6 +318,17 @@ async fn async_main(command: Option<Commands>) {
             skip_permissions,
         } => {
             run_configure(&project, &model, skip_permissions);
+        }
+        Commands::Enroll {
+            code,
+            server,
+            key_file,
+        } => {
+            if let Err(e) = enroll::run_enroll(&code, &server, key_file).await {
+                tracing::error!(error = %e, "enrollment failed");
+                eprintln!("Enrollment failed: {e}");
+                std::process::exit(1);
+            }
         }
         #[cfg(feature = "channel")]
         Commands::ChannelServer => unreachable!("handled above"),
