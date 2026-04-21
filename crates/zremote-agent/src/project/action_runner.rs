@@ -257,6 +257,7 @@ mod tests {
             crate::config::PersistenceBackend::None,
             PathBuf::from("/tmp/zremote-test-action-runner"),
             Uuid::new_v4(),
+            "test-local-token".to_string(),
         )
     }
 
