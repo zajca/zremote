@@ -107,7 +107,7 @@ fn create_private_dir(path: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn write_private_file(path: &PathBuf, data: &[u8]) -> Result<(), String> {
+fn write_private_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = OpenOptions::new()
@@ -121,7 +121,7 @@ fn write_private_file(path: &PathBuf, data: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn write_private_file(path: &PathBuf, data: &[u8]) -> Result<(), String> {
+fn write_private_file(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let mut f = OpenOptions::new()
         .write(true)
@@ -153,6 +153,17 @@ pub fn load(server_url: &str) -> Option<SessionEntry> {
             .filter(|e| !e.is_expired());
     }
     None
+}
+
+/// Human-readable description of where sessions will be stored.
+pub fn storage_mode() -> &'static str {
+    if keyring_available() {
+        "OS keychain"
+    } else if file_fallback_enabled() {
+        "~/.config/zremote/session.json"
+    } else {
+        "keyring unavailable"
+    }
 }
 
 /// Persists `entry` for `server_url`.

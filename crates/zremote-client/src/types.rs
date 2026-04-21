@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Re-export protocol types used in SDK API
 pub use zremote_protocol::{
@@ -702,7 +703,8 @@ impl std::error::Error for WorktreeCreateError {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionTokenResponse {
     pub session_token: String,
-    pub expires_at: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// Response from `POST /api/auth/oidc/init`.
@@ -728,7 +730,8 @@ pub struct CreateEnrollmentRequest {
 }
 
 /// Response from `POST /api/admin/enroll/create`.
-#[derive(Debug, Clone, Deserialize)]
+/// The enrollment code is sensitive — it is zeroized on drop.
+#[derive(Debug, Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct EnrollmentCodeResponse {
     pub code: String,
     pub expires_at: String,

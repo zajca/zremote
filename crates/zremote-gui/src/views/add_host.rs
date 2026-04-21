@@ -10,14 +10,13 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zeroize::Zeroize;
 
 use crate::app_state::AppState;
-use crate::auth_state;
 use crate::icons::{Icon, icon};
 use crate::theme;
 use zremote_client::{CreateEnrollmentRequest, EnrollmentCodeResponse, Host};
@@ -35,11 +34,36 @@ pub enum AddHostModalEvent {
 
 impl EventEmitter<AddHostModalEvent> for AddHostModal {}
 
+/// Hard deadline for enrollment polling (10 minutes). After this the wizard
+/// transitions to `PollState::Expired` so the poll loop never runs indefinitely.
+const POLL_DEADLINE_SECS: u64 = 600;
+
+/// Hostname validation regex: RFC-952 / RFC-1123 labels.
+fn is_valid_hostname(s: &str) -> bool {
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    let first = s.chars().next().unwrap_or('\0');
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Create,
     Install,
     Success,
+}
+
+/// State of the polling phase in Step 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PollState {
+    Waiting,
+    Error(String),
+    Expired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,17 +99,21 @@ pub struct AddHostModal {
 
     step: Step,
     hostname_input: String,
+    hostname_error: Option<String>,
     expiry: ExpiryChoice,
 
     /// Set after successful code generation.
     enrollment: Option<EnrollmentCodeResponse>,
-    /// Absolute deadline for countdown display.
-    code_deadline: Option<Instant>,
     /// Elapsed since last countdown update, used by ticker.
     countdown_secs: u64,
+    /// Elapsed seconds of polling — hard deadline enforced at POLL_DEADLINE_SECS.
+    poll_elapsed_secs: u64,
 
     /// Server URL cached for the install snippet.
     server_url: String,
+
+    /// Polling phase state (step 2).
+    poll_state: PollState,
 
     /// Host that just enrolled (Step 3).
     enrolled_host: Option<Host>,
@@ -97,7 +125,7 @@ pub struct AddHostModal {
     create_task: Option<Task<()>>,
     /// Polling task for host detection (Step 2).
     poll_task: Option<Task<()>>,
-    /// Countdown tick task.
+    /// Countdown + poll deadline tick task.
     tick_task: Option<Task<()>>,
 }
 
@@ -109,11 +137,13 @@ impl AddHostModal {
             focus_handle: cx.focus_handle(),
             step: Step::Create,
             hostname_input: String::new(),
+            hostname_error: None,
             expiry: ExpiryChoice::TenMin,
             enrollment: None,
-            code_deadline: None,
             countdown_secs: 0,
+            poll_elapsed_secs: 0,
             server_url,
+            poll_state: PollState::Waiting,
             enrolled_host: None,
             submitting: false,
             error: None,
@@ -125,21 +155,25 @@ impl AddHostModal {
 
     fn generate_code(&mut self, cx: &mut Context<Self>) {
         let hostname = self.hostname_input.trim().to_string();
-        if hostname.is_empty() || self.submitting {
+        if self.submitting {
             return;
         }
+        // Validate hostname before submitting.
+        if !is_valid_hostname(&hostname) {
+            self.hostname_error = Some(
+                "Invalid hostname. Use letters, digits, hyphens, dots (max 64 chars).".to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        self.hostname_error = None;
         self.submitting = true;
         self.error = None;
         cx.notify();
 
         let api = self.app_state.api.clone();
         let handle = self.app_state.tokio_handle.clone();
-        let server_url = self.server_url.clone();
         let expires_in_secs = self.expiry.secs();
-
-        let session_token = auth_state::load(&server_url)
-            .map(|e| e.session_token)
-            .unwrap_or_default();
 
         let req = CreateEnrollmentRequest {
             hostname: Some(hostname),
@@ -149,7 +183,7 @@ impl AddHostModal {
         self.create_task = Some(cx.spawn(
             async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let result = handle
-                    .spawn(async move { api.admin_enroll_create(&session_token, &req).await })
+                    .spawn(async move { api.admin_enroll_create(&req).await })
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.submitting = false;
@@ -164,9 +198,9 @@ impl AddHostModal {
                                     diff.num_seconds().max(0) as u64
                                 })
                                 .unwrap_or(600);
-                            this.code_deadline =
-                                Some(Instant::now() + Duration::from_secs(expires_in));
                             this.countdown_secs = expires_in;
+                            this.poll_elapsed_secs = 0;
+                            this.poll_state = PollState::Waiting;
                             this.enrollment = Some(code_resp);
                             this.step = Step::Install;
                             this.tick_task = Some(this.spawn_tick(cx));
@@ -194,9 +228,18 @@ impl AddHostModal {
                         if this.countdown_secs > 0 {
                             this.countdown_secs -= 1;
                         }
+                        this.poll_elapsed_secs += 1;
+                        // Hard deadline: stop polling after POLL_DEADLINE_SECS.
+                        if this.poll_elapsed_secs >= POLL_DEADLINE_SECS
+                            && this.poll_state == PollState::Waiting
+                        {
+                            this.poll_state = PollState::Expired;
+                        }
                         cx.notify();
-                        // Stop when expired or step changed
-                        this.countdown_secs > 0 && this.step == Step::Install
+                        // Stop when code expired, step changed, or hard deadline hit
+                        this.step == Step::Install
+                            && this.countdown_secs > 0
+                            && this.poll_state == PollState::Waiting
                     })
                     .unwrap_or(false);
                 if !keep_going {
@@ -210,20 +253,15 @@ impl AddHostModal {
         let api = self.app_state.api.clone();
         let handle = self.app_state.tokio_handle.clone();
         let hostname = self.hostname_input.trim().to_string();
-        let server_url = self.server_url.clone();
-        let session_token = auth_state::load(&server_url)
-            .map(|e| e.session_token)
-            .unwrap_or_default();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             // Remember hosts we knew about before issuing the code so we can
             // detect the newly enrolled one.
             let baseline: Vec<String> = {
                 let api = api.clone();
-                let tok = session_token.clone();
                 handle
                     .spawn(async move {
-                        api.list_hosts_authed(&tok)
+                        api.list_hosts_authed()
                             .await
                             .unwrap_or_default()
                             .into_iter()
@@ -238,34 +276,53 @@ impl AddHostModal {
                 Timer::after(Duration::from_secs(3)).await;
 
                 let api = api.clone();
-                let tok = session_token.clone();
                 let baseline = baseline.clone();
                 let hn = hostname.clone();
-                let hosts = handle
-                    .spawn(async move { api.list_hosts_authed(&tok).await })
-                    .await
-                    .unwrap_or(Ok(vec![]))
-                    .unwrap_or_default();
-
-                let new_host = hosts
-                    .into_iter()
-                    .find(|h| !baseline.contains(&h.id) || h.hostname == hn);
+                let poll_result = handle
+                    .spawn(async move { api.list_hosts_authed().await })
+                    .await;
 
                 let keep_going = this
                     .update(cx, |this, cx| {
-                        if let Some(host) = new_host {
-                            this.enrolled_host = Some(host.clone());
-                            this.step = Step::Success;
-                            this.tick_task = None;
-                            cx.emit(AddHostModalEvent::Enrolled {
-                                host_id: host.id,
-                                hostname: host.hostname,
-                            });
-                            cx.notify();
+                        // Hard deadline or step change — stop silently.
+                        if this.step != Step::Install
+                            || this.poll_state == PollState::Expired
+                            || this.countdown_secs == 0
+                        {
                             return false;
                         }
-                        // Stop if step changed or code expired
-                        this.step == Step::Install && this.countdown_secs > 0
+                        match poll_result {
+                            Ok(Ok(hosts)) => {
+                                let new_host = hosts
+                                    .into_iter()
+                                    .find(|h| !baseline.contains(&h.id) && h.hostname == hn);
+                                if let Some(host) = new_host {
+                                    this.enrolled_host = Some(host.clone());
+                                    this.step = Step::Success;
+                                    this.tick_task = None;
+                                    cx.emit(AddHostModalEvent::Enrolled {
+                                        host_id: host.id,
+                                        hostname: host.hostname,
+                                    });
+                                    cx.notify();
+                                    return false;
+                                }
+                                true
+                            }
+                            Ok(Err(err)) => {
+                                this.poll_state = PollState::Error(format!("Poll failed: {err}"));
+                                this.tick_task = None;
+                                cx.notify();
+                                false
+                            }
+                            Err(_) => {
+                                this.poll_state =
+                                    PollState::Error("Poll task panicked.".to_string());
+                                this.tick_task = None;
+                                cx.notify();
+                                false
+                            }
+                        }
                     })
                     .unwrap_or(false);
 
@@ -274,6 +331,22 @@ impl AddHostModal {
                 }
             }
         })
+    }
+
+    /// Reset wizard back to step 1 (used from Expired / Error states).
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        self.step = Step::Create;
+        self.poll_state = PollState::Waiting;
+        self.poll_elapsed_secs = 0;
+        self.countdown_secs = 0;
+        if let Some(enroll) = &mut self.enrollment {
+            enroll.code.zeroize();
+        }
+        self.enrollment = None;
+        self.tick_task = None;
+        self.poll_task = None;
+        self.error = None;
+        cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -374,7 +447,8 @@ impl AddHostModal {
     }
 
     fn render_step_create(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_hostname = !self.hostname_input.trim().is_empty();
+        let trimmed = self.hostname_input.trim();
+        let has_valid_hostname = !trimmed.is_empty() && is_valid_hostname(trimmed);
         let display = if self.hostname_input.is_empty() {
             div()
                 .text_color(theme::text_tertiary())
@@ -416,11 +490,23 @@ impl AddHostModal {
                             .rounded(px(6.0))
                             .bg(theme::bg_tertiary())
                             .border_1()
-                            .border_color(theme::border())
+                            .border_color(if self.hostname_error.is_some() {
+                                theme::error()
+                            } else {
+                                theme::border()
+                            })
                             .text_size(px(13.0))
                             .min_h(px(34.0))
                             .child(display),
-                    ),
+                    )
+                    .when_some(self.hostname_error.as_deref(), |d, msg| {
+                        d.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme::error())
+                                .child(msg.to_string()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -453,12 +539,7 @@ impl AddHostModal {
                                         theme::border()
                                     })
                                     .bg(if is_selected {
-                                        Rgba {
-                                            r: 0.369,
-                                            g: 0.416,
-                                            b: 0.824,
-                                            a: 0.15,
-                                        }
+                                        theme::accent_subtle()
                                     } else {
                                         theme::bg_tertiary()
                                     })
@@ -496,7 +577,7 @@ impl AddHostModal {
                     .px(px(12.0))
                     .py(px(8.0))
                     .rounded(px(6.0))
-                    .bg(if has_hostname && !self.submitting {
+                    .bg(if has_valid_hostname && !self.submitting {
                         theme::accent()
                     } else {
                         theme::bg_tertiary()
@@ -504,7 +585,7 @@ impl AddHostModal {
                     .border_1()
                     .border_color(theme::border())
                     .text_size(px(13.0))
-                    .text_color(if has_hostname && !self.submitting {
+                    .text_color(if has_valid_hostname && !self.submitting {
                         theme::text_primary()
                     } else {
                         theme::text_secondary()
@@ -544,134 +625,28 @@ impl AddHostModal {
             .flex()
             .flex_col()
             .gap(px(16.0))
+            .child(self.render_install_code_section(code, expired, &countdown, cx))
+            .child(self.render_install_snippet_section(&snippet, cx))
+            .child(self.render_poll_status(cx))
+    }
+
+    fn render_install_code_section(
+        &self,
+        code: &str,
+        expired: bool,
+        countdown: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::text_secondary())
-                            .child("Enrollment code"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme::bg_tertiary())
-                                    .border_1()
-                                    .border_color(if expired {
-                                        theme::error()
-                                    } else {
-                                        theme::border()
-                                    })
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(if expired {
-                                        theme::error()
-                                    } else {
-                                        theme::text_primary()
-                                    })
-                                    .child(code.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .id("ah-copy-code-btn")
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme::bg_tertiary())
-                                    .border_1()
-                                    .border_color(theme::border())
-                                    .text_size(px(12.0))
-                                    .text_color(theme::text_secondary())
-                                    .cursor_pointer()
-                                    .child("Copy")
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                        this.copy_code(cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(icon(Icon::Clock).size(px(11.0)).text_color(if expired {
-                                theme::error()
-                            } else {
-                                theme::text_tertiary()
-                            }))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(if expired {
-                                        theme::error()
-                                    } else {
-                                        theme::text_tertiary()
-                                    })
-                                    .child(if expired {
-                                        "Code expired. Generate a new one.".to_string()
-                                    } else {
-                                        format!("Expires in {countdown}")
-                                    }),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme::text_secondary())
-                            .child("Install command"),
-                    )
-                    .child(
-                        div()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(6.0))
-                            .bg(theme::bg_tertiary())
-                            .border_1()
-                            .border_color(theme::border())
-                            .text_size(px(11.0))
-                            .text_color(theme::text_secondary())
-                            .font_family("monospace")
-                            .child(snippet.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("ah-copy-install-btn")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px(px(12.0))
-                            .py(px(7.0))
-                            .rounded(px(6.0))
-                            .bg(theme::bg_tertiary())
-                            .border_1()
-                            .border_color(theme::border())
-                            .text_size(px(12.0))
-                            .text_color(theme::text_secondary())
-                            .cursor_pointer()
-                            .child("Copy install command")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                this.copy_install_command(cx);
-                            })),
-                    ),
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::text_secondary())
+                    .child("Enrollment code"),
             )
             .child(
                 div()
@@ -679,17 +654,250 @@ impl AddHostModal {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        icon(Icon::Loader)
-                            .size(px(13.0))
-                            .text_color(theme::accent()),
+                        div()
+                            .flex_1()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .bg(theme::bg_tertiary())
+                            .border_1()
+                            .border_color(if expired {
+                                theme::error()
+                            } else {
+                                theme::border()
+                            })
+                            .text_size(px(16.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if expired {
+                                theme::error()
+                            } else {
+                                theme::text_primary()
+                            })
+                            .child(code.to_string()),
                     )
                     .child(
                         div()
+                            .id("ah-copy-code-btn")
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .bg(theme::bg_tertiary())
+                            .border_1()
+                            .border_color(theme::border())
                             .text_size(px(12.0))
                             .text_color(theme::text_secondary())
-                            .child("Waiting for host to enroll..."),
+                            .cursor_pointer()
+                            .child("Copy")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                this.copy_code(cx);
+                            })),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(icon(Icon::Clock).size(px(11.0)).text_color(if expired {
+                        theme::error()
+                    } else {
+                        theme::text_tertiary()
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if expired {
+                                theme::error()
+                            } else {
+                                theme::text_tertiary()
+                            })
+                            .child(if expired {
+                                "Code expired. Generate a new one.".to_string()
+                            } else {
+                                format!("Expires in {countdown}")
+                            }),
+                    ),
+            )
+    }
+
+    fn render_install_snippet_section(
+        &self,
+        snippet: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::text_secondary())
+                    .child("Install command"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child("Run on the target machine:"),
+            )
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(6.0))
+                    .bg(theme::bg_tertiary())
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_size(px(11.0))
+                    .text_color(theme::text_secondary())
+                    .font_family("monospace")
+                    .child(snippet.to_string()),
+            )
+            .child(
+                div()
+                    .id("ah-copy-install-btn")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(12.0))
+                    .py(px(7.0))
+                    .rounded(px(6.0))
+                    .bg(theme::bg_tertiary())
+                    .border_1()
+                    .border_color(theme::border())
+                    .text_size(px(12.0))
+                    .text_color(theme::text_secondary())
+                    .cursor_pointer()
+                    .child("Copy install command")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.copy_install_command(cx);
+                    })),
+            )
+    }
+
+    fn render_poll_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.poll_state {
+            PollState::Waiting => div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    icon(Icon::Loader)
+                        .size(px(13.0))
+                        .text_color(theme::accent()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme::text_secondary())
+                        .child("Waiting for host to enroll..."),
+                )
+                .into_any_element(),
+            PollState::Error(msg) => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(6.0))
+                        .bg(theme::error_bg())
+                        .border_1()
+                        .border_color(theme::error())
+                        .child(
+                            icon(Icon::AlertTriangle)
+                                .size(px(12.0))
+                                .text_color(theme::error()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme::error())
+                                .child(msg.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .id("ah-poll-retry-btn")
+                                .px(px(12.0))
+                                .py(px(7.0))
+                                .rounded(px(6.0))
+                                .bg(theme::accent())
+                                .border_1()
+                                .border_color(theme::border())
+                                .text_size(px(12.0))
+                                .text_color(theme::text_primary())
+                                .cursor_pointer()
+                                .child("Retry")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.poll_state = PollState::Waiting;
+                                    this.poll_task = Some(this.spawn_host_poll(cx));
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("ah-poll-back-btn")
+                                .px(px(12.0))
+                                .py(px(7.0))
+                                .rounded(px(6.0))
+                                .bg(theme::bg_tertiary())
+                                .border_1()
+                                .border_color(theme::border())
+                                .text_size(px(12.0))
+                                .text_color(theme::text_secondary())
+                                .cursor_pointer()
+                                .child("Start over")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.restart(cx);
+                                })),
+                        ),
+                )
+                .into_any_element(),
+            PollState::Expired => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme::warning())
+                        .child(
+                            "Enrollment window expired (10 min). Regenerate a code to continue.",
+                        ),
+                )
+                .child(
+                    div()
+                        .id("ah-regenerate-btn")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(6.0))
+                        .bg(theme::accent())
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_size(px(12.0))
+                        .text_color(theme::text_primary())
+                        .cursor_pointer()
+                        .child("Regenerate code")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.restart(cx);
+                        })),
+                )
+                .into_any_element(),
+        }
     }
 
     fn render_step_success(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -765,9 +973,71 @@ impl AddHostModal {
     }
 }
 
+impl AddHostModal {
+    fn render_modal_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(20.0))
+            .py(px(14.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child("Add Host"),
+            )
+            .child(
+                div()
+                    .id("ah-close-btn")
+                    .p(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .child(
+                        icon(Icon::X)
+                            .size(px(14.0))
+                            .text_color(theme::text_secondary()),
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        this.close(cx);
+                    })),
+            )
+    }
+
+    fn render_modal_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let step_content = match self.step {
+            Step::Create => self.render_step_create(cx).into_any_element(),
+            Step::Install => self.render_step_install(cx).into_any_element(),
+            Step::Success => self.render_step_success(cx).into_any_element(),
+        };
+        let header = self.render_modal_header(cx).into_any_element();
+        let step_indicator = self.render_step_indicator().into_any_element();
+        div()
+            .occlude()
+            .w(px(480.0))
+            .flex()
+            .flex_col()
+            .rounded(px(12.0))
+            .bg(theme::bg_secondary())
+            .border_1()
+            .border_color(theme::border())
+            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _w, cx| {
+                cx.stop_propagation();
+            })
+            .child(header)
+            .child(div().px(px(20.0)).pt(px(16.0)).child(step_indicator))
+            .child(div().px(px(20.0)).py(px(16.0)).child(step_content))
+    }
+}
+
 impl Render for AddHostModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Modal overlay + backdrop
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_handle.contains_focused(window, cx) {
+            self.focus_handle.focus(window);
+        }
         div()
             .id("add-host-modal-root")
             .track_focus(&self.focus_handle)
@@ -790,80 +1060,23 @@ impl Render for AddHostModal {
                     this.close(cx);
                 }),
             )
-            .child(
-                div()
-                    .occlude()
-                    .w(px(480.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(12.0))
-                    .bg(theme::bg_secondary())
-                    .border_1()
-                    .border_color(theme::border())
-                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _w, cx| {
-                        cx.stop_propagation();
-                    })
-                    // Header
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(20.0))
-                            .py(px(14.0))
-                            .border_b_1()
-                            .border_color(theme::border())
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::text_primary())
-                                    .child("Add Host"),
-                            )
-                            .child(
-                                div()
-                                    .id("ah-close-btn")
-                                    .p(px(4.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .child(
-                                        icon(Icon::X)
-                                            .size(px(14.0))
-                                            .text_color(theme::text_secondary()),
-                                    )
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                        this.close(cx);
-                                    })),
-                            ),
-                    )
-                    // Step indicator
-                    .child(
-                        div()
-                            .px(px(20.0))
-                            .pt(px(16.0))
-                            .child(self.render_step_indicator()),
-                    )
-                    // Step content
-                    .child(div().px(px(20.0)).py(px(16.0)).child(match self.step {
-                        Step::Create => self.render_step_create(cx).into_any_element(),
-                        Step::Install => self.render_step_install(cx).into_any_element(),
-                        Step::Success => self.render_step_success(cx).into_any_element(),
-                    })),
-            )
+            .child(self.render_modal_body(cx))
     }
 }
 
 fn install_snippet(server_url: &str, code: &str) -> String {
     let safe_url: Cow<str> = shell_escape::unix::escape(server_url.into());
     let safe_code: Cow<str> = shell_escape::unix::escape(code.into());
+    // Two-step: download to a temp file, then execute. Avoids piping an
+    // unknown script directly into bash and lets the user inspect the file.
     format!(
-        "export ZREMOTE_SERVER_URL={safe_url}\nexport ZREMOTE_ENROLLMENT_CODE={safe_code}\ncurl -fsSL \"$ZREMOTE_SERVER_URL/enroll.sh\" | bash"
+        "export ZREMOTE_SERVER_URL={safe_url}\nexport ZREMOTE_ENROLLMENT_CODE={safe_code}\ncurl -fsSL \"$ZREMOTE_SERVER_URL/enroll.sh\" -o /tmp/zremote-enroll.sh\nbash /tmp/zremote-enroll.sh"
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExpiryChoice, install_snippet};
+    use super::{ExpiryChoice, install_snippet, is_valid_hostname};
 
     #[test]
     fn expiry_choice_secs() {
@@ -913,5 +1126,35 @@ mod tests {
     fn expiry_choice_labels() {
         assert_eq!(ExpiryChoice::TenMin.label(), "10 min");
         assert_eq!(ExpiryChoice::OneHour.label(), "1 hour");
+    }
+
+    #[test]
+    fn hostname_validation_accepts_valid() {
+        assert!(is_valid_hostname("my-server"));
+        assert!(is_valid_hostname("host01"));
+        assert!(is_valid_hostname("a.b.c"));
+    }
+
+    #[test]
+    fn hostname_validation_rejects_invalid() {
+        assert!(!is_valid_hostname(""));
+        assert!(!is_valid_hostname("-starts-with-dash"));
+        assert!(!is_valid_hostname("has spaces"));
+        assert!(!is_valid_hostname("has\"quote"));
+        let long = "a".repeat(65);
+        assert!(!is_valid_hostname(&long));
+    }
+
+    #[test]
+    fn install_snippet_two_step() {
+        let snippet = install_snippet("https://my.server", "CODE");
+        assert!(
+            snippet.contains("-o /tmp/zremote-enroll.sh"),
+            "missing download step"
+        );
+        assert!(
+            snippet.contains("bash /tmp/zremote-enroll.sh"),
+            "missing execute step"
+        );
     }
 }

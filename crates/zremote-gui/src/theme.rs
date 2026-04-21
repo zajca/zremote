@@ -84,3 +84,29 @@ pub fn modal_backdrop() -> Rgba {
         a: 0.40,
     }
 }
+
+/// Accent color at ~15% opacity — for selected/active item backgrounds.
+pub fn accent_subtle() -> Rgba {
+    Rgba {
+        r: 0.369,
+        g: 0.416,
+        b: 0.824,
+        a: 0.15,
+    }
+}
+
+/// Semi-transparent overlay for status badges painted over the terminal area.
+/// Near-black base (~60% opaque) so text remains legible against the dark terminal bg.
+pub fn terminal_badge_bg() -> Rgba {
+    gpui::rgba(0x1111_1399)
+}
+
+/// Error background: error color at ~12% opacity over dark background.
+pub fn error_bg() -> Rgba {
+    Rgba {
+        r: 0.87,
+        g: 0.27,
+        b: 0.27,
+        a: 0.12,
+    }
+}

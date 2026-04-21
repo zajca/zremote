@@ -48,7 +48,7 @@ use app_state::AppState;
 use assets::Assets;
 use persistence::Persistence;
 use views::login::{LoginEvent, LoginView};
-use views::main_view::MainView;
+use views::main_view::{MainView, MainViewEvent};
 
 // Re-export from client for callers that used `zremote_gui::extract_base_url`.
 pub use zremote_client::extract_base_url;
@@ -73,28 +73,77 @@ enum RootState {
 struct RootView {
     state: RootState,
     app_state: Arc<AppState>,
-    focus_handle: FocusHandle,
 }
 
 impl RootView {
     fn authed(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
         let main = cx.new(|cx| MainView::new(app_state.clone(), window, cx));
+        cx.subscribe(&main, Self::on_main_view_event).detach();
         Self {
             state: RootState::Main(main),
             app_state,
-            focus_handle,
         }
     }
 
+    fn on_main_view_event(
+        &mut self,
+        _entity: Entity<MainView>,
+        event: &MainViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            MainViewEvent::Logout => {
+                self.perform_logout(cx);
+            }
+        }
+    }
+
+    fn perform_logout(&mut self, cx: &mut Context<Self>) {
+        let server_url = self.app_state.api.base_url().to_string();
+
+        // Clear stored session from keyring/file.
+        auth_state::clear(&server_url);
+
+        // Clear bearer token from API client.
+        self.app_state.api.set_session_token(None);
+
+        // Fire-and-forget server logout (best effort).
+        let api = self.app_state.api.clone();
+        let handle = self.app_state.tokio_handle.clone();
+        handle.spawn(async move {
+            let _ = api.logout().await;
+        });
+
+        // Transition back to login view.
+        let login = cx.new(|cx| LoginView::new(self.app_state.clone(), cx));
+        cx.subscribe(&login, {
+            move |this: &mut Self, _entity, event: &LoginEvent, cx| {
+                let LoginEvent::LoggedIn(entry) = event;
+                auth_state::save(&server_url, entry);
+                this.app_state
+                    .api
+                    .set_session_token(Some(entry.session_token.clone()));
+                this.state = RootState::PendingMain;
+                cx.notify();
+                tracing::debug!("session saved, switching to main view");
+            }
+        })
+        .detach();
+        self.state = RootState::Login(login);
+        cx.notify();
+    }
+
     fn login(app_state: Arc<AppState>, server_url: String, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
         let login = cx.new(|cx| LoginView::new(app_state.clone(), cx));
         cx.subscribe(&login, {
             let server_url = server_url.clone();
             move |this: &mut Self, _entity, event: &LoginEvent, cx| {
                 let LoginEvent::LoggedIn(entry) = event;
                 auth_state::save(&server_url, entry);
+                // Inject the bearer token into the API client for all future requests.
+                this.app_state
+                    .api
+                    .set_session_token(Some(entry.session_token.clone()));
                 // Transition to PendingMain — render() will create MainView with Window.
                 this.state = RootState::PendingMain;
                 cx.notify();
@@ -105,7 +154,6 @@ impl RootView {
         Self {
             state: RootState::Login(login),
             app_state,
-            focus_handle,
         }
     }
 }
@@ -116,6 +164,7 @@ impl Render for RootView {
         if matches!(self.state, RootState::PendingMain) {
             let app_state = self.app_state.clone();
             let main = cx.new(|cx| MainView::new(app_state, window, cx));
+            cx.subscribe(&main, Self::on_main_view_event).detach();
             self.state = RootState::Main(main);
         }
         match &self.state {
@@ -185,7 +234,15 @@ pub fn run(config: GuiConfig) {
     });
 
     let exit_after = config.exit_after;
-    let has_session = auth_state::load(&server_url).is_some();
+    let stored_session = auth_state::load(&server_url);
+    let has_session = stored_session.is_some();
+
+    // Restore bearer token into the API client for authenticated requests.
+    if let Some(entry) = &stored_session {
+        app_state
+            .api
+            .set_session_token(Some(entry.session_token.clone()));
+    }
 
     // Launch GPUI application on main thread
     Application::new()

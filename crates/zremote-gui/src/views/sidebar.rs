@@ -2024,6 +2024,7 @@ impl Render for CcTooltipView {
 
 impl SidebarView {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_server_mode = self.app_state.mode != "local";
         div()
             .flex()
             .items_center()
@@ -2044,6 +2045,30 @@ impl SidebarView {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .when(is_server_mode, |d| {
+                        d.child(
+                            div()
+                                .id("add-host-button")
+                                .cursor_pointer()
+                                .child(
+                                    icon(Icon::Plus)
+                                        .size(px(14.0))
+                                        .text_color(theme::text_secondary()),
+                                )
+                                .hover(|s| s.text_color(theme::text_primary()))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| {
+                                        SidebarTextTooltip("Add Host (Ctrl+Shift+H)".to_string())
+                                    })
+                                    .into()
+                                })
+                                .on_click(cx.listener(
+                                    |_this, _event: &ClickEvent, _window, cx| {
+                                        cx.emit(SidebarEvent::OpenAddHost);
+                                    },
+                                )),
+                        )
+                    })
                     .child(
                         div()
                             .id("settings-button")
@@ -2076,6 +2101,28 @@ impl SidebarView {
                                 cx.emit(SidebarEvent::OpenHelp);
                             })),
                     )
+                    .when(is_server_mode, |d| {
+                        d.child(
+                            div()
+                                .id("logout-button")
+                                .cursor_pointer()
+                                .child(
+                                    icon(Icon::LogOut)
+                                        .size(px(14.0))
+                                        .text_color(theme::text_secondary()),
+                                )
+                                .hover(|s| s.text_color(theme::error()))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| SidebarTextTooltip("Sign out".to_string()))
+                                        .into()
+                                })
+                                .on_click(cx.listener(
+                                    |_this, _event: &ClickEvent, _window, cx| {
+                                        cx.emit(SidebarEvent::Logout);
+                                    },
+                                )),
+                        )
+                    })
                     .child(if self.loading {
                         icon(Icon::Loader)
                             .size(px(14.0))
@@ -2094,13 +2141,49 @@ impl SidebarView {
         let is_local = self.app_state.mode == "local";
 
         if self.hosts.is_empty() && !self.loading {
+            let is_server_mode = self.app_state.mode != "local";
             vec![
                 div()
                     .px(px(12.0))
-                    .py(px(8.0))
-                    .text_color(theme::text_tertiary())
-                    .text_size(px(12.0))
-                    .child("No hosts connected")
+                    .py(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        icon(Icon::Server)
+                            .size(px(24.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::text_tertiary())
+                            .text_size(px(12.0))
+                            .child("No hosts connected"),
+                    )
+                    .when(is_server_mode, |d| {
+                        d.child(
+                            div()
+                                .id("sidebar-add-host-cta")
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(theme::accent_subtle())
+                                .border_1()
+                                .border_color(theme::accent())
+                                .text_size(px(12.0))
+                                .text_color(theme::accent())
+                                .cursor_pointer()
+                                .child(icon(Icon::Plus).size(px(12.0)))
+                                .child("Add Host")
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {
+                                    cx.emit(SidebarEvent::OpenAddHost);
+                                })),
+                        )
+                    })
                     .into_any_element(),
             ]
         } else if is_local {

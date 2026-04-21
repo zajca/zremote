@@ -9847,6 +9847,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroize",
  "zremote-protocol",
 ]
 

@@ -15,6 +15,7 @@ use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::notifications::NativeUrgency;
 use crate::theme;
+use crate::views::add_host::{AddHostModal, AddHostModalEvent};
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
@@ -36,6 +37,13 @@ use crate::views::worktree_create_modal::{WorktreeCreateModal, WorktreeCreateMod
 /// (permission prompt, end-of-turn) persists well beyond this window.
 const WAITING_DEBOUNCE: Duration = Duration::from_secs(3);
 
+/// Events emitted by `MainView` for `RootView` to handle.
+pub enum MainViewEvent {
+    Logout,
+}
+
+impl EventEmitter<MainViewEvent> for MainView {}
+
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
     app_state: Arc<AppState>,
@@ -47,6 +55,7 @@ pub struct MainView {
     help_modal: Option<Entity<HelpModal>>,
     settings_modal: Option<Entity<SettingsModal>>,
     worktree_create_modal: Option<Entity<WorktreeCreateModal>>,
+    add_host_modal: Option<Entity<AddHostModal>>,
     double_shift: DoubleShiftDetector,
     toasts: Entity<ToastContainer>,
     /// Whether the OS window is currently focused/active.
@@ -125,6 +134,7 @@ impl MainView {
             help_modal: None,
             settings_modal: None,
             worktree_create_modal: None,
+            add_host_modal: None,
             double_shift: DoubleShiftDetector::new(),
             toasts,
             window_active: window.is_window_active(),
@@ -211,6 +221,12 @@ impl MainView {
                 host_id,
             } => {
                 self.open_worktree_create_modal(parent_project_id.clone(), host_id.clone(), cx);
+            }
+            SidebarEvent::OpenAddHost => {
+                self.open_add_host_modal(cx);
+            }
+            SidebarEvent::Logout => {
+                cx.emit(MainViewEvent::Logout);
             }
         }
     }
@@ -1030,6 +1046,7 @@ impl MainView {
             }
             KeyAction::OpenHelp => self.open_help_modal(cx),
             KeyAction::OpenNewWorktree => self.trigger_new_worktree_for_selection(cx),
+            KeyAction::OpenAddHost => self.open_add_host_modal(cx),
             KeyAction::ToggleActivityPanel => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |panel, cx| {
@@ -1039,7 +1056,9 @@ impl MainView {
             }
             KeyAction::CloseOverlay => {
                 // Close topmost modal
-                if self.worktree_create_modal.is_some() {
+                if self.add_host_modal.is_some() {
+                    self.close_add_host_modal(cx);
+                } else if self.worktree_create_modal.is_some() {
                     self.close_worktree_create_modal(cx);
                 } else if self.command_palette.is_some() {
                     self.close_command_palette(cx);
@@ -1135,6 +1154,9 @@ impl MainView {
             }
             TerminalPanelEvent::OpenNewWorktree => {
                 self.trigger_new_worktree_for_selection(cx);
+            }
+            TerminalPanelEvent::OpenAddHost => {
+                self.open_add_host_modal(cx);
             }
             TerminalPanelEvent::BridgeFailed { session_id } => {
                 tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
@@ -1801,6 +1823,40 @@ impl MainView {
         cx.notify();
     }
 
+    fn open_add_host_modal(&mut self, cx: &mut Context<Self>) {
+        if self.add_host_modal.is_some() {
+            self.close_add_host_modal(cx);
+            return;
+        }
+        let app_state = self.app_state.clone();
+        let modal = cx.new(|cx| AddHostModal::new(app_state, cx));
+        cx.subscribe(&modal, Self::on_add_host_event).detach();
+        self.add_host_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_add_host_modal(&mut self, cx: &mut Context<Self>) {
+        self.add_host_modal = None;
+        cx.notify();
+    }
+
+    fn on_add_host_event(
+        &mut self,
+        _emitter: Entity<AddHostModal>,
+        event: &AddHostModalEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            AddHostModalEvent::Close => {
+                self.close_add_host_modal(cx);
+            }
+            AddHostModalEvent::Enrolled { .. } => {
+                // Trigger sidebar refresh on next data poll — it picks up automatically.
+                self.close_add_host_modal(cx);
+            }
+        }
+    }
+
     fn on_worktree_create_event(
         &mut self,
         _emitter: Entity<WorktreeCreateModal>,
@@ -2142,6 +2198,22 @@ impl MainView {
         ))
     }
 
+    fn render_add_host_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let modal = self.add_host_modal.as_ref()?;
+        Some(Self::render_modal_overlay(
+            "add-host-backdrop",
+            "add-host-container",
+            px(80.0),
+            px(520.0),
+            None,
+            Some(px(560.0)),
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_add_host_modal(cx);
+            }),
+            modal.clone().into_any_element(),
+        ))
+    }
+
     fn render_worktree_create_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let modal = self.worktree_create_modal.as_ref()?;
         Some(Self::render_modal_overlay(
@@ -2222,6 +2294,9 @@ impl Render for MainView {
             root = root.child(overlay);
         }
         if let Some(overlay) = self.render_worktree_create_overlay(cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_add_host_overlay(cx) {
             root = root.child(overlay);
         }
 
@@ -2358,6 +2433,8 @@ pub enum SidebarEvent {
     },
     OpenHelp,
     OpenSettings,
+    OpenAddHost,
+    Logout,
     /// User requested a new worktree under a parent git project. `MainView`
     /// opens the create modal. `parent_project_id` is the root repo (never a
     /// worktree — sidebar/command-palette resolve to the root before emitting).

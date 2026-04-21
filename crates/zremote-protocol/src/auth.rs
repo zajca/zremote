@@ -458,7 +458,7 @@ mod tests {
         assert!(verifying_key.verify(&payload, &bad_sig).is_err());
     }
 
-    /// Signature from the right key but wrong agent_id in the payload must fail.
+    /// Signature from the right key but wrong `agent_id` in the payload must fail.
     #[test]
     fn wrong_agent_id_payload_rejected() {
         use ed25519_dalek::{Signer, SigningKey, Verifier};

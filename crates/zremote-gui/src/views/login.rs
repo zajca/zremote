@@ -95,7 +95,12 @@ impl LoginView {
 
     fn submit_admin_token(&mut self, cx: &mut Context<Self>) {
         let token = self.token_input.trim().to_string();
-        if token.is_empty() || self.loading != Loading::Idle {
+        if self.loading != Loading::Idle {
+            return;
+        }
+        if token.is_empty() {
+            self.error = Some("Token is required.".to_string());
+            cx.notify();
             return;
         }
         self.loading = Loading::Token;
@@ -275,7 +280,13 @@ impl LoginView {
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         match event.keystroke.key.as_str() {
             "backspace" => {
-                self.token_input.pop();
+                // Pop the last Unicode scalar (not last byte) to stay valid UTF-8.
+                let new_len = self
+                    .token_input
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(i, _)| i);
+                self.token_input.truncate(new_len);
                 cx.notify();
                 true
             }
@@ -284,13 +295,36 @@ impl LoginView {
                 true
             }
             ch => {
-                if ch.len() == 1 && !event.keystroke.modifiers.platform {
-                    self.token_input.push_str(ch);
-                    cx.notify();
-                    true
-                } else {
-                    false
+                let mods = &event.keystroke.modifiers;
+                // Accept single-codepoint keys (letters, digits, symbols).
+                // Skip platform (Cmd/Win) combos and control combos except
+                // plain Shift, which is needed for uppercase letters.
+                if !mods.platform && !mods.control && !mods.alt {
+                    // `ch` is the key name (e.g. "a", "1", "-"). When Shift is
+                    // held, GPUI gives us the *key name* not the shifted glyph,
+                    // so we use `event.keystroke.key_char` (the OS-resolved
+                    // character, if any). Fall back to `ch` for keys without one.
+                    let char_to_push: &str = event
+                        .keystroke
+                        .key_char
+                        .as_deref()
+                        .filter(|s: &&str| {
+                            // Accept only a single printable codepoint.
+                            let mut it = s.chars();
+                            it.next().is_some_and(|c: char| !c.is_control()) && it.next().is_none()
+                        })
+                        .unwrap_or(ch);
+
+                    if char_to_push.len() == 1
+                        || (char_to_push.chars().count() == 1
+                            && !char_to_push.starts_with(|c: char| c.is_control()))
+                    {
+                        self.token_input.push_str(char_to_push);
+                        cx.notify();
+                        return true;
+                    }
                 }
+                false
             }
         }
     }
@@ -385,6 +419,24 @@ impl LoginView {
             }))
     }
 
+    /// Renders OIDC button when configured, or a fixed-height placeholder
+    /// while the probe is in-flight, to avoid layout shift on appearance.
+    fn render_oidc_section_or_placeholder(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.oidc_configured {
+            None => {
+                // Probe in-flight: reserve the space so layout does not shift.
+                div()
+                    .w_full()
+                    .h(px(73.0)) // matches divider (1+8+8) + button height (36) + gap (px(8))
+                    .into_any_element()
+            }
+            Some(false) => div().into_any_element(),
+            Some(true) => self
+                .render_oidc_section(cx)
+                .map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
+        }
+    }
+
     fn render_oidc_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         // Only shown when OIDC is confirmed configured.
         if self.oidc_configured != Some(true) {
@@ -445,10 +497,103 @@ impl LoginView {
                 ),
         )
     }
+    fn render_header(&mut self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(28.0))
+            .pt(px(32.0))
+            .pb(px(20.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_primary())
+                    .child("Sign in to ZRemote"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme::text_tertiary())
+                    .child(self.app_state.api.base_url().to_string()),
+            )
+    }
+
+    fn render_error_banner(&self) -> Option<impl IntoElement> {
+        let err = self.error.as_deref()?;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(6.0))
+                .bg(theme::error_bg())
+                .border_1()
+                .border_color(theme::error())
+                .child(
+                    icon(Icon::AlertTriangle)
+                        .size(px(12.0))
+                        .text_color(theme::error()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme::error())
+                        .child(err.to_string()),
+                ),
+        )
+    }
+
+    fn render_storage_footer(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .pt(px(4.0))
+            .child(
+                icon(Icon::Lock)
+                    .size(px(10.0))
+                    .text_color(theme::text_tertiary()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme::text_tertiary())
+                    .child(format!("Stored in {}", crate::auth_state::storage_mode())),
+            )
+    }
+
+    fn render_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let error_banner = self
+            .render_error_banner()
+            .map(IntoElement::into_any_element);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .px(px(28.0))
+            .py(px(24.0))
+            .child(self.render_token_input(cx))
+            .when_some(error_banner, |d, banner| d.child(banner))
+            .child(self.render_submit_button(cx))
+            .child(self.render_oidc_section_or_placeholder(cx))
+            .child(self.render_storage_footer())
+    }
 }
 
 impl Render for LoginView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Grab focus on first render so keyboard input works immediately.
+        if !self.focus_handle.contains_focused(window, cx) {
+            self.focus_handle.focus(window);
+        }
         div()
             .id("login-root")
             .track_focus(&self.focus_handle)
@@ -469,7 +614,6 @@ impl Render for LoginView {
                 }),
             )
             .child(
-                // Card
                 div()
                     .w(px(400.0))
                     .flex()
@@ -479,74 +623,8 @@ impl Render for LoginView {
                     .bg(theme::bg_secondary())
                     .border_1()
                     .border_color(theme::border())
-                    // Header
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(28.0))
-                            .pt(px(32.0))
-                            .pb(px(20.0))
-                            .border_b_1()
-                            .border_color(theme::border())
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::text_primary())
-                                    .child("Sign in to ZRemote"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme::text_tertiary())
-                                    .child(self.app_state.api.base_url().to_string()),
-                            ),
-                    )
-                    // Body
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.0))
-                            .px(px(28.0))
-                            .py(px(24.0))
-                            .child(self.render_token_input(cx))
-                            .when_some(self.error.as_deref(), |d, err| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .px(px(10.0))
-                                        .py(px(8.0))
-                                        .rounded(px(6.0))
-                                        .bg(Rgba {
-                                            r: 0.87,
-                                            g: 0.27,
-                                            b: 0.27,
-                                            a: 0.12,
-                                        })
-                                        .border_1()
-                                        .border_color(theme::error())
-                                        .child(
-                                            icon(Icon::AlertTriangle)
-                                                .size(px(12.0))
-                                                .text_color(theme::error()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(12.0))
-                                                .text_color(theme::error())
-                                                .child(err.to_string()),
-                                        ),
-                                )
-                            })
-                            .child(self.render_submit_button(cx))
-                            .when_some(self.render_oidc_section(cx), |d, oidc| d.child(oidc)),
-                    ),
+                    .child(self.render_header())
+                    .child(self.render_body(cx)),
             )
     }
 }
@@ -627,27 +705,32 @@ fn write_http_response(mut stream: impl Write, status: u16, body: &str) {
 }
 
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             let hi = chars.next().unwrap_or('0');
             let lo = chars.next().unwrap_or('0');
             if let Ok(byte) = u8::from_str_radix(&format!("{hi}{lo}"), 16) {
-                out.push(byte as char);
+                bytes.push(byte);
                 continue;
             }
+            // Not valid hex — pass through the raw characters.
+            bytes.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes());
+            bytes.extend_from_slice(hi.encode_utf8(&mut [0u8; 4]).as_bytes());
+            bytes.extend_from_slice(lo.encode_utf8(&mut [0u8; 4]).as_bytes());
+        } else {
+            bytes.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes());
         }
-        out.push(c);
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn session_entry_from_response(resp: SessionTokenResponse) -> SessionEntry {
     let expires_at = resp
         .expires_at
-        .parse::<chrono::DateTime<chrono::Utc>>()
-        .ok();
+        .as_deref()
+        .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
     SessionEntry {
         session_token: resp.session_token,
         expires_at,
@@ -656,14 +739,25 @@ fn session_entry_from_response(resp: SessionTokenResponse) -> SessionEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::session_entry_from_response;
+    use super::{percent_decode, session_entry_from_response};
     use zremote_client::SessionTokenResponse;
 
     #[test]
     fn session_entry_from_response_no_expiry() {
         let resp = SessionTokenResponse {
             session_token: "abc123".into(),
-            expires_at: "invalid-date".into(),
+            expires_at: Some("invalid-date".into()),
+        };
+        let entry = session_entry_from_response(resp);
+        assert_eq!(entry.session_token, "abc123");
+        assert!(entry.expires_at.is_none());
+    }
+
+    #[test]
+    fn session_entry_from_response_missing_expiry() {
+        let resp = SessionTokenResponse {
+            session_token: "abc123".into(),
+            expires_at: None,
         };
         let entry = session_entry_from_response(resp);
         assert_eq!(entry.session_token, "abc123");
@@ -674,10 +768,22 @@ mod tests {
     fn session_entry_from_response_valid_expiry() {
         let resp = SessionTokenResponse {
             session_token: "tok".into(),
-            expires_at: "2099-01-01T00:00:00Z".into(),
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
         };
         let entry = session_entry_from_response(resp);
         assert!(entry.expires_at.is_some());
         assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // %C3%A9 is the UTF-8 encoding of é (U+00E9)
+        assert_eq!(percent_decode("%C3%A9"), "é");
+    }
+
+    #[test]
+    fn percent_decode_ascii() {
+        assert_eq!(percent_decode("hello+world"), "hello+world");
+        assert_eq!(percent_decode("code%3Dabc"), "code=abc");
     }
 }

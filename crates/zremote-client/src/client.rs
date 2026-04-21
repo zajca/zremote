@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -63,6 +64,8 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ApiClient {
     base_url: String,
     client: reqwest::Client,
+    /// Session token injected as `Authorization: Bearer <token>` on every request.
+    session_token: Arc<RwLock<Option<String>>>,
 }
 
 impl ApiClient {
@@ -76,7 +79,11 @@ impl ApiClient {
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             .build()
             .map_err(ApiError::Http)?;
-        Ok(Self { base_url, client })
+        Ok(Self {
+            base_url,
+            client,
+            session_token: Arc::new(RwLock::new(None)),
+        })
     }
 
     /// Create with a custom `reqwest::Client` (for custom TLS, proxy, etc.).
@@ -89,7 +96,27 @@ impl ApiClient {
     pub fn with_client(base_url: &str, client: reqwest::Client) -> Result<Self, ApiError> {
         let base_url = extract_base_url(base_url);
         let _ = url::Url::parse(&base_url)?;
-        Ok(Self { base_url, client })
+        Ok(Self {
+            base_url,
+            client,
+            session_token: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Set (or clear) the session token. All subsequent requests will include
+    /// `Authorization: Bearer <token>` when a token is set.
+    pub fn set_session_token(&self, token: Option<String>) {
+        if let Ok(mut guard) = self.session_token.write() {
+            *guard = token;
+        }
+    }
+
+    /// Read the current session token without taking ownership.
+    fn bearer_header(&self) -> Option<String> {
+        self.session_token
+            .read()
+            .ok()
+            .and_then(|g| g.as_deref().map(|t| format!("Bearer {t}")))
     }
 
     /// Get the base URL.
@@ -150,6 +177,35 @@ impl ApiClient {
         }
     }
 
+    /// Attach the session token as an `Authorization: Bearer` header, if set.
+    fn authed(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(header) = self.bearer_header() {
+            builder.header("Authorization", header)
+        } else {
+            builder
+        }
+    }
+
+    fn get(&self, url: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.get(url))
+    }
+
+    fn post(&self, url: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.post(url))
+    }
+
+    fn put(&self, url: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.put(url))
+    }
+
+    fn patch(&self, url: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.patch(url))
+    }
+
+    fn delete(&self, url: String) -> reqwest::RequestBuilder {
+        self.authed(self.client.delete(url))
+    }
+
     /// Check response status and parse errors.
     async fn check_response(
         &self,
@@ -172,7 +228,6 @@ impl ApiClient {
     /// Detect server mode and version.
     pub async fn get_mode_info(&self) -> Result<crate::types::ModeInfo, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/mode", self.base_url))
             .send()
             .await?;
@@ -186,11 +241,7 @@ impl ApiClient {
 
     /// Check server health.
     pub async fn health(&self) -> Result<(), ApiError> {
-        let resp = self
-            .client
-            .get(format!("{}/health", self.base_url))
-            .send()
-            .await?;
+        let resp = self.get(format!("{}/health", self.base_url)).send().await?;
         self.check_response(resp).await?;
         Ok(())
     }
@@ -200,7 +251,6 @@ impl ApiClient {
     /// List all hosts.
     pub async fn list_hosts(&self) -> Result<Vec<Host>, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/hosts", self.base_url))
             .send()
             .await?;
@@ -211,7 +261,6 @@ impl ApiClient {
     /// Get a single host.
     pub async fn get_host(&self, host_id: &str) -> Result<Host, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/hosts/{}",
                 self.base_url,
@@ -230,7 +279,6 @@ impl ApiClient {
         req: &UpdateHostRequest,
     ) -> Result<Host, ApiError> {
         let resp = self
-            .client
             .patch(format!(
                 "{}/api/hosts/{}",
                 self.base_url,
@@ -246,7 +294,6 @@ impl ApiClient {
     /// Delete a host.
     pub async fn delete_host(&self, host_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/hosts/{}",
                 self.base_url,
@@ -263,7 +310,6 @@ impl ApiClient {
     /// List sessions for a host.
     pub async fn list_sessions(&self, host_id: &str) -> Result<Vec<Session>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/hosts/{}/sessions",
                 self.base_url,
@@ -283,7 +329,6 @@ impl ApiClient {
         req: &CreateSessionRequest,
     ) -> Result<CreateSessionResponse, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/hosts/{}/sessions",
                 self.base_url,
@@ -299,7 +344,6 @@ impl ApiClient {
     /// Get a single session.
     pub async fn get_session(&self, session_id: &str) -> Result<Session, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/sessions/{}",
                 self.base_url,
@@ -319,7 +363,6 @@ impl ApiClient {
         req: &UpdateSessionRequest,
     ) -> Result<Session, ApiError> {
         let resp = self
-            .client
             .patch(format!(
                 "{}/api/sessions/{}",
                 self.base_url,
@@ -335,7 +378,6 @@ impl ApiClient {
     /// Close (delete) a session.
     pub async fn close_session(&self, session_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/sessions/{}",
                 self.base_url,
@@ -350,7 +392,6 @@ impl ApiClient {
     /// Close all suspended (zombie) sessions for a host.
     pub async fn cleanup_sessions(&self, host_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/hosts/{}/sessions/cleanup",
                 self.base_url,
@@ -365,7 +406,6 @@ impl ApiClient {
     /// Purge a closed session (remove from DB).
     pub async fn purge_session(&self, session_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/sessions/{}/purge",
                 self.base_url,
@@ -382,7 +422,6 @@ impl ApiClient {
         &self,
     ) -> Result<std::collections::HashMap<String, PreviewSnapshot>, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/sessions/previews", self.base_url))
             .send()
             .await?;
@@ -396,7 +435,6 @@ impl ApiClient {
     /// List projects for a host.
     pub async fn list_projects(&self, host_id: &str) -> Result<Vec<Project>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/hosts/{}/projects",
                 self.base_url,
@@ -411,7 +449,6 @@ impl ApiClient {
     /// Get a single project.
     pub async fn get_project(&self, project_id: &str) -> Result<Project, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}",
                 self.base_url,
@@ -431,7 +468,6 @@ impl ApiClient {
         req: &UpdateProjectRequest,
     ) -> Result<Project, ApiError> {
         let resp = self
-            .client
             .patch(format!(
                 "{}/api/projects/{}",
                 self.base_url,
@@ -447,7 +483,6 @@ impl ApiClient {
     /// Delete a project.
     pub async fn delete_project(&self, project_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/projects/{}",
                 self.base_url,
@@ -466,7 +501,6 @@ impl ApiClient {
         req: &AddProjectRequest,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/hosts/{}/projects",
                 self.base_url,
@@ -482,7 +516,6 @@ impl ApiClient {
     /// Trigger project scanning on a host.
     pub async fn trigger_scan(&self, host_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/hosts/{}/projects/scan",
                 self.base_url,
@@ -497,7 +530,6 @@ impl ApiClient {
     /// Trigger git status refresh for a project.
     pub async fn trigger_git_refresh(&self, project_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/git/refresh",
                 self.base_url,
@@ -512,7 +544,6 @@ impl ApiClient {
     /// List sessions for a project.
     pub async fn list_project_sessions(&self, project_id: &str) -> Result<Vec<Session>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/sessions",
                 self.base_url,
@@ -529,7 +560,6 @@ impl ApiClient {
     /// Returns project rows (worktrees are stored as child projects in the DB).
     pub async fn list_worktrees(&self, project_id: &str) -> Result<Vec<Project>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/worktrees",
                 self.base_url,
@@ -550,7 +580,6 @@ impl ApiClient {
         req: &CreateWorktreeRequest,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/worktrees",
                 self.base_url,
@@ -576,7 +605,6 @@ impl ApiClient {
         req: &CreateWorktreeRequest,
     ) -> Result<serde_json::Value, crate::types::WorktreeCreateError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/worktrees",
                 self.base_url,
@@ -621,7 +649,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<zremote_protocol::project::BranchList, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/git/branches",
                 self.base_url,
@@ -641,7 +668,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<zremote_protocol::project::BranchList, crate::types::WorktreeCreateError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/git/branches",
                 self.base_url,
@@ -694,7 +720,6 @@ impl ApiClient {
             zremote_protocol::fs::FsCompleteKind::Any => "any",
         };
         let resp = self
-            .client
             .get(format!("{}/api/fs/complete", self.base_url))
             .query(&[("prefix", prefix), ("kind", kind_str)])
             .send()
@@ -710,7 +735,6 @@ impl ApiClient {
         worktree_id: &str,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/projects/{}/worktrees/{}",
                 self.base_url,
@@ -731,7 +755,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<Option<ProjectSettings>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/settings",
                 self.base_url,
@@ -752,7 +775,6 @@ impl ApiClient {
         settings: &ProjectSettings,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .put(format!(
                 "{}/api/projects/{}/settings",
                 self.base_url,
@@ -768,7 +790,6 @@ impl ApiClient {
     /// List actions for a project.
     pub async fn list_actions(&self, project_id: &str) -> Result<ActionsResponse, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/actions",
                 self.base_url,
@@ -787,7 +808,6 @@ impl ApiClient {
         action_name: &str,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/actions/{}/run",
                 self.base_url,
@@ -808,7 +828,6 @@ impl ApiClient {
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/actions/{}/resolve-inputs",
                 self.base_url,
@@ -830,7 +849,6 @@ impl ApiClient {
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/prompts/{}/resolve",
                 self.base_url,
@@ -850,7 +868,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/configure",
                 self.base_url,
@@ -868,7 +885,7 @@ impl ApiClient {
         host_id: &str,
         path: Option<&str>,
     ) -> Result<Vec<DirectoryEntry>, ApiError> {
-        let mut req = self.client.get(format!(
+        let mut req = self.get(format!(
             "{}/api/hosts/{}/browse",
             self.base_url,
             encode_path(host_id)
@@ -886,7 +903,6 @@ impl ApiClient {
     /// List agentic loops with optional filters.
     pub async fn list_loops(&self, filter: &ListLoopsFilter) -> Result<Vec<AgenticLoop>, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/loops", self.base_url))
             .query(filter)
             .send()
@@ -898,7 +914,6 @@ impl ApiClient {
     /// Get a single agentic loop.
     pub async fn get_loop(&self, loop_id: &str) -> Result<AgenticLoop, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/loops/{}",
                 self.base_url,
@@ -915,7 +930,6 @@ impl ApiClient {
     /// Get a global config value.
     pub async fn get_global_config(&self, key: &str) -> Result<ConfigValue, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/config/{}", self.base_url, encode_path(key)))
             .send()
             .await?;
@@ -929,7 +943,6 @@ impl ApiClient {
             value: value.to_string(),
         };
         let resp = self
-            .client
             .put(format!("{}/api/config/{}", self.base_url, encode_path(key)))
             .json(&req)
             .send()
@@ -941,7 +954,6 @@ impl ApiClient {
     /// Get a host-scoped config value.
     pub async fn get_host_config(&self, host_id: &str, key: &str) -> Result<ConfigValue, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/hosts/{}/config/{}",
                 self.base_url,
@@ -965,7 +977,6 @@ impl ApiClient {
             value: value.to_string(),
         };
         let resp = self
-            .client
             .put(format!(
                 "{}/api/hosts/{}/config/{}",
                 self.base_url,
@@ -987,7 +998,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<Option<KnowledgeBase>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/knowledge/status",
                 self.base_url,
@@ -1006,7 +1016,6 @@ impl ApiClient {
         req: &IndexRequest,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/index",
                 self.base_url,
@@ -1026,7 +1035,6 @@ impl ApiClient {
         req: &SearchRequest,
     ) -> Result<Vec<SearchResult>, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/search",
                 self.base_url,
@@ -1045,7 +1053,7 @@ impl ApiClient {
         project_id: &str,
         category: Option<&str>,
     ) -> Result<Vec<Memory>, ApiError> {
-        let mut req = self.client.get(format!(
+        let mut req = self.get(format!(
             "{}/api/projects/{}/knowledge/memories",
             self.base_url,
             encode_path(project_id)
@@ -1067,7 +1075,6 @@ impl ApiClient {
         req: &UpdateMemoryRequest,
     ) -> Result<Memory, ApiError> {
         let resp = self
-            .client
             .put(format!(
                 "{}/api/projects/{}/knowledge/memories/{}",
                 self.base_url,
@@ -1084,7 +1091,6 @@ impl ApiClient {
     /// Delete a memory.
     pub async fn delete_memory(&self, project_id: &str, memory_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/projects/{}/knowledge/memories/{}",
                 self.base_url,
@@ -1104,7 +1110,6 @@ impl ApiClient {
         req: &ExtractRequest,
     ) -> Result<Vec<ExtractedMemory>, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/extract",
                 self.base_url,
@@ -1123,7 +1128,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/generate-instructions",
                 self.base_url,
@@ -1138,7 +1142,6 @@ impl ApiClient {
     /// Write CLAUDE.md file on remote host.
     pub async fn write_claude_md(&self, project_id: &str) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/write-claude-md",
                 self.base_url,
@@ -1153,7 +1156,6 @@ impl ApiClient {
     /// Bootstrap project knowledge.
     pub async fn bootstrap_project(&self, project_id: &str) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/projects/{}/knowledge/bootstrap",
                 self.base_url,
@@ -1172,7 +1174,6 @@ impl ApiClient {
         req: &ServiceControlRequest,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/hosts/{}/knowledge/service",
                 self.base_url,
@@ -1193,7 +1194,6 @@ impl ApiClient {
         filter: &ListClaudeTasksFilter,
     ) -> Result<Vec<ClaudeTask>, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/claude-tasks", self.base_url))
             .query(filter)
             .send()
@@ -1209,7 +1209,6 @@ impl ApiClient {
         req: &CreateClaudeTaskRequest,
     ) -> Result<ClaudeTask, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/claude-tasks", self.base_url))
             .json(req)
             .send()
@@ -1221,7 +1220,6 @@ impl ApiClient {
     /// Get a single Claude task.
     pub async fn get_claude_task(&self, task_id: &str) -> Result<ClaudeTask, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/claude-tasks/{}",
                 self.base_url,
@@ -1241,7 +1239,6 @@ impl ApiClient {
         req: &ResumeClaudeTaskRequest,
     ) -> Result<ClaudeTask, ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/claude-tasks/{}/resume",
                 self.base_url,
@@ -1261,9 +1258,7 @@ impl ApiClient {
         &self,
         kind: Option<&str>,
     ) -> Result<Vec<AgentProfile>, ApiError> {
-        let mut req = self
-            .client
-            .get(format!("{}/api/agent-profiles", self.base_url));
+        let mut req = self.get(format!("{}/api/agent-profiles", self.base_url));
         if let Some(k) = kind {
             req = req.query(&[("kind", k)]);
         }
@@ -1277,7 +1272,7 @@ impl ApiClient {
         session_id: &str,
         limit: Option<i64>,
     ) -> Result<Vec<super::types::ExecutionNode>, ApiError> {
-        let mut req = self.client.get(format!(
+        let mut req = self.get(format!(
             "{}/api/sessions/{}/execution-nodes",
             self.base_url,
             encode_path(session_id)
@@ -1292,7 +1287,6 @@ impl ApiClient {
     /// List the agent kinds the server knows how to launch.
     pub async fn list_agent_kinds(&self) -> Result<Vec<AgentKindInfo>, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/agent-profiles/kinds", self.base_url))
             .send()
             .await?;
@@ -1303,7 +1297,6 @@ impl ApiClient {
     /// Fetch a single agent profile by id.
     pub async fn get_agent_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/agent-profiles/{}",
                 self.base_url,
@@ -1322,7 +1315,6 @@ impl ApiClient {
         req: &CreateAgentProfileRequest,
     ) -> Result<AgentProfile, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/agent-profiles", self.base_url))
             .json(req)
             .send()
@@ -1339,7 +1331,6 @@ impl ApiClient {
         req: &UpdateAgentProfileRequest,
     ) -> Result<AgentProfile, ApiError> {
         let resp = self
-            .client
             .put(format!(
                 "{}/api/agent-profiles/{}",
                 self.base_url,
@@ -1355,7 +1346,6 @@ impl ApiClient {
     /// Delete an agent profile. Idempotent — deleting a non-existent id is OK.
     pub async fn delete_agent_profile(&self, id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/agent-profiles/{}",
                 self.base_url,
@@ -1371,7 +1361,6 @@ impl ApiClient {
     #[must_use = "set_default returns the refreshed profile"]
     pub async fn set_default_agent_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
         let resp = self
-            .client
             .put(format!(
                 "{}/api/agent-profiles/{}/default",
                 self.base_url,
@@ -1390,7 +1379,6 @@ impl ApiClient {
         req: &StartAgentRequest,
     ) -> Result<StartAgentResponse, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/agent-tasks", self.base_url))
             .json(req)
             .send()
@@ -1407,7 +1395,6 @@ impl ApiClient {
         let encoded = base64::engine::general_purpose::STANDARD.encode(data);
         let body = serde_json::json!({ "data": encoded });
         let resp = self
-            .client
             .post(format!(
                 "{}/api/sessions/{}/terminal/input",
                 self.base_url,
@@ -1429,7 +1416,6 @@ impl ApiClient {
         message: &serde_json::Value,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!(
                 "{}/api/sessions/{}/channel/send",
                 self.base_url,
@@ -1445,7 +1431,6 @@ impl ApiClient {
     /// Get channel status for a session.
     pub async fn channel_status(&self, session_id: &str) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/sessions/{}/channel/status",
                 self.base_url,
@@ -1463,7 +1448,6 @@ impl ApiClient {
         project_id: &str,
     ) -> Result<serde_json::Value, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/projects/{}/permission-policy",
                 self.base_url,
@@ -1482,7 +1466,6 @@ impl ApiClient {
         policy: &serde_json::Value,
     ) -> Result<(), ApiError> {
         let resp = self
-            .client
             .put(format!(
                 "{}/api/projects/{}/permission-policy",
                 self.base_url,
@@ -1498,7 +1481,6 @@ impl ApiClient {
     /// Delete permission policy for a project.
     pub async fn delete_permission_policy(&self, project_id: &str) -> Result<(), ApiError> {
         let resp = self
-            .client
             .delete(format!(
                 "{}/api/projects/{}/permission-policy",
                 self.base_url,
@@ -1523,7 +1505,6 @@ impl ApiClient {
             "reason": reason,
         });
         let resp = self
-            .client
             .post(format!(
                 "{}/api/sessions/{}/channel/permission/{}",
                 self.base_url,
@@ -1541,7 +1522,6 @@ impl ApiClient {
     pub async fn cancel_claude_task(&self, task_id: &str, force: bool) -> Result<(), ApiError> {
         let body = serde_json::json!({ "force": force });
         let resp = self
-            .client
             .post(format!(
                 "{}/api/claude-tasks/{}/cancel",
                 self.base_url,
@@ -1562,7 +1542,6 @@ impl ApiClient {
     ) -> Result<ClaudeTask, ApiError> {
         let body = serde_json::json!({ "summary": summary });
         let resp = self
-            .client
             .post(format!(
                 "{}/api/claude-tasks/{}/resolve",
                 self.base_url,
@@ -1578,7 +1557,6 @@ impl ApiClient {
     /// Get task log (scrollback output).
     pub async fn get_task_log(&self, task_id: &str) -> Result<String, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/claude-tasks/{}/log",
                 self.base_url,
@@ -1597,7 +1575,6 @@ impl ApiClient {
         project_path: &str,
     ) -> Result<Vec<ClaudeSessionInfo>, ApiError> {
         let resp = self
-            .client
             .get(format!(
                 "{}/api/hosts/{}/claude-tasks/discover",
                 self.base_url,
@@ -1610,22 +1587,14 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// List all hosts with an explicit session Bearer token.
-    pub async fn list_hosts_authed(&self, session_token: &str) -> Result<Vec<Host>, ApiError> {
-        let resp = self
-            .client
-            .get(format!("{}/api/hosts", self.base_url))
-            .header("Authorization", format!("Bearer {session_token}"))
-            .send()
-            .await?;
-        let resp = self.check_response(resp).await?;
-        Ok(resp.json().await?)
+    /// List all hosts. Requires a session token set via [`Self::set_session_token`].
+    pub async fn list_hosts_authed(&self) -> Result<Vec<Host>, ApiError> {
+        self.list_hosts().await
     }
 
     /// Exchange the admin token for a session token.
     pub async fn login_admin_token(&self, token: String) -> Result<SessionTokenResponse, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/auth/admin-token", self.base_url))
             .json(&serde_json::json!({ "token": token }))
             .send()
@@ -1637,7 +1606,6 @@ impl ApiClient {
     /// Start an OIDC login flow. Returns the authorization URL to open in browser.
     pub async fn login_oidc_init(&self, redirect_uri: &str) -> Result<OidcInitResponse, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/auth/oidc/init", self.base_url))
             .json(&serde_json::json!({ "redirect_uri": redirect_uri }))
             .send()
@@ -1653,7 +1621,6 @@ impl ApiClient {
         state: String,
     ) -> Result<SessionTokenResponse, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/auth/oidc/callback", self.base_url))
             .json(&serde_json::json!({ "code": code, "state": state }))
             .send()
@@ -1662,12 +1629,10 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// Log out the current session.
-    pub async fn logout(&self, session_token: &str) -> Result<(), ApiError> {
+    /// Log out the current session. Requires a session token set via [`Self::set_session_token`].
+    pub async fn logout(&self) -> Result<(), ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/auth/logout", self.base_url))
-            .header("Authorization", format!("Bearer {session_token}"))
             .send()
             .await?;
         self.check_response(resp).await?;
@@ -1677,7 +1642,6 @@ impl ApiClient {
     /// Check whether the server has OIDC configured (public endpoint, no auth required).
     pub async fn oidc_status(&self) -> Result<OidcStatus, ApiError> {
         let resp = self
-            .client
             .get(format!("{}/api/auth/oidc/status", self.base_url))
             .send()
             .await?;
@@ -1685,16 +1649,14 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// Create an enrollment code for a new host (requires Bearer token).
+    /// Create an enrollment code for a new host. Requires a session token set via
+    /// [`Self::set_session_token`].
     pub async fn admin_enroll_create(
         &self,
-        session_token: &str,
         req: &CreateEnrollmentRequest,
     ) -> Result<EnrollmentCodeResponse, ApiError> {
         let resp = self
-            .client
             .post(format!("{}/api/admin/enroll/create", self.base_url))
-            .header("Authorization", format!("Bearer {session_token}"))
             .json(req)
             .send()
             .await?;
