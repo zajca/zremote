@@ -184,30 +184,17 @@ pub async fn update_config(
         )
     };
 
+    // `all_some` means the caller sent a full OIDC triple; any other shape
+    // means they cleared OIDC (all-None — mixed is already rejected above).
+    let oidc_flag = Some(all_some);
     match result {
         Ok(()) => {
-            log_config_change(
-                &state,
-                &ip,
-                &ctx,
-                outcome_event,
-                Outcome::Ok,
-                req.oidc_email.as_deref(),
-            )
-            .await;
+            log_config_change(&state, &ip, &ctx, outcome_event, Outcome::Ok, oidc_flag).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(err) => {
             tracing::error!(error = ?err, "admin_config update failed");
-            log_config_change(
-                &state,
-                &ip,
-                &ctx,
-                outcome_event,
-                Outcome::Error,
-                req.oidc_email.as_deref(),
-            )
-            .await;
+            log_config_change(&state, &ip, &ctx, outcome_event, Outcome::Error, oidc_flag).await;
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal_error" })),
@@ -286,16 +273,17 @@ pub async fn revoke_host(
 ) -> Response {
     let ip = addr.ip().to_string();
 
-    // Validate host_id as UUID to stop SQL-parameter abuse & produce a
-    // useful 400 when a UI sends a nonsense value.
-    if Uuid::parse_str(&host_id).is_err() {
+    // Parse the path param exactly once. A non-UUID is an early 400 (and
+    // a Denied audit row) — every downstream call takes the typed `Uuid`,
+    // so a second parse attempt on the happy path is impossible.
+    let Ok(host_uuid) = Uuid::parse_str(&host_id) else {
         log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Denied, 0).await;
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid_host_id" })),
         )
             .into_response();
-    }
+    };
 
     // Confirm the host actually exists — otherwise we silently audit a
     // no-op revoke of a non-existent row, which muddies forensics.
@@ -328,9 +316,9 @@ pub async fn revoke_host(
         Ok(revoked) => {
             // Drop any live WS connection for this host so revocation is
             // immediate rather than "takes effect on next reconnect".
-            if let Ok(parsed) = Uuid::parse_str(&host_id) {
-                state.connections.unregister(&parsed).await;
-            }
+            // `host_uuid` is the already-parsed path param — we never
+            // re-parse on the success path.
+            state.connections.unregister(&host_uuid).await;
             log_host_revoke(&state, &ip, &ctx, &host_id, Outcome::Ok, revoked).await;
             tracing::info!(
                 session_id = %ctx.session_id,
@@ -461,13 +449,20 @@ async fn log_session_revoke(
 
 /// Emit a `config_change` audit row. Always logs the caller's session
 /// id in `target` so the audit trail is unambiguous even across rotations.
+///
+/// The OIDC email is deliberately NOT duplicated into the audit details:
+/// `admin_config.oidc_email` is the source of truth, and copying it here
+/// only invites drift when the admin rotates the allow-listed address.
+/// A boolean flag is enough to correlate the audit row with the config
+/// write; callers pass `Some(true)` when an OIDC triple was present in
+/// the request and `None` when the change was a clear.
 async fn log_config_change(
     state: &AppState,
     ip: &str,
     ctx: &AuthContext,
     event: &'static str,
     outcome: Outcome,
-    email: Option<&str>,
+    oidc_configured: Option<bool>,
 ) {
     let result = audit::log_event(
         &state.db,
@@ -480,7 +475,7 @@ async fn log_config_change(
             outcome,
             details: Some(json!({
                 "change": event,
-                "email": email,
+                "oidc_configured": oidc_configured,
             })),
         },
     )
@@ -720,6 +715,52 @@ mod tests {
                 .any(|r| r.event == "config_change" && r.details.contains("oidc_cleared")),
             "clear must be audited, got {audit_rows:?}"
         );
+    }
+
+    /// Regression guard for MEDIUM-6: the config_change audit row must
+    /// carry a boolean `oidc_configured` flag and must NOT duplicate the
+    /// admin email into the audit details. `admin_config.oidc_email` is
+    /// the source of truth; storing it twice invites drift when the
+    /// allow-listed address changes.
+    #[tokio::test]
+    async fn update_config_audit_details_omit_email() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+
+        let body = serde_json::json!({
+            "oidc_issuer_url": "https://audit.issuer",
+            "oidc_client_id": "audit-client",
+            "oidc_email": "leak-me@example.com"
+        });
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "PUT",
+                "/api/admin/config",
+                &bearer,
+                Body::from(body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let rows = audit::list_recent(&state.db, 10).await.unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event == "config_change")
+            .expect("config_change audit row expected");
+        assert!(
+            row.details.contains("oidc_configured"),
+            "audit details must carry the oidc_configured flag, got {}",
+            row.details
+        );
+        assert!(
+            !row.details.contains("leak-me@example.com"),
+            "audit details must NOT contain the admin email, got {}",
+            row.details
+        );
+        // Also assert the flag is `true` for the set path (all fields present).
+        let details: serde_json::Value = serde_json::from_str(&row.details).unwrap();
+        assert_eq!(details["oidc_configured"], serde_json::Value::Bool(true));
     }
 
     #[tokio::test]
@@ -989,6 +1030,48 @@ mod tests {
         assert_eq!(row.outcome, "ok");
         assert_eq!(row.target.as_deref(), Some(host_id.as_str()));
         assert!(row.details.contains("agents_revoked"));
+    }
+
+    /// Regression guard for MEDIUM-4: on success, the already-parsed
+    /// `Uuid` reaches `ConnectionManager::unregister` so a live agent WS
+    /// is actually dropped. Previously the handler re-parsed `host_id`
+    /// inside the success arm, and a `Err` from that second parse would
+    /// have silently skipped the unregister while still returning 204.
+    #[tokio::test]
+    async fn revoke_host_unregisters_live_connection() {
+        let state = test_state().await;
+        let bearer = seed_token_and_session(&state).await;
+        let host_uuid = uuid::Uuid::now_v7();
+        let host_id = host_uuid.to_string();
+        insert_test_host(&state, &host_id).await;
+        let _a1 = insert_test_agent(&state, &host_id).await;
+
+        // Register a live agent connection the handler must tear down.
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_uuid, "host".to_string(), tx, false)
+            .await;
+        assert!(
+            state.connections.get_sender(&host_uuid).await.is_some(),
+            "precondition: host must be registered before revoke"
+        );
+
+        let response = admin_router(Arc::clone(&state))
+            .oneshot(req_with_addr(
+                "DELETE",
+                &format!("/api/admin/hosts/{host_id}"),
+                &bearer,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state.connections.get_sender(&host_uuid).await.is_none(),
+            "revoke must unregister the live WS connection"
+        );
     }
 
     #[tokio::test]

@@ -108,6 +108,13 @@ pub async fn create_session(
         || "anonymous".to_string(),
         |Extension(ctx)| ctx.session_id.to_string(),
     );
+    // TODO(audit-ip): capture the caller IP in the pty_spawn audit row.
+    // axum 0.8's `ConnectInfo<SocketAddr>` extractor does not implement
+    // `OptionalFromRequestParts`, and a non-optional `ConnectInfo` would
+    // panic in the many test call sites that drive the router via
+    // `oneshot` without stamping the extension. Revisit when tower-http
+    // / axum get bumped and an opt-out Option-extractor lands, or wire
+    // `ConnectInfo` through a middleware that injects `AuthContext`.
     let result = audit::log_event(
         &state.db,
         AuditEvent {

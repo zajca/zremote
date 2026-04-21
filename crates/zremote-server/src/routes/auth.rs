@@ -257,8 +257,14 @@ pub async fn logout(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `GET /api/auth/oidc/status` — public endpoint; returns whether OIDC is
-/// configured so the GUI can decide whether to show the SSO button.
+/// `GET /api/auth/oidc/status` — public, unauthenticated. Returns
+/// `{configured, issuer}` where `issuer` is the issuer **hostname only**
+/// (never the full URL or path). Disclosing the hostname is a deliberate
+/// tradeoff: the GUI needs it to render the SSO button before the user has
+/// any credentials, and a would-be attacker can already learn the same
+/// value by inspecting the OIDC redirect. This endpoint is rate-limited via
+/// the `/api/auth/*` subtree governor, so it cannot be used as an
+/// amplification oracle.
 pub async fn oidc_status(State(state): State<Arc<AppState>>) -> Response {
     let (configured, issuer) = match admin_config::get(&state.db).await {
         Ok(Some(cfg)) => {

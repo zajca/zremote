@@ -368,13 +368,17 @@ async fn set_oidc(
         .await
         .map_err(|e| AdminError::Query(format!("set_oidc: {e}")))?;
 
+    // `email` is the source-of-truth field on `admin_config`; duplicating
+    // it into the audit details only invites drift when the admin rotates
+    // the allow-listed address. A boolean flag is enough to correlate the
+    // audit row with the config write.
     audit_log(
         pool,
         actor,
         "set_oidc_config",
         None,
         Outcome::Ok,
-        Some(json!({ "email": email })),
+        Some(json!({ "oidc_configured": true })),
     )
     .await;
 
@@ -754,10 +758,24 @@ mod tests {
         assert_eq!(cfg.oidc_client_id.as_deref(), Some("cid"));
         assert_eq!(cfg.oidc_email.as_deref(), Some("admin@example.com"));
 
+        // MEDIUM-6 regression: audit details must carry the boolean
+        // `oidc_configured` flag, NOT the admin email — the email is
+        // already the source of truth in `admin_config`.
         let rows = audit::list_recent(&pool, 10).await.unwrap();
-        assert!(rows.iter().any(|r| r.event == "set_oidc_config"
-            && r.outcome == "ok"
-            && r.details.contains("admin@example.com")));
+        let row = rows
+            .iter()
+            .find(|r| r.event == "set_oidc_config" && r.outcome == "ok")
+            .expect("ok set_oidc_config row expected");
+        assert!(
+            row.details.contains("oidc_configured"),
+            "audit details must carry oidc_configured flag, got {}",
+            row.details
+        );
+        assert!(
+            !row.details.contains("admin@example.com"),
+            "audit details must NOT duplicate admin email, got {}",
+            row.details
+        );
     }
 
     #[tokio::test]

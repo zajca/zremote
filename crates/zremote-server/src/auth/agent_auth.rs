@@ -637,20 +637,19 @@ mod tests {
                 axum::Router::new().route(
                     "/ws",
                     axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
-                        let pool = pool.clone();
+                        let _pool = pool.clone();
                         async move {
                             ws.on_upgrade(move |mut socket| async move {
                                 // Send Challenge by completing Hello processing,
                                 // then simulate timeout by using a tiny manual timeout
                                 // on the AuthResponse wait.
-                                let hello_raw = match tokio::time::timeout(
+                                let Ok(Some(hello_raw)) = tokio::time::timeout(
                                     Duration::from_secs(5),
                                     recv_auth_msg(&mut socket),
                                 )
                                 .await
-                                {
-                                    Ok(Some(m)) => m,
-                                    _ => return,
+                                else {
+                                    return;
                                 };
                                 let AgentAuthMessage::Hello {
                                     agent_id: aid,
