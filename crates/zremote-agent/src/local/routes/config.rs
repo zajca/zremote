@@ -120,7 +120,7 @@ mod tests {
         upsert_local_host(&pool, &host_id, "test-host")
             .await
             .unwrap();
-        LocalAppState::new(
+        LocalAppState::new_for_test(
             pool,
             "test-host".to_string(),
             host_id,

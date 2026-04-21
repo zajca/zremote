@@ -31,6 +31,7 @@ mod app_state;
 mod assets;
 mod auth_state;
 mod icons;
+pub mod local;
 mod notifications;
 mod persistence;
 mod terminal_handle;
@@ -57,6 +58,10 @@ pub use zremote_client::extract_base_url;
 pub struct GuiConfig {
     pub server_url: String,
     pub exit_after: Option<u64>,
+    /// When true, the GUI is talking to a local-mode agent on the same host.
+    /// The GUI reads `~/.zremote/local.token` at startup and uses it as the
+    /// bearer token; it also skips the login flow.
+    pub is_local: bool,
 }
 
 /// Top-level view that switches between `LoginView` (unauthenticated) and
@@ -234,15 +239,36 @@ pub fn run(config: GuiConfig) {
     });
 
     let exit_after = config.exit_after;
-    let stored_session = auth_state::load(&server_url);
-    let has_session = stored_session.is_some();
 
-    // Restore bearer token into the API client for authenticated requests.
-    if let Some(entry) = &stored_session {
-        app_state
-            .api
-            .set_session_token(Some(entry.session_token.clone()));
-    }
+    // Local mode: read the agent's per-install bearer from
+    // `~/.zremote/local.token` and skip the login flow. Server mode: load the
+    // stored keyring/file session.
+    let (has_session, stored_session) = if config.is_local {
+        match local::read_local_token() {
+            Some(tok) => {
+                app_state.api.set_session_token(Some(tok));
+                tracing::info!("loaded local-mode token from ~/.zremote/local.token");
+                (true, None)
+            }
+            None => {
+                tracing::error!(
+                    "local mode: ~/.zremote/local.token is missing or unreadable; \
+                     run `zremote agent local` once to generate it, then restart the GUI"
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let stored = auth_state::load(&server_url);
+        let present = stored.is_some();
+        if let Some(entry) = &stored {
+            app_state
+                .api
+                .set_session_token(Some(entry.session_token.clone()));
+        }
+        (present, stored)
+    };
+    let _ = stored_session;
 
     // Launch GPUI application on main thread
     Application::new()

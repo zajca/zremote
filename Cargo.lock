@@ -9792,6 +9792,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "strip-ansi-escapes",
+ "subtle",
  "sysinfo 0.34.2",
  "tempfile",
  "tokio",

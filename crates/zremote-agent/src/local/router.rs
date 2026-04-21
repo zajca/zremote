@@ -6,6 +6,7 @@ use axum::routing::{delete, get, post, put};
 use tower_http::trace::TraceLayer;
 use zremote_core::request_id::request_id_middleware;
 
+use super::auth_mw::require_local_token;
 use super::routes;
 use super::state::LocalAppState;
 
@@ -41,9 +42,15 @@ pub(crate) fn build_router(
         )
         .layer(DefaultBodyLimit::max(AGENT_PROFILES_BODY_LIMIT));
 
-    let router = Router::new()
+    // `/health` and `/api/mode` stay unauthenticated so the GUI's startup
+    // probe (is there an agent alive on this port?) works before the GUI has
+    // read the token file. All other routes are layered with
+    // `require_local_token` below.
+    let public_router: Router<Arc<LocalAppState>> = Router::new()
         .route("/health", get(routes::health::health))
-        .route("/api/mode", get(routes::health::api_mode))
+        .route("/api/mode", get(routes::health::api_mode));
+
+    let protected_router: Router<Arc<LocalAppState>> = Router::new()
         // Filesystem autocomplete — LOCAL MODE ONLY (RFC-007 §2.5.1).
         // The server-mode router intentionally does NOT register this
         // endpoint: FS probing across the network is out of scope for v1.
@@ -293,6 +300,17 @@ pub(crate) fn build_router(
         )
         // Events WebSocket
         .route("/ws/events", get(routes::events::ws_handler))
+        // Gate every route in `protected_router` on the agent's local token.
+        // `/health` and `/api/mode` (below) are merged AFTER this layer, so
+        // the GUI's startup probe can detect the agent before it has read the
+        // token file.
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_local_token,
+        ));
+
+    let router = public_router
+        .merge(protected_router)
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(request_id_middleware))
         // No CORS layer: the GUI uses reqwest (not a browser) so cross-origin
@@ -320,7 +338,7 @@ mod tests {
     async fn test_state() -> std::sync::Arc<LocalAppState> {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
-        LocalAppState::new(
+        LocalAppState::new_for_test(
             pool,
             "test".to_string(),
             Uuid::new_v4(),

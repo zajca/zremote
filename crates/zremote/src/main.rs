@@ -147,6 +147,7 @@ fn run_gui(server: &str, local: bool, port: u16, exit_after: Option<u64>) {
     zremote_gui::run(zremote_gui::GuiConfig {
         server_url,
         exit_after,
+        is_local: local,
     });
 }
 

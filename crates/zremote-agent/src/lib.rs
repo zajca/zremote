@@ -72,6 +72,18 @@ pub enum Commands {
         /// Bind address
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+        /// Allow binding to a non-loopback address. Only meaningful combined
+        /// with `--require-admin-token`; the startup validator rejects the
+        /// invocation otherwise because exposing the local API on a routable
+        /// interface without token enforcement would be an open proxy.
+        #[arg(long)]
+        allow_remote: bool,
+        /// Enforce bearer-token auth on every `/api/*` and `/ws/*` route
+        /// (except `/health`). Required when `--allow-remote` is passed;
+        /// optional otherwise (the token file is still generated either way,
+        /// so the GUI uses it uniformly).
+        #[arg(long)]
+        require_admin_token: bool,
     },
     /// Run as multi-host server
     #[cfg(feature = "server")]
@@ -297,8 +309,24 @@ async fn async_main(command: Option<Commands>) {
     match command.unwrap_or_default() {
         Commands::Run => run_agent().await,
         #[cfg(feature = "local")]
-        Commands::Local { port, db, bind } => {
-            if let Err(e) = local::run_local(port, &db, &bind).await {
+        Commands::Local {
+            port,
+            db,
+            bind,
+            allow_remote,
+            require_admin_token,
+        } => {
+            if allow_remote && !require_admin_token {
+                eprintln!(
+                    "--allow-remote requires --require-admin-token: binding the local API \
+                     to a non-loopback address without token enforcement would expose an \
+                     unauthenticated session manager to the network"
+                );
+                std::process::exit(2);
+            }
+            if let Err(e) =
+                local::run_local(port, &db, &bind, allow_remote, require_admin_token).await
+            {
                 tracing::error!(error = %e, "local mode failed");
                 std::process::exit(1);
             }
