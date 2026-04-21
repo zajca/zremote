@@ -147,7 +147,49 @@ Build the resolver that turns a `HookRef` into an executed action, with fallback
 - Inputs: `HookRef.inputs` override action prompt defaults (`{{custom_key}}` substitution)
 - Regression: default flow unchanged when no hooks configured
 
-## Phase 4: Settings UI Surface (GUI)
+## Phase 4: Server-Mode Dispatcher Parity
+
+Without server-mode support, the hook system is unusable for multi-host deployments — that is the primary production path. Phase 4 extends the dispatcher into `connection/dispatch.rs` so `hooks.worktree.*` with named action references works over the server WebSocket just like local mode.
+
+### Constraints
+
+- Server mode has **no PTY surface** — the agent→server channel only carries `AgentMessage` events, not raw PTY streams. All four hook slots therefore run through **captured mode** (`run_worktree_hook`) regardless of semantic slot. The `Create`/`Delete` override slots still run, but their stdout/stderr is streamed back via `WorktreeHookResult` rather than attached to an interactive session.
+- `run_worktree_hook` signature in `hook_dispatcher.rs` must accept all four `WorktreeSlot` variants (not only `PostCreate`/`PreDelete`). The existing `debug_assert!` is relaxed.
+- Template expansion and env injection are identical to local mode — same `ActionRunContext`, same `expand_template`, same `build_action_env`.
+- `reject_leading_dash` on `branch` / `path` / `base_ref` must run **before** any custom hook path (CWE-88).
+
+### Files
+
+- **Modify** `crates/zremote-agent/src/project/hook_dispatcher.rs`
+  - Relax `debug_assert!` so `run_worktree_hook` accepts `Create` / `Delete` slots in addition to `PostCreate` / `PreDelete`
+  - Doc comment: explain server-mode captured use case
+
+- **Modify** `crates/zremote-agent/src/connection/dispatch.rs`
+  - Delete legacy helpers `run_worktree_hook_server`, `read_worktree_settings_server` (string-based, no dispatcher)
+  - Add `read_project_settings_server(project_path) -> Option<ProjectSettings>` (full settings, not legacy fragment)
+  - Add `send_worktree_error(tx, project_path, message)` helper
+  - Add `SERVER_PRE_DELETE_HOOK_TIMEOUT = Duration::from_secs(120)`
+  - **Rewrite** `ServerMessage::WorktreeCreate` arm:
+    - Validate inputs (reject leading dash on `branch`, `path`, `base_ref`)
+    - Resolve `WorktreeSlot::Create` via `resolve_worktree_hook` — if present, run captured; on success send `WorktreeHookResult`, emit `WorktreeCreated` (`mode: "custom_command"`), run `PostCreate` captured
+    - Else default git flow (`GitInspector::create_worktree`), then `PostCreate` captured
+    - `Err(missing action)` → `send_worktree_error`
+  - **Rewrite** `ServerMessage::WorktreeDelete` arm:
+    - Resolve `WorktreeSlot::PreDelete` → run captured with `SERVER_PRE_DELETE_HOOK_TIMEOUT`; on non-zero exit abort delete with `WorktreeError`
+    - Resolve `WorktreeSlot::Delete` → if present, run captured; else default `remove_worktree`
+    - Emit `WorktreeDeleted` / `WorktreeHookResult`
+  - Remove manual `.replace("{{project_path}}", ...)` / `.replace("{{branch}}", ...)` template substitution — goes through `expand_template` via dispatcher
+
+### Tests (Phase 4)
+
+- `hooks.worktree.create` with named action over server dispatch: WorktreeHookResult + WorktreeCreated emitted, env has `ZREMOTE_BRANCH` / `ZREMOTE_WORKTREE_PATH`
+- `hooks.worktree.pre_delete` runs before any `remove_worktree`, non-zero exit aborts
+- Missing action referenced in hook → `WorktreeError` with action name
+- Legacy `create_command` string still works (ephemeral action synthesis shared with local mode)
+- Regression: default flow unchanged when no hooks — `worktree_create_threads_base_ref_through_dispatch` keeps passing
+- `reject_leading_dash` rejects `--upload-pack=foo` in `base_ref` **even when** `hooks.worktree.create` is set
+
+## Phase 5: Settings UI Surface (GUI)
 
 Out of scope for this RFC — the GUI already exposes raw `WorktreeSettings` fields via a form; that stays. A follow-up RFC will build a visual hook editor (drop-down picker for action, inputs form). JSON editing works today and proves the backend.
 
@@ -163,7 +205,11 @@ Out of scope for this RFC — the GUI already exposes raw `WorktreeSettings` fie
 
 ## Deployment Order
 
-Local-mode only feature; no server/agent protocol changes. Deployable as a single agent release.
+Feature spans both local and server modes. No wire-protocol breaking changes (new `hooks` field is `#[serde(default)]`, legacy fields preserved). Deployment order:
+
+1. **Server first** — no server-side changes required beyond new message fields, already compatible
+2. **Agents rolling** — new agent binary handles both local (PTY) and server (captured) paths. Old agents still work with legacy string fields
+3. GUI update independent (Phase 5 future work)
 
 ## Verification Checklist
 

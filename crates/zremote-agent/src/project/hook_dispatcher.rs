@@ -170,7 +170,13 @@ pub async fn run_worktree_override(
     Ok(Some(spawned))
 }
 
-/// Run a captured hook (`PostCreate` / `PreDelete`).
+/// Run a worktree hook slot in captured (non-PTY) mode.
+///
+/// Works for any of the four slots. `PostCreate`/`PreDelete` are always
+/// captured by design (they wrap the default git flow). `Create`/`Delete`
+/// slots also route here when the caller has no way to spawn a PTY — most
+/// importantly the server-mode dispatcher, which runs over a plain
+/// WebSocket and can only stream command output via `WorktreeHookResult`.
 ///
 /// Returns `Ok(None)` when no hook is configured for the slot. Hook command
 /// failures (non-zero exit, timeout) are captured in `HookResultInfo.success`
@@ -188,10 +194,6 @@ pub async fn run_worktree_hook(
     mut ctx: ActionRunContext,
     timeout: Option<Duration>,
 ) -> Result<Option<HookResultInfo>, AppError> {
-    debug_assert!(
-        matches!(slot, WorktreeSlot::PostCreate | WorktreeSlot::PreDelete),
-        "run_worktree_hook only handles PostCreate/PreDelete",
-    );
     let Some(resolution) = resolve_worktree_hook(settings, slot)? else {
         return Ok(None);
     };

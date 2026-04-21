@@ -41,7 +41,7 @@ const PRE_DELETE_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// endpoint (CWE-88) — for example, passing `--upload-pack=evil` as a branch
 /// name. Enforced at the API boundary so the check is centralised and the
 /// git layer can assume its arguments are safe.
-fn reject_leading_dash(field: &str, value: &str) -> Result<(), WorktreeError> {
+pub(crate) fn reject_leading_dash(field: &str, value: &str) -> Result<(), WorktreeError> {
     if value.starts_with('-') {
         return Err(WorktreeError::new(
             WorktreeErrorCode::InvalidRef,
