@@ -62,6 +62,58 @@ pub fn legacy_socket_dir() -> PathBuf {
     PathBuf::from(format!("/tmp/zremote-pty-{uid}"))
 }
 
+/// File name for the persistent agent instance ID inside the scoped socket dir.
+const INSTANCE_ID_FILE: &str = "instance_id";
+
+/// Load the agent instance ID from `socket_dir/instance_id`, or generate a new
+/// one and persist it atomically if the file is missing or unreadable.
+///
+/// The instance ID identifies which agent owns PTY daemons in this scoped
+/// socket directory. Persisting it across process restarts is what allows a
+/// restarted / upgraded agent to re-adopt its own previously-spawned daemons
+/// instead of being filtered out by the owner-id check during discovery.
+///
+/// The file is written atomically with 0600 permissions (same pattern as
+/// state files). If the directory doesn't exist yet, it's created with 0700.
+pub fn load_or_create_instance_id(socket_dir: &Path) -> uuid::Uuid {
+    let path = socket_dir.join(INSTANCE_ID_FILE);
+
+    // Try to read + parse existing ID
+    if let Ok(contents) = std::fs::read_to_string(&path)
+        && let Ok(id) = uuid::Uuid::parse_str(contents.trim())
+    {
+        return id;
+    }
+
+    // Generate a fresh one and persist it (best-effort; if persistence fails
+    // the agent still runs but won't recover sessions after next restart).
+    let id = uuid::Uuid::new_v4();
+    if let Err(e) = persist_instance_id(socket_dir, &path, id) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "failed to persist agent instance ID; sessions will not be recoverable across restarts"
+        );
+    }
+    id
+}
+
+fn persist_instance_id(socket_dir: &Path, path: &Path, id: uuid::Uuid) -> std::io::Result<()> {
+    // Ensure dir exists with 0700 (matches daemon bind convention)
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(socket_dir)?;
+    std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o700))?;
+
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, id.to_string())?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Run the PTY daemon event loop.
 ///
 /// IMPORTANT: `setsid()` must be called BEFORE this function (in main, before tokio runtime).
@@ -739,6 +791,68 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let decoded: DaemonStateFile = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.owner_id.as_deref(), Some("test-owner-id"));
+    }
+
+    #[test]
+    fn load_or_create_instance_id_creates_new_in_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("not-yet-existing");
+        assert!(!dir.exists());
+
+        let id = load_or_create_instance_id(&dir);
+        assert!(dir.exists(), "socket dir should be created");
+        assert!(
+            dir.join(INSTANCE_ID_FILE).exists(),
+            "instance_id file should be written"
+        );
+        // Round-trip: second call returns the same id
+        let id2 = load_or_create_instance_id(&dir);
+        assert_eq!(id, id2, "persistent id must be stable across calls");
+    }
+
+    #[test]
+    fn load_or_create_instance_id_reuses_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixed = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        std::fs::write(tmp.path().join(INSTANCE_ID_FILE), fixed.to_string()).unwrap();
+
+        let loaded = load_or_create_instance_id(tmp.path());
+        assert_eq!(loaded, fixed);
+    }
+
+    #[test]
+    fn load_or_create_instance_id_tolerates_trailing_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixed = uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        std::fs::write(tmp.path().join(INSTANCE_ID_FILE), format!("{fixed}\n")).unwrap();
+
+        assert_eq!(load_or_create_instance_id(tmp.path()), fixed);
+    }
+
+    #[test]
+    fn load_or_create_instance_id_regenerates_on_garbage() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(INSTANCE_ID_FILE), "not-a-uuid").unwrap();
+
+        let id = load_or_create_instance_id(tmp.path());
+        // File got overwritten with the new id
+        let persisted = std::fs::read_to_string(tmp.path().join(INSTANCE_ID_FILE)).unwrap();
+        assert_eq!(persisted.trim(), id.to_string());
+    }
+
+    #[test]
+    fn load_or_create_instance_id_file_has_0600_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scoped");
+        let _ = load_or_create_instance_id(&dir);
+
+        let mode = std::fs::metadata(dir.join(INSTANCE_ID_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

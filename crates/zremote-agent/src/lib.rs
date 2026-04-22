@@ -410,7 +410,10 @@ async fn run_agent() {
         );
     }
 
-    let agent_instance_id = uuid::Uuid::new_v4();
+    // Persistent instance ID: stored in the scoped socket_dir so an upgraded
+    // or restarted agent re-adopts its previously-spawned PTY daemons instead
+    // of being filtered out by the owner-id check in discovery.
+    let agent_instance_id = daemon::load_or_create_instance_id(&socket_dir);
     tracing::info!(%agent_instance_id, "agent instance started");
     let mut session_manager =
         session::SessionManager::new(pty_output_tx, backend, socket_dir, agent_instance_id);
