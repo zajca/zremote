@@ -1,0 +1,4 @@
+# GPUI proc-macro expansion is deeply recursive. Without a large enough stack
+# rustc SIGSEGV during test compilation once the crate has enough view types.
+[env]
+RUST_MIN_STACK = "67108864"

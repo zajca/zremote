@@ -1,3 +1,11 @@
+//! Legacy single-token agent authentication (pre-RFC auth-overhaul).
+//!
+//! The old `Register { token }` path hashes the shared `ZREMOTE_TOKEN` and
+//! compares against the hash carried in `AppState::agent_token_hash`. Phase 3
+//! will replace this with the per-agent challenge-response flow. Keep the
+//! helpers exposed at `crate::auth::{hash_token, verify_token}` so the rest of
+//! the server continues to compile unchanged until that phase lands.
+
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -6,8 +14,7 @@ use subtle::ConstantTimeEq;
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(result)
+    hex::encode(hasher.finalize())
 }
 
 /// Verify a provided token against a stored hash using constant-time
@@ -25,17 +32,6 @@ pub fn verify_token(provided: &str, stored_hash: &str) -> bool {
     provided_bytes.ct_eq(stored_bytes).into()
 }
 
-/// Simple hex encoding for SHA-256 output (avoids adding hex crate dependency).
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().fold(String::new(), |mut acc, b| {
-            use std::fmt::Write;
-            let _ = write!(acc, "{b:02x}");
-            acc
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,7 +41,6 @@ mod tests {
         let hash1 = hash_token("test-token");
         let hash2 = hash_token("test-token");
         assert_eq!(hash1, hash2);
-        // SHA-256 produces 64 hex characters
         assert_eq!(hash1.len(), 64);
     }
 

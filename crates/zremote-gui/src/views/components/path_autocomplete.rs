@@ -675,6 +675,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[allow(clippy::unused_async)]
     async fn path_autocomplete_debounces_keystrokes(cx: &mut gpui::TestAppContext) {
         let (api, calls) = MockApi::new(vec![entry("alpha", "/tmp/alpha", false)]);
         let view = cx.add_window(|_w, cx| {
@@ -715,6 +716,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[allow(clippy::unused_async)]
     async fn path_autocomplete_tab_completes_common_prefix(cx: &mut gpui::TestAppContext) {
         let (api, _calls) = MockApi::new(vec![
             entry("foo-bar", "/tmp/foo-bar", false),
@@ -750,6 +752,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[allow(clippy::unused_async)]
     async fn path_autocomplete_enter_submits_without_waiting_for_fetch(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -814,6 +817,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[allow(clippy::unused_async)]
     async fn path_autocomplete_recent_shown_before_first_keystroke(cx: &mut gpui::TestAppContext) {
         let (api, calls) = MockApi::new(vec![]);
         let view = cx.add_window(|_w, cx| {

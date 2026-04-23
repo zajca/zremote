@@ -1,6 +1,11 @@
+pub mod admin_config;
 pub mod agent_profiles;
+pub mod agents;
+pub mod audit;
+pub mod auth_sessions;
 pub mod claude_sessions;
 pub mod config;
+pub mod enrollment;
 pub mod execution_nodes;
 pub mod hosts;
 pub mod knowledge;

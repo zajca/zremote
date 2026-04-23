@@ -52,6 +52,11 @@ pub struct LocalAppState {
     /// the agent lifetime and aborted when the state is finally dropped.
     /// Cancellation during normal shutdown is driven by `self.shutdown`.
     pub git_refresh_task: Mutex<Option<JoinHandle<()>>>,
+    /// Per-agent bearer token for local-mode auth. Plaintext, generated or
+    /// loaded at startup from `~/.zremote/local.token`. The middleware
+    /// compares caller-supplied `Authorization: Bearer` tokens against this
+    /// with `subtle::ConstantTimeEq`.
+    pub local_token: Arc<String>,
 }
 
 impl Drop for LocalAppState {
@@ -72,6 +77,7 @@ impl Drop for LocalAppState {
 
 impl LocalAppState {
     /// Create a new `LocalAppState` with the given database pool.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: SqlitePool,
         hostname: String,
@@ -80,6 +86,7 @@ impl LocalAppState {
         backend: crate::config::PersistenceBackend,
         socket_dir: PathBuf,
         agent_instance_id: Uuid,
+        local_token: String,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         let sessions = SessionStore::default();
@@ -119,7 +126,34 @@ impl LocalAppState {
             channel_dialog_detectors: Mutex::new(HashMap::new()),
             launcher_registry: Arc::new(crate::agents::LauncherRegistry::with_builtins()),
             git_refresh_task: Mutex::new(None),
+            local_token: Arc::new(local_token),
         })
+    }
+
+    /// Test-only constructor: forwards to [`Self::new`] with a fixed dummy
+    /// token. Centralised so Phase-6 state additions don't require touching
+    /// every route-level test at once.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        db: SqlitePool,
+        hostname: String,
+        host_id: Uuid,
+        shutdown: CancellationToken,
+        backend: crate::config::PersistenceBackend,
+        socket_dir: PathBuf,
+        agent_instance_id: Uuid,
+    ) -> Arc<Self> {
+        Self::new(
+            db,
+            hostname,
+            host_id,
+            shutdown,
+            backend,
+            socket_dir,
+            agent_instance_id,
+            "test-local-token".to_string(),
+        )
     }
 }
 
@@ -132,7 +166,7 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-host");
-        let state = LocalAppState::new(
+        let state = LocalAppState::new_for_test(
             pool,
             "test-host".to_string(),
             host_id,
@@ -151,7 +185,7 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(
+        let state = LocalAppState::new_for_test(
             pool,
             "host".to_string(),
             host_id,
@@ -174,7 +208,7 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(
+        let state = LocalAppState::new_for_test(
             pool,
             "host".to_string(),
             host_id,
@@ -200,7 +234,7 @@ mod tests {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
         let host_id = Uuid::new_v4();
-        let state = LocalAppState::new(
+        let state = LocalAppState::new_for_test(
             pool,
             "host".to_string(),
             host_id,

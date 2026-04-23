@@ -1,0 +1,258 @@
+//! Queries for the `audit_log` table. Append-only forensic record of
+//! auth/enrollment/PTY-spawn events. Never persist secret values.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+
+#[derive(Debug)]
+pub enum AuditError {
+    Db(sqlx::Error),
+    InvalidOutcome(String),
+    Serialize(serde_json::Error),
+}
+
+impl std::fmt::Display for AuditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Db(e) => write!(f, "database error: {e}"),
+            Self::InvalidOutcome(v) => write!(f, "invalid outcome value: {v}"),
+            Self::Serialize(e) => write!(f, "details serialization failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AuditError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Db(e) => Some(e),
+            Self::Serialize(e) => Some(e),
+            Self::InvalidOutcome(_) => None,
+        }
+    }
+}
+
+impl From<sqlx::Error> for AuditError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+impl From<serde_json::Error> for AuditError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Serialize(e)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Ok,
+    Denied,
+    Error,
+}
+
+impl Outcome {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Denied => "denied",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// One audit event to write.
+#[derive(Debug, Clone)]
+pub struct AuditEvent {
+    pub ts: DateTime<Utc>,
+    pub actor: String,
+    pub ip: Option<String>,
+    pub event: String,
+    pub target: Option<String>,
+    pub outcome: Outcome,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct AuditRow {
+    pub id: i64,
+    pub ts: String,
+    pub actor: String,
+    pub ip: Option<String>,
+    pub event: String,
+    pub target: Option<String>,
+    pub outcome: String,
+    /// Raw JSON string. `'{}'` when the writer left `details` as `None`.
+    /// The column is `TEXT NOT NULL DEFAULT '{}'` so downstream parsers can
+    /// rely on getting a well-formed JSON object without null-handling.
+    pub details: String,
+}
+
+pub async fn log_event(pool: &SqlitePool, event: AuditEvent) -> Result<i64, AuditError> {
+    // Column is `TEXT NOT NULL DEFAULT '{}'`; collapse `None` → `{}` so every
+    // row carries a well-formed JSON object regardless of caller.
+    let details = match event.details {
+        Some(v) => serde_json::to_string(&v)?,
+        None => "{}".to_string(),
+    };
+    let id = sqlx::query(
+        "INSERT INTO audit_log (ts, actor, ip, event, target, outcome, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(event.ts.to_rfc3339())
+    .bind(&event.actor)
+    .bind(&event.ip)
+    .bind(&event.event)
+    .bind(&event.target)
+    .bind(event.outcome.as_str())
+    .bind(&details)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+pub async fn list_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<AuditRow>, AuditError> {
+    let rows = sqlx::query_as::<_, AuditRow>(
+        "SELECT id, ts, actor, ip, event, target, outcome, details FROM audit_log ORDER BY id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// List the most-recent audit rows, optionally filtered to a single event
+/// name. `limit` is clamped by the caller; this query trusts it.
+pub async fn list_recent_filtered(
+    pool: &SqlitePool,
+    limit: i64,
+    event: Option<&str>,
+) -> Result<Vec<AuditRow>, AuditError> {
+    let rows = if let Some(event) = event {
+        sqlx::query_as::<_, AuditRow>(
+            "SELECT id, ts, actor, ip, event, target, outcome, details FROM audit_log \
+             WHERE event = ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(event)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        list_recent(pool, limit).await?
+    };
+    Ok(rows)
+}
+
+pub async fn count_by_event(
+    pool: &SqlitePool,
+    event: &str,
+    since: DateTime<Utc>,
+) -> Result<i64, AuditError> {
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE event = ? AND ts >= ?")
+            .bind(event)
+            .bind(since.to_rfc3339())
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use chrono::Duration;
+
+    #[tokio::test]
+    async fn log_and_list() {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let t = Utc::now();
+        log_event(
+            &pool,
+            AuditEvent {
+                ts: t,
+                actor: "admin".into(),
+                ip: Some("127.0.0.1".into()),
+                event: "login_ok".into(),
+                target: Some("session-abc".into()),
+                outcome: Outcome::Ok,
+                details: Some(serde_json::json!({"method": "admin_token"})),
+            },
+        )
+        .await
+        .unwrap();
+
+        log_event(
+            &pool,
+            AuditEvent {
+                ts: t + Duration::seconds(1),
+                actor: "admin".into(),
+                ip: None,
+                event: "token_rotate".into(),
+                target: None,
+                outcome: Outcome::Ok,
+                details: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows = list_recent(&pool, 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // Most recent first.
+        assert_eq!(rows[0].event, "token_rotate");
+        assert_eq!(rows[1].event, "login_ok");
+        assert_eq!(rows[1].outcome, "ok");
+        assert!(rows[1].details.contains("admin_token"));
+        // Writers that pass `None` see `'{}'` on read.
+        assert_eq!(rows[0].details, "{}");
+    }
+
+    #[tokio::test]
+    async fn count_by_event_in_window() {
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let t = Utc::now();
+
+        for delta_minutes in [-60_i64, -10, 1, 2] {
+            log_event(
+                &pool,
+                AuditEvent {
+                    ts: t + Duration::minutes(delta_minutes),
+                    actor: "admin".into(),
+                    ip: None,
+                    event: "login_fail".into(),
+                    target: None,
+                    outcome: Outcome::Denied,
+                    details: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let since = t - Duration::minutes(15);
+        let count = count_by_event(&pool, "login_fail", since).await.unwrap();
+        // Three events are at or after `since`: -10, +1, +2.
+        assert_eq!(count, 3);
+
+        let different = count_by_event(&pool, "something_else", since)
+            .await
+            .unwrap();
+        assert_eq!(different, 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_outcome_rejected_by_db_check() {
+        // Sanity check: the CHECK constraint rejects an unknown outcome if
+        // someone bypassed the Outcome enum.
+        let pool = db::init_db("sqlite::memory:").await.unwrap();
+        let result = sqlx::query(
+            "INSERT INTO audit_log (ts, actor, event, outcome) VALUES ('t', 'a', 'e', 'maybe')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(result.is_err());
+    }
+}

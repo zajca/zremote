@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
+use zremote_core::queries::audit::{self, AuditEvent, Outcome};
 use zremote_core::queries::sessions as q;
 use zremote_protocol::ServerMessage;
 
+use crate::auth::AuthContext;
 use crate::error::AppError;
 use crate::state::{AppState, BrowserMessage, ServerEvent, SessionState};
 
@@ -26,8 +29,14 @@ pub struct CreateSessionRequest {
 }
 
 /// `POST /api/hosts/:host_id/sessions` - create a new terminal session.
+///
+/// `AuthContext` is optional: while the full /api/* surface is not yet
+/// behind `auth_mw` (see phase-2b TODO in `lib.rs`), this endpoint may be
+/// reached without an authenticated session. The audit row falls back to
+/// actor=`"anonymous"` in that case so pty_spawn coverage stays total.
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
+    auth_ext: Option<Extension<AuthContext>>,
     Path(host_id): Path<String>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -73,12 +82,13 @@ pub async fn create_session(
     }
 
     // Send SessionCreate to agent
+    let working_dir = body.working_dir;
     let msg = ServerMessage::SessionCreate {
         session_id,
         shell: body.shell,
         cols: body.cols,
         rows: body.rows,
-        working_dir: body.working_dir,
+        working_dir: working_dir.clone(),
         env: None,
         initial_command: None,
     };
@@ -87,6 +97,44 @@ pub async fn create_session(
         return Err(AppError::Conflict(
             "host went offline, cannot create session".to_string(),
         ));
+    }
+
+    // Audit: pty_spawn (T-10 coverage item). Actor is the authenticated
+    // session id when the caller came through auth_mw; "anonymous" while
+    // the REST surface is still pre-auth-gate (TODO phase-2b in lib.rs).
+    // Audit never propagates errors — a logging hiccup must not break
+    // session creation.
+    let actor = auth_ext.as_ref().map_or_else(
+        || "anonymous".to_string(),
+        |Extension(ctx)| ctx.session_id.to_string(),
+    );
+    // TODO(audit-ip): capture the caller IP in the pty_spawn audit row.
+    // axum 0.8's `ConnectInfo<SocketAddr>` extractor does not implement
+    // `OptionalFromRequestParts`, and a non-optional `ConnectInfo` would
+    // panic in the many test call sites that drive the router via
+    // `oneshot` without stamping the extension. Revisit when tower-http
+    // / axum get bumped and an opt-out Option-extractor lands, or wire
+    // `ConnectInfo` through a middleware that injects `AuthContext`.
+    let result = audit::log_event(
+        &state.db,
+        AuditEvent {
+            ts: Utc::now(),
+            actor,
+            ip: None,
+            event: "pty_spawn".to_string(),
+            target: Some(session_id_str.clone()),
+            outcome: Outcome::Ok,
+            details: Some(serde_json::json!({
+                "host_id": host_id,
+                "working_dir": working_dir,
+                "cols": body.cols,
+                "rows": body.rows,
+            })),
+        },
+    )
+    .await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, "audit pty_spawn failed");
     }
 
     let response = serde_json::json!({
@@ -497,6 +545,8 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            ticket_store: crate::auth::TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         })
     }
 
@@ -527,6 +577,57 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_session_writes_pty_spawn_audit_row() {
+        let state = test_state().await;
+        let host_id = uuid::Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "host", "host").await;
+
+        // Register a connection so the host appears online and the audit
+        // branch runs (audit only fires after the agent send succeeds).
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state
+            .connections
+            .register(host_id, "host".to_string(), tx, false)
+            .await;
+
+        let app = create_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/hosts/{host_id_str}/sessions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"cols": 80, "rows": 24, "working_dir": "/tmp"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let rows = zremote_core::queries::audit::list_recent(&state.db, 10)
+            .await
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event == "pty_spawn")
+            .expect("pty_spawn audit row must be written on session create");
+        assert_eq!(row.outcome, "ok");
+        assert!(
+            row.details.contains(&host_id_str),
+            "host_id should be in details, got {}",
+            row.details
+        );
+        assert!(
+            row.details.contains("/tmp"),
+            "working_dir should be in details, got {}",
+            row.details
+        );
     }
 
     #[tokio::test]

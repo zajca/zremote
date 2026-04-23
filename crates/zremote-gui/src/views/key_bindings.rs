@@ -68,6 +68,8 @@ pub enum KeyAction {
     /// Phase 2 ships a single-step shortcut; the D4 leader chord (`Cmd+K, n`)
     /// lands once the leader dispatch infrastructure is in place (Phase 3).
     OpenNewWorktree,
+    /// Open the Add Host enrollment wizard modal.
+    OpenAddHost,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +149,14 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::OpenNewWorktree,
         label: "Ctrl+Shift+N",
         description: "New worktree",
+    },
+    KeyBinding {
+        key: "h",
+        modifiers: KeyModifiers::new(true, true, false),
+        scope: KeyScope::Global,
+        action: KeyAction::OpenAddHost,
+        label: "Ctrl+Shift+H",
+        description: "Add host",
     },
     KeyBinding {
         key: "escape",

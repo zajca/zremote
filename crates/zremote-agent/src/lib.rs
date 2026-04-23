@@ -20,6 +20,7 @@
     unused_imports
 )]
 
+mod admin;
 mod agentic;
 mod agents;
 mod bridge;
@@ -29,6 +30,8 @@ mod claude;
 mod config;
 mod connection;
 mod daemon;
+mod enroll;
+mod fingerprint;
 mod hooks;
 mod knowledge;
 mod linear;
@@ -69,6 +72,20 @@ pub enum Commands {
         /// Bind address
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+        /// Allow binding to a non-loopback address. Only meaningful combined
+        /// with `--require-admin-token`; the startup validator rejects the
+        /// invocation otherwise because exposing the local API on a routable
+        /// interface without token enforcement would be an open proxy.
+        #[arg(long)]
+        allow_remote: bool,
+        /// Acknowledges that bearer-token auth on every `/api/*` and `/ws/*`
+        /// route (except `/health` and `/api/mode`) is enforced when binding
+        /// to a non-loopback address. REQUIRED with `--allow-remote` — this
+        /// flag is now purely a safety gate (the middleware already enforces
+        /// the token unconditionally). On a loopback bind the flag is a
+        /// no-op; the token is still generated and required.
+        #[arg(long)]
+        require_admin_token: bool,
     },
     /// Run as multi-host server
     #[cfg(feature = "server")]
@@ -108,6 +125,24 @@ pub enum Commands {
     #[command(hide = true)]
     #[cfg(feature = "channel")]
     ChannelServer,
+    /// Direct-to-DB administrative commands (run on the server host).
+    Admin {
+        #[command(subcommand)]
+        command: admin::AdminCommand,
+    },
+    /// Enroll this agent with a server using a one-time code
+    Enroll {
+        /// One-time enrollment code (prefer ZREMOTE_ENROLL_CODE env var to avoid
+        /// leaking the code into process argv / audit logs)
+        #[arg(long, env = "ZREMOTE_ENROLL_CODE")]
+        code: String,
+        /// Server URL (e.g. https://myserver.example.com)
+        #[arg(long, env = "ZREMOTE_SERVER")]
+        server: String,
+        /// Path to store the signing key (default: ~/.zremote/agent.key)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Internal: Claude Code status line handler (reads JSON from stdin, outputs formatted status)
     #[command(hide = true)]
     Ccline,
@@ -276,8 +311,26 @@ async fn async_main(command: Option<Commands>) {
     match command.unwrap_or_default() {
         Commands::Run => run_agent().await,
         #[cfg(feature = "local")]
-        Commands::Local { port, db, bind } => {
-            if let Err(e) = local::run_local(port, &db, &bind).await {
+        Commands::Local {
+            port,
+            db,
+            bind,
+            allow_remote,
+            require_admin_token,
+        } => {
+            if allow_remote && !require_admin_token {
+                eprintln!(
+                    "--allow-remote requires --require-admin-token: binding the local API \
+                     to a non-loopback address without token enforcement would expose an \
+                     unauthenticated session manager to the network"
+                );
+                std::process::exit(2);
+            }
+            // `require_admin_token` is only validated above — the middleware
+            // enforces the token unconditionally, so the flag no longer flows
+            // into `run_local`.
+            let _ = require_admin_token;
+            if let Err(e) = local::run_local(port, &db, &bind, allow_remote).await {
                 tracing::error!(error = %e, "local mode failed");
                 std::process::exit(1);
             }
@@ -304,6 +357,24 @@ async fn async_main(command: Option<Commands>) {
             skip_permissions,
         } => {
             run_configure(&project, &model, skip_permissions);
+        }
+        Commands::Admin { command } => {
+            if let Err(e) = admin::run(command).await {
+                tracing::error!(error = %e, "admin command failed");
+                eprintln!("admin command failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Enroll {
+            code,
+            server,
+            key_file,
+        } => {
+            if let Err(e) = enroll::run_enroll(&code, &server, key_file).await {
+                tracing::error!(error = %e, "enrollment failed");
+                eprintln!("Enrollment failed: {e}");
+                std::process::exit(1);
+            }
         }
         #[cfg(feature = "channel")]
         Commands::ChannelServer => unreachable!("handled above"),

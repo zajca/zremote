@@ -1,10 +1,13 @@
+pub mod admin;
 pub mod agent_profiles;
 pub mod agent_tasks;
 pub mod agentic;
 pub mod agents;
+pub mod auth;
 pub mod channel;
 pub mod claude_sessions;
 pub mod config;
+pub mod enrollment;
 pub mod events;
 pub mod health;
 pub mod hosts;

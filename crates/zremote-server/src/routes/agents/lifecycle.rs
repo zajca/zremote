@@ -1,23 +1,37 @@
 //! Agent registration, cleanup on disconnect, session recovery.
+//!
+//! **Protocol dispatch (Phase 3):**
+//! The WebSocket upgrade handler peeks at the first message to determine which
+//! auth path to take:
+//!
+//! - `AgentAuthMessage::Hello { version: 2, … }` → ed25519 challenge-response
+//!   via `auth::agent_auth::authenticate_agent` (pre-parsed Hello passed in).
+//!   V2 path (RFC §3 amendment).
+//! - `AgentMessage::Register { token, … }` → legacy single-token check.
+//!   Kept alive for one release cycle per RFC §9 backward-compat window.
+//! - Anything else → reject with a malformed-message error.
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use chrono::Utc;
+use serde_json;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use zremote_protocol::auth::{AgentAuthMessage, ServerAuthMessage};
 use zremote_protocol::claude::ClaudeTaskStatus;
 use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgentMessage, AgenticLoopId, HostId, ServerMessage};
 
 use crate::auth;
+use crate::auth::agent_auth;
 use crate::state::{AppState, ServerEvent};
 
 use super::send_server_message;
 
-/// Timeout for the first message (Register) after WebSocket upgrade.
+/// Timeout for the first message (Register / Hello) after WebSocket upgrade.
 pub(super) const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Buffer size for the outbound message channel.
@@ -56,6 +70,257 @@ async fn recv_terminal_message(socket: &mut WebSocket) -> Option<AgentMessage> {
             }
         }
     }
+}
+
+/// Dispatch entry point: peek at the first frame to determine which auth path
+/// to take. Returns a `RegisteredAgent` on success or `None` on failure.
+///
+/// V2 path (`AgentAuthMessage::Hello`): ed25519 challenge-response.
+/// V1 path (`AgentMessage::Register`): legacy single-token check (one-release compat).
+pub(super) async fn register_agent_dispatch(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    peer_ip: Option<&str>,
+) -> Option<RegisteredAgent> {
+    // Peek at the first frame to decide which path to take.
+    let first_frame = match tokio::time::timeout(REGISTER_TIMEOUT, recv_first_frame(socket)).await {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            tracing::warn!("agent disconnected before first message");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("agent did not send first message within timeout");
+            let _ = send_server_message(
+                socket,
+                &ServerMessage::Error {
+                    message: "registration timeout".to_string(),
+                },
+            )
+            .await;
+            return None;
+        }
+    };
+
+    // Try deserializing as v2 AgentAuthMessage first.
+    if let Ok(auth_msg) = serde_json::from_str::<AgentAuthMessage>(&first_frame)
+        && matches!(auth_msg, AgentAuthMessage::Hello { .. })
+    {
+        // Feed back the message by creating a single-frame replay socket is
+        // not straightforward. Instead, handle the Hello directly here.
+        let started = Instant::now();
+        return register_agent_v2(socket, state, auth_msg, peer_ip, started).await;
+    }
+
+    // Try deserializing as v1 AgentMessage (legacy Register).
+    if let Ok(legacy_msg) = serde_json::from_str::<AgentMessage>(&first_frame)
+        && matches!(legacy_msg, AgentMessage::Register { .. })
+    {
+        tracing::warn!(peer_ip = ?peer_ip, "legacy Register auth, upgrade agent");
+        return register_agent_legacy(socket, state, legacy_msg).await;
+    }
+
+    tracing::warn!(peer_ip = ?peer_ip, "unrecognized first message from agent");
+    let _ = send_server_message(
+        socket,
+        &ServerMessage::Error {
+            message: "expected Hello or Register as first message".to_string(),
+        },
+    )
+    .await;
+    None
+}
+
+/// Receive the first text frame raw (before deserialization) so the dispatch
+/// shim can try both v1 and v2 deserialization paths.
+async fn recv_first_frame(socket: &mut WebSocket) -> Option<String> {
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => return Some(text.to_string()),
+            Some(Ok(Message::Close(_))) | None => return None,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            Some(Ok(Message::Binary(_))) => {
+                tracing::warn!("received unexpected binary message from agent");
+                return None;
+            }
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "WebSocket receive error");
+                return None;
+            }
+        }
+    }
+}
+
+/// V2 (ed25519) registration path. The `hello_msg` has already been parsed by
+/// the dispatch shim.
+async fn register_agent_v2(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    hello_msg: AgentAuthMessage,
+    peer_ip: Option<&str>,
+    started: Instant,
+) -> Option<RegisteredAgent> {
+    let authenticated =
+        match agent_auth::authenticate_agent(socket, &state.db, peer_ip, Some(hello_msg)).await {
+            Ok(auth) => auth,
+            Err(err) => {
+                agent_auth::reject_after(socket, &state.db, err, None, peer_ip, started).await;
+                return None;
+            }
+        };
+
+    tracing::info!(agent_id = %authenticated.agent_id, "agent authenticated (v2 ed25519)");
+
+    let host_id: HostId = match authenticated.host_id.parse() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "invalid host_id from agent auth");
+            return None;
+        }
+    };
+
+    // Fetch hostname from DB for connection registration.
+    let hostname: String = match sqlx::query_as::<_, (String,)>(
+        "SELECT hostname FROM hosts WHERE id = ?",
+    )
+    .bind(&authenticated.host_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some((h,))) => h,
+        Ok(None) => {
+            tracing::error!(host_id = %authenticated.host_id, "host not found after agent auth");
+            return None;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "DB error fetching hostname");
+            return None;
+        }
+    };
+
+    let (tx, rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_SIZE);
+    let (old_sender, generation) = state
+        .connections
+        .register(host_id, hostname.clone(), tx, true)
+        .await;
+    if let Some(old_sender) = old_sender {
+        drop(old_sender);
+        tracing::info!(host_id = %host_id, "replaced existing agent connection (v2)");
+    }
+
+    // Send AuthSuccess.
+    let auth_success = ServerAuthMessage::AuthSuccess {
+        session_id: authenticated.agent_id.clone(),
+        reconnect_token: authenticated.session_token,
+    };
+    if let Ok(json) = serde_json::to_string(&auth_success)
+        && socket.send(Message::Text(json.into())).await.is_err()
+    {
+        tracing::error!(host_id = %host_id, "failed to send AuthSuccess");
+        state.connections.unregister(&host_id).await;
+        return None;
+    }
+
+    Some(RegisteredAgent {
+        host_id,
+        generation,
+        rx,
+        hostname,
+        agent_version: String::new(),
+        os: String::new(),
+        arch: String::new(),
+        supports_persistent_sessions: true,
+    })
+}
+
+/// V1 (legacy) registration path. Kept for one release cycle per RFC §9.
+async fn register_agent_legacy(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    msg: AgentMessage,
+) -> Option<RegisteredAgent> {
+    // Delegate to the existing register_agent function by re-using its logic.
+    // The msg has already been parsed; wrap it in a pre-parsed call.
+    register_agent_from_parsed(socket, state, msg).await
+}
+
+/// Process a pre-parsed AgentMessage::Register (legacy v1 path).
+async fn register_agent_from_parsed(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    register_msg: AgentMessage,
+) -> Option<RegisteredAgent> {
+    let AgentMessage::Register {
+        hostname,
+        agent_version,
+        os,
+        arch,
+        token,
+        supports_persistent_sessions,
+    } = register_msg
+    else {
+        tracing::warn!("expected Register message in legacy path");
+        return None;
+    };
+
+    if !auth::verify_token(&token, &state.agent_token_hash) {
+        tracing::warn!(hostname = %hostname, "legacy agent authentication failed");
+        let _ = send_server_message(
+            socket,
+            &ServerMessage::Error {
+                message: "invalid authentication token".to_string(),
+            },
+        )
+        .await;
+        return None;
+    }
+
+    let host_id = match upsert_host(state, &hostname, &agent_version, &os, &arch, &token).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to upsert host in database");
+            let _ = send_server_message(
+                socket,
+                &ServerMessage::Error {
+                    message: "internal server error".to_string(),
+                },
+            )
+            .await;
+            return None;
+        }
+    };
+
+    tracing::info!(host_id = %host_id, hostname = %hostname, "agent registered (legacy v1)");
+
+    let (tx, rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_SIZE);
+    let (old_sender, generation) = state
+        .connections
+        .register(host_id, hostname.clone(), tx, supports_persistent_sessions)
+        .await;
+    if let Some(old_sender) = old_sender {
+        drop(old_sender);
+        tracing::info!(host_id = %host_id, "replaced existing agent connection");
+    }
+
+    if send_server_message(socket, &ServerMessage::RegisterAck { host_id })
+        .await
+        .is_err()
+    {
+        tracing::error!(host_id = %host_id, "failed to send RegisterAck");
+        state.connections.unregister(&host_id).await;
+        return None;
+    }
+
+    Some(RegisteredAgent {
+        host_id,
+        generation,
+        rx,
+        hostname,
+        agent_version,
+        os,
+        arch,
+        supports_persistent_sessions,
+    })
 }
 
 /// Perform the registration handshake: wait for Register message, validate

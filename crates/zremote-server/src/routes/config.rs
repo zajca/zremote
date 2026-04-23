@@ -130,6 +130,8 @@ mod tests {
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            ticket_store: crate::auth::TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         })
     }
 

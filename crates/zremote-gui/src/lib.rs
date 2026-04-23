@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "2048"]
 // Pre-existing pedantic clippy lints — suppress at crate level for now
 #![allow(
     clippy::unreadable_literal,       // hex color codes in theme.rs
@@ -29,7 +29,9 @@
 #[allow(dead_code)]
 mod app_state;
 mod assets;
+mod auth_state;
 mod icons;
+pub mod local;
 mod notifications;
 mod persistence;
 mod terminal_handle;
@@ -46,7 +48,8 @@ use zremote_client::ApiClient;
 use app_state::AppState;
 use assets::Assets;
 use persistence::Persistence;
-use views::main_view::MainView;
+use views::login::{LoginEvent, LoginView};
+use views::main_view::{MainView, MainViewEvent};
 
 // Re-export from client for callers that used `zremote_gui::extract_base_url`.
 pub use zremote_client::extract_base_url;
@@ -55,6 +58,208 @@ pub use zremote_client::extract_base_url;
 pub struct GuiConfig {
     pub server_url: String,
     pub exit_after: Option<u64>,
+    /// When true, the GUI is talking to a local-mode agent on the same host.
+    /// In local mode the login flow is skipped; the bearer token comes from
+    /// `local_token` below (read by the caller from `~/.zremote/local.token`).
+    pub is_local: bool,
+    /// Local-mode bearer token, pre-loaded by the caller. `None` in local
+    /// mode triggers a blocking error view instead of a hard process exit.
+    /// Ignored in server mode.
+    pub local_token: Option<String>,
+}
+
+/// Top-level view that switches between `LoginView` (unauthenticated) and
+/// `MainView` (authenticated). Stored as the GPUI window root so swapping
+/// views doesn't require closing and re-opening the window.
+enum RootState {
+    Login(Entity<LoginView>),
+    /// Transition state: login succeeded, MainView will be created on next render
+    /// when `&mut Window` is available.
+    PendingMain,
+    Main(Entity<MainView>),
+    /// Local-mode startup could not locate the agent's bearer token at
+    /// `~/.zremote/local.token`. Renders a static error panel instead of
+    /// hard-exiting the process. Recovery is operator-driven (start the
+    /// agent once, restart the GUI).
+    LocalBootstrapFailed {
+        token_path: String,
+    },
+}
+
+struct RootView {
+    state: RootState,
+    app_state: Arc<AppState>,
+}
+
+impl RootView {
+    fn authed(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let main = cx.new(|cx| MainView::new(app_state.clone(), window, cx));
+        cx.subscribe(&main, Self::on_main_view_event).detach();
+        Self {
+            state: RootState::Main(main),
+            app_state,
+        }
+    }
+
+    fn on_main_view_event(
+        &mut self,
+        _entity: Entity<MainView>,
+        event: &MainViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            MainViewEvent::Logout => {
+                self.perform_logout(cx);
+            }
+        }
+    }
+
+    fn perform_logout(&mut self, cx: &mut Context<Self>) {
+        let server_url = self.app_state.api.base_url().to_string();
+
+        // Clear stored session from keyring/file.
+        auth_state::clear(&server_url);
+
+        // Clear bearer token from API client.
+        self.app_state.api.set_session_token(None);
+
+        // Fire-and-forget server logout (best effort).
+        let api = self.app_state.api.clone();
+        let handle = self.app_state.tokio_handle.clone();
+        handle.spawn(async move {
+            let _ = api.logout().await;
+        });
+
+        // Transition back to login view.
+        let login = cx.new(|cx| LoginView::new(self.app_state.clone(), cx));
+        cx.subscribe(&login, {
+            move |this: &mut Self, _entity, event: &LoginEvent, cx| {
+                let LoginEvent::LoggedIn(entry) = event;
+                auth_state::save(&server_url, entry);
+                this.app_state
+                    .api
+                    .set_session_token(Some(entry.session_token.clone()));
+                this.state = RootState::PendingMain;
+                cx.notify();
+                tracing::debug!("session saved, switching to main view");
+            }
+        })
+        .detach();
+        self.state = RootState::Login(login);
+        cx.notify();
+    }
+
+    fn local_bootstrap_failed(app_state: Arc<AppState>, token_path: String) -> Self {
+        Self {
+            state: RootState::LocalBootstrapFailed { token_path },
+            app_state,
+        }
+    }
+
+    fn render_local_bootstrap_failed(&self, token_path: &str) -> AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::bg_primary())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_8()
+                    .max_w(px(560.0))
+                    .bg(theme::bg_secondary())
+                    .border_1()
+                    .border_color(theme::border())
+                    .rounded_md()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::error())
+                            .child("Cannot start local mode"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::text_primary())
+                            .child(
+                                "The agent's bearer token could not be read from the \
+                                 file below. ZRemote needs this token to authenticate \
+                                 against the local-mode API.",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family("monospace")
+                            .text_color(theme::text_secondary())
+                            .p_2()
+                            .bg(theme::bg_tertiary())
+                            .rounded_sm()
+                            .child(token_path.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme::text_secondary())
+                            .child(
+                                "Run `zremote agent local` once to generate the token, \
+                                 then restart the GUI.",
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn login(app_state: Arc<AppState>, server_url: String, cx: &mut Context<Self>) -> Self {
+        let login = cx.new(|cx| LoginView::new(app_state.clone(), cx));
+        cx.subscribe(&login, {
+            let server_url = server_url.clone();
+            move |this: &mut Self, _entity, event: &LoginEvent, cx| {
+                let LoginEvent::LoggedIn(entry) = event;
+                auth_state::save(&server_url, entry);
+                // Inject the bearer token into the API client for all future requests.
+                this.app_state
+                    .api
+                    .set_session_token(Some(entry.session_token.clone()));
+                // Transition to PendingMain — render() will create MainView with Window.
+                this.state = RootState::PendingMain;
+                cx.notify();
+                tracing::debug!("session saved, switching to main view");
+            }
+        })
+        .detach();
+        Self {
+            state: RootState::Login(login),
+            app_state,
+        }
+    }
+}
+
+impl Render for RootView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Resolve PendingMain: we now have &mut Window so we can create MainView.
+        if matches!(self.state, RootState::PendingMain) {
+            let app_state = self.app_state.clone();
+            let main = cx.new(|cx| MainView::new(app_state, window, cx));
+            cx.subscribe(&main, Self::on_main_view_event).detach();
+            self.state = RootState::Main(main);
+        }
+        match &self.state {
+            RootState::Login(login) => login.clone().into_any_element(),
+            RootState::PendingMain => {
+                // Should not reach here after the block above, but provide a fallback.
+                div().into_any_element()
+            }
+            RootState::Main(main) => main.clone().into_any_element(),
+            RootState::LocalBootstrapFailed { token_path } => {
+                self.render_local_bootstrap_failed(token_path)
+            }
+        }
+    }
 }
 
 /// Launch the GPUI application. This function blocks until the window is closed.
@@ -114,15 +319,60 @@ pub fn run(config: GuiConfig) {
 
     let exit_after = config.exit_after;
 
+    // Local mode: use the pre-loaded agent bearer token (read by the caller
+    // with retry). If absent, we surface a blocking error view instead of
+    // exiting — lets the user read the failure reason in the GUI itself.
+    // Server mode: load the stored keyring/file session.
+    let local_token_missing = config.is_local && config.local_token.is_none();
+    let (has_session, stored_session) = if config.is_local {
+        if let Some(tok) = config.local_token {
+            app_state.api.set_session_token(Some(tok));
+            tracing::info!("loaded local-mode token from ~/.zremote/local.token");
+            (true, None)
+        } else {
+            tracing::error!(
+                "local mode: ~/.zremote/local.token is missing or unreadable; \
+                 run `zremote agent local` once to generate it, then restart the GUI"
+            );
+            (false, None)
+        }
+    } else {
+        let stored = auth_state::load(&server_url);
+        let present = stored.is_some();
+        if let Some(entry) = &stored {
+            app_state
+                .api
+                .set_session_token(Some(entry.session_token.clone()));
+        }
+        (present, stored)
+    };
+    let _ = stored_session;
+
+    let local_token_path_display = local::token_path_display();
+
     // Launch GPUI application on main thread
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             let app_state_for_quit = app_state.clone();
             let app_state_clone = app_state.clone();
+            let server_url_for_login = server_url.clone();
             cx.open_window(
                 window_options(restored_width, restored_height),
-                move |window, cx| cx.new(|cx| MainView::new(app_state_clone, window, cx)),
+                move |window, cx| {
+                    if local_token_missing {
+                        cx.new(|_cx| {
+                            RootView::local_bootstrap_failed(
+                                app_state_clone,
+                                local_token_path_display,
+                            )
+                        })
+                    } else if has_session {
+                        cx.new(|cx| RootView::authed(app_state_clone, window, cx))
+                    } else {
+                        cx.new(|cx| RootView::login(app_state_clone, server_url_for_login, cx))
+                    }
+                },
             )
             .expect("failed to open window");
 

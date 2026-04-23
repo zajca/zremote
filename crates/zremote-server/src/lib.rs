@@ -10,8 +10,10 @@
 )]
 
 mod auth;
+mod auth_mw;
 mod db;
 mod error;
+mod rate_limit;
 mod routes;
 mod state;
 mod telegram;
@@ -40,11 +42,70 @@ const MAX_WS_CONNECTIONS: usize = 200;
 /// this ceiling.
 const AGENT_PROFILES_BODY_LIMIT: usize = 1_048_576; // 1 MiB
 
+/// Tight body cap for the `/api/auth/*` surface. Every payload we accept on
+/// auth endpoints is a small JSON object (≤ a handful of short string
+/// fields); 4 KiB is far more than we ever need and a hard ceiling that
+/// drops oversized requests before they reach the constant-time hash
+/// compare or the audit logger.
+const AUTH_BODY_LIMIT: usize = 4096; // 4 KiB
+
 /// Configuration for running the multi-host server.
 pub struct ServerConfig {
     pub token: String,
     pub database_url: String,
     pub port: u16,
+}
+
+/// Build the auth surface (RFC §Phase 2). Public routes (`/admin-token`,
+/// OIDC placeholders) are covered by the governor rate limiter; protected
+/// routes (`/me`, `/logout`, `/ws-ticket`) sit behind `auth_mw`. The whole
+/// subtree is rate-limited together because the attack surface is narrow
+/// and the per-IP bucket is sized for human login pacing.
+fn build_auth_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    use axum::routing::{delete, get, post};
+
+    // Routes that require a valid session bearer. Grouped together so
+    // the `auth_mw` layer only runs for paths that actually need it.
+    let protected: Router<Arc<AppState>> = Router::new()
+        .route("/api/auth/me", get(routes::auth::me))
+        .route("/api/auth/logout", post(routes::auth::logout))
+        .route("/api/auth/ws-ticket", post(routes::auth::ws_ticket))
+        .route(
+            "/api/admin/config",
+            get(routes::admin::get_config).put(routes::admin::update_config),
+        )
+        .route("/api/admin/rotate-token", post(routes::admin::rotate_token))
+        .route(
+            "/api/admin/hosts/{host_id}",
+            delete(routes::admin::revoke_host),
+        )
+        .route(
+            "/api/admin/sessions/{session_id}",
+            delete(routes::admin::revoke_session),
+        )
+        .route(
+            "/api/admin/enroll/create",
+            post(routes::enrollment::create_enrollment_code),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            auth_mw::auth_mw,
+        ));
+
+    let auth_subtree: Router<Arc<AppState>> = Router::new()
+        .route(
+            "/api/auth/admin-token",
+            post(routes::auth::admin_token_login),
+        )
+        .route("/api/auth/oidc/init", post(routes::auth::oidc_init))
+        .route("/api/auth/oidc/callback", post(routes::auth::oidc_callback))
+        .route("/api/auth/oidc/status", get(routes::auth::oidc_status))
+        // Enrollment is public but rate-limited together with auth (10 req/min/IP).
+        .route("/api/enroll", post(routes::enrollment::enroll))
+        .merge(protected)
+        .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT));
+
+    rate_limit::apply_rate_limits(auth_subtree)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -85,10 +146,24 @@ fn create_router(state: Arc<AppState>) -> Router {
         )
         .layer(DefaultBodyLimit::max(AGENT_PROFILES_BODY_LIMIT));
 
-    // TODO(phase-3): Add authentication middleware for REST API endpoints
+    // Auth surface: /api/auth/*. Phase 2 lands login + /me + logout + ws-ticket
+    // with per-IP rate limits and the uniform-401 oracle collapse. Phase 2b will
+    // gate the rest of the /api/* surface by wrapping `protected_api` with
+    // `auth_mw`. For now the non-auth routes below remain unauthenticated so
+    // existing tests and clients keep working; the TODO below tracks the gap.
+    let auth_subtree = build_auth_routes(Arc::clone(&state));
+
+    // TODO(phase-2b): gate the router below with `auth_mw`. All of the
+    // primitives (TicketStore, auth_mw, AuthContext) already exist; flipping
+    // the switch is a single `.route_layer(from_fn_with_state(.., auth_mw))`
+    // once admin-config endpoints land. Delaying until then avoids a
+    // window where the server is auth-required but has no way to provision
+    // credentials other than the first-run admin token.
     Router::new()
+        .merge(auth_subtree)
         .route("/health", get(routes::health::health))
         .route("/api/mode", get(routes::health::api_mode))
+        .route("/enroll.sh", get(routes::health::enroll_sh))
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route(
             "/api/hosts/{host_id}",
@@ -316,6 +391,22 @@ pub async fn run_server(config: ServerConfig) {
         std::process::exit(1);
     });
 
+    // Auth bootstrap: generate the admin token on first run (RFC §1 /
+    // Phase 2). If `ZREMOTE_TOKEN` is set and `admin_config` is empty, we
+    // seed the admin-token hash from it rather than printing a new token
+    // to stderr (RFC §9 migration path for existing deployments). The
+    // generated-token path prints a banner to stderr (never to disk) —
+    // operators are expected to copy it from the console on first run.
+    let migration_token = std::env::var("ZREMOTE_TOKEN").ok();
+    match routes::auth::bootstrap_admin_token(&pool, migration_token.as_deref()).await {
+        Ok(Some(_)) => tracing::debug!("admin token bootstrap completed"),
+        Ok(None) => tracing::debug!("admin_config present, skipping bootstrap"),
+        Err(err) => {
+            tracing::error!(error = %err, "admin token bootstrap failed");
+            std::process::exit(1);
+        }
+    }
+
     // Clean stale data from previous server runs.
     // All active sessions are suspended: daemon sessions are persistent and may be
     // recovered when the agent reconnects. The agent's SessionsRecovered message
@@ -424,6 +515,8 @@ pub async fn run_server(config: ServerConfig) {
         settings_get_requests,
         settings_save_requests,
         action_inputs_requests,
+        ticket_store: auth::ws_ticket::TicketStore::new(),
+        oidc_flows: auth::oidc::OidcFlowStore::new(),
     });
 
     // Spawn heartbeat monitor background task
@@ -450,10 +543,13 @@ pub async fn run_server(config: ServerConfig) {
 
     tracing::info!(addr = %addr, "Server ready on {addr}");
 
-    axum::serve(listener, create_router(state))
-        .with_graceful_shutdown(shutdown_signal(shutdown))
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        create_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown))
+    .await
+    .expect("server error");
 }
 
 fn spawn_idle_loop_checker(state: Arc<AppState>, shutdown: CancellationToken) {
@@ -553,6 +649,8 @@ mod tests {
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            ticket_store: auth::ws_ticket::TicketStore::new(),
+            oidc_flows: auth::oidc::OidcFlowStore::new(),
         })
     }
 

@@ -826,6 +826,9 @@ mod tests {
         assert!(v.is_none());
     }
 
+    // test-only, value is a small compile-time const (u64 4096, fits usize on any
+    // supported target). The `u64` type is fixed because `Read::take` requires it.
+    #[allow(clippy::cast_possible_truncation)]
     #[test]
     fn prompt_caps_input_at_prompt_max_len() {
         // A malicious / buggy stdin providing a very long line without a

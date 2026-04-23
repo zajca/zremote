@@ -1126,6 +1126,7 @@ pub enum TerminalPanelEvent {
     OpenSessionSwitcher,
     OpenHelp,
     OpenNewWorktree,
+    OpenAddHost,
     BridgeFailed {
         session_id: String,
     },
@@ -1410,7 +1411,7 @@ impl TerminalPanel {
             .px(px(6.0))
             .py(px(2.0))
             .rounded(px(8.0))
-            .bg(gpui::rgba(0x1111_1399))
+            .bg(theme::terminal_badge_bg())
             .child(
                 icon(if is_bridge { Icon::Zap } else { Icon::Wifi })
                     .size(px(10.0))
@@ -1455,7 +1456,7 @@ impl TerminalPanel {
             .px(px(6.0))
             .py(px(2.0))
             .rounded(px(8.0))
-            .bg(gpui::rgba(0x1111_1399))
+            .bg(theme::terminal_badge_bg())
             .child(cc_widgets::cc_bot_icon(status, 10.0));
 
         if let Some(ref model) = metrics.model {
@@ -1568,6 +1569,9 @@ impl Render for TerminalPanel {
                                         cx.emit(TerminalPanelEvent::OpenNewWorktree);
                                     }
                                     KeyAction::CloseOverlay => {}
+                                    KeyAction::OpenAddHost => {
+                                        cx.emit(TerminalPanelEvent::OpenAddHost);
+                                    }
                                 },
                             );
                         cx.stop_propagation();

@@ -548,7 +548,7 @@ mod tests {
 
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
         let shutdown = CancellationToken::new();
-        let state = LocalAppState::new(
+        let state = LocalAppState::new_for_test(
             pool,
             "test".to_string(),
             Uuid::new_v4(),

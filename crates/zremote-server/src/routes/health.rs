@@ -28,6 +28,24 @@ pub async fn api_mode() -> Json<serde_json::Value> {
     }))
 }
 
+/// Serves the enrollment shell script.
+/// Uses `text/plain` (not `text/x-shellscript`) to prevent browsers from
+/// auto-executing it, and `no-store` to prevent proxies serving stale scripts.
+pub async fn enroll_sh() -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    const SCRIPT: &str = include_str!("../../public/enroll.sh");
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        SCRIPT,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -59,6 +77,8 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            ticket_store: crate::auth::TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         })
     }
 

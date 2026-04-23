@@ -1,3 +1,4 @@
+pub mod auth;
 mod dispatch;
 mod heartbeat;
 mod registration;
@@ -16,7 +17,8 @@ use crate::agentic::manager::AgenticLoopManager;
 use crate::bridge::BridgeCommand;
 use crate::bridge::{self, BridgeSenders};
 use crate::claude::ChannelDialogDetector;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, CredentialStore};
+use crate::connection::auth::AuthError;
 use crate::hooks::mapper::SessionMapper;
 use crate::hooks::server::HooksServer;
 use crate::knowledge::KnowledgeManager;
@@ -88,6 +90,83 @@ async fn connect(config: &AgentConfig) -> Result<WsStream, ConnectionError> {
         .await
         .map_err(ConnectionError::Connect)?;
     Ok(ws_stream)
+}
+
+/// Authenticate and register with the server.
+///
+/// If v2 ed25519 credentials exist, performs the challenge-response handshake.
+/// The v1 legacy token path is only taken when no v2 credentials are present at all
+/// (fresh install that has never run `zremote agent enroll`).
+///
+/// Downgrade policy:
+/// - `Revoked` / `InvalidAgentId` → fatal, exit 1 (re-enrollment required).
+/// - `Rejected(reason)` → hard error, returned to caller (no v1 fallback — active rejection).
+/// - `Timeout` / `Connection(_)` → transient, propagate as `ConnectionError`; outer loop retries v2.
+/// - No v2 credentials → v1 token path (only legitimate legacy scenario).
+async fn connect_and_register(
+    ws: &mut WsStream,
+    config: &AgentConfig,
+    supports_persistence: bool,
+) -> Result<zremote_protocol::HostId, ConnectionError> {
+    let store = CredentialStore::new(None);
+    match store.load() {
+        Ok(creds) => {
+            tracing::info!(agent_id = %creds.agent_id, "using v2 ed25519 auth");
+            match auth::authenticate(ws, &creds.agent_id, &creds.signing_key).await {
+                Ok(success) => {
+                    tracing::info!(session_id = %success.session_id, "v2 auth succeeded");
+                    return success.session_id.parse().map_err(|_| {
+                        ConnectionError::UnexpectedRegisterResponse(
+                            "AuthSuccess.session_id is not a valid HostId".into(),
+                        )
+                    });
+                }
+                Err(AuthError::Revoked) => {
+                    tracing::error!(
+                        agent_id = %creds.agent_id,
+                        "agent credentials revoked — re-enroll required (zremote agent enroll)"
+                    );
+                    std::process::exit(1);
+                }
+                Err(AuthError::InvalidAgentId) => {
+                    tracing::error!(
+                        "agent_id in stored credentials is not a valid UUID — \
+                         credential store may be corrupt; re-enroll required"
+                    );
+                    std::process::exit(1);
+                }
+                Err(AuthError::Rejected(reason)) => {
+                    // Active server rejection — do not fall back to v1. The key on disk
+                    // is wrong or the agent is banned; re-enrollment is required.
+                    tracing::error!(
+                        ?reason,
+                        "v2 auth actively rejected by server — re-enroll required"
+                    );
+                    return Err(ConnectionError::ServerError(format!(
+                        "v2 auth rejected: {reason:?}"
+                    )));
+                }
+                Err(AuthError::CspRngUnavailable) => {
+                    // OS CSPRNG is gone — fatal, no point retrying.
+                    tracing::error!("OS CSPRNG unavailable during v2 auth — cannot continue");
+                    std::process::exit(1);
+                }
+                Err(AuthError::Timeout) => {
+                    return Err(ConnectionError::RegisterTimeout);
+                }
+                Err(AuthError::Connection(e)) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(_) => {
+            // No v2 credentials — this is the only legitimate v1 fallback path.
+            tracing::info!("no v2 credentials found — using v1 legacy token auth");
+        }
+    }
+
+    // v1 legacy path: only reached when no v2 credentials exist.
+    registration::register(ws, config, supports_persistence).await
 }
 
 /// Send a JSON-encoded agent message over the WebSocket.
@@ -239,7 +318,8 @@ pub async fn run_connection(
     let mut ws = connect(config).await?;
     tracing::info!("WebSocket connection established");
 
-    let host_id = registration::register(&mut ws, config, supports_persistence).await?;
+    // Try v2 ed25519 auth if credentials are available; fall back to v1 legacy token.
+    let host_id = connect_and_register(&mut ws, config, supports_persistence).await?;
 
     // Write host_id for GUI bridge discovery (skip bridge for non-local sessions)
     bridge::write_host_id_file(&host_id).await;
@@ -989,7 +1069,7 @@ mod tests {
     async fn connect_to_invalid_url_returns_error() {
         let config = AgentConfig {
             server_url: url::Url::parse("ws://127.0.0.1:1").unwrap(),
-            token: "test".to_string(),
+            token: Some("test".to_string()),
             openviking_enabled: false,
             openviking_binary: "openviking".to_string(),
             openviking_port: 1933,

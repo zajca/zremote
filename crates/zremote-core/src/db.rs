@@ -134,6 +134,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_overhaul_migration_creates_all_tables() {
+        let pool = init_db("sqlite::memory:").await.unwrap();
+        for table in [
+            "admin_config",
+            "auth_sessions",
+            "agents",
+            "enrollment_codes",
+            "agent_sessions",
+            "audit_log",
+        ] {
+            let count: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                count.0, 1,
+                "expected table {table} to exist after migrations"
+            );
+        }
+
+        // hosts.host_fingerprint column was added by the auth migration.
+        let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('hosts')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            cols.iter().any(|(n,)| n == "host_fingerprint"),
+            "hosts.host_fingerprint column must exist: {cols:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn init_db_foreign_key_constraint_works() {
         let pool = init_db("sqlite::memory:").await.unwrap();
 

@@ -348,6 +348,8 @@ mod tests {
             settings_get_requests: Arc::new(DashMap::new()),
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
+            ticket_store: crate::auth::TicketStore::new(),
+            oidc_flows: crate::auth::oidc::OidcFlowStore::new(),
         })
     }
 
