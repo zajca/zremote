@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 // Pre-existing pedantic clippy lints — suppress at crate level for now
 #![allow(
     clippy::unreadable_literal,       // hex color codes in theme.rs
@@ -50,6 +50,18 @@ use views::main_view::MainView;
 
 // Re-export from client for callers that used `zremote_gui::extract_base_url`.
 pub use zremote_client::extract_base_url;
+
+/// Re-exports of pure helpers for integration tests. Diff-view tests cannot
+/// live inside `src/views/diff/*.rs` because gpui's proc-macros exhaust the
+/// rustc stack while expanding `#[test]` through the enclosing modules.
+/// Keeping these helpers reachable from `tests/*.rs` sidesteps the issue
+/// without growing `recursion_limit` into the tens of thousands.
+#[doc(hidden)]
+pub mod test_exports {
+    pub use crate::views::diff::review_comment::infer_side_from_kind;
+    pub use crate::views::diff::review_composer::body_is_empty;
+    pub use crate::views::diff::review_panel::{compact_preview, session_label};
+}
 
 /// Configuration for launching the GUI application.
 pub struct GuiConfig {

@@ -202,6 +202,7 @@ mod tests {
             settings_get_requests: Arc::new(DashMap::new()),
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
+            diff_dispatch: Arc::new(crate::diff_dispatch::DiffDispatch::new()),
         })
     }
 
@@ -406,7 +407,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ServerMessage>(4);
         state
             .connections
-            .register(host_uuid, "test-host".to_string(), tx, false)
+            .register(host_uuid, "test-host".to_string(), tx, false, false)
             .await;
 
         let app = router(state);

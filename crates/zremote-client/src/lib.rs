@@ -6,12 +6,14 @@
 //! - [`TerminalSession`] — WebSocket terminal session with binary frame support
 
 mod client;
+pub mod diff;
 mod error;
 mod events;
 mod terminal;
 pub mod types;
 
 pub use client::{ApiClient, extract_base_url};
+pub use diff::{DiffEventStream, DiffEventWire, get_diff_sources, send_review, stream_diff};
 pub use error::ApiError;
 pub use events::{ClientEvent, EventStream};
 pub use terminal::TerminalSession;

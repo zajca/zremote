@@ -1126,6 +1126,7 @@ pub enum TerminalPanelEvent {
     OpenSessionSwitcher,
     OpenHelp,
     OpenNewWorktree,
+    OpenDiff,
     BridgeFailed {
         session_id: String,
     },
@@ -1566,6 +1567,9 @@ impl Render for TerminalPanel {
                                     }
                                     KeyAction::OpenNewWorktree => {
                                         cx.emit(TerminalPanelEvent::OpenNewWorktree);
+                                    }
+                                    KeyAction::OpenDiff => {
+                                        cx.emit(TerminalPanelEvent::OpenDiff);
                                     }
                                     KeyAction::CloseOverlay => {}
                                 },

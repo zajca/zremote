@@ -29,6 +29,13 @@ pub fn accent() -> Rgba {
     rgb(0x5e6ad2)
 }
 
+/// Accent colour shade used on hover. A touch lighter than `accent()` so
+/// primary buttons (Send, Save) give visible feedback when the cursor
+/// enters. Paired with `accent()` as the resting colour.
+pub fn accent_hover() -> Rgba {
+    rgb(0x7683dd)
+}
+
 pub fn border() -> Rgba {
     rgb(0x2a2a2e)
 }
@@ -37,8 +44,28 @@ pub fn success() -> Rgba {
     rgb(0x4ade80)
 }
 
+/// Subtle green tint for added-line backgrounds in diff views.
+pub fn success_bg() -> Rgba {
+    Rgba {
+        r: 0.290,
+        g: 0.871,
+        b: 0.502,
+        a: 0.10,
+    }
+}
+
 pub fn error() -> Rgba {
     rgb(0xef4444)
+}
+
+/// Subtle red tint for removed-line backgrounds in diff views.
+pub fn error_bg() -> Rgba {
+    Rgba {
+        r: 0.937,
+        g: 0.267,
+        b: 0.267,
+        a: 0.10,
+    }
 }
 
 pub fn warning() -> Rgba {
@@ -63,6 +90,54 @@ pub fn warning_border() -> Rgba {
         b: 0.141,
         a: 0.27,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Syntax highlight palette — used by the diff view's syntect bridge. Tuned to
+// the ZRemote dark palette (neutral base, muted accents) so highlighted code
+// sits visually inside the UI instead of competing with it.
+//
+// TODO(light-theme): these values are hardcoded for the current dark theme.
+// ZRemote does not yet ship a light theme; when it does, route these through
+// the same runtime dispatch used by `bg_primary()` / `text_primary()` so the
+// diff syntax palette tracks the active theme. Tracked in RFC-git-diff-ui P4
+// review (M5).
+// ---------------------------------------------------------------------------
+
+pub fn syntax_keyword() -> Rgba {
+    rgb(0xc586c0)
+}
+
+pub fn syntax_string() -> Rgba {
+    rgb(0xce9178)
+}
+
+pub fn syntax_comment() -> Rgba {
+    rgb(0x6a9955)
+}
+
+pub fn syntax_function() -> Rgba {
+    rgb(0xdcdcaa)
+}
+
+pub fn syntax_type() -> Rgba {
+    rgb(0x4ec9b0)
+}
+
+pub fn syntax_number() -> Rgba {
+    rgb(0xb5cea8)
+}
+
+pub fn syntax_constant() -> Rgba {
+    rgb(0x569cd6)
+}
+
+pub fn syntax_variable() -> Rgba {
+    rgb(0x9cdcfe)
+}
+
+pub fn syntax_punctuation() -> Rgba {
+    rgb(0xd4d4d4)
 }
 
 pub fn terminal_bg() -> Rgba {

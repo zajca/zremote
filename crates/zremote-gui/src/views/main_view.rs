@@ -19,6 +19,7 @@ use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
 use crate::views::components::path_autocomplete::PathAutocompleteApi;
+use crate::views::diff::{DiffView, DiffViewEvent};
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
@@ -41,6 +42,10 @@ pub struct MainView {
     app_state: Arc<AppState>,
     sidebar: Entity<SidebarView>,
     terminal: Option<Entity<TerminalPanel>>,
+    /// Active diff view (P3 MVP). When `Some`, it replaces the terminal in
+    /// the content area. Set by `open_diff`; cleared when the user closes
+    /// it or switches back to a session via sidebar/palette.
+    diff: Option<Entity<DiffView>>,
     focus_handle: FocusHandle,
     command_palette: Option<Entity<CommandPalette>>,
     session_switcher: Option<Entity<SessionSwitcher>>,
@@ -119,6 +124,7 @@ impl MainView {
             app_state,
             sidebar,
             terminal: None,
+            diff: None,
             focus_handle,
             command_palette: None,
             session_switcher: None,
@@ -153,6 +159,11 @@ impl MainView {
                 session_id,
                 host_id,
             } => {
+                // Opening a session returns the user to the terminal view.
+                if self.diff.is_some() {
+                    self.diff = None;
+                    cx.notify();
+                }
                 // Skip if this session is already open (prevents duplicate open_terminal
                 // from sidebar re-emitting SessionSelected after data reload).
                 if let Some(terminal) = &self.terminal
@@ -162,6 +173,9 @@ impl MainView {
                 }
                 self.record_recent_session(session_id);
                 self.open_terminal(session_id, host_id, cx);
+            }
+            SidebarEvent::OpenDiff { project_id } => {
+                self.open_diff(project_id.clone(), cx);
             }
             SidebarEvent::SessionClosed { session_id } => {
                 if let Some(terminal) = &self.terminal {
@@ -266,6 +280,37 @@ impl MainView {
 
         self.terminal = Some(terminal);
         cx.notify();
+    }
+
+    /// Open the diff viewer for a project. Replaces the terminal in the
+    /// content area until the user selects a session again (via sidebar or
+    /// palette). The existing terminal entity is preserved so returning to
+    /// the session doesn't rebuild it.
+    pub fn open_diff(&mut self, project_id: String, cx: &mut Context<Self>) {
+        if let Some(existing) = &self.diff
+            && existing.read(cx).project_id() == project_id
+        {
+            return;
+        }
+        let app_state = self.app_state.clone();
+        let view = cx.new(|cx| DiffView::new(app_state, project_id.clone(), cx));
+        cx.subscribe(&view, Self::on_diff_event).detach();
+        self.diff = Some(view);
+        cx.notify();
+    }
+
+    fn on_diff_event(
+        &mut self,
+        _emitter: Entity<DiffView>,
+        event: &DiffViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DiffViewEvent::Close => {
+                self.diff = None;
+                cx.notify();
+            }
+        }
     }
 
     fn start_event_polling(app_state: &Arc<AppState>, cx: &mut Context<Self>) -> Task<()> {
@@ -1030,6 +1075,7 @@ impl MainView {
             }
             KeyAction::OpenHelp => self.open_help_modal(cx),
             KeyAction::OpenNewWorktree => self.trigger_new_worktree_for_selection(cx),
+            KeyAction::OpenDiff => self.trigger_open_diff_for_selection(cx),
             KeyAction::ToggleActivityPanel => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |panel, cx| {
@@ -1038,7 +1084,8 @@ impl MainView {
                 }
             }
             KeyAction::CloseOverlay => {
-                // Close topmost modal
+                // Close topmost modal; if no modal is open, fall through to
+                // the diff view (Esc closes it when it's the active content).
                 if self.worktree_create_modal.is_some() {
                     self.close_worktree_create_modal(cx);
                 } else if self.command_palette.is_some() {
@@ -1049,6 +1096,9 @@ impl MainView {
                     self.close_help_modal(cx);
                 } else if self.settings_modal.is_some() {
                     self.close_settings_modal(cx);
+                } else if self.diff.is_some() {
+                    self.diff = None;
+                    cx.notify();
                 }
             }
         }
@@ -1091,6 +1141,11 @@ impl MainView {
             .unwrap_or_default();
         let cc_states = snapshot.cc_states().clone();
         let cc_metrics = snapshot.cc_metrics().clone();
+        let review_pending = self
+            .diff
+            .as_ref()
+            .map(|d| d.read(cx).pending_review_count())
+            .unwrap_or(0);
         let palette_snapshot = PaletteSnapshot::capture(
             Rc::clone(snapshot.hosts_rc()),
             Rc::clone(snapshot.sessions_rc()),
@@ -1103,7 +1158,8 @@ impl MainView {
             cc_metrics,
             Rc::clone(snapshot.agent_profiles_rc()),
             Rc::clone(snapshot.agent_kinds_rc()),
-        );
+        )
+        .with_review_pending_count(review_pending);
         let path_api: Arc<dyn PathAutocompleteApi> = Arc::new(self.app_state.api.clone());
         let palette =
             cx.new(|cx| CommandPalette::new(palette_snapshot, tab, path_api, recent_add_paths, cx));
@@ -1135,6 +1191,9 @@ impl MainView {
             }
             TerminalPanelEvent::OpenNewWorktree => {
                 self.trigger_new_worktree_for_selection(cx);
+            }
+            TerminalPanelEvent::OpenDiff => {
+                self.trigger_open_diff_for_selection(cx);
             }
             TerminalPanelEvent::BridgeFailed { session_id } => {
                 tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
@@ -1546,6 +1605,16 @@ impl MainView {
                 })
                 .detach();
             }
+            CommandPaletteEvent::OpenDiff { project_id } => {
+                self.open_diff(project_id.clone(), cx);
+            }
+            CommandPaletteEvent::SendReview => {
+                if let Some(diff) = self.diff.clone() {
+                    diff.update(cx, |d, cx| {
+                        d.send_review_from_palette(cx);
+                    });
+                }
+            }
             CommandPaletteEvent::Close => {}
         }
         self.close_command_palette(cx);
@@ -1718,6 +1787,26 @@ impl MainView {
     /// project, or the parent of a selected worktree) and open the creation
     /// modal. No-ops when no project is selected or the selection is on a
     /// non-git project.
+    fn trigger_open_diff_for_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_id) = self
+            .app_state
+            .selected_project_id
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        else {
+            self.show_toast(
+                "Select a project first to view its diff",
+                ToastLevel::Warning,
+                Some(Icon::GitBranch),
+                ToastContext::default(),
+                cx,
+            );
+            return;
+        };
+        self.open_diff(selected_id, cx);
+    }
+
     fn trigger_new_worktree_for_selection(&mut self, cx: &mut Context<Self>) {
         let Some(selected_id) = self
             .app_state
@@ -1935,7 +2024,9 @@ impl MainView {
     }
 
     fn render_content_area(&self, cx: &mut Context<Self>) -> Div {
-        if let Some(terminal) = &self.terminal {
+        if let Some(diff) = &self.diff {
+            div().flex_1().flex().flex_col().child(diff.clone())
+        } else if let Some(terminal) = &self.terminal {
             div().flex_1().flex().flex_col().child(terminal.clone())
         } else {
             div().flex_1().flex().flex_col().child(
@@ -2406,6 +2497,10 @@ pub enum SidebarEvent {
     OpenNewWorktree {
         parent_project_id: String,
         host_id: String,
+    },
+    /// User requested to view the git diff for a project.
+    OpenDiff {
+        project_id: String,
     },
 }
 

@@ -36,6 +36,7 @@ async fn test_state() -> Arc<AppState> {
         settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        diff_dispatch: std::sync::Arc::new(crate::diff_dispatch::DiffDispatch::new()),
     })
 }
 
@@ -137,7 +138,7 @@ async fn register_host_connection(
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     state
         .connections
-        .register(host_id, "test-host".to_string(), tx, false)
+        .register(host_id, "test-host".to_string(), tx, false, false)
         .await;
     rx
 }

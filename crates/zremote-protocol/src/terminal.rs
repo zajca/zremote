@@ -6,7 +6,9 @@ use crate::channel::{ChannelAgentAction, ChannelServerAction};
 use crate::claude::{ClaudeAgentMessage, ClaudeServerMessage};
 use crate::knowledge::{KnowledgeAgentMessage, KnowledgeServerMessage};
 use crate::project::{
-    DirectoryEntry, GitInfo, ProjectInfo, ProjectSettings, ResolvedActionInput, WorktreeInfo,
+    DiffError, DiffFile, DiffFileSummary, DiffRequest, DiffSourceOptions, DirectoryEntry, GitInfo,
+    ProjectInfo, ProjectSettings, ResolvedActionInput, SendReviewRequest, SendReviewResponse,
+    WorktreeInfo,
 };
 use crate::{HostId, SessionId};
 
@@ -39,6 +41,11 @@ pub enum AgentMessage {
         token: String,
         #[serde(default)]
         supports_persistent_sessions: bool,
+        /// Whether this agent can serve git diff requests (RFC git-diff-ui).
+        /// Older agents that predate the diff feature omit this field and
+        /// the server treats them as unable to serve diffs.
+        #[serde(default)]
+        supports_diff: bool,
     },
     Heartbeat {
         timestamp: DateTime<Utc>,
@@ -145,6 +152,43 @@ pub enum AgentMessage {
     /// Generic agentic launcher lifecycle notifications (new in RFC-003).
     /// Older servers that predate agent profiles simply ignore unknown variants.
     AgentLifecycle(AgentLifecycleMessage),
+    /// Summary of files in a streamed diff. Emitted once per `ProjectDiff`
+    /// request, followed by one `DiffFileChunk` per file, then `DiffFinished`.
+    DiffStarted {
+        request_id: uuid::Uuid,
+        files: Vec<DiffFileSummary>,
+    },
+    /// Single file's full diff payload. `file_index` is the index into
+    /// `DiffStarted.files` so the client can pair chunks to summaries under
+    /// streaming.
+    DiffFileChunk {
+        request_id: uuid::Uuid,
+        file_index: u32,
+        file: DiffFile,
+    },
+    /// Terminal event for a streamed diff. If `error` is `Some`, the whole
+    /// op failed after `DiffStarted` — client should discard pending chunks.
+    DiffFinished {
+        request_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<DiffError>,
+    },
+    /// Response to `ProjectDiffSources`.
+    DiffSourcesResult {
+        request_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Box<DiffSourceOptions>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<DiffError>,
+    },
+    /// Response to `ProjectSendReview`.
+    SendReviewResult {
+        request_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response: Option<Box<SendReviewResponse>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<DiffError>,
+    },
 }
 
 /// Messages sent from server to agent (terminal/connection layer).
@@ -248,6 +292,33 @@ pub enum ServerMessage {
         #[serde(default)]
         conventions: Vec<String>,
     },
+    /// Request a streaming diff from the agent. Agent replies with
+    /// `DiffStarted` + `DiffFileChunk` * N + `DiffFinished`.
+    ProjectDiff {
+        request_id: uuid::Uuid,
+        request: DiffRequest,
+    },
+    /// Request diff-source metadata (branches + recent commits + dirty
+    /// state) for the source picker. Agent replies with `DiffSourcesResult`.
+    ProjectDiffSources {
+        request_id: uuid::Uuid,
+        project_path: String,
+        /// Cap on the number of recent commits returned.
+        #[serde(default)]
+        max_commits: Option<u32>,
+    },
+    /// Ship a review (rendered markdown) to a target session. Agent replies
+    /// with `SendReviewResult`.
+    ProjectSendReview {
+        request_id: uuid::Uuid,
+        request: SendReviewRequest,
+    },
+    /// Cancel an in-flight `ProjectDiff` identified by `request_id`. The
+    /// agent checks the token between files and aborts with
+    /// `DiffFinished { error: Some(Timeout) }`.
+    DiffCancel {
+        request_id: uuid::Uuid,
+    },
 }
 
 #[cfg(test)]
@@ -276,6 +347,7 @@ mod tests {
             arch: "x86_64".to_string(),
             token: "secret-token".to_string(),
             supports_persistent_sessions: false,
+            supports_diff: false,
         });
         roundtrip_agent(&AgentMessage::Register {
             hostname: "dev-machine".to_string(),
@@ -284,6 +356,7 @@ mod tests {
             arch: "x86_64".to_string(),
             token: "secret-token".to_string(),
             supports_persistent_sessions: true,
+            supports_diff: true,
         });
     }
 
@@ -294,10 +367,31 @@ mod tests {
         let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
         if let AgentMessage::Register {
             supports_persistent_sessions,
+            supports_diff,
             ..
         } = msg
         {
             assert!(!supports_persistent_sessions, "should default to false");
+            assert!(!supports_diff, "supports_diff should default to false");
+        } else {
+            panic!("expected Register variant");
+        }
+    }
+
+    #[test]
+    fn register_without_supports_diff_deserializes() {
+        // An agent that knows supports_persistent_sessions but predates
+        // supports_diff must still deserialise cleanly.
+        let json = r#"{"type":"Register","payload":{"hostname":"h","agent_version":"0.1","os":"linux","arch":"x86_64","token":"t","supports_persistent_sessions":true}}"#;
+        let msg: AgentMessage = serde_json::from_str(json).expect("should deserialize");
+        if let AgentMessage::Register {
+            supports_persistent_sessions,
+            supports_diff,
+            ..
+        } = msg
+        {
+            assert!(supports_persistent_sessions);
+            assert!(!supports_diff);
         } else {
             panic!("expected Register variant");
         }
@@ -1168,5 +1262,217 @@ mod tests {
                 error: "spawn failed".to_string(),
             },
         ));
+    }
+
+    #[test]
+    fn project_diff_server_message_roundtrip() {
+        use crate::project::{DiffRequest, DiffSource};
+        roundtrip_server(&ServerMessage::ProjectDiff {
+            request_id: Uuid::new_v4(),
+            request: DiffRequest {
+                project_id: "proj-1".to_string(),
+                source: DiffSource::WorkingTree,
+                file_paths: None,
+                context_lines: 3,
+            },
+        });
+    }
+
+    #[test]
+    fn project_diff_sources_server_message_roundtrip() {
+        roundtrip_server(&ServerMessage::ProjectDiffSources {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/repo".to_string(),
+            max_commits: Some(50),
+        });
+        roundtrip_server(&ServerMessage::ProjectDiffSources {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/repo".to_string(),
+            max_commits: None,
+        });
+    }
+
+    #[test]
+    fn project_diff_sources_without_max_commits_deserializes() {
+        let id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"ProjectDiffSources","payload":{{"request_id":"{id}","project_path":"/home/user/repo"}}}}"#
+        );
+        let msg: ServerMessage = serde_json::from_str(&raw).unwrap();
+        match msg {
+            ServerMessage::ProjectDiffSources {
+                request_id,
+                project_path,
+                max_commits,
+            } => {
+                assert_eq!(request_id, id);
+                assert_eq!(project_path, "/home/user/repo");
+                assert!(max_commits.is_none());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_send_review_server_message_roundtrip() {
+        use crate::project::{DiffSource, ReviewDelivery, SendReviewRequest};
+        roundtrip_server(&ServerMessage::ProjectSendReview {
+            request_id: Uuid::new_v4(),
+            request: SendReviewRequest {
+                project_id: "proj-1".to_string(),
+                source: DiffSource::WorkingTree,
+                comments: vec![],
+                delivery: ReviewDelivery::InjectSession,
+                session_id: Some(Uuid::new_v4()),
+                preamble: None,
+            },
+        });
+    }
+
+    #[test]
+    fn diff_cancel_server_message_roundtrip() {
+        roundtrip_server(&ServerMessage::DiffCancel {
+            request_id: Uuid::new_v4(),
+        });
+    }
+
+    #[test]
+    fn diff_started_agent_message_roundtrip() {
+        use crate::project::{DiffFileStatus, DiffFileSummary};
+        roundtrip_agent(&AgentMessage::DiffStarted {
+            request_id: Uuid::new_v4(),
+            files: vec![DiffFileSummary {
+                path: "src/a.rs".to_string(),
+                old_path: None,
+                status: DiffFileStatus::Modified,
+                binary: false,
+                submodule: false,
+                too_large: false,
+                additions: 3,
+                deletions: 1,
+                old_sha: Some("aaa".to_string()),
+                new_sha: Some("bbb".to_string()),
+                old_mode: None,
+                new_mode: None,
+            }],
+        });
+    }
+
+    #[test]
+    fn diff_file_chunk_agent_message_roundtrip() {
+        use crate::project::{
+            DiffFile, DiffFileStatus, DiffFileSummary, DiffHunk, DiffLine, DiffLineKind,
+        };
+        roundtrip_agent(&AgentMessage::DiffFileChunk {
+            request_id: Uuid::new_v4(),
+            file_index: 0,
+            file: DiffFile {
+                summary: DiffFileSummary {
+                    path: "src/a.rs".to_string(),
+                    old_path: None,
+                    status: DiffFileStatus::Modified,
+                    binary: false,
+                    submodule: false,
+                    too_large: false,
+                    additions: 1,
+                    deletions: 1,
+                    old_sha: None,
+                    new_sha: None,
+                    old_mode: None,
+                    new_mode: None,
+                },
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 1,
+                    header: "@@ -1 +1 @@".to_string(),
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Removed,
+                            old_lineno: Some(1),
+                            new_lineno: None,
+                            content: "old".to_string(),
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Added,
+                            old_lineno: None,
+                            new_lineno: Some(1),
+                            content: "new".to_string(),
+                        },
+                    ],
+                }],
+            },
+        });
+    }
+
+    #[test]
+    fn diff_finished_agent_message_roundtrip() {
+        use crate::project::{DiffError, DiffErrorCode};
+        roundtrip_agent(&AgentMessage::DiffFinished {
+            request_id: Uuid::new_v4(),
+            error: None,
+        });
+        roundtrip_agent(&AgentMessage::DiffFinished {
+            request_id: Uuid::new_v4(),
+            error: Some(DiffError {
+                code: DiffErrorCode::Timeout,
+                message: "timed out".to_string(),
+                hint: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn diff_sources_result_agent_message_roundtrip() {
+        use crate::project::{BranchList, DiffError, DiffErrorCode, DiffSourceOptions};
+        roundtrip_agent(&AgentMessage::DiffSourcesResult {
+            request_id: Uuid::new_v4(),
+            options: Some(Box::new(DiffSourceOptions {
+                has_working_tree_changes: true,
+                has_staged_changes: false,
+                branches: BranchList {
+                    local: vec![],
+                    remote: vec![],
+                    current: "main".to_string(),
+                    remote_truncated: false,
+                },
+                recent_commits: vec![],
+                head_sha: Some("deadbeef".to_string()),
+                head_short_sha: Some("deadbee".to_string()),
+            })),
+            error: None,
+        });
+        roundtrip_agent(&AgentMessage::DiffSourcesResult {
+            request_id: Uuid::new_v4(),
+            options: None,
+            error: Some(DiffError {
+                code: DiffErrorCode::NotGitRepo,
+                message: "not a git repo".to_string(),
+                hint: None,
+            }),
+        });
+    }
+
+    #[test]
+    fn send_review_result_agent_message_roundtrip() {
+        use crate::project::{DiffError, DiffErrorCode, SendReviewResponse};
+        roundtrip_agent(&AgentMessage::SendReviewResult {
+            request_id: Uuid::new_v4(),
+            response: Some(Box::new(SendReviewResponse {
+                session_id: Uuid::new_v4(),
+                delivered: 2,
+            })),
+            error: None,
+        });
+        roundtrip_agent(&AgentMessage::SendReviewResult {
+            request_id: Uuid::new_v4(),
+            response: None,
+            error: Some(DiffError {
+                code: DiffErrorCode::Other,
+                message: "session not found".to_string(),
+                hint: None,
+            }),
+        });
     }
 }

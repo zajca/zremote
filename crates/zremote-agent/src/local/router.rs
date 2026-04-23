@@ -13,6 +13,11 @@ use super::state::LocalAppState;
 /// the server-mode router — individual field caps in the core validator
 /// track this ceiling.
 const AGENT_PROFILES_BODY_LIMIT: usize = 1_048_576; // 1 MiB
+/// Maximum request body size for the diff + review endpoints (CWE-400).
+/// A `DiffRequest` is tiny; `SendReviewRequest` carries the review-comment
+/// bodies the GUI composed — 1 MiB is comfortably above any realistic input
+/// and below a DoS-capable payload.
+const DIFF_REVIEW_BODY_LIMIT: usize = 1_048_576; // 1 MiB
 
 pub(crate) fn build_router(
     state: Arc<LocalAppState>,
@@ -40,6 +45,25 @@ pub(crate) fn build_router(
             put(routes::agent_profiles::set_default),
         )
         .layer(DefaultBodyLimit::max(AGENT_PROFILES_BODY_LIMIT));
+
+    // Diff + review routes. Scoped into their own sub-router so a tight
+    // `DefaultBodyLimit` caps request bodies without affecting unrelated
+    // endpoints. GET `/diff/sources` has no body but still benefits from the
+    // per-group policy for consistency.
+    let diff_review_router: Router<Arc<LocalAppState>> = Router::new()
+        .route(
+            "/api/projects/{project_id}/diff",
+            post(routes::projects::post_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/diff/sources",
+            get(routes::projects::get_diff_sources),
+        )
+        .route(
+            "/api/projects/{project_id}/review/send",
+            post(routes::projects::post_send_review),
+        )
+        .layer(DefaultBodyLimit::max(DIFF_REVIEW_BODY_LIMIT));
 
     let router = Router::new()
         .route("/health", get(routes::health::health))
@@ -116,6 +140,7 @@ pub(crate) fn build_router(
             "/api/projects/{project_id}/git/branches",
             get(routes::projects::list_branches),
         )
+        // Git diff UI (RFC git-diff-ui) — merged below with a 1 MiB body cap.
         .route(
             "/api/projects/{project_id}/worktrees",
             get(routes::projects::list_worktrees).post(routes::projects::create_worktree),
@@ -207,6 +232,8 @@ pub(crate) fn build_router(
         // sub-router so a tight `DefaultBodyLimit` layer can apply without
         // leaking to unrelated routes. See `agent_profiles_router` above.
         .merge(agent_profiles_router)
+        // Diff + review routes — same scoping pattern, 1 MiB body cap.
+        .merge(diff_review_router)
         // Profile-driven agent task launch (generic replacement for
         // /api/claude-tasks — the legacy route stays for backwards compat).
         .route(
@@ -329,6 +356,52 @@ mod tests {
             std::path::PathBuf::from("/tmp/zremote-cors-test"),
             Uuid::new_v4(),
         )
+    }
+
+    /// Diff + review routes must reject bodies above the scoped 1 MiB cap
+    /// (CWE-400). Routes without a DefaultBodyLimit layer would happily
+    /// stream > 1 MiB of JSON into the handler; with the layer in place the
+    /// request terminates with a length-limit error before any handler runs.
+    ///
+    /// `AppJson` re-wraps every `JsonRejection` (including length-limit) as
+    /// `AppError::BadRequest` → 400. That is still a hard reject before the
+    /// DB or PTY are touched, which is what we care about here: the handler
+    /// never sees the oversized payload. Control vs non-control: a tiny body
+    /// reaches the handler (and hits 404/500 from later logic), while a 2
+    /// MiB body is dropped at the extractor.
+    #[tokio::test]
+    async fn diff_route_rejects_oversized_body() {
+        let state = test_state().await;
+        let router = build_router(state).unwrap();
+
+        // Build a valid-shape JSON whose encoded size exceeds 1 MiB.
+        let project_id = Uuid::new_v4();
+        let huge_path = "x".repeat(2 * 1_048_576);
+        let body_json = format!(
+            r#"{{"project_id":"{project_id}","source":"working_tree","file_paths":["{huge_path}"],"context_lines":3}}"#
+        );
+        assert!(
+            body_json.len() > 1_048_576,
+            "body must exceed 1 MiB to exercise the cap"
+        );
+        let response = router
+            .oneshot(
+                Request::post(format!("/api/projects/{project_id}/diff"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_json))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Either 413 (bare DefaultBodyLimit) or 400 (AppJson re-wrapping the
+        // length rejection) is an acceptable "rejected before handler" signal.
+        // We explicitly disallow 200/404/500 — any of those would mean the
+        // handler ran despite the cap.
+        let status = response.status();
+        assert!(
+            status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::BAD_REQUEST,
+            "oversized diff body must be rejected before the handler, got {status}"
+        );
     }
 
     /// Verify the local router does NOT echo permissive CORS headers in

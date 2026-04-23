@@ -15,9 +15,15 @@ pub enum AppError {
     Database(sqlx::Error),
     NotFound(String),
     Unauthorized(String),
+    /// 403 Forbidden — the caller is authenticated but not allowed to access
+    /// the requested resource (e.g. cross-project session access).
+    Forbidden(String),
     BadRequest(String),
     Conflict(String),
     Internal(String),
+    /// 501 Not Implemented — used for capability gating when the remote
+    /// agent does not support a feature (e.g. `supports_diff=false`).
+    NotImplemented(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -26,9 +32,11 @@ impl std::fmt::Display for AppError {
             Self::Database(e) => write!(f, "database error: {e}"),
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
+            Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             Self::BadRequest(msg) => write!(f, "bad request: {msg}"),
             Self::Conflict(msg) => write!(f, "conflict: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
+            Self::NotImplemented(msg) => write!(f, "not implemented: {msg}"),
         }
     }
 }
@@ -55,6 +63,7 @@ impl IntoResponse for AppError {
             }
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.clone()),
             Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg.clone()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg.clone()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.clone()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg.clone()),
             Self::Internal(msg) => {
@@ -64,6 +73,9 @@ impl IntoResponse for AppError {
                     "INTERNAL_ERROR",
                     "internal server error".to_string(),
                 )
+            }
+            Self::NotImplemented(msg) => {
+                (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED", msg.clone())
             }
         };
 

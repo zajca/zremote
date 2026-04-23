@@ -163,6 +163,14 @@ pub enum CommandPaletteEvent {
     RecordRecentAction {
         action_key: String,
     },
+    /// Open the diff viewer for a project. Handled by `MainView`.
+    OpenDiff {
+        project_id: String,
+    },
+    /// Fire a "Send review" action on the currently active diff view.
+    /// Only raised when `PaletteSnapshot.review_pending_count > 0`; the
+    /// main view forwards it to the live `DiffView`.
+    SendReview,
     Close,
 }
 
@@ -1153,6 +1161,8 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
+                PaletteAction::SendReview => Icon::Send,
             },
         };
 
@@ -2150,6 +2160,8 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
+                PaletteAction::SendReview => Icon::Send,
             },
         };
 
@@ -2245,6 +2257,8 @@ impl CommandPalette {
                 PaletteAction::ManageAgentProfiles => Icon::Bot,
                 PaletteAction::NewWorktree { .. } => Icon::GitBranchPlus,
                 PaletteAction::DeleteWorktree { .. } => Icon::XCircle,
+                PaletteAction::OpenDiffForProject { .. } => Icon::GitBranch,
+                PaletteAction::SendReview => Icon::Send,
             },
         };
 

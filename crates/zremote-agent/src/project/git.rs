@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zremote_protocol::project::{Branch, BranchList, GitInfo, GitRemote, WorktreeInfo};
+use zremote_protocol::project::{
+    Branch, BranchList, DiffError, DiffErrorCode, GitInfo, GitRemote, RecentCommit, WorktreeInfo,
+};
 
 /// Maximum wall time for any individual git subprocess. Kills the child on
 /// expiry so a hung command (network, file-lock, misconfigured credential
@@ -13,7 +15,7 @@ const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// message. Disables every interactive credential prompt path (terminal +
 /// GUI askpass) so a repo with a broken remote can't block the caller
 /// waiting for human input.
-fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
+pub(super) fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
     // `Command::spawn` fails with ENOENT both when the binary is missing AND
     // when `current_dir` points at a nonexistent directory — the two are
     // indistinguishable from the caller's perspective. Pre-check the path so
@@ -79,6 +81,140 @@ fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
         }
         Err(e) => Err(format!("git command failed: {e}")),
     }
+}
+
+/// Validate a user-supplied git ref/SHA/range endpoint before it is passed to
+/// `git diff` / `git show` / `git rev-list`.
+///
+/// Strict allowlist: only alphanumerics, `.`, `_`, `/`, `-` are accepted.
+/// Every other byte — including `{`, `}`, `@`, `^`, `:`, `~`, `*`, `?`, `[`,
+/// `\`, space, tabs, all control chars — is rejected. This blocks CWE-88
+/// argument-injection vectors that git's own ref-parser interprets specially
+/// (`@{-1}`, `HEAD^{/pattern}`, `HEAD@{upstream}`, `:/secret`, `~N`).
+///
+/// Additional rejects: leading `-` (flag), leading `.` (git reserves these
+/// names), leading `/`, and `..` substrings (range syntax).
+pub fn validate_git_ref(s: &str) -> Result<(), DiffError> {
+    // Allowlist regex. The set intentionally excludes every metacharacter
+    // git treats specially in a revision.
+    static REF_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = REF_RE.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z0-9._/\-]+$").expect("static ref regex must compile")
+    });
+
+    if s.is_empty() {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not be empty".to_string(),
+            hint: None,
+        });
+    }
+    if s.starts_with('-') {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not start with '-'".to_string(),
+            hint: Some("flag-injection guard; rename the branch".to_string()),
+        });
+    }
+    if s.starts_with('.') {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not start with '.'".to_string(),
+            hint: None,
+        });
+    }
+    if s.starts_with('/') {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not start with '/'".to_string(),
+            hint: None,
+        });
+    }
+    if s.contains("..") {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref must not contain '..'".to_string(),
+            hint: Some("use DiffSource::Range for range queries".to_string()),
+        });
+    }
+    if !re.is_match(s) {
+        return Err(DiffError {
+            code: DiffErrorCode::InvalidInput,
+            message: "ref contains disallowed characters (allowed: A-Z a-z 0-9 . _ / -)"
+                .to_string(),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+/// List the `n` most recent commits reachable from HEAD. Each entry maps 1:1
+/// to `RecentCommit` in the protocol — caller feeds these to the diff source
+/// picker's "recent commits" dropdown.
+///
+/// Uses `git log --pretty=format:%H%x1f%an%x1f%aI%x1f%s -n <n>` so subjects
+/// containing tabs or multiple spaces round-trip cleanly. Returns an empty
+/// vector for empty repos (no HEAD yet).
+pub fn list_recent_commits(path: &Path, n: usize) -> Result<Vec<RecentCommit>, DiffError> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    // Use ASCII US (0x1f) as field separator, LF as record separator. Subjects
+    // can legally contain anything except LF, so this is the only safe parse.
+    let n_str = n.to_string();
+    let fmt = "--pretty=format:%H%x1f%an%x1f%aI%x1f%s";
+    let output = match run_git(path, &["log", fmt, "-n", &n_str, "--no-color"]) {
+        Ok(s) => s,
+        Err(stderr) => {
+            // Empty repo: `fatal: your current branch 'main' does not have any commits yet`.
+            // Not having commits is expected; surface as empty list.
+            let lowered = stderr.to_lowercase();
+            if lowered.contains("does not have any commits")
+                || lowered.contains("bad default revision")
+                || lowered.contains("unknown revision")
+            {
+                return Ok(Vec::new());
+            }
+            if lowered.contains("not a git repository") {
+                return Err(DiffError {
+                    code: DiffErrorCode::NotGitRepo,
+                    message: stderr,
+                    hint: None,
+                });
+            }
+            return Err(DiffError {
+                code: DiffErrorCode::Other,
+                message: stderr,
+                hint: None,
+            });
+        }
+    };
+
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let sha = parts[0].to_string();
+        let short_sha: String = sha.chars().take(7).collect();
+        let author = parts[1].to_string();
+        let timestamp = match chrono::DateTime::parse_from_rfc3339(parts[2]) {
+            Ok(dt) => dt.with_timezone(&chrono::Utc),
+            Err(_) => continue,
+        };
+        commits.push(RecentCommit {
+            sha,
+            short_sha,
+            author,
+            timestamp,
+            subject: parts[3].to_string(),
+        });
+    }
+    Ok(commits)
 }
 
 /// Strip credentials from a remote URL.
@@ -1043,6 +1179,150 @@ upstream\tgit@github.com:org/repo.git (push)
             list.local.len()
         );
         assert!(!list.remote_truncated, "no remotes configured in this repo");
+    }
+
+    #[test]
+    fn validate_git_ref_accepts_simple_names() {
+        assert!(validate_git_ref("main").is_ok());
+        assert!(validate_git_ref("feature/foo").is_ok());
+        assert!(validate_git_ref("v1.0.0").is_ok());
+        assert!(validate_git_ref("v1.2.3").is_ok());
+        assert!(validate_git_ref("abc1234").is_ok());
+        assert!(validate_git_ref("origin/main").is_ok());
+        assert!(validate_git_ref("user.name/branch").is_ok());
+        assert!(validate_git_ref("HEAD").is_ok());
+        assert!(validate_git_ref("release-1.0").is_ok());
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_flag_injection() {
+        let err = validate_git_ref("-upload-pack=evil").expect_err("must fail");
+        assert_eq!(err.code, DiffErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_range_syntax() {
+        assert!(validate_git_ref("main..feat").is_err());
+        assert!(validate_git_ref("main...feat").is_err());
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_control_chars() {
+        assert!(validate_git_ref("main\nwhoops").is_err());
+        assert!(validate_git_ref("main\0").is_err());
+        assert!(validate_git_ref("main\r").is_err());
+        assert!(validate_git_ref("main\t").is_err());
+        assert!(validate_git_ref("main\x01").is_err());
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_empty() {
+        assert!(validate_git_ref("").is_err());
+    }
+
+    /// CWE-88: block git's own revision metacharacters. Each of these strings
+    /// passes the previous blocklist (`-`, `..`, LF/CR/NUL) but names
+    /// something unexpected when git parses it — a reflog peek, a pickaxe
+    /// search, an upstream alias, or a flag when concatenated inside a
+    /// `{from}..{to}` range.
+    #[test]
+    fn validate_git_ref_rejects_git_metacharacters() {
+        let bad = [
+            "@{-1}",           // reflog index
+            "HEAD^{/pattern}", // pickaxe search on message
+            "HEAD@{upstream}", // upstream alias
+            ":/secret",        // commit search by message
+            "main~1",          // ancestor
+            "foo^",            // parent
+            "foo*",            // glob
+            "foo?",            // glob
+            "foo[bar]",        // glob
+            "foo\\bar",        // backslash
+            "foo bar",         // space
+            "foo`bar",         // backtick
+            "foo\"bar",        // double quote
+            "foo'bar",         // single quote
+            "foo;bar",         // shell separator
+            "foo&bar",         // background
+            "foo|bar",         // pipe
+            "foo$bar",         // variable
+            "foo<bar",         // redirection
+            "foo>bar",         // redirection
+            "foo(bar)",        // subshell
+            "foo#bar",         // comment
+            "foo=bar",         // flag value
+            "@{upstream}",     // bare at-brace
+            "main\x1b[31m",    // CSI sneak
+        ];
+        for s in bad {
+            assert!(validate_git_ref(s).is_err(), "ref must be rejected: {s:?}");
+        }
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_leading_dot_or_slash() {
+        assert!(validate_git_ref(".hidden").is_err());
+        assert!(validate_git_ref("/abs").is_err());
+        assert!(validate_git_ref(".main").is_err());
+    }
+
+    #[test]
+    fn list_recent_commits_returns_commits_for_repo() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        // Add a second commit so we have >1.
+        fs::write(tmp.path().join("second.txt"), "two").unwrap();
+        run_git(tmp.path(), &["add", "."]).unwrap();
+        run_git(tmp.path(), &["commit", "--no-verify", "-m", "second"]).unwrap();
+
+        let commits = list_recent_commits(tmp.path(), 10).expect("list commits");
+        assert_eq!(
+            commits.len(),
+            2,
+            "expected 2 commits, got {}",
+            commits.len()
+        );
+        assert_eq!(commits[0].subject, "second");
+        assert_eq!(commits[1].subject, "initial commit");
+        assert_eq!(commits[0].short_sha.len(), 7);
+        assert!(!commits[0].sha.is_empty());
+        assert_eq!(commits[0].author, "Test");
+    }
+
+    #[test]
+    fn list_recent_commits_respects_n() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        for i in 0..3 {
+            fs::write(tmp.path().join(format!("f{i}.txt")), "x").unwrap();
+            run_git(tmp.path(), &["add", "."]).unwrap();
+            run_git(
+                tmp.path(),
+                &["commit", "--no-verify", "-m", &format!("c{i}")],
+            )
+            .unwrap();
+        }
+        let commits = list_recent_commits(tmp.path(), 2).expect("list commits");
+        assert_eq!(commits.len(), 2);
+    }
+
+    #[test]
+    fn list_recent_commits_empty_repo_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        run_git(tmp.path(), &["init"]).unwrap();
+        run_git(tmp.path(), &["config", "user.email", "x@x.com"]).unwrap();
+        run_git(tmp.path(), &["config", "user.name", "x"]).unwrap();
+
+        let commits = list_recent_commits(tmp.path(), 10).expect("should succeed on empty");
+        assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn list_recent_commits_n_zero_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let commits = list_recent_commits(tmp.path(), 0).expect("list commits");
+        assert!(commits.is_empty());
     }
 
     #[test]

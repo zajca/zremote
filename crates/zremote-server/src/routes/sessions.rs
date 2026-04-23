@@ -497,6 +497,7 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            diff_dispatch: Arc::new(crate::diff_dispatch::DiffDispatch::new()),
         })
     }
 

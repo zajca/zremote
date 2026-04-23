@@ -790,6 +790,60 @@ pub(super) async fn handle_agent_message(
                 }
             }
         }
+        AgentMessage::DiffStarted { request_id, files } => {
+            state
+                .diff_dispatch
+                .forward_stream(
+                    request_id,
+                    crate::diff_dispatch::DiffStreamChunk::Started { files },
+                )
+                .await;
+        }
+        AgentMessage::DiffFileChunk {
+            request_id,
+            file_index,
+            file,
+        } => {
+            state
+                .diff_dispatch
+                .forward_stream(
+                    request_id,
+                    crate::diff_dispatch::DiffStreamChunk::File {
+                        file_index,
+                        file: Box::new(file),
+                    },
+                )
+                .await;
+        }
+        AgentMessage::DiffFinished { request_id, error } => {
+            state.diff_dispatch.finish_stream(request_id, error).await;
+        }
+        AgentMessage::DiffSourcesResult {
+            request_id,
+            options,
+            error,
+        } => {
+            state
+                .diff_dispatch
+                .complete_sources(
+                    request_id,
+                    crate::diff_dispatch::DiffSourcesReply { options, error },
+                )
+                .await;
+        }
+        AgentMessage::SendReviewResult {
+            request_id,
+            response,
+            error,
+        } => {
+            state
+                .diff_dispatch
+                .complete_review(
+                    request_id,
+                    crate::diff_dispatch::SendReviewReply { response, error },
+                )
+                .await;
+        }
     }
     Ok(())
 }
@@ -2196,6 +2250,7 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            diff_dispatch: Arc::new(crate::diff_dispatch::DiffDispatch::new()),
         })
     }
 
@@ -2367,7 +2422,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         let msg = AgenticAgentMessage::LoopDetected {
@@ -2418,7 +2473,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         // First detect the loop
@@ -2476,7 +2531,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, false)
+            .register(host_id, "test-host".to_string(), tx, false, false)
             .await;
 
         // Detect loop first
@@ -2542,7 +2597,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "cleanup-host".to_string(), tx, false)
+            .register(host_id, "cleanup-host".to_string(), tx, false, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -2602,7 +2657,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "persist-host".to_string(), tx, true)
+            .register(host_id, "persist-host".to_string(), tx, true, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -2644,13 +2699,13 @@ mod tests {
         let (tx1, _rx1) = tokio::sync::mpsc::channel(16);
         let (_, gen1) = state
             .connections
-            .register(host_id, "stale-host".to_string(), tx1, false)
+            .register(host_id, "stale-host".to_string(), tx1, false, false)
             .await;
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
         let (_, gen2) = state
             .connections
-            .register(host_id, "stale-host".to_string(), tx2, false)
+            .register(host_id, "stale-host".to_string(), tx2, false, false)
             .await;
 
         assert!(gen2 > gen1);
@@ -2925,7 +2980,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "persist-host".to_string(), tx, true)
+            .register(host_id, "persist-host".to_string(), tx, true, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -2980,7 +3035,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_, generation) = state
             .connections
-            .register(host_id, "non-persist-host".to_string(), tx, false)
+            .register(host_id, "non-persist-host".to_string(), tx, false, false)
             .await;
 
         cleanup_agent(&state, &host_id, generation).await;
@@ -3037,7 +3092,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         state
             .connections
-            .register(host_id, "test-host".to_string(), tx, true)
+            .register(host_id, "test-host".to_string(), tx, true, false)
             .await;
 
         let msg = AgenticAgentMessage::LoopDetected {

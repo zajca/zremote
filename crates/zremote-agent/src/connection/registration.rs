@@ -28,6 +28,9 @@ pub(super) async fn register(
         arch: std::env::consts::ARCH.to_string(),
         token: config.token.clone(),
         supports_persistent_sessions: supports_persistence,
+        // RFC git-diff-ui P2: this agent build handles ProjectDiff /
+        // ProjectDiffSources / ProjectSendReview / DiffCancel.
+        supports_diff: true,
     };
 
     send_message(ws, &register_msg).await?;
