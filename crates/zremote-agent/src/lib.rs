@@ -39,6 +39,7 @@ mod project;
 mod pty;
 mod session;
 mod shell;
+mod worktree;
 
 use std::path::PathBuf;
 use std::time::Duration;
