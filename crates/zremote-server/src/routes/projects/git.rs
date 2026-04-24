@@ -12,7 +12,7 @@ use zremote_protocol::ServerMessage;
 use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
 
 use crate::error::AppError;
-use crate::state::{AppState, BranchListResponse, PendingRequest};
+use crate::state::{AppState, BranchListResponse, MAX_PENDING_BRANCH_LIST, PendingRequest};
 
 use super::parse_project_id;
 
@@ -88,6 +88,23 @@ pub(crate) async fn list_branches_with_timeout(
         .await
         .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
 
+    // DoS mitigation (complements future REST auth middleware): refuse new
+    // requests once the pending map is saturated so a misbehaving or
+    // unauthenticated caller cannot grow it without bound.
+    if state.branch_list_requests.len() >= MAX_PENDING_BRANCH_LIST {
+        tracing::warn!(
+            host_id = %host_id,
+            pending = state.branch_list_requests.len(),
+            "branch_list_requests map saturated, rejecting"
+        );
+        let err = WorktreeError::new(
+            WorktreeErrorCode::Internal,
+            "Server temporarily overloaded — try again shortly.",
+            "pending-map cap reached",
+        );
+        return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(err)).into_response());
+    }
+
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel::<BranchListResponse>();
     state
@@ -151,8 +168,11 @@ pub(crate) async fn list_branches_with_timeout(
             );
             let err = WorktreeError::new(
                 WorktreeErrorCode::Internal,
-                "Branch list timed out — the agent did not respond in 30s.",
-                "agent response timeout",
+                "Branch list timed out — the agent may still be working or may have disconnected. Reopen the modal to try again.",
+                format!(
+                    "agent response timeout after {}s",
+                    response_timeout.as_secs()
+                ),
             );
             Ok((StatusCode::GATEWAY_TIMEOUT, Json(err)).into_response())
         }

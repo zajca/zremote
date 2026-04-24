@@ -1280,6 +1280,34 @@ fn handle_branch_list_request(
 ) -> impl std::future::Future<Output = ()> + Send {
     let tx = outbound_tx.clone();
     async move {
+        // Reject path traversal (`..`) before any I/O — mirrors the guard on
+        // `ProjectRegister` / `ListDirectory`. A traversal-containing path
+        // does not resolve to a real project, so PathMissing carries the same
+        // actionable hint.
+        if let Err(e) = validate_path_no_traversal(&project_path) {
+            tracing::warn!(
+                path = %project_path,
+                error = %e,
+                "rejected BranchListRequest with invalid path"
+            );
+            let err = zremote_protocol::project::WorktreeError::new(
+                zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                "Project path is not valid. Remove the project and re-add it with a correct path.",
+                "invalid path",
+            );
+            if tx
+                .send(AgentMessage::BranchListResponse {
+                    request_id,
+                    branches: None,
+                    error: Some(err),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!("outbound channel closed, BranchListResponse dropped");
+            }
+            return;
+        }
         tokio::spawn(async move {
             // Existence check first so we can return a precise PathMissing
             // error. `GitInspector::list_branches` would fail with a raw git
@@ -1327,8 +1355,11 @@ fn handle_branch_list_request(
                 Ok(Err(stderr)) => {
                     tracing::warn!(error = %stderr, "list_branches failed");
                     // Preserve PathMissing classification if git stderr
-                    // happens to indicate it; otherwise map to Internal so
-                    // the raw git message doesn't leak through.
+                    // happens to indicate it; otherwise map to Internal with a
+                    // fixed safe message so raw git output (which can include
+                    // filesystem paths, remote URLs, credential-helper details
+                    // — CWE-200) never reaches the HTTP client. Raw stderr is
+                    // kept in the `tracing::warn!` above for local debugging.
                     let err = zremote_protocol::project::WorktreeError::from_git_stderr(&stderr);
                     let err = if matches!(
                         err.code,
@@ -1339,7 +1370,7 @@ fn handle_branch_list_request(
                         zremote_protocol::project::WorktreeError::new(
                             zremote_protocol::project::WorktreeErrorCode::Internal,
                             "Could not list branches for this project.",
-                            stderr,
+                            "unexpected git error",
                         )
                     };
                     AgentMessage::BranchListResponse {
@@ -1356,7 +1387,7 @@ fn handle_branch_list_request(
                         error: Some(zremote_protocol::project::WorktreeError::new(
                             zremote_protocol::project::WorktreeErrorCode::Internal,
                             "Internal error while listing branches.",
-                            format!("task join failed: {join_err}"),
+                            "task join failed",
                         )),
                     }
                 }
@@ -1384,6 +1415,34 @@ fn handle_worktree_create_request(
 ) -> impl std::future::Future<Output = ()> + Send {
     let tx = outbound_tx.clone();
     async move {
+        // Reject path traversal (`..`) before any I/O or spawn_blocking —
+        // mirrors the guard on `ProjectRegister` / `ListDirectory`. A
+        // traversal-containing path does not resolve to a real project, so
+        // PathMissing is the correct classification for the client.
+        if let Err(e) = validate_path_no_traversal(&project_path) {
+            tracing::warn!(
+                path = %project_path,
+                error = %e,
+                "rejected WorktreeCreateRequest with invalid path"
+            );
+            let err = zremote_protocol::project::WorktreeError::new(
+                zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                "Project path is not valid. Remove the project and re-add it with a correct path.",
+                "invalid path",
+            );
+            if tx
+                .send(AgentMessage::WorktreeCreateResponse {
+                    request_id,
+                    worktree: None,
+                    error: Some(err),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!("outbound channel closed, WorktreeCreateResponse dropped");
+            }
+            return;
+        }
         tokio::spawn(async move {
             let job_id = uuid::Uuid::new_v4().to_string();
 

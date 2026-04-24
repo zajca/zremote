@@ -13,7 +13,9 @@ use zremote_protocol::ServerMessage;
 use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
 
 use crate::error::{AppError, AppJson};
-use crate::state::{AppState, PendingWorktreeCreate, WorktreeCreateResponse};
+use crate::state::{
+    AppState, MAX_PENDING_WORKTREE_CREATE, PendingWorktreeCreate, WorktreeCreateResponse,
+};
 
 use super::crud::ProjectResponse;
 use super::parse_project_id;
@@ -85,6 +87,23 @@ pub(crate) async fn create_worktree_with_timeout(
         .await
         .ok_or_else(|| AppError::Conflict("host is offline".to_string()))?;
 
+    // DoS mitigation (complements future REST auth middleware): refuse new
+    // requests once the pending map is saturated so a misbehaving or
+    // unauthenticated caller cannot grow it without bound.
+    if state.worktree_create_requests.len() >= MAX_PENDING_WORKTREE_CREATE {
+        tracing::warn!(
+            host_id = %host_id,
+            pending = state.worktree_create_requests.len(),
+            "worktree_create_requests map saturated, rejecting"
+        );
+        let err = WorktreeError::new(
+            WorktreeErrorCode::Internal,
+            "Server temporarily overloaded — try again shortly.",
+            "pending-map cap reached",
+        );
+        return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(err)).into_response());
+    }
+
     let request_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::oneshot::channel::<WorktreeCreateResponse>();
     state.worktree_create_requests.insert(
@@ -142,15 +161,20 @@ pub(crate) async fn create_worktree_with_timeout(
         })) => {
             // Dispatch reported success but could not upsert the DB row. This
             // happens when the parent project was deleted mid-flight or the
-            // upsert itself failed — treat as an internal error so the caller
-            // retries rather than sees a half-updated UI.
+            // upsert itself failed. Return a structured `WorktreeError` (same
+            // shape as every other error path) so the client's
+            // `create_worktree_structured` routes through
+            // `WorktreeCreateError::Structured` consistently.
             tracing::error!(
                 request_id = %request_id,
                 "WorktreeCreateResponse success without project_id — parent missing or upsert failed"
             );
-            Err(AppError::Internal(
-                "worktree created but could not be recorded".to_string(),
-            ))
+            let err = WorktreeError::new(
+                WorktreeErrorCode::Internal,
+                "Worktree was created but the server couldn't link it back — refresh to see the new entry.",
+                "worktree created but project row upsert failed or parent was missing",
+            );
+            Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(err)).into_response())
         }
         Ok(Ok(WorktreeCreateResponse {
             error: Some(err), ..
@@ -177,8 +201,11 @@ pub(crate) async fn create_worktree_with_timeout(
             );
             let err = WorktreeError::new(
                 WorktreeErrorCode::Internal,
-                "Worktree creation timed out — the agent may still be working or disconnected.",
-                "agent response timeout after 120s",
+                "Worktree creation timed out — the agent may still be working or may have disconnected. Reopen the modal to try again.",
+                format!(
+                    "agent response timeout after {}s",
+                    response_timeout.as_secs()
+                ),
             );
             Ok((StatusCode::GATEWAY_TIMEOUT, Json(err)).into_response())
         }

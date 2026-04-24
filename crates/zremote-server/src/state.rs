@@ -251,6 +251,18 @@ pub const BRANCH_LIST_STALE_THRESHOLD: std::time::Duration = std::time::Duration
 pub const WORKTREE_CREATE_STALE_THRESHOLD: std::time::Duration =
     std::time::Duration::from_secs(180);
 
+/// Hard cap on outstanding `BranchListRequest` pending entries. DoS mitigation
+/// complementing future auth middleware: an unauthenticated client (pre-auth)
+/// or a buggy caller cannot grow the map without bound and exhaust memory.
+/// Sized generously — legitimate users open branch pickers across at most a
+/// handful of projects simultaneously.
+pub const MAX_PENDING_BRANCH_LIST: usize = 5_000;
+
+/// Hard cap on outstanding `WorktreeCreateRequest` pending entries. Same DoS
+/// mitigation as `MAX_PENDING_BRANCH_LIST`, with a tighter cap since
+/// worktree-create requests are heavier (agent spawns git) and much rarer.
+pub const MAX_PENDING_WORKTREE_CREATE: usize = 1_000;
+
 impl AppState {
     /// Remove pending requests older than `max_age` from the general-purpose
     /// pending maps, and apply per-map thresholds

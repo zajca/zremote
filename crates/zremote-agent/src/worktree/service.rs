@@ -186,13 +186,16 @@ pub async fn run_worktree_create(
     let git_result = match join_result {
         Ok(r) => r,
         Err(join_err) => {
-            let msg = format!("worktree create task failed: {join_err}");
-            tracing::error!(error = %msg, "spawn_blocking join failed");
-            emit_progress(WorktreeCreationStage::Failed, 100, Some(msg.clone()));
+            tracing::error!(error = %join_err, "spawn_blocking join failed");
+            emit_progress(
+                WorktreeCreationStage::Failed,
+                100,
+                Some("worktree create task failed".to_string()),
+            );
             return Err(WorktreeCreateFailure::Structured(WorktreeError::new(
                 WorktreeErrorCode::Internal,
                 "Internal error while creating worktree.",
-                msg,
+                "worktree create task failed",
             )));
         }
     };

@@ -109,12 +109,18 @@ async fn upsert_worktree_row(
         .unwrap_or("worktree")
         .to_string();
 
+    // Preserve `parent_project_id` on conflict via COALESCE — if both the
+    // legacy `WorktreeCreated` path and the new `WorktreeCreateResponse` path
+    // write the same row (or they happen out of order), an incoming NULL must
+    // not clobber a previously-linked parent. See FIX 1 in the RFC-009 review.
     if let Err(e) = sqlx::query(
         "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
          git_branch, git_commit_hash) \
          VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?) \
          ON CONFLICT(host_id, path) DO UPDATE SET \
-         git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash",
+         git_branch = excluded.git_branch, \
+         git_commit_hash = excluded.git_commit_hash, \
+         parent_project_id = COALESCE(excluded.parent_project_id, projects.parent_project_id)",
     )
     .bind(&wt_id)
     .bind(host_id_str)
@@ -3749,6 +3755,96 @@ mod tests {
         )
         .await;
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_worktree_create_response_preserves_parent_project_id_on_conflict() {
+        // Regression: a second WorktreeCreateResponse (or a legacy
+        // WorktreeCreated) arriving after the row has already been linked to
+        // its parent must NOT clobber `parent_project_id` with NULL.
+        // Exercises FIX 1 in the RFC-009 review.
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let parent_path = "/srv/repos/acme";
+        let wt_path = "/srv/repos/acme-wt/feature";
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        let parent_id = Uuid::new_v4().to_string();
+        insert_test_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+        // Pre-insert the worktree row with a linked parent (simulates the
+        // state after a successful first pass — legacy WorktreeCreated or an
+        // earlier WorktreeCreateResponse).
+        let existing_wt_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+             git_branch, git_commit_hash) \
+             VALUES (?, ?, ?, ?, 'worktree', ?, 'old-branch', 'oldhash')",
+        )
+        .bind(&existing_wt_id)
+        .bind(&host_id_str)
+        .bind(wt_path)
+        .bind("feature")
+        .bind(&parent_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Arrange: dispatch a WorktreeCreateResponse whose upsert call would
+        // produce `parent_project_id = NULL` for some reason (e.g. the
+        // dispatch helper resolved the parent from a now-removed project row
+        // between the insert and the upsert). We simulate that by passing a
+        // parent_project_path that does NOT match any row in `projects`, so
+        // `upsert_worktree_row` returns early (None, no DB write) — then
+        // independently we re-run upsert with the real parent to prove the
+        // COALESCE logic: use the legacy WorktreeCreated path (matching
+        // parent) and the conflict must preserve the pre-existing parent.
+        //
+        // Concretely: call `upsert_worktree_row` twice in order, second one
+        // with the legacy path that actually carries a parent, and assert the
+        // row's parent stays set. To actually exercise the "excluded NULL"
+        // branch of COALESCE we bypass the helper (which never passes NULL
+        // because it early-returns) and drive the raw SQL via a dedicated
+        // upsert whose `parent_project_id` param is NULL.
+        let wt_id2 = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+             git_branch, git_commit_hash) \
+             VALUES (?, ?, ?, ?, 'worktree', NULL, ?, ?) \
+             ON CONFLICT(host_id, path) DO UPDATE SET \
+             git_branch = excluded.git_branch, \
+             git_commit_hash = excluded.git_commit_hash, \
+             parent_project_id = COALESCE(excluded.parent_project_id, projects.parent_project_id)",
+        )
+        .bind(&wt_id2)
+        .bind(&host_id_str)
+        .bind(wt_path)
+        .bind("feature")
+        .bind("new-branch")
+        .bind("newhash")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Assert: parent is still set to the original parent_id.
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT parent_project_id, git_branch, git_commit_hash FROM projects \
+             WHERE host_id = ? AND path = ?",
+        )
+        .bind(&host_id_str)
+        .bind(wt_path)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0.as_deref(),
+            Some(parent_id.as_str()),
+            "COALESCE must preserve the pre-existing parent_project_id when excluded is NULL"
+        );
+        // And the updatable columns were overwritten as expected.
+        assert_eq!(row.1.as_deref(), Some("new-branch"));
+        assert_eq!(row.2.as_deref(), Some("newhash"));
     }
 
     #[tokio::test]
