@@ -790,6 +790,23 @@ pub(super) async fn handle_agent_message(
                 }
             }
         }
+        // RFC-009 P1: protocol variants landed ahead of server dispatch (P3).
+        // Until P3 wires the pending maps, drop the response with a debug log
+        // so the agent's reply doesn't crash the server on exhaustiveness.
+        AgentMessage::BranchListResponse { request_id, .. } => {
+            tracing::debug!(
+                host_id = %host_id,
+                request_id = %request_id,
+                "received BranchListResponse before P3 dispatch wired; dropping"
+            );
+        }
+        AgentMessage::WorktreeCreateResponse { request_id, .. } => {
+            tracing::debug!(
+                host_id = %host_id,
+                request_id = %request_id,
+                "received WorktreeCreateResponse before P3 dispatch wired; dropping"
+            );
+        }
     }
     Ok(())
 }

@@ -1230,6 +1230,22 @@ pub(super) async fn handle_server_message(
             )
             .await;
         }
+        // RFC-009 P1: protocol variants landed ahead of the agent handlers
+        // (P2). Until P2 wires git branch listing and synchronous worktree
+        // create, log and ignore so a newer server reaching an older agent
+        // (or this intermediate build) doesn't crash on exhaustiveness.
+        ServerMessage::BranchListRequest { request_id, .. } => {
+            tracing::debug!(
+                request_id = %request_id,
+                "received BranchListRequest before P2 handlers wired; dropping"
+            );
+        }
+        ServerMessage::WorktreeCreateRequest { request_id, .. } => {
+            tracing::debug!(
+                request_id = %request_id,
+                "received WorktreeCreateRequest before P2 handlers wired; dropping"
+            );
+        }
     }
 }
 
