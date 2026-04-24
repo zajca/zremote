@@ -16,18 +16,13 @@ use crate::local::state::LocalAppState;
 use crate::project::action_runner::ActionRunContext;
 use crate::project::git::GitInspector;
 use crate::project::hook_dispatcher::{WorktreeSlot, run_worktree_hook, run_worktree_override};
+use crate::worktree::service::{WorktreeCreateFailure, WorktreeCreateInput, run_worktree_create};
 
 use super::ProjectResponse;
 use super::parse_project_id;
 use zremote_protocol::ProjectSettings;
 use zremote_protocol::events::WorktreeCreationStage;
 use zremote_protocol::project::{WorktreeError, WorktreeErrorCode};
-
-/// Maximum wall time for the blocking git worktree add call. Chosen to
-/// tolerate large-repo worktree creation (where git's staged checkout can
-/// legitimately take tens of seconds) while still putting a hard ceiling on
-/// the request so the client isn't left hanging forever.
-const WORKTREE_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Maximum wall time for the `pre_delete` captured hook. The delete handler
 /// blocks on this hook before touching git, so an unbounded run would pin the
@@ -50,25 +45,6 @@ pub(crate) fn reject_leading_dash(field: &str, value: &str) -> Result<(), Worktr
         ));
     }
     Ok(())
-}
-
-/// Emit a `WorktreeCreationProgress` event for the given job/stage. Broadcast
-/// is best-effort — a full broadcast channel should not abort the operation.
-fn emit_progress(
-    state: &LocalAppState,
-    project_id: &str,
-    job_id: &str,
-    stage: WorktreeCreationStage,
-    percent: u8,
-    message: Option<String>,
-) {
-    let _ = state.events.send(ServerEvent::WorktreeCreationProgress {
-        project_id: project_id.to_string(),
-        job_id: job_id.to_string(),
-        stage,
-        percent,
-        message,
-    });
 }
 
 /// Map a `WorktreeErrorCode` to the HTTP status that best conveys the class of
@@ -337,115 +313,58 @@ pub async fn create_worktree(
         }
     }
 
-    // Default flow: existing GitInspector behavior, wrapped in a 60s timeout
-    // and bracketed by progress events so the GUI can show a pending spinner
-    // for large-repo creations. Leading-dash inputs were already rejected at
-    // the top of the handler so the blocking task can trust these values.
-    let branch = body.branch.clone();
-    let wt_path = body.path.clone();
-    let new_branch = body.new_branch.unwrap_or(false);
-    let base_ref = body.base_ref.clone();
-    let repo_path = project_path.clone();
-
+    // Default flow: delegate to the shared helper. The helper runs the
+    // CWE-88 leading-dash guard (defence-in-depth), emits Init/Creating/
+    // Finalizing/Done progress through the callback, bounds the git call
+    // with the shared `WORKTREE_CREATE_TIMEOUT`, and fires `post_create`
+    // when settings configure one.
+    //
+    // HTTP-only concerns kept in this handler:
+    //   * translating the callback into a broadcast `ServerEvent`,
+    //   * DB insert + `UPDATE projects`,
+    //   * mapping the structured error to an HTTP status.
     let job_id = Uuid::new_v4().to_string();
-    emit_progress(
-        &state,
-        &project_id,
-        &job_id,
-        WorktreeCreationStage::Init,
-        0,
-        None,
-    );
+    let events_cb = state.events.clone();
+    let project_id_cb = project_id.clone();
+    let job_id_cb = job_id.clone();
 
-    // Emit Creating from *inside* the blocking task so the event fires when
-    // git actually starts running, not at the moment we scheduled it. That
-    // gives the GUI a progress signal that reflects reality under load.
-    let events_for_task = state.events.clone();
-    let project_id_for_task = project_id.clone();
-    let job_id_for_task = job_id.clone();
+    let service_input = WorktreeCreateInput {
+        project_path: std::path::PathBuf::from(&project_path),
+        branch: body.branch.clone(),
+        path: body.path.as_deref().map(std::path::PathBuf::from),
+        new_branch: body.new_branch.unwrap_or(false),
+        base_ref: body.base_ref.clone(),
+    };
 
-    let mut handle = tokio::task::spawn_blocking(move || {
-        // Best-effort broadcast: a full channel must not abort the git call.
-        let _ = events_for_task.send(ServerEvent::WorktreeCreationProgress {
-            project_id: project_id_for_task,
-            job_id: job_id_for_task,
-            stage: WorktreeCreationStage::Creating,
-            percent: 25,
-            message: Some("running git worktree add".to_string()),
+    let service_result = run_worktree_create(service_input, move |stage, percent, message| {
+        // Best-effort broadcast — a full channel must not abort the git call.
+        let _ = events_cb.send(ServerEvent::WorktreeCreationProgress {
+            project_id: project_id_cb.clone(),
+            job_id: job_id_cb.clone(),
+            stage,
+            percent,
+            message,
         });
-        GitInspector::create_worktree(
-            Path::new(&repo_path),
-            &branch,
-            wt_path.as_deref().map(Path::new),
-            new_branch,
-            base_ref.as_deref(),
-        )
-    });
+    })
+    .await;
 
-    // Passing `&mut handle` keeps ownership of the JoinHandle so we can abort
-    // the task if the timeout fires; otherwise the handle would be moved into
-    // the timeout future and we would leak the spawned task on timeout.
-    let join_result = match tokio::time::timeout(WORKTREE_CREATE_TIMEOUT, &mut handle).await {
-        Ok(res) => {
-            res.map_err(|e| AppError::Internal(format!("worktree create task failed: {e}")))?
+    let output = match service_result {
+        Ok(out) => out,
+        Err(WorktreeCreateFailure::Structured(err)) => {
+            return Ok(worktree_error_response(err));
         }
-        Err(_) => {
-            handle.abort();
-            tracing::warn!(
-                job_id = %job_id,
-                timeout_secs = WORKTREE_CREATE_TIMEOUT.as_secs(),
-                "worktree create timed out"
-            );
-            emit_progress(
-                &state,
-                &project_id,
-                &job_id,
-                WorktreeCreationStage::Failed,
-                100,
-                Some(format!(
-                    "timed out after {}s",
-                    WORKTREE_CREATE_TIMEOUT.as_secs()
-                )),
-            );
+        Err(WorktreeCreateFailure::Timeout { seconds }) => {
+            tracing::warn!(job_id = %job_id, timeout_secs = seconds, "worktree create timed out");
             return Ok(worktree_error_response(WorktreeError::new(
                 WorktreeErrorCode::Internal,
                 "Worktree creation timed out — the repository may be very large or git may be stuck.",
-                format!("timed out after {}s", WORKTREE_CREATE_TIMEOUT.as_secs()),
+                format!("timed out after {seconds}s"),
             )));
         }
     };
 
-    let result = match join_result {
-        Ok(info) => info,
-        Err(stderr) => {
-            tracing::warn!(error = %stderr, job_id = %job_id, "worktree create failed");
-            let err = WorktreeError::from_git_stderr(&stderr);
-            emit_progress(
-                &state,
-                &project_id,
-                &job_id,
-                WorktreeCreationStage::Failed,
-                100,
-                Some(err.message.clone()),
-            );
-            return Ok(worktree_error_response(err));
-        }
-    };
-
-    // git has returned successfully; the work left is DB insert + post_create
-    // hook. Surface that as Finalizing so the GUI can show a "wrapping up"
-    // state distinct from the active git call.
-    emit_progress(
-        &state,
-        &project_id,
-        &job_id,
-        WorktreeCreationStage::Finalizing,
-        75,
-        None,
-    );
-
     let wt_id = Uuid::new_v4().to_string();
-    let wt_name = result
+    let wt_name = output
         .path
         .rsplit('/')
         .next()
@@ -456,7 +375,7 @@ pub async fn create_worktree(
         &state.db,
         &wt_id,
         &host_id_str,
-        &result.path,
+        &output.path,
         &wt_name,
         Some(&project_id),
         "worktree",
@@ -464,51 +383,26 @@ pub async fn create_worktree(
     .await?;
 
     sqlx::query("UPDATE projects SET git_branch = ?, git_commit_hash = ? WHERE id = ?")
-        .bind(&result.branch)
-        .bind(&result.commit_hash)
+        .bind(&output.branch)
+        .bind(&output.commit_hash)
         .bind(&wt_id)
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
 
-    // Run post_create captured hook (new or legacy on_create) if configured.
-    // Resolution errors (e.g. hook references a missing action) surface as
-    // 400s so misconfiguration is visible immediately, not silently dropped.
-    let hook_result = if let Some(ref sett) = settings {
-        let ctx = ActionRunContext {
-            project_path: project_path.clone(),
-            worktree_path: Some(result.path.clone()),
-            branch: result.branch.clone(),
-            worktree_name: Some(wt_name.clone()),
-            inputs: std::collections::HashMap::new(),
-        };
-        run_worktree_hook(sett, WorktreeSlot::PostCreate, ctx, None).await?
-    } else {
-        None
-    };
-
-    if let Some(ref hr) = hook_result {
-        log_hook_result("post_create", &result.path, hr);
+    if let Some(ref hr) = output.hook_result {
+        log_hook_result("post_create", &output.path, hr);
     }
 
     let mut project = serde_json::to_value(q::get_project(&state.db, &wt_id).await?)
         .map_err(|e| AppError::Internal(format!("serialization error: {e}")))?;
-    if let Some(ref hr) = hook_result {
+    if let Some(ref hr) = output.hook_result {
         project["hook_result"] = serde_json::json!({
             "success": hr.success,
             "output": hr.output,
             "duration_ms": hr.duration_ms,
         });
     }
-
-    emit_progress(
-        &state,
-        &project_id,
-        &job_id,
-        WorktreeCreationStage::Done,
-        100,
-        None,
-    );
 
     Ok((StatusCode::CREATED, Json(project)).into_response())
 }
