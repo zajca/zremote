@@ -47,30 +47,12 @@ pub(crate) fn reject_leading_dash(field: &str, value: &str) -> Result<(), Worktr
     Ok(())
 }
 
-/// Map a `WorktreeErrorCode` to the HTTP status that best conveys the class of
-/// failure. We keep 500 for true internal errors so monitoring/alerting can
-/// still distinguish them, but use 4xx for issues the caller can correct.
-fn status_for_code(code: &WorktreeErrorCode) -> StatusCode {
-    match code {
-        WorktreeErrorCode::BranchExists | WorktreeErrorCode::PathCollision => StatusCode::CONFLICT,
-        WorktreeErrorCode::DetachedHead
-        | WorktreeErrorCode::Locked
-        | WorktreeErrorCode::Unmerged
-        | WorktreeErrorCode::InvalidRef => StatusCode::BAD_REQUEST,
-        // The project directory is gone — the caller has to fix the project
-        // registration, not the worktree inputs. 404 matches the semantics
-        // (the referenced resource no longer exists on this host).
-        WorktreeErrorCode::PathMissing => StatusCode::NOT_FOUND,
-        WorktreeErrorCode::Internal | WorktreeErrorCode::Unknown => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-/// Build a JSON response body for a structured worktree error.
+/// Build a JSON response body for a structured worktree error. Delegates to
+/// the shared helper in `zremote-core` so local-mode and server-mode use one
+/// status-code mapping.
 fn worktree_error_response(err: WorktreeError) -> axum::response::Response {
-    let status = status_for_code(&err.code);
-    (status, Json(err)).into_response()
+    let (status, body) = zremote_core::worktree_http::worktree_error_response(err);
+    (status, body).into_response()
 }
 
 /// Read full project settings via spawn_blocking. Returns `None` when no

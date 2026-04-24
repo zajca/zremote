@@ -7,7 +7,7 @@ mod worktree;
 pub use crud::{
     add_project, delete_project, get_project, list_project_sessions, list_projects, update_project,
 };
-pub use git::trigger_git_refresh;
+pub use git::{list_branches, trigger_git_refresh};
 pub use scan::trigger_scan;
 pub use settings::{
     browse_directory, configure_with_claude, get_settings, list_actions, resolve_action_inputs,
