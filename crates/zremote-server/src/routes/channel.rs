@@ -217,6 +217,8 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            branch_list_requests: Arc::new(dashmap::DashMap::new()),
+            worktree_create_requests: Arc::new(dashmap::DashMap::new()),
         })
     }
 

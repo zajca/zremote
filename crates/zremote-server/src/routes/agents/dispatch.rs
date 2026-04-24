@@ -74,6 +74,160 @@ pub(super) async fn fetch_loop_info(state: &AppState, loop_id: &str) -> Option<L
     })
 }
 
+/// Upsert a worktree child project row for a successful create. Looks up the
+/// parent project by `(host_id, parent_project_path)`; if missing, the upsert
+/// is skipped and `Ok(None)` is returned (same behaviour as the legacy
+/// `WorktreeCreated` handler -- the agent may report a worktree for a parent
+/// that the server hasn't ingested yet, and we don't want to stub a bogus
+/// parent row here).
+///
+/// Shared between the legacy fire-and-forget `WorktreeCreated` handler and the
+/// RFC-009 request/response `WorktreeCreateResponse` handler so the SQL lives
+/// in exactly one place.
+async fn upsert_worktree_row(
+    state: &AppState,
+    host_id_str: &str,
+    parent_project_path: &str,
+    worktree_path: &str,
+    branch: Option<&str>,
+    commit_hash: Option<&str>,
+) -> Option<String> {
+    let parent: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+            .bind(host_id_str)
+            .bind(parent_project_path)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    let (parent_id,) = parent?;
+    let wt_id = Uuid::new_v4().to_string();
+    let wt_name = std::path::Path::new(worktree_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("worktree")
+        .to_string();
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+         git_branch, git_commit_hash) \
+         VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?) \
+         ON CONFLICT(host_id, path) DO UPDATE SET \
+         git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash",
+    )
+    .bind(&wt_id)
+    .bind(host_id_str)
+    .bind(worktree_path)
+    .bind(&wt_name)
+    .bind(&parent_id)
+    .bind(branch)
+    .bind(commit_hash)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(host_id = %host_id_str, path = %worktree_path, error = %e, "failed to insert worktree child");
+        return None;
+    }
+
+    // On conflict (UPDATE path), the stable id is the pre-existing one, not
+    // `wt_id`. Read back the authoritative id so callers get the right value.
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
+            .bind(host_id_str)
+            .bind(worktree_path)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    row.map(|(id,)| id)
+}
+
+/// Resolve a pending `BranchListRequest` oneshot with the agent's reply.
+/// Extracted from `handle_agent_message` so the logic is unit-testable
+/// without a WebSocket.
+pub(super) fn handle_branch_list_response(
+    state: &AppState,
+    host_id: HostId,
+    request_id: Uuid,
+    branches: Option<zremote_protocol::project::BranchList>,
+    error: Option<zremote_protocol::project::WorktreeError>,
+) {
+    let response = crate::state::BranchListResponse { branches, error };
+    if let Some((_, pending)) = state.branch_list_requests.remove(&request_id) {
+        // Receiver may have been dropped on timeout — swallow.
+        let _ = pending.sender.send(response);
+    } else {
+        // Late reply (HTTP handler already timed out and reaper cleared the
+        // entry) or stray message. Not an error.
+        tracing::debug!(
+            host_id = %host_id,
+            request_id = %request_id,
+            "BranchListResponse for unknown request_id; dropping (likely late reply)"
+        );
+    }
+}
+
+/// Resolve a pending `WorktreeCreateRequest` oneshot, upserting the worktree
+/// child row into the DB and broadcasting `ProjectsUpdated` when the agent
+/// reports a successful create. Extracted from `handle_agent_message` so the
+/// logic is unit-testable without a WebSocket.
+pub(super) async fn handle_worktree_create_response(
+    state: &AppState,
+    host_id: HostId,
+    request_id: Uuid,
+    worktree: Option<zremote_protocol::WorktreeCreateSuccessPayload>,
+    error: Option<zremote_protocol::project::WorktreeError>,
+) {
+    let host_id_str = host_id.to_string();
+    let pending = state.worktree_create_requests.remove(&request_id);
+
+    let project_id = match (&worktree, &pending) {
+        (Some(wt), Some((_, entry))) => {
+            let id = upsert_worktree_row(
+                state,
+                &host_id_str,
+                &entry.parent_project_path,
+                &wt.path,
+                wt.branch.as_deref(),
+                wt.commit_hash.as_deref(),
+            )
+            .await;
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id_str.clone(),
+            });
+            id
+        }
+        (Some(_), None) => {
+            // Late reply after HTTP timeout: we've lost the parent project
+            // context, so we can't upsert the worktree row here. The agent
+            // will emit a `GitStatusUpdate` / `ProjectList` soon and the
+            // reconciliation path will pick up the new child. Still
+            // broadcast `ProjectsUpdated` so connected GUIs refresh.
+            tracing::debug!(
+                host_id = %host_id,
+                request_id = %request_id,
+                "WorktreeCreateResponse with success payload for unknown request_id; \
+                 skipping DB upsert (no parent context), broadcasting refresh"
+            );
+            let _ = state.events.send(ServerEvent::ProjectsUpdated {
+                host_id: host_id_str.clone(),
+            });
+            None
+        }
+        (None, _) => None,
+    };
+
+    if let Some((_, entry)) = pending {
+        let response = crate::state::WorktreeCreateResponse {
+            worktree,
+            error,
+            project_id,
+        };
+        let _ = entry.sender.send(response);
+    }
+}
+
 /// Handle a single agent message.
 #[allow(clippy::too_many_lines)]
 pub(super) async fn handle_agent_message(
@@ -487,45 +641,15 @@ pub(super) async fn handle_agent_message(
             hook_result: _,
         } => {
             let host_id_str = host_id.to_string();
-
-            // Find parent project id
-            let parent: Option<(String,)> =
-                sqlx::query_as("SELECT id FROM projects WHERE host_id = ? AND path = ?")
-                    .bind(&host_id_str)
-                    .bind(&project_path)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten();
-
-            if let Some((parent_id,)) = parent {
-                let wt_id = Uuid::new_v4().to_string();
-                let wt_name = std::path::Path::new(&worktree.path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("worktree")
-                    .to_string();
-
-                if let Err(e) = sqlx::query(
-                    "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
-                     git_branch, git_commit_hash) \
-                     VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?) \
-                     ON CONFLICT(host_id, path) DO UPDATE SET \
-                     git_branch = excluded.git_branch, git_commit_hash = excluded.git_commit_hash",
-                )
-                .bind(&wt_id)
-                .bind(&host_id_str)
-                .bind(&worktree.path)
-                .bind(&wt_name)
-                .bind(&parent_id)
-                .bind(&worktree.branch)
-                .bind(&worktree.commit_hash)
-                .execute(&state.db)
-                .await
-                {
-                    tracing::warn!(host_id = %host_id, path = %worktree.path, error = %e, "failed to insert worktree child");
-                }
-            }
+            let _ = upsert_worktree_row(
+                state,
+                &host_id_str,
+                &project_path,
+                &worktree.path,
+                worktree.branch.as_deref(),
+                worktree.commit_hash.as_deref(),
+            )
+            .await;
 
             let _ = state.events.send(ServerEvent::ProjectsUpdated {
                 host_id: host_id.to_string(),
@@ -790,22 +914,19 @@ pub(super) async fn handle_agent_message(
                 }
             }
         }
-        // RFC-009 P1: protocol variants landed ahead of server dispatch (P3).
-        // Until P3 wires the pending maps, drop the response with a debug log
-        // so the agent's reply doesn't crash the server on exhaustiveness.
-        AgentMessage::BranchListResponse { request_id, .. } => {
-            tracing::debug!(
-                host_id = %host_id,
-                request_id = %request_id,
-                "received BranchListResponse before P3 dispatch wired; dropping"
-            );
+        AgentMessage::BranchListResponse {
+            request_id,
+            branches,
+            error,
+        } => {
+            handle_branch_list_response(state, host_id, request_id, branches, error);
         }
-        AgentMessage::WorktreeCreateResponse { request_id, .. } => {
-            tracing::debug!(
-                host_id = %host_id,
-                request_id = %request_id,
-                "received WorktreeCreateResponse before P3 dispatch wired; dropping"
-            );
+        AgentMessage::WorktreeCreateResponse {
+            request_id,
+            worktree,
+            error,
+        } => {
+            handle_worktree_create_response(state, host_id, request_id, worktree, error).await;
         }
     }
     Ok(())
@@ -2213,6 +2334,8 @@ mod tests {
             settings_get_requests: Arc::new(dashmap::DashMap::new()),
             settings_save_requests: Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: Arc::new(dashmap::DashMap::new()),
+            branch_list_requests: Arc::new(dashmap::DashMap::new()),
+            worktree_create_requests: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -3295,5 +3418,383 @@ mod tests {
 
         // project_type on main repo should reflect detected language, not worktree.
         assert_eq!(parent.project_type, "rust");
+    }
+
+    // ── RFC-009 P3: handle_branch_list_response / handle_worktree_create_response ──
+
+    async fn insert_test_project(
+        state: &AppState,
+        id: &str,
+        host_id: &str,
+        path: &str,
+        name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO projects (id, host_id, path, name, project_type) \
+             VALUES (?, ?, ?, ?, 'rust')",
+        )
+        .bind(id)
+        .bind(host_id)
+        .bind(path)
+        .bind(name)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_branch_list_response_resolves_pending_oneshot() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::BranchListResponse>();
+        state
+            .branch_list_requests
+            .insert(request_id, crate::state::PendingRequest::new(tx));
+
+        let branches = zremote_protocol::project::BranchList {
+            local: vec![zremote_protocol::project::Branch {
+                name: "main".to_string(),
+                is_current: true,
+                ahead: 0,
+                behind: 0,
+            }],
+            remote: vec![],
+            current: "main".to_string(),
+            remote_truncated: false,
+        };
+
+        handle_branch_list_response(&state, host_id, request_id, Some(branches.clone()), None);
+
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("oneshot should be resolved")
+            .expect("sender should not have been dropped");
+        assert_eq!(resolved.branches.as_ref(), Some(&branches));
+        assert!(resolved.error.is_none());
+        assert!(
+            state.branch_list_requests.get(&request_id).is_none(),
+            "pending entry should be consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_branch_list_response_unknown_request_id_is_noop() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        // No pending entry registered.
+        handle_branch_list_response(&state, host_id, request_id, None, None);
+        // No panic, no entry added.
+        assert!(state.branch_list_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_worktree_create_response_success_upserts_and_broadcasts() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let parent_path = "/srv/repos/acme";
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        let parent_id = Uuid::new_v4().to_string();
+        insert_test_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+        let mut events_rx = state.events.subscribe();
+
+        let request_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::WorktreeCreateResponse>();
+        state.worktree_create_requests.insert(
+            request_id,
+            crate::state::PendingWorktreeCreate::new(tx, parent_path.to_string()),
+        );
+
+        let payload = zremote_protocol::WorktreeCreateSuccessPayload {
+            path: "/srv/repos/acme-wt/feature".to_string(),
+            branch: Some("feature/x".to_string()),
+            commit_hash: Some("abc1234".to_string()),
+            hook_result: None,
+        };
+
+        handle_worktree_create_response(&state, host_id, request_id, Some(payload.clone()), None)
+            .await;
+
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("oneshot resolved")
+            .expect("sender not dropped");
+        assert_eq!(resolved.worktree.as_ref(), Some(&payload));
+        assert!(resolved.error.is_none());
+        assert!(
+            resolved.project_id.is_some(),
+            "upsert should have returned a project_id"
+        );
+        assert!(state.worktree_create_requests.is_empty());
+
+        // DB row inserted
+        let row: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT id, path, git_branch, git_commit_hash, parent_project_id, project_type \
+                 FROM projects WHERE host_id = ? AND path = ?",
+        )
+        .bind(&host_id_str)
+        .bind(&payload.path)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(row.1, payload.path);
+        assert_eq!(row.2.as_deref(), Some("feature/x"));
+        assert_eq!(row.3.as_deref(), Some("abc1234"));
+        assert_eq!(row.4.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(row.5, "worktree");
+        assert_eq!(
+            resolved.project_id.as_deref(),
+            Some(row.0.as_str()),
+            "returned project_id matches DB row id"
+        );
+
+        // ProjectsUpdated broadcast
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event received in time")
+            .expect("event channel open");
+        match evt {
+            ServerEvent::ProjectsUpdated { host_id: h } => assert_eq!(h, host_id_str),
+            other => panic!("expected ProjectsUpdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_worktree_create_response_error_resolves_without_db_write() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let parent_path = "/srv/repos/acme";
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        insert_test_project(
+            &state,
+            &Uuid::new_v4().to_string(),
+            &host_id_str,
+            parent_path,
+            "acme",
+        )
+        .await;
+
+        let request_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::WorktreeCreateResponse>();
+        state.worktree_create_requests.insert(
+            request_id,
+            crate::state::PendingWorktreeCreate::new(tx, parent_path.to_string()),
+        );
+
+        let err = zremote_protocol::project::WorktreeError::new(
+            zremote_protocol::project::WorktreeErrorCode::BranchExists,
+            "Pick a different branch name",
+            "branch already exists",
+        );
+        handle_worktree_create_response(&state, host_id, request_id, None, Some(err.clone())).await;
+
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("oneshot resolved")
+            .expect("sender not dropped");
+        assert!(resolved.worktree.is_none());
+        assert_eq!(resolved.error.as_ref(), Some(&err));
+        assert!(resolved.project_id.is_none());
+
+        // No worktree child inserted
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM projects WHERE parent_project_id IS NOT NULL")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_worktree_create_response_unknown_request_with_success_still_broadcasts() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        let mut events_rx = state.events.subscribe();
+
+        // No pending entry registered -- simulates a late reply after HTTP timeout.
+        let payload = zremote_protocol::WorktreeCreateSuccessPayload {
+            path: "/srv/repos/acme-wt/feature".to_string(),
+            branch: Some("feature/x".to_string()),
+            commit_hash: Some("abc1234".to_string()),
+            hook_result: None,
+        };
+        handle_worktree_create_response(
+            &state,
+            host_id,
+            Uuid::new_v4(),
+            Some(payload.clone()),
+            None,
+        )
+        .await;
+
+        // DB should NOT have the worktree row (no parent context available).
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM projects WHERE host_id = ? AND path = ?")
+                .bind(&host_id_str)
+                .bind(&payload.path)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count.0, 0, "no upsert when parent context is lost");
+
+        // ProjectsUpdated should still fire so GUIs refresh.
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("event received")
+            .expect("channel open");
+        assert!(matches!(evt, ServerEvent::ProjectsUpdated { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_worktree_create_response_unknown_request_with_error_is_silent() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        insert_test_host(&state, &host_id_str, "test-host").await;
+
+        let mut events_rx = state.events.subscribe();
+
+        let err = zremote_protocol::project::WorktreeError::new(
+            zremote_protocol::project::WorktreeErrorCode::Internal,
+            "try again",
+            "boom",
+        );
+        handle_worktree_create_response(&state, host_id, Uuid::new_v4(), None, Some(err)).await;
+
+        // No event, no DB change.
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await;
+        assert!(
+            got.is_err(),
+            "no event should fire for late error-only replies"
+        );
+    }
+
+    // Regression: the legacy WorktreeCreated handler still works after the
+    // SQL was extracted into `upsert_worktree_row`.
+    #[tokio::test]
+    async fn legacy_worktree_created_still_upserts_via_shared_helper() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let parent_path = "/srv/repos/acme";
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        let parent_id = Uuid::new_v4().to_string();
+        insert_test_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+        let wt_path = "/srv/repos/acme-wt/legacy";
+        let project_id = upsert_worktree_row(
+            &state,
+            &host_id_str,
+            parent_path,
+            wt_path,
+            Some("legacy-branch"),
+            Some("deadbee"),
+        )
+        .await;
+        assert!(project_id.is_some());
+
+        let row: (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT id, git_branch, git_commit_hash, parent_project_id, project_type \
+                 FROM projects WHERE host_id = ? AND path = ?",
+        )
+        .bind(&host_id_str)
+        .bind(wt_path)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(row.1.as_deref(), Some("legacy-branch"));
+        assert_eq!(row.2.as_deref(), Some("deadbee"));
+        assert_eq!(row.3.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(row.4, "worktree");
+    }
+
+    #[tokio::test]
+    async fn upsert_worktree_row_without_parent_returns_none() {
+        let state = test_state().await;
+        let host_id_str = Uuid::new_v4().to_string();
+
+        // No parent project row in DB — helper should skip and return None.
+        let result = upsert_worktree_row(
+            &state,
+            &host_id_str,
+            "/nonexistent/parent",
+            "/nonexistent/parent-wt/x",
+            Some("b"),
+            Some("c"),
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_worktree_row_conflict_updates_existing_branch_and_hash() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let host_id_str = host_id.to_string();
+        let parent_path = "/srv/repos/acme";
+
+        insert_test_host(&state, &host_id_str, "test-host").await;
+        let parent_id = Uuid::new_v4().to_string();
+        insert_test_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+        let wt_path = "/srv/repos/acme-wt/a";
+
+        let first_id = upsert_worktree_row(
+            &state,
+            &host_id_str,
+            parent_path,
+            wt_path,
+            Some("v1"),
+            Some("h1"),
+        )
+        .await
+        .unwrap();
+        let second_id = upsert_worktree_row(
+            &state,
+            &host_id_str,
+            parent_path,
+            wt_path,
+            Some("v2"),
+            Some("h2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_id, second_id, "stable id across upserts");
+
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT git_branch, git_commit_hash FROM projects WHERE host_id = ? AND path = ?",
+        )
+        .bind(&host_id_str)
+        .bind(wt_path)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("v2"));
+        assert_eq!(row.1.as_deref(), Some("h2"));
     }
 }
