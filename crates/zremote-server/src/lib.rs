@@ -409,6 +409,8 @@ pub async fn run_server(config: ServerConfig) {
     let settings_get_requests = std::sync::Arc::new(dashmap::DashMap::new());
     let settings_save_requests = std::sync::Arc::new(dashmap::DashMap::new());
     let action_inputs_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let branch_list_requests = std::sync::Arc::new(dashmap::DashMap::new());
+    let worktree_create_requests = std::sync::Arc::new(dashmap::DashMap::new());
 
     let state = Arc::new(AppState {
         db: pool,
@@ -424,6 +426,8 @@ pub async fn run_server(config: ServerConfig) {
         settings_get_requests,
         settings_save_requests,
         action_inputs_requests,
+        branch_list_requests,
+        worktree_create_requests,
     });
 
     // Spawn heartbeat monitor background task
@@ -553,6 +557,8 @@ mod tests {
             settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
             action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            branch_list_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+            worktree_create_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         })
     }
 

@@ -168,6 +168,45 @@ pub struct ActionInputsResolveResponse {
     pub error: Option<String>,
 }
 
+/// Response type for branch list oneshot channels (RFC-009).
+pub struct BranchListResponse {
+    pub branches: Option<zremote_protocol::project::BranchList>,
+    pub error: Option<zremote_protocol::project::WorktreeError>,
+}
+
+/// Response type for worktree create oneshot channels (RFC-009). `project_id`
+/// is set to the newly-inserted DB row id when the upsert succeeded on a
+/// successful create; `None` on error or when the upsert was skipped (e.g.
+/// parent project row not found).
+pub struct WorktreeCreateResponse {
+    pub worktree: Option<zremote_protocol::WorktreeCreateSuccessPayload>,
+    pub error: Option<zremote_protocol::project::WorktreeError>,
+    pub project_id: Option<String>,
+}
+
+/// Pending-entry wrapper for `worktree_create_requests`. The response payload
+/// doesn't carry `parent_project_path`, but the dispatch handler needs it to
+/// upsert the worktree row. The HTTP handler (P4) knows it when building the
+/// request, so we stash it here alongside the oneshot sender.
+pub struct PendingWorktreeCreate {
+    pub sender: tokio::sync::oneshot::Sender<WorktreeCreateResponse>,
+    pub parent_project_path: String,
+    pub(crate) created_at: Instant,
+}
+
+impl PendingWorktreeCreate {
+    pub fn new(
+        sender: tokio::sync::oneshot::Sender<WorktreeCreateResponse>,
+        parent_project_path: String,
+    ) -> Self {
+        Self {
+            sender,
+            parent_project_path,
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// Shared application state.
 pub struct AppState {
     pub db: SqlitePool,
@@ -187,11 +226,36 @@ pub struct AppState {
     pub settings_save_requests: Arc<DashMap<uuid::Uuid, PendingRequest<SettingsSaveResponse>>>,
     pub action_inputs_requests:
         Arc<DashMap<uuid::Uuid, PendingRequest<ActionInputsResolveResponse>>>,
+    /// Pending `BranchListRequest` oneshots, resolved when the agent sends the
+    /// matching `BranchListResponse` back. When an agent disconnects, the
+    /// `ConnectionManager` drops its mpsc sender and the oneshot receiver
+    /// eventually returns `Err(RecvError)` via the HTTP handler's timeout.
+    /// Stale entries are reaped by `cleanup_stale_requests`.
+    pub branch_list_requests: Arc<DashMap<uuid::Uuid, PendingRequest<BranchListResponse>>>,
+    /// Pending `WorktreeCreateRequest` oneshots, resolved when the agent sends
+    /// the matching `WorktreeCreateResponse` back. Same disconnect/timeout
+    /// semantics as `branch_list_requests`. Uses `PendingWorktreeCreate`
+    /// instead of the generic `PendingRequest<T>` because the response payload
+    /// doesn't carry the parent `project_path`, but the dispatch handler needs
+    /// it to upsert the worktree row.
+    pub worktree_create_requests: Arc<DashMap<uuid::Uuid, PendingWorktreeCreate>>,
 }
 
+/// Per-map stale threshold for `branch_list_requests`: git branch listing is
+/// fast, so a short window is enough to keep the map from growing when an
+/// agent hangs or crashes mid-request.
+pub const BRANCH_LIST_STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Per-map stale threshold for `worktree_create_requests`: covers the agent's
+/// 60s git timeout plus hook headroom and a safety margin.
+pub const WORKTREE_CREATE_STALE_THRESHOLD: std::time::Duration =
+    std::time::Duration::from_secs(180);
+
 impl AppState {
-    /// Remove pending requests older than `max_age` from all DashMap fields.
-    /// Returns the total number of stale entries removed.
+    /// Remove pending requests older than `max_age` from the general-purpose
+    /// pending maps, and apply per-map thresholds
+    /// (`BRANCH_LIST_STALE_THRESHOLD`, `WORKTREE_CREATE_STALE_THRESHOLD`) to the
+    /// RFC-009 maps. Returns the total number of stale entries removed.
     pub fn cleanup_stale_requests(&self, max_age: std::time::Duration) -> usize {
         let now = Instant::now();
         let mut removed = 0;
@@ -245,6 +309,24 @@ impl AppState {
             let keep = now.duration_since(req.created_at) <= max_age;
             if !keep {
                 tracing::warn!(request_id = %id, map = "action_inputs_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.branch_list_requests.retain(|id, req| {
+            let keep = now.duration_since(req.created_at) <= BRANCH_LIST_STALE_THRESHOLD;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "branch_list_requests", "removing stale pending request");
+                removed += 1;
+            }
+            keep
+        });
+
+        self.worktree_create_requests.retain(|id, entry| {
+            let keep = now.duration_since(entry.created_at) <= WORKTREE_CREATE_STALE_THRESHOLD;
+            if !keep {
+                tracing::warn!(request_id = %id, map = "worktree_create_requests", "removing stale pending request");
                 removed += 1;
             }
             keep
@@ -448,6 +530,8 @@ mod tests {
             settings_get_requests: Arc::new(DashMap::new()),
             settings_save_requests: Arc::new(DashMap::new()),
             action_inputs_requests: Arc::new(DashMap::new()),
+            branch_list_requests: Arc::new(DashMap::new()),
+            worktree_create_requests: Arc::new(DashMap::new()),
         }
     }
 
@@ -537,6 +621,69 @@ mod tests {
         assert!(state.directory_requests.is_empty());
         assert!(state.settings_save_requests.is_empty());
         assert!(state.action_inputs_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_stale_branch_list_entries() {
+        let app = make_app_state().await;
+
+        let id_expired = Uuid::new_v4();
+        let (tx_expired, _rx_expired) = tokio::sync::oneshot::channel::<BranchListResponse>();
+        let mut expired = PendingRequest::new(tx_expired);
+        expired.created_at =
+            Instant::now() - (BRANCH_LIST_STALE_THRESHOLD + std::time::Duration::from_secs(5));
+        app.branch_list_requests.insert(id_expired, expired);
+
+        let id_fresh = Uuid::new_v4();
+        let (tx_fresh, _rx_fresh) = tokio::sync::oneshot::channel::<BranchListResponse>();
+        app.branch_list_requests
+            .insert(id_fresh, PendingRequest::new(tx_fresh));
+
+        // max_age (for the generic maps) is large, but branch_list_requests uses
+        // its own threshold — so the expired entry must go.
+        let removed = app.cleanup_stale_requests(std::time::Duration::from_secs(600));
+        assert_eq!(removed, 1);
+        assert!(app.branch_list_requests.get(&id_expired).is_none());
+        assert!(app.branch_list_requests.get(&id_fresh).is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_stale_worktree_create_entries() {
+        let app = make_app_state().await;
+
+        let id_expired = Uuid::new_v4();
+        let (tx_expired, _rx_expired) = tokio::sync::oneshot::channel::<WorktreeCreateResponse>();
+        let mut expired = PendingWorktreeCreate::new(tx_expired, "/tmp/parent".to_string());
+        expired.created_at =
+            Instant::now() - (WORKTREE_CREATE_STALE_THRESHOLD + std::time::Duration::from_secs(5));
+        app.worktree_create_requests.insert(id_expired, expired);
+
+        let id_fresh = Uuid::new_v4();
+        let (tx_fresh, _rx_fresh) = tokio::sync::oneshot::channel::<WorktreeCreateResponse>();
+        app.worktree_create_requests.insert(
+            id_fresh,
+            PendingWorktreeCreate::new(tx_fresh, "/tmp/parent".to_string()),
+        );
+
+        let removed = app.cleanup_stale_requests(std::time::Duration::from_secs(600));
+        assert_eq!(removed, 1);
+        assert!(app.worktree_create_requests.get(&id_expired).is_none());
+        assert!(app.worktree_create_requests.get(&id_fresh).is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_fresh_branch_list_even_with_tiny_generic_max_age() {
+        let state = make_app_state().await;
+        let id = Uuid::new_v4();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<BranchListResponse>();
+        state
+            .branch_list_requests
+            .insert(id, PendingRequest::new(tx));
+
+        // Generic max_age = 0 would reap all generic maps, but branch_list is fresh.
+        let removed = state.cleanup_stale_requests(std::time::Duration::ZERO);
+        assert_eq!(removed, 0);
+        assert!(state.branch_list_requests.get(&id).is_some());
     }
 
     #[tokio::test]
