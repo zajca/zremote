@@ -36,6 +36,8 @@ async fn test_state() -> Arc<AppState> {
         settings_get_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         settings_save_requests: std::sync::Arc::new(dashmap::DashMap::new()),
         action_inputs_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        branch_list_requests: std::sync::Arc::new(dashmap::DashMap::new()),
+        worktree_create_requests: std::sync::Arc::new(dashmap::DashMap::new()),
     })
 }
 
@@ -83,6 +85,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/projects/{project_id}/git/refresh",
             post(trigger_git_refresh),
+        )
+        .route(
+            "/api/projects/{project_id}/git/branches",
+            get(list_branches),
         )
         .route(
             "/api/projects/{project_id}/worktrees",
@@ -1018,4 +1024,552 @@ async fn run_action_with_custom_inputs() {
         .unwrap();
     // Host is offline, so we get CONFLICT -- but the request parsed successfully
     assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RFC-009 P4: GET /git/branches + POST /worktrees (synchronous proxy)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spawn a task that simulates the agent-dispatch side of a branch-list
+/// request/response round-trip. For the first `BranchListRequest` it sees on
+/// the outbound channel, it pops the matching pending entry and resolves the
+/// oneshot with `scripted`. Any other outbound message is ignored so unrelated
+/// tests don't have to drain the receiver.
+fn spawn_branch_list_fake_agent(
+    state: Arc<AppState>,
+    mut rx: tokio::sync::mpsc::Receiver<zremote_protocol::ServerMessage>,
+    scripted: crate::state::BranchListResponse,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let zremote_protocol::ServerMessage::BranchListRequest { request_id, .. } = msg {
+                if let Some((_, pending)) = state.branch_list_requests.remove(&request_id) {
+                    let _ = pending.sender.send(scripted);
+                }
+                return;
+            }
+        }
+    })
+}
+
+/// Same idea for worktree create. The closure `script` owns the full dispatch
+/// simulation — it can upsert the DB row, flip `project_id`, etc. — so each
+/// test can exercise a different success/error shape.
+fn spawn_worktree_create_fake_agent<F>(
+    state: Arc<AppState>,
+    mut rx: tokio::sync::mpsc::Receiver<zremote_protocol::ServerMessage>,
+    script: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce(
+            Arc<AppState>,
+            zremote_protocol::ServerMessage,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+{
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if matches!(
+                msg,
+                zremote_protocol::ServerMessage::WorktreeCreateRequest { .. }
+            ) {
+                script(state, msg).await;
+                return;
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn list_branches_happy_path_returns_branch_list() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let proj_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &proj_id, &host_id_str, "/srv/acme", "acme").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    let scripted = zremote_protocol::project::BranchList {
+        local: vec![zremote_protocol::project::Branch {
+            name: "main".to_string(),
+            is_current: true,
+            ahead: 0,
+            behind: 0,
+        }],
+        remote: vec![],
+        current: "main".to_string(),
+        remote_truncated: false,
+    };
+    let _agent = spawn_branch_list_fake_agent(
+        Arc::clone(&state),
+        rx,
+        crate::state::BranchListResponse {
+            branches: Some(scripted.clone()),
+            error: None,
+        },
+    );
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::get(format!("/api/projects/{proj_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let got: zremote_protocol::project::BranchList = serde_json::from_slice(&body).unwrap();
+    assert_eq!(got, scripted);
+}
+
+#[tokio::test]
+async fn list_branches_structured_error_path_missing_returns_404() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let proj_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &proj_id, &host_id_str, "/nope", "nope").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    let err = zremote_protocol::project::WorktreeError::new(
+        zremote_protocol::project::WorktreeErrorCode::PathMissing,
+        "Project path no longer exists",
+        "path does not exist: /nope",
+    );
+    let _agent = spawn_branch_list_fake_agent(
+        Arc::clone(&state),
+        rx,
+        crate::state::BranchListResponse {
+            branches: None,
+            error: Some(err.clone()),
+        },
+    );
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::get(format!("/api/projects/{proj_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let got: zremote_protocol::project::WorktreeError = serde_json::from_slice(&body).unwrap();
+    assert_eq!(got, err);
+}
+
+#[tokio::test]
+async fn list_branches_host_offline_returns_409() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4().to_string();
+    let proj_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id).await;
+    insert_project(&state, &proj_id, &host_id, "/srv/acme", "acme").await;
+
+    // No connection registered.
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::get(format!("/api/projects/{proj_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn list_branches_project_not_found_returns_404() {
+    let state = test_state().await;
+    let proj_id = Uuid::new_v4().to_string();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::get(format!("/api/projects/{proj_id}/git/branches"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_branches_invalid_project_id_returns_400() {
+    let state = test_state().await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/api/projects/not-a-uuid/git/branches")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_branches_agent_timeout_returns_504() {
+    // Drive the inner `_with_timeout` variant with a tiny duration so the 504
+    // branch fires without stalling the test suite on the 30s production
+    // ceiling. The fake agent drains the outbound channel but never replies,
+    // mirroring a wedged agent.
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let proj_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &proj_id, &host_id_str, "/srv/acme", "acme").await;
+
+    let mut rx = register_host_connection(&state, host_id).await;
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let resp = super::git::list_branches_with_timeout(
+        Arc::clone(&state),
+        proj_id,
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect("handler returns a response even on timeout");
+
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let got: zremote_protocol::project::WorktreeError = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(
+        got.code,
+        zremote_protocol::project::WorktreeErrorCode::Internal
+    ));
+}
+
+#[tokio::test]
+async fn create_worktree_happy_path_returns_201_with_project_row() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    let parent_path = "/srv/repos/acme";
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    // Simulate the dispatch handler: insert the worktree row and resolve the
+    // oneshot with the fresh project_id.
+    let state_for_agent = Arc::clone(&state);
+    let host_id_for_agent = host_id_str.clone();
+    let parent_id_for_agent = parent_id.clone();
+    let _agent = spawn_worktree_create_fake_agent(state_for_agent, rx, move |state, msg| {
+        Box::pin(async move {
+            let zremote_protocol::ServerMessage::WorktreeCreateRequest { request_id, .. } = msg
+            else {
+                unreachable!()
+            };
+
+            let payload = zremote_protocol::WorktreeCreateSuccessPayload {
+                path: "/srv/repos/acme-wt/feature".to_string(),
+                branch: Some("feature/x".to_string()),
+                commit_hash: Some("abc1234".to_string()),
+                hook_result: Some(zremote_protocol::HookResultInfo {
+                    success: true,
+                    output: Some("done".to_string()),
+                    duration_ms: 42,
+                }),
+            };
+
+            let new_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO projects (id, host_id, path, name, project_type, parent_project_id, \
+                 git_branch, git_commit_hash) VALUES (?, ?, ?, ?, 'worktree', ?, ?, ?)",
+            )
+            .bind(&new_id)
+            .bind(&host_id_for_agent)
+            .bind(&payload.path)
+            .bind("feature")
+            .bind(&parent_id_for_agent)
+            .bind(payload.branch.as_deref())
+            .bind(payload.commit_hash.as_deref())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            if let Some((_, pending)) = state.worktree_create_requests.remove(&request_id) {
+                let _ = pending.sender.send(crate::state::WorktreeCreateResponse {
+                    worktree: Some(payload),
+                    error: None,
+                    project_id: Some(new_id),
+                });
+            }
+        })
+    });
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"feature/x","new_branch":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["host_id"], host_id_str);
+    assert_eq!(json["path"], "/srv/repos/acme-wt/feature");
+    assert_eq!(json["parent_project_id"], parent_id);
+    assert_eq!(json["project_type"], "worktree");
+    assert_eq!(json["git_branch"], "feature/x");
+    assert_eq!(json["git_commit_hash"], "abc1234");
+    assert!(json["id"].is_string());
+
+    // hook_result injected
+    assert_eq!(json["hook_result"]["success"], true);
+    assert_eq!(json["hook_result"]["output"], "done");
+    assert_eq!(json["hook_result"]["duration_ms"], 42);
+
+    // DB row exists
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM projects WHERE parent_project_id = ?")
+        .bind(&parent_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 1);
+}
+
+#[tokio::test]
+async fn create_worktree_structured_error_branch_exists_returns_409() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    let parent_path = "/srv/repos/acme";
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &parent_id, &host_id_str, parent_path, "acme").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    let err = zremote_protocol::project::WorktreeError::new(
+        zremote_protocol::project::WorktreeErrorCode::BranchExists,
+        "Pick a different branch name",
+        "branch already exists",
+    );
+    let err_clone = err.clone();
+    let _agent = spawn_worktree_create_fake_agent(Arc::clone(&state), rx, move |state, msg| {
+        Box::pin(async move {
+            let zremote_protocol::ServerMessage::WorktreeCreateRequest { request_id, .. } = msg
+            else {
+                unreachable!()
+            };
+            if let Some((_, pending)) = state.worktree_create_requests.remove(&request_id) {
+                let _ = pending.sender.send(crate::state::WorktreeCreateResponse {
+                    worktree: None,
+                    error: Some(err_clone),
+                    project_id: None,
+                });
+            }
+        })
+    });
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"feature/x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let got: zremote_protocol::project::WorktreeError = serde_json::from_slice(&body).unwrap();
+    assert_eq!(got, err);
+    assert_eq!(
+        got.code,
+        zremote_protocol::project::WorktreeErrorCode::BranchExists
+    );
+}
+
+#[tokio::test]
+async fn create_worktree_structured_error_path_collision_returns_409() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &parent_id, &host_id_str, "/srv/acme", "acme").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    let err = zremote_protocol::project::WorktreeError::new(
+        zremote_protocol::project::WorktreeErrorCode::PathCollision,
+        "Choose a different target path",
+        "path exists",
+    );
+    let err_clone = err.clone();
+    let _agent = spawn_worktree_create_fake_agent(Arc::clone(&state), rx, move |state, msg| {
+        Box::pin(async move {
+            let zremote_protocol::ServerMessage::WorktreeCreateRequest { request_id, .. } = msg
+            else {
+                unreachable!()
+            };
+            if let Some((_, pending)) = state.worktree_create_requests.remove(&request_id) {
+                let _ = pending.sender.send(crate::state::WorktreeCreateResponse {
+                    worktree: None,
+                    error: Some(err_clone),
+                    project_id: None,
+                });
+            }
+        })
+    });
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"feature/x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn create_worktree_structured_error_path_missing_returns_404() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &parent_id, &host_id_str, "/gone", "gone").await;
+
+    let rx = register_host_connection(&state, host_id).await;
+
+    let err = zremote_protocol::project::WorktreeError::new(
+        zremote_protocol::project::WorktreeErrorCode::PathMissing,
+        "Project path no longer exists",
+        "path does not exist",
+    );
+    let err_clone = err.clone();
+    let _agent = spawn_worktree_create_fake_agent(Arc::clone(&state), rx, move |state, msg| {
+        Box::pin(async move {
+            let zremote_protocol::ServerMessage::WorktreeCreateRequest { request_id, .. } = msg
+            else {
+                unreachable!()
+            };
+            if let Some((_, pending)) = state.worktree_create_requests.remove(&request_id) {
+                let _ = pending.sender.send(crate::state::WorktreeCreateResponse {
+                    worktree: None,
+                    error: Some(err_clone),
+                    project_id: None,
+                });
+            }
+        })
+    });
+
+    let app = build_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"feature/x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_worktree_host_offline_returns_409() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4().to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id).await;
+    insert_project(&state, &parent_id, &host_id, "/srv/acme", "acme").await;
+
+    // No registered connection.
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"branch":"feature/x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn create_worktree_invalid_body_returns_400() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4().to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id).await;
+    insert_project(&state, &parent_id, &host_id, "/srv/acme", "acme").await;
+
+    let app = build_router(state);
+    // Missing required "branch" field.
+    let resp = app
+        .oneshot(
+            Request::post(format!("/api/projects/{parent_id}/worktrees"))
+                .header("content-type", "application/json")
+                .body(Body::from(r"{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_worktree_agent_timeout_returns_504() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4();
+    let host_id_str = host_id.to_string();
+    let parent_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id_str).await;
+    insert_project(&state, &parent_id, &host_id_str, "/srv/acme", "acme").await;
+
+    let mut rx = register_host_connection(&state, host_id).await;
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let resp = super::worktree::create_worktree_with_timeout(
+        Arc::clone(&state),
+        parent_id,
+        super::worktree::CreateWorktreeRequest {
+            branch: "feature/x".to_string(),
+            path: None,
+            new_branch: None,
+            base_ref: None,
+        },
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect("handler returns a response even on timeout");
+
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let got: zremote_protocol::project::WorktreeError = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(
+        got.code,
+        zremote_protocol::project::WorktreeErrorCode::Internal
+    ));
 }

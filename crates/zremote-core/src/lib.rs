@@ -12,3 +12,5 @@ pub mod state;
 #[cfg(feature = "axum")]
 pub mod terminal_ws;
 pub mod validation;
+#[cfg(feature = "axum")]
+pub mod worktree_http;

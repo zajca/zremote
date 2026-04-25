@@ -1230,6 +1230,280 @@ pub(super) async fn handle_server_message(
             )
             .await;
         }
+        // RFC-009 P2: synchronous branch listing with request_id correlation.
+        // Returns a `BranchListResponse` either with `branches: Some(..)` or
+        // `error: Some(..)` — never both. A missing project directory maps to
+        // `PathMissing` so the server can render a precise remediation hint;
+        // any other git failure degrades to `Internal` with the raw message
+        // kept in `message` (the hint is user-facing, safe).
+        ServerMessage::BranchListRequest {
+            request_id,
+            project_path,
+        } => {
+            handle_branch_list_request(outbound_tx, *request_id, project_path.clone()).await;
+        }
+        // RFC-009 P2: synchronous worktree create with request_id correlation.
+        // Delegates to the shared `worktree::service::run_worktree_create`
+        // helper so validation + git + post_create hook stay identical to
+        // the local HTTP route. Progress events route through the outbound
+        // channel as `AgentMessage::WorktreeCreationProgress`.
+        ServerMessage::WorktreeCreateRequest {
+            request_id,
+            project_path,
+            branch,
+            path,
+            new_branch,
+            base_ref,
+        } => {
+            handle_worktree_create_request(
+                outbound_tx,
+                *request_id,
+                project_path.clone(),
+                branch.clone(),
+                path.clone(),
+                *new_branch,
+                base_ref.clone(),
+            )
+            .await;
+        }
+    }
+}
+
+/// Handle `ServerMessage::BranchListRequest`. Spawned into its own task so a
+/// slow `for-each-ref` on a huge repo doesn't block the dispatch loop — we
+/// don't await completion here; the response is sent on the outbound channel
+/// as the task finishes.
+fn handle_branch_list_request(
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    request_id: uuid::Uuid,
+    project_path: String,
+) -> impl std::future::Future<Output = ()> + Send {
+    let tx = outbound_tx.clone();
+    async move {
+        // Reject path traversal (`..`) before any I/O — mirrors the guard on
+        // `ProjectRegister` / `ListDirectory`. A traversal-containing path
+        // does not resolve to a real project, so PathMissing carries the same
+        // actionable hint.
+        if let Err(e) = validate_path_no_traversal(&project_path) {
+            tracing::warn!(
+                path = %project_path,
+                error = %e,
+                "rejected BranchListRequest with invalid path"
+            );
+            let err = zremote_protocol::project::WorktreeError::new(
+                zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                "Project path is not valid. Remove the project and re-add it with a correct path.",
+                "invalid path",
+            );
+            if tx
+                .send(AgentMessage::BranchListResponse {
+                    request_id,
+                    branches: None,
+                    error: Some(err),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!("outbound channel closed, BranchListResponse dropped");
+            }
+            return;
+        }
+        tokio::spawn(async move {
+            // Existence check first so we can return a precise PathMissing
+            // error. `GitInspector::list_branches` would fail with a raw git
+            // message that collapses to `Internal` via `from_git_stderr`,
+            // which is less actionable than a typed PathMissing.
+            let path_buf = std::path::PathBuf::from(&project_path);
+            let exists = tokio::task::spawn_blocking({
+                let p = path_buf.clone();
+                move || p.exists()
+            })
+            .await
+            .unwrap_or(false);
+
+            if !exists {
+                let err = zremote_protocol::project::WorktreeError::new(
+                    zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                    "Project path no longer exists on disk. Remove the project and re-add it with the correct path.",
+                    format!("path does not exist: {project_path}"),
+                );
+                if tx
+                    .send(AgentMessage::BranchListResponse {
+                        request_id,
+                        branches: None,
+                        error: Some(err),
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("outbound channel closed, BranchListResponse dropped");
+                }
+                return;
+            }
+
+            let join = tokio::task::spawn_blocking(move || {
+                GitInspector::list_branches(std::path::Path::new(&project_path))
+            })
+            .await;
+
+            let message = match join {
+                Ok(Ok(branches)) => AgentMessage::BranchListResponse {
+                    request_id,
+                    branches: Some(branches),
+                    error: None,
+                },
+                Ok(Err(stderr)) => {
+                    tracing::warn!(error = %stderr, "list_branches failed");
+                    // Preserve PathMissing classification if git stderr
+                    // happens to indicate it; otherwise map to Internal with a
+                    // fixed safe message so raw git output (which can include
+                    // filesystem paths, remote URLs, credential-helper details
+                    // — CWE-200) never reaches the HTTP client. Raw stderr is
+                    // kept in the `tracing::warn!` above for local debugging.
+                    let err = zremote_protocol::project::WorktreeError::from_git_stderr(&stderr);
+                    let err = if matches!(
+                        err.code,
+                        zremote_protocol::project::WorktreeErrorCode::PathMissing
+                    ) {
+                        err
+                    } else {
+                        zremote_protocol::project::WorktreeError::new(
+                            zremote_protocol::project::WorktreeErrorCode::Internal,
+                            "Could not list branches for this project.",
+                            "unexpected git error",
+                        )
+                    };
+                    AgentMessage::BranchListResponse {
+                        request_id,
+                        branches: None,
+                        error: Some(err),
+                    }
+                }
+                Err(join_err) => {
+                    tracing::error!(error = %join_err, "list_branches task panicked");
+                    AgentMessage::BranchListResponse {
+                        request_id,
+                        branches: None,
+                        error: Some(zremote_protocol::project::WorktreeError::new(
+                            zremote_protocol::project::WorktreeErrorCode::Internal,
+                            "Internal error while listing branches.",
+                            "task join failed",
+                        )),
+                    }
+                }
+            };
+
+            if tx.send(message).await.is_err() {
+                tracing::warn!("outbound channel closed, BranchListResponse dropped");
+            }
+        });
+    }
+}
+
+/// Handle `ServerMessage::WorktreeCreateRequest`. Delegates to the shared
+/// `worktree::service` helper so validation + git + post_create stay in lock-
+/// step with the local HTTP handler.
+#[allow(clippy::too_many_arguments)]
+fn handle_worktree_create_request(
+    outbound_tx: &mpsc::Sender<AgentMessage>,
+    request_id: uuid::Uuid,
+    project_path: String,
+    branch: String,
+    path: Option<String>,
+    new_branch: bool,
+    base_ref: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let tx = outbound_tx.clone();
+    async move {
+        // Reject path traversal (`..`) before any I/O or spawn_blocking —
+        // mirrors the guard on `ProjectRegister` / `ListDirectory`. A
+        // traversal-containing path does not resolve to a real project, so
+        // PathMissing is the correct classification for the client.
+        if let Err(e) = validate_path_no_traversal(&project_path) {
+            tracing::warn!(
+                path = %project_path,
+                error = %e,
+                "rejected WorktreeCreateRequest with invalid path"
+            );
+            let err = zremote_protocol::project::WorktreeError::new(
+                zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                "Project path is not valid. Remove the project and re-add it with a correct path.",
+                "invalid path",
+            );
+            if tx
+                .send(AgentMessage::WorktreeCreateResponse {
+                    request_id,
+                    worktree: None,
+                    error: Some(err),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!("outbound channel closed, WorktreeCreateResponse dropped");
+            }
+            return;
+        }
+        tokio::spawn(async move {
+            let job_id = uuid::Uuid::new_v4().to_string();
+
+            // Progress callback: convert the service's stage + percent +
+            // optional message into `AgentMessage::WorktreeCreationProgress`
+            // on the outbound channel. Uses `try_send` so a full channel
+            // doesn't deadlock the dispatch task — the server treats
+            // progress as best-effort anyway.
+            let progress_tx = tx.clone();
+            let progress_project_path = project_path.clone();
+            let progress_job_id = job_id.clone();
+            let emit = move |stage, percent, message| {
+                let msg = AgentMessage::WorktreeCreationProgress {
+                    project_path: progress_project_path.clone(),
+                    job_id: progress_job_id.clone(),
+                    stage,
+                    percent,
+                    message,
+                };
+                if progress_tx.try_send(msg).is_err() {
+                    tracing::warn!(
+                        project_path = %progress_project_path,
+                        job_id = %progress_job_id,
+                        "outbound channel full, WorktreeCreationProgress dropped"
+                    );
+                }
+            };
+
+            let input = crate::worktree::service::WorktreeCreateInput {
+                project_path: std::path::PathBuf::from(&project_path),
+                branch,
+                path: path.map(std::path::PathBuf::from),
+                new_branch,
+                base_ref,
+            };
+
+            let response = match crate::worktree::service::run_worktree_create(input, emit).await {
+                Ok(output) => AgentMessage::WorktreeCreateResponse {
+                    request_id,
+                    worktree: Some(zremote_protocol::WorktreeCreateSuccessPayload {
+                        path: output.path,
+                        branch: output.branch,
+                        commit_hash: output.commit_hash,
+                        hook_result: output.hook_result,
+                    }),
+                    error: None,
+                },
+                Err(failure) => AgentMessage::WorktreeCreateResponse {
+                    request_id,
+                    worktree: None,
+                    error: Some(failure.into_worktree_error()),
+                },
+            };
+
+            if tx.send(response).await.is_err() {
+                tracing::warn!(
+                    request_id = %request_id,
+                    "outbound channel closed, WorktreeCreateResponse dropped"
+                );
+            }
+        });
     }
 }
 
@@ -2422,5 +2696,284 @@ mod tests {
             wt_path.exists(),
             "worktree must not be removed when pre_delete fails"
         );
+    }
+
+    // ─── RFC-009 P2: request/response dispatch ──────────────────────────────
+
+    /// `BranchListRequest` on a real git repo must round-trip to
+    /// `BranchListResponse { branches: Some(..), error: None }`.
+    #[tokio::test]
+    async fn branch_list_request_returns_branches_on_healthy_repo() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+
+        let request_id = Uuid::new_v4();
+        let msg = ServerMessage::BranchListRequest {
+            request_id,
+            project_path: repo.to_string_lossy().into_owned(),
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(10), orx.recv())
+            .await
+            .expect("timed out waiting for response")
+            .expect("channel closed");
+        match sent {
+            AgentMessage::BranchListResponse {
+                request_id: rid,
+                branches,
+                error,
+            } => {
+                assert_eq!(rid, request_id, "request_id must echo back");
+                assert!(
+                    error.is_none(),
+                    "healthy repo must not return error: {error:?}"
+                );
+                let list = branches.expect("branches must be Some");
+                assert!(
+                    list.local.iter().any(|b| b.name == "main"),
+                    "expected local branch 'main' in {:?}",
+                    list.local
+                );
+            }
+            other => panic!("unexpected agent message: {other:?}"),
+        }
+    }
+
+    /// `BranchListRequest` for a path that does not exist must come back with
+    /// `error: Some(WorktreeError { code: PathMissing, .. })`.
+    #[tokio::test]
+    async fn branch_list_request_path_missing_maps_to_structured_error() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let request_id = Uuid::new_v4();
+        let msg = ServerMessage::BranchListRequest {
+            request_id,
+            project_path: "/nonexistent/zremote-test/abcxyz".to_string(),
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(5), orx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        match sent {
+            AgentMessage::BranchListResponse {
+                request_id: rid,
+                branches,
+                error,
+            } => {
+                assert_eq!(rid, request_id);
+                assert!(branches.is_none(), "branches must be None on error");
+                let err = error.expect("error must be Some for missing path");
+                assert_eq!(
+                    err.code,
+                    zremote_protocol::project::WorktreeErrorCode::PathMissing,
+                    "expected PathMissing for nonexistent project path"
+                );
+            }
+            other => panic!("unexpected agent message: {other:?}"),
+        }
+    }
+
+    /// `WorktreeCreateRequest` happy path: response carries a populated
+    /// `WorktreeCreateSuccessPayload` and at least Init/Finalizing/Done
+    /// progress events fire before it.
+    #[tokio::test]
+    async fn worktree_create_request_happy_path_returns_success_payload() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+        let wt_path = tmp.path().join("wt-request");
+
+        let request_id = Uuid::new_v4();
+        let msg = ServerMessage::WorktreeCreateRequest {
+            request_id,
+            project_path: repo.to_string_lossy().into_owned(),
+            branch: "derived-req".to_string(),
+            path: Some(wt_path.to_string_lossy().into_owned()),
+            new_branch: true,
+            base_ref: Some("base-branch".to_string()),
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut stages = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let sent = tokio::time::timeout(remaining, orx.recv())
+                .await
+                .expect("timed out")
+                .expect("channel closed");
+            match sent {
+                AgentMessage::WorktreeCreationProgress { stage, .. } => {
+                    stages.push(stage);
+                }
+                AgentMessage::WorktreeCreateResponse {
+                    request_id: rid,
+                    worktree,
+                    error,
+                } => {
+                    assert_eq!(rid, request_id, "request_id must echo back");
+                    assert!(error.is_none(), "happy path must not emit error: {error:?}");
+                    let payload = worktree.expect("payload must be Some on success");
+                    assert_eq!(payload.branch.as_deref(), Some("derived-req"));
+                    assert!(
+                        payload.path.ends_with("wt-request"),
+                        "unexpected path {}",
+                        payload.path
+                    );
+                    assert!(
+                        payload.commit_hash.is_some(),
+                        "commit_hash must be populated"
+                    );
+                    break;
+                }
+                AgentMessage::WorktreeError { .. } => {
+                    panic!("legacy WorktreeError must not fire for request path");
+                }
+                AgentMessage::WorktreeCreated { .. } => {
+                    panic!("legacy WorktreeCreated must not fire for request path");
+                }
+                _ => {}
+            }
+        }
+
+        use zremote_protocol::events::WorktreeCreationStage::{Done, Finalizing, Init};
+        assert!(stages.contains(&Init), "missing Init: {stages:?}");
+        assert!(
+            stages.contains(&Finalizing),
+            "missing Finalizing: {stages:?}"
+        );
+        assert!(stages.contains(&Done), "missing Done: {stages:?}");
+    }
+
+    /// `WorktreeCreateRequest` with a leading-dash branch must be rejected
+    /// before any git call — the service helper is the single source of truth
+    /// for that validation.
+    #[tokio::test]
+    async fn worktree_create_request_leading_dash_rejected_in_service() {
+        let host_id = Uuid::new_v4();
+        let (mut sm, mut am, mut ps, otx, mut orx, atx, _arx, ktx, mapper, bs, bsb, mut sa) =
+            make_test_context();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_dispatch_test_repo(&repo);
+
+        let request_id = Uuid::new_v4();
+        let msg = ServerMessage::WorktreeCreateRequest {
+            request_id,
+            project_path: repo.to_string_lossy().into_owned(),
+            branch: "-x".to_string(),
+            path: None,
+            new_branch: true,
+            base_ref: None,
+        };
+        handle_server_message(
+            &msg,
+            &host_id,
+            &mut sm,
+            &mut am,
+            &mut ps,
+            &otx,
+            &atx,
+            ktx.as_ref(),
+            &mapper,
+            &bs,
+            &bsb,
+            &mut sa,
+            None,
+            &mut std::collections::HashMap::new(),
+            &std::sync::Arc::new(crate::agents::LauncherRegistry::with_builtins()),
+        )
+        .await;
+
+        let sent = tokio::time::timeout(Duration::from_secs(5), orx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        match sent {
+            AgentMessage::WorktreeCreateResponse {
+                request_id: rid,
+                worktree,
+                error,
+            } => {
+                assert_eq!(rid, request_id);
+                assert!(worktree.is_none(), "worktree must be None on rejection");
+                let err = error.expect("error must be Some");
+                assert_eq!(
+                    err.code,
+                    zremote_protocol::project::WorktreeErrorCode::InvalidRef,
+                    "leading dash must map to InvalidRef"
+                );
+            }
+            other => panic!("unexpected agent message: {other:?}"),
+        }
     }
 }

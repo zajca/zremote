@@ -27,6 +27,20 @@ pub struct HookResultInfo {
     pub duration_ms: u64,
 }
 
+/// Success payload for a request/response `WorktreeCreateResponse`. Mirrors the
+/// shape local-mode's HTTP handler returns today (minus the DB-assigned `id`,
+/// which the server assigns after upsert). New in RFC-009.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorktreeCreateSuccessPayload {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_result: Option<HookResultInfo>,
+}
+
 /// Messages sent from agent to server (terminal/connection layer).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
@@ -114,6 +128,27 @@ pub enum AgentMessage {
     WorktreeError {
         project_path: String,
         message: String,
+    },
+    /// Reply to a `ServerMessage::BranchListRequest`. Exactly one of
+    /// `branches` / `error` is `Some`. New in RFC-009; older servers that
+    /// predate this variant simply ignore it (unknown message type).
+    BranchListResponse {
+        request_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branches: Option<crate::project::BranchList>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<crate::project::WorktreeError>,
+    },
+    /// Reply to a `ServerMessage::WorktreeCreateRequest`. Exactly one of
+    /// `worktree` / `error` is `Some`. New in RFC-009; the legacy
+    /// `WorktreeCreated` / `WorktreeError` fire-and-forget path stays alive
+    /// so a mixed-version fleet keeps working during rollout.
+    WorktreeCreateResponse {
+        request_id: uuid::Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<WorktreeCreateSuccessPayload>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<crate::project::WorktreeError>,
     },
     SessionsRecovered {
         sessions: Vec<RecoveredSession>,
@@ -220,6 +255,26 @@ pub enum ServerMessage {
         project_path: String,
         worktree_path: String,
         force: bool,
+    },
+    /// Ask the agent for the branch list of a project. Response:
+    /// `AgentMessage::BranchListResponse`. New in RFC-009.
+    BranchListRequest {
+        request_id: uuid::Uuid,
+        project_path: String,
+    },
+    /// Synchronous worktree-create with reply. Response:
+    /// `AgentMessage::WorktreeCreateResponse`. The existing `WorktreeCreate`
+    /// variant remains for older agents that do not recognise this request.
+    /// New in RFC-009.
+    WorktreeCreateRequest {
+        request_id: uuid::Uuid,
+        project_path: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        new_branch: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
     },
     ListDirectory {
         request_id: uuid::Uuid,
@@ -618,6 +673,158 @@ mod tests {
             project_path: "/home/user/repo".to_string(),
             message: "branch already exists".to_string(),
         });
+    }
+
+    #[test]
+    fn branch_list_request_roundtrip() {
+        roundtrip_server(&ServerMessage::BranchListRequest {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/repo".to_string(),
+        });
+    }
+
+    #[test]
+    fn worktree_create_request_roundtrip() {
+        roundtrip_server(&ServerMessage::WorktreeCreateRequest {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/repo".to_string(),
+            branch: "feature/new".to_string(),
+            path: Some("/home/user/repo-feature".to_string()),
+            new_branch: true,
+            base_ref: Some("main".to_string()),
+        });
+        roundtrip_server(&ServerMessage::WorktreeCreateRequest {
+            request_id: Uuid::new_v4(),
+            project_path: "/home/user/repo".to_string(),
+            branch: "existing".to_string(),
+            path: None,
+            new_branch: false,
+            base_ref: None,
+        });
+    }
+
+    #[test]
+    fn branch_list_response_roundtrip() {
+        use crate::project::{Branch, BranchList};
+        roundtrip_agent(&AgentMessage::BranchListResponse {
+            request_id: Uuid::new_v4(),
+            branches: Some(BranchList {
+                local: vec![Branch {
+                    name: "main".to_string(),
+                    is_current: true,
+                    ahead: 0,
+                    behind: 0,
+                }],
+                remote: vec![Branch {
+                    name: "origin/main".to_string(),
+                    is_current: false,
+                    ahead: 0,
+                    behind: 2,
+                }],
+                current: "main".to_string(),
+                remote_truncated: false,
+            }),
+            error: None,
+        });
+    }
+
+    #[test]
+    fn branch_list_response_error_roundtrip() {
+        use crate::project::{WorktreeError, WorktreeErrorCode};
+        roundtrip_agent(&AgentMessage::BranchListResponse {
+            request_id: Uuid::new_v4(),
+            branches: None,
+            error: Some(WorktreeError::new(
+                WorktreeErrorCode::PathMissing,
+                "project path gone",
+                "no such directory",
+            )),
+        });
+    }
+
+    #[test]
+    fn worktree_create_response_success_roundtrip() {
+        roundtrip_agent(&AgentMessage::WorktreeCreateResponse {
+            request_id: Uuid::new_v4(),
+            worktree: Some(WorktreeCreateSuccessPayload {
+                path: "/home/user/repo-feat".to_string(),
+                branch: Some("feature/new".to_string()),
+                commit_hash: Some("abc1234".to_string()),
+                hook_result: Some(HookResultInfo {
+                    success: true,
+                    output: Some("npm install done".to_string()),
+                    duration_ms: 2000,
+                }),
+            }),
+            error: None,
+        });
+    }
+
+    #[test]
+    fn worktree_create_response_error_roundtrip() {
+        use crate::project::{WorktreeError, WorktreeErrorCode};
+        roundtrip_agent(&AgentMessage::WorktreeCreateResponse {
+            request_id: Uuid::new_v4(),
+            worktree: None,
+            error: Some(WorktreeError::new(
+                WorktreeErrorCode::BranchExists,
+                "pick another name",
+                "branch already exists",
+            )),
+        });
+    }
+
+    #[test]
+    fn worktree_create_success_payload_hook_result_omitted_when_none() {
+        let payload = WorktreeCreateSuccessPayload {
+            path: "/home/user/repo-feat".to_string(),
+            branch: Some("feature".to_string()),
+            commit_hash: Some("abcdef0".to_string()),
+            hook_result: None,
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(
+            !obj.contains_key("hook_result"),
+            "hook_result must be omitted when None, got JSON: {json}"
+        );
+        // Round-trip still works when field is absent.
+        let parsed: WorktreeCreateSuccessPayload =
+            serde_json::from_value(json).expect("deserialize");
+        assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn worktree_create_success_payload_roundtrip_with_hook() {
+        let payload = WorktreeCreateSuccessPayload {
+            path: "/home/user/repo-feat".to_string(),
+            branch: Some("feature".to_string()),
+            commit_hash: Some("abcdef0".to_string()),
+            hook_result: Some(HookResultInfo {
+                success: false,
+                output: Some("install failed".to_string()),
+                duration_ms: 150,
+            }),
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let parsed: WorktreeCreateSuccessPayload =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn worktree_create_request_accepts_missing_optional_fields() {
+        // Future-proofing: a minimal request with only required fields must
+        // deserialize with `path` and `base_ref` defaulting to None.
+        let json = r#"{"type":"WorktreeCreateRequest","payload":{"request_id":"550e8400-e29b-41d4-a716-446655440000","project_path":"/r","branch":"b","new_branch":true}}"#;
+        let msg: ServerMessage = serde_json::from_str(json).expect("should deserialize");
+        match msg {
+            ServerMessage::WorktreeCreateRequest { path, base_ref, .. } => {
+                assert!(path.is_none(), "path should default to None");
+                assert!(base_ref.is_none(), "base_ref should default to None");
+            }
+            other => panic!("expected WorktreeCreateRequest, got {other:?}"),
+        }
     }
 
     #[test]
