@@ -880,6 +880,39 @@ impl SidebarView {
         .detach();
     }
 
+    /// Trigger a project/worktree rescan on the agent for the given host.
+    /// The agent broadcasts `ProjectsUpdated` on completion, which causes
+    /// `handle_server_event` to call `load_data()` and refresh the sidebar.
+    pub fn refresh_projects(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        let api = self.app_state.api.clone();
+        let host_id = host_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = handle
+                .spawn({
+                    let host_id = host_id.clone();
+                    async move { api.trigger_scan(&host_id).await }
+                })
+                .await;
+            let Ok(result) = result else {
+                tracing::error!("refresh_projects task panicked or was cancelled");
+                return;
+            };
+            if let Err(e) = result {
+                tracing::error!(error = %e, host_id = %host_id, "failed to trigger project scan");
+                return;
+            }
+            // Fall back to an immediate reload in case the broadcast event
+            // is lost (e.g. scan returns 202 with no changes, or a brief
+            // WebSocket hiccup in server mode drops the ProjectsUpdated
+            // broadcast). load_generation collapses the duplicate fetch.
+            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                this.load_data(cx);
+            });
+        })
+        .detach();
+    }
+
     /// Start an agent task for the given project using the specified profile.
     /// On success, adds the session to the sidebar and selects it. On error,
     /// logs via tracing.
@@ -1201,6 +1234,7 @@ impl SidebarView {
                     .any(|s| s.host_id == host_id && s.status == SessionStatus::Suspended);
 
                 let cleanup_host_id = host_id.clone();
+                let refresh_host_id = host_id.clone();
                 let new_session_host_id = host_id.clone();
 
                 div()
@@ -1220,6 +1254,12 @@ impl SidebarView {
                                     s
                                 })
                                 .hover(|s| s.bg(theme::bg_tertiary()))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| {
+                                        SidebarTextTooltip("Remove suspended sessions".to_string())
+                                    })
+                                    .into()
+                                })
                                 .child(icon(Icon::X).size(px(14.0)).text_color(theme::error()))
                                 .on_click(cx.listener(
                                     move |this, _event: &ClickEvent, _window, cx| {
@@ -1228,6 +1268,35 @@ impl SidebarView {
                                 )),
                         )
                     })
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("refresh-{refresh_host_id}")))
+                            .p(px(2.0))
+                            .rounded(px(3.0))
+                            .cursor_pointer()
+                            .invisible()
+                            .group_hover("host-header", |mut s| {
+                                s.visibility = Some(gpui::Visibility::Visible);
+                                s
+                            })
+                            .hover(|s| s.bg(theme::bg_tertiary()))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| {
+                                    SidebarTextTooltip("Refresh projects & worktrees".to_string())
+                                })
+                                .into()
+                            })
+                            .child(
+                                icon(Icon::RefreshCw)
+                                    .size(px(14.0))
+                                    .text_color(theme::text_tertiary()),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _event: &ClickEvent, _window, cx| {
+                                    this.refresh_projects(&refresh_host_id, cx);
+                                },
+                            )),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!(
@@ -1242,6 +1311,10 @@ impl SidebarView {
                                 s
                             })
                             .hover(|s| s.bg(theme::bg_tertiary()))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SidebarTextTooltip("New session".to_string()))
+                                    .into()
+                            })
                             .child(
                                 icon(Icon::Plus)
                                     .size(px(14.0))

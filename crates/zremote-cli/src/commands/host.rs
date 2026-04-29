@@ -36,6 +36,12 @@ pub enum HostCommand {
         #[arg(long, default_value = "/")]
         path: String,
     },
+    /// Re-scan projects and worktrees on the host (alias for `project scan`)
+    #[command(alias = "rescan")]
+    Refresh {
+        /// Host ID (defaults to --host or auto-detected in local mode)
+        host_id: Option<String>,
+    },
 }
 
 pub async fn run(
@@ -105,6 +111,28 @@ pub async fn run(
             match client.browse_directory(&host_id, Some(&path)).await {
                 Ok(entries) => {
                     println!("{}", fmt.directory_entries(&entries));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        HostCommand::Refresh { host_id } => {
+            let host_id = match host_id {
+                Some(id) => id,
+                None => match resolver.resolve_host_id(client).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        return 1;
+                    }
+                },
+            };
+            match client.trigger_scan(&host_id).await {
+                Ok(()) => {
+                    println!("Project scan triggered on host {host_id}.");
                     0
                 }
                 Err(e) => {
