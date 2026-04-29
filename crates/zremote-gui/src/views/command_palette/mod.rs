@@ -1127,7 +1127,7 @@ impl CommandPalette {
         // Icon
         let item_icon = match &item.item {
             PaletteItem::Session { .. } => Icon::SquareTerminal,
-            PaletteItem::Project { .. } => Icon::Folder,
+            PaletteItem::Project { project_idx } => self.project_icon(*project_idx),
             PaletteItem::Action(a) => match a {
                 PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
                 PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
@@ -1233,6 +1233,14 @@ impl CommandPalette {
         }
 
         row
+    }
+
+    fn project_icon(&self, project_idx: usize) -> Icon {
+        if self.snapshot.projects[project_idx].project_type == "worktree" {
+            Icon::GitBranch
+        } else {
+            Icon::Folder
+        }
     }
 
     fn render_session_accessory(&self, session: &zremote_client::Session) -> impl IntoElement {
@@ -2124,7 +2132,7 @@ impl CommandPalette {
     fn render_disabled_row(&self, item: &ResultItem) -> impl IntoElement {
         let item_icon = match &item.item {
             PaletteItem::Session { .. } => Icon::SquareTerminal,
-            PaletteItem::Project { .. } => Icon::Folder,
+            PaletteItem::Project { project_idx } => self.project_icon(*project_idx),
             PaletteItem::Action(a) => match a {
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal
@@ -2219,7 +2227,7 @@ impl CommandPalette {
         // Icon
         let item_icon = match &item.item {
             PaletteItem::Session { .. } => Icon::SquareTerminal,
-            PaletteItem::Project { .. } => Icon::Folder,
+            PaletteItem::Project { project_idx } => self.project_icon(*project_idx),
             PaletteItem::Action(a) => match a {
                 PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
                 PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
@@ -2603,6 +2611,7 @@ mod tests {
     #[test]
     fn test_palette_category_drill_labels() {
         assert_eq!(PaletteCategory::DrillSessions.label(), "SESSIONS");
+        assert_eq!(PaletteCategory::DrillWorktrees.label(), "WORKTREES");
         assert_eq!(PaletteCategory::DrillActions.label(), "ACTIONS");
     }
 }

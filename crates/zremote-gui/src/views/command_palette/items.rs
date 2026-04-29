@@ -97,6 +97,7 @@ pub(crate) enum PaletteCategory {
     AllProjects,
     Actions,
     DrillSessions,
+    DrillWorktrees,
     DrillActions,
 }
 
@@ -110,6 +111,7 @@ impl PaletteCategory {
             Self::AllProjects => "ALL PROJECTS",
             Self::Actions | Self::DrillActions => "ACTIONS",
             Self::DrillSessions => "SESSIONS",
+            Self::DrillWorktrees => "WORKTREES",
         }
     }
 }
@@ -467,6 +469,30 @@ pub(super) fn build_project_drill_items_from(
     let mut items = Vec::new();
     let mut groups = Vec::new();
 
+    // Worktrees: child projects of this project tagged as worktrees.
+    let mut worktree_indices = Vec::new();
+    for (idx, p) in snapshot.projects.iter().enumerate() {
+        if p.project_type == "worktree" && p.parent_project_id.as_deref() == Some(&project.id) {
+            let host_name = snapshot.host_name(&p.host_id);
+            let subtitle = project_subtitle(p, &host_name, &snapshot.mode);
+            worktree_indices.push(items.len());
+            items.push(ResultItem {
+                item: PaletteItem::Project { project_idx: idx },
+                title: p.name.clone(),
+                subtitle,
+                selectable: true,
+            });
+        }
+    }
+
+    if !worktree_indices.is_empty() {
+        groups.push(CategoryGroup {
+            category: PaletteCategory::DrillWorktrees,
+            indices: worktree_indices,
+            source: ItemSource::Project,
+        });
+    }
+
     // Find sessions belonging to this project
     let mut session_indices = Vec::new();
     for sess_item in session_items {
@@ -512,6 +538,23 @@ pub(super) fn build_project_drill_items_from(
         selectable: true,
     });
     action_indices.push(action_start);
+
+    // "New Worktree in {project}" — only for non-worktree projects (worktrees
+    // can't have nested worktrees). Pre-fills the parent project so the dialog
+    // opens with the correct context.
+    if project.project_type != "worktree" {
+        let new_worktree_idx = items.len();
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::NewWorktree {
+                parent_project_id: Some(project.id.clone()),
+                host_id: Some(project.host_id.clone()),
+            }),
+            title: format!("New Worktree in {}", project.name),
+            subtitle: String::new(),
+            selectable: true,
+        });
+        action_indices.push(new_worktree_idx);
+    }
 
     // Agent profile quick-launch entries — one per profile, pre-filled with
     // the drilled-in project's host_id + path so the launch skips the
@@ -1880,6 +1923,94 @@ mod tests {
         assert!(
             !has_delete,
             "orphan worktree (no parent_project_id) must not expose Delete Worktree"
+        );
+    }
+
+    #[test]
+    fn test_project_drill_lists_child_worktrees() {
+        let projects = vec![
+            worktree_project("parent-1", "main-repo", None, "rust"),
+            worktree_project("wt-1", "feature-a", Some("parent-1"), "worktree"),
+            worktree_project("wt-2", "feature-b", Some("parent-1"), "worktree"),
+            // unrelated worktree pointing at a different parent — must not show
+            worktree_project("wt-other", "unrelated", Some("parent-2"), "worktree"),
+            worktree_project("parent-2", "other-repo", None, "rust"),
+        ];
+        let snapshot = snapshot_with_projects(projects);
+        let session_items = build_session_items(&snapshot);
+        // Drill into parent-1 (index 0)
+        let (items, results) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let worktree_titles: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match &i.item {
+                PaletteItem::Project { project_idx } => {
+                    let p = &snapshot.projects[*project_idx];
+                    if p.project_type == "worktree" {
+                        Some(p.name.as_str())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(worktree_titles, vec!["feature-a", "feature-b"]);
+
+        // Verify a DrillWorktrees group exists
+        if let PaletteResults::Grouped(groups) = results {
+            assert!(
+                groups
+                    .iter()
+                    .any(|g| g.category == PaletteCategory::DrillWorktrees && g.indices.len() == 2),
+                "drill-down on parent must expose a WORKTREES group with 2 entries"
+            );
+        } else {
+            panic!("expected grouped results");
+        }
+    }
+
+    #[test]
+    fn test_project_drill_includes_new_worktree_action() {
+        let projects = vec![worktree_project("parent-1", "main-repo", None, "rust")];
+        let snapshot = snapshot_with_projects(projects);
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let has_new_worktree = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::NewWorktree { parent_project_id, host_id })
+                    if parent_project_id.as_deref() == Some("parent-1") && host_id.is_some()
+            )
+        });
+        assert!(
+            has_new_worktree,
+            "drill-down on a non-worktree project must expose 'New Worktree in <name>' pre-filled"
+        );
+    }
+
+    #[test]
+    fn test_project_drill_omits_new_worktree_for_worktree() {
+        let projects = vec![worktree_project(
+            "wt-1",
+            "feature-y",
+            Some("parent-1"),
+            "worktree",
+        )];
+        let snapshot = snapshot_with_projects(projects);
+        let session_items = build_session_items(&snapshot);
+        let (items, _) = build_project_drill_items_from(0, &snapshot, &session_items);
+
+        let has_new_worktree = items.iter().any(|i| {
+            matches!(
+                &i.item,
+                PaletteItem::Action(PaletteAction::NewWorktree { .. })
+            )
+        });
+        assert!(
+            !has_new_worktree,
+            "drill-down on a worktree must not offer creating nested worktrees"
         );
     }
 
