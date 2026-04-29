@@ -1153,6 +1153,18 @@ impl SidebarView {
             theme::text_tertiary()
         };
 
+        let host_tooltip = {
+            let mut lines = vec![host.hostname.clone()];
+            lines.push(format!(
+                "Status: {}",
+                if is_online { "online" } else { "offline" }
+            ));
+            if !host.id.is_empty() && host.id != host.hostname {
+                lines.push(format!("ID: {}", host.id));
+            }
+            lines.join("\n")
+        };
+
         div()
             .id(SharedString::from(format!("host-header-{host_id}")))
             .group("host-header")
@@ -1161,6 +1173,7 @@ impl SidebarView {
             .justify_between()
             .px(px(12.0))
             .py(px(4.0))
+            .tooltip(move |_window, cx| cx.new(|_| SidebarTextTooltip(host_tooltip.clone())).into())
             .child(
                 div()
                     .flex()
@@ -1488,13 +1501,18 @@ impl SidebarView {
             );
         }
 
+        // Name is allowed to shrink and truncate — `flex_shrink_0` here would
+        // push the row wider than the sidebar, hiding the badges/actions on
+        // the right. With `truncate()` long worktree branches (e.g. RFC names)
+        // get a visible ellipsis and the tooltip below carries the full text.
         left = left.child(
             div()
                 .text_color(theme::text_primary())
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
-                .flex_shrink_0()
+                .min_w(px(0.0))
                 .whitespace_nowrap()
+                .truncate()
                 .child(display_name_for_row(project, kind)),
         );
 
@@ -1521,9 +1539,12 @@ impl SidebarView {
         let pid_for_click = project_id.clone();
         let host_for_click = host_id_owned.clone();
 
+        let tooltip_text = build_project_tooltip(project, kind);
+
         div()
             .id(row_id)
             .group("project-row")
+            .tooltip(move |_window, cx| cx.new(|_| SidebarTextTooltip(tooltip_text.clone())).into())
             .flex()
             .items_center()
             .justify_between()
@@ -1839,6 +1860,8 @@ impl SidebarView {
         // Row height: taller when we have a second row with metrics
         let row_height = if has_second_row { px(38.0) } else { px(22.0) };
 
+        let session_tooltip = build_session_tooltip(session, &display_name, cc_state, cc_metrics);
+
         div()
             .id(SharedString::from(format!("session-{session_id}")))
             .flex()
@@ -1852,6 +1875,10 @@ impl SidebarView {
             .mx(px(4.0))
             .bg(bg_color)
             .hover(|s| s.bg(theme::bg_tertiary()))
+            .tooltip(move |_window, cx| {
+                cx.new(|_| SidebarTextTooltip(session_tooltip.clone()))
+                    .into()
+            })
             .on_click({
                 let session_id = session_id.clone();
                 let host_id = host_id.clone();
@@ -1982,11 +2009,18 @@ impl SidebarView {
 }
 
 /// Minimal text-only tooltip view (GPUI tooltips require `AnyView`).
+///
+/// Newlines in the contents are rendered as separate lines, so a single
+/// instance can carry name + path + branch for truncated sidebar rows.
 struct SidebarTextTooltip(String);
 
 impl Render for SidebarTextTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let lines: Vec<&str> = self.0.split('\n').collect();
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(6.0))
@@ -1995,8 +2029,142 @@ impl Render for SidebarTextTooltip {
             .border_color(theme::border())
             .text_size(px(11.0))
             .text_color(theme::text_secondary())
-            .child(self.0.clone())
+            .max_w(px(420.0));
+        for (idx, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let mut row = div().child(line.to_string());
+            if idx == 0 {
+                row = row
+                    .text_color(theme::text_primary())
+                    .font_weight(FontWeight::MEDIUM);
+            }
+            container = container.child(row);
+        }
+        container
     }
+}
+
+/// Build the multiline tooltip body for a sidebar project / worktree row.
+///
+/// First line is the displayed identity (project name or worktree branch),
+/// followed by branch / path / status detail. Lines are joined with `\n`
+/// and rendered by [`SidebarTextTooltip`].
+fn build_project_tooltip(project: &Project, kind: RowKind) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let display = display_name_for_row(project, kind);
+    lines.push(display.clone());
+
+    // Worktree rows show the branch as their title — surface the underlying
+    // project name as a separate line, but skip when they happen to match.
+    if matches!(kind, RowKind::Worktree) && project.name != display {
+        lines.push(format!("Project: {}", project.name));
+    }
+
+    // For worktrees `display` is the branch, so the branch line is redundant
+    // there; `branch != display` collapses both cases without a separate
+    // `RowKind` match.
+    if let Some(branch) = project.git_branch.as_deref()
+        && !branch.is_empty()
+        && branch != display
+    {
+        lines.push(format!("Branch: {branch}"));
+    }
+
+    if !project.path.is_empty() {
+        lines.push(format!("Path: {}", project.path));
+    }
+
+    let mut status_parts: Vec<String> = Vec::new();
+    if project.git_ahead > 0 {
+        status_parts.push(format!("{} ahead", project.git_ahead));
+    }
+    if project.git_behind > 0 {
+        status_parts.push(format!("{} behind", project.git_behind));
+    }
+    if project.git_is_dirty {
+        status_parts.push("uncommitted changes".to_string());
+    }
+    if !status_parts.is_empty() {
+        lines.push(status_parts.join(", "));
+    }
+
+    lines.join("\n")
+}
+
+/// Build the multiline tooltip body for a sidebar session row.
+fn build_session_tooltip(
+    session: &Session,
+    display_name: &str,
+    cc_state: Option<&CcState>,
+    cc_metrics: Option<&CcMetrics>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(display_name.to_string());
+
+    if let Some(custom) = session.name.as_deref()
+        && custom != display_name
+    {
+        lines.push(format!("Name: {custom}"));
+    }
+
+    if let Some(cc) = cc_state
+        && let Some(task) = cc.task_name.as_deref()
+        && task != display_name
+    {
+        lines.push(format!("Task: {task}"));
+    }
+
+    if let Some(dir) = session.working_dir.as_deref()
+        && !dir.is_empty()
+    {
+        lines.push(format!("Dir: {dir}"));
+    }
+
+    if let Some(shell) = session.shell.as_deref()
+        && !shell.is_empty()
+    {
+        lines.push(format!("Shell: {shell}"));
+    }
+
+    let status_label = match session.status {
+        SessionStatus::Active => "active",
+        SessionStatus::Suspended => "suspended",
+        SessionStatus::Closed => "closed",
+        SessionStatus::Creating => "creating",
+        SessionStatus::Error => "error",
+        SessionStatus::Unknown => "unknown",
+    };
+    lines.push(format!("Status: {status_label}"));
+
+    if let Some(cc) = cc_state {
+        let agentic = match cc.status {
+            AgenticStatus::Idle => "idle",
+            AgenticStatus::Working => "working",
+            AgenticStatus::WaitingForInput => "waiting for input",
+            AgenticStatus::RequiresAction => "requires action",
+            AgenticStatus::Error => "error",
+            AgenticStatus::Completed => "completed",
+            AgenticStatus::Unknown => "unknown",
+        };
+        lines.push(format!("Agent: {agentic}"));
+        if let Some(mode) = cc.permission_mode.as_deref()
+            && mode != "default"
+        {
+            lines.push(format!("Mode: {mode}"));
+        }
+    }
+
+    if let Some(metrics) = cc_metrics
+        && let Some(model) = metrics.model.as_deref()
+    {
+        lines.push(format!("Model: {model}"));
+    }
+
+    lines.push(format!("ID: {}", session.id));
+
+    lines.join("\n")
 }
 
 /// Tooltip view for Claude Code session metrics.
