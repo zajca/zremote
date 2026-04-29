@@ -2126,15 +2126,25 @@ impl MainView {
             )
     }
 
-    fn render_command_palette_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_command_palette_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let palette = self.command_palette.as_ref()?;
+        let viewport = window.viewport_size();
+        let viewport_w = f32::from(viewport.width);
+        let viewport_h = f32::from(viewport.height);
+        let palette_w = px((viewport_w - 160.0).clamp(760.0, 1100.0));
+        let palette_max_h = px((viewport_h - 160.0).clamp(520.0, 820.0));
+
         Some(Self::render_modal_overlay(
             "palette-backdrop",
             "palette-container",
             px(80.0),
-            px(520.0),
+            palette_w,
             None,
-            Some(px(420.0)),
+            Some(palette_max_h),
             cx.listener(|this, _: &ClickEvent, _window, cx| {
                 this.close_command_palette(cx);
             }),
@@ -2251,7 +2261,7 @@ impl Render for MainView {
             .child(self.sidebar.clone())
             .child(right_column);
 
-        if let Some(overlay) = self.render_command_palette_overlay(cx) {
+        if let Some(overlay) = self.render_command_palette_overlay(window, cx) {
             root = root.child(overlay);
         }
         if let Some(overlay) = self.render_session_switcher_overlay(window, cx) {
