@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage};
 
 use super::AGENTIC_CHECK_INTERVAL;
@@ -285,13 +286,44 @@ pub(crate) fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                 let events = analyzer.process_output(&data);
                 for event in events {
                     if let AnalyzerEvent::NodeCompleted(node) = event {
-                        let loop_id = {
+                        let (loop_id, is_hook) = {
                             let mgr = state.agentic_manager.lock().await;
-                            mgr.loop_id_for_session(&session_id)
+                            let lid = mgr.loop_id_for_session(&session_id);
+                            let hook = state.session_mapper.is_hook_mode(&session_id);
+                            (lid, hook)
                         };
-                        // TODO(rfc-009 phase 2): replace with Opened/Closed messages
-                        let _ = (session_id, loop_id, node);
-                        tracing::warn!("PTY execution node not yet forwarded via Opened/Closed");
+
+                        let suppressed =
+                            is_hook && (node.kind == "tool_call" || node.kind == "agent_response");
+
+                        if !suppressed {
+                            let synth_id = format!("pty-{}", uuid::Uuid::new_v4());
+                            let opened = AgenticAgentMessage::ExecutionNodeOpened {
+                                session_id,
+                                loop_id,
+                                tool_use_id: synth_id.clone(),
+                                timestamp: node.timestamp,
+                                kind: node.kind.clone(),
+                                input: node.input.clone(),
+                                working_dir: node.working_dir.clone(),
+                            };
+                            if let Err(e) = state.agentic_processor.handle_message(opened).await {
+                                tracing::warn!(error = %e, "failed to process ExecutionNodeOpened");
+                            }
+
+                            let closed = AgenticAgentMessage::ExecutionNodeClosed {
+                                session_id,
+                                tool_use_id: synth_id,
+                                kind: node.kind.clone(),
+                                output_summary: node.output_summary.clone(),
+                                exit_code: node.exit_code,
+                                duration_ms: node.duration_ms,
+                                status: zremote_protocol::NodeStatus::Completed,
+                            };
+                            if let Err(e) = state.agentic_processor.handle_message(closed).await {
+                                tracing::warn!(error = %e, "failed to process ExecutionNodeClosed");
+                            }
+                        }
                     }
                 }
 

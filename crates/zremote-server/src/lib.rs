@@ -446,6 +446,9 @@ pub async fn run_server(config: ServerConfig) {
     // Spawn idle loop checker for agentic loops
     spawn_idle_loop_checker(Arc::clone(&state), shutdown.clone());
 
+    // Spawn stale execution node sweeper (every 60s, TTL 600s)
+    spawn_stale_node_sweeper(Arc::clone(&state), shutdown.clone());
+
     let addr = format!("0.0.0.0:{}", config.port);
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -462,6 +465,45 @@ pub async fn run_server(config: ServerConfig) {
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .expect("server error");
+}
+
+fn spawn_stale_node_sweeper(state: Arc<AppState>, shutdown: CancellationToken) {
+    use crate::state::ServerEvent;
+    use zremote_protocol::NodeStatus;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match zremote_core::queries::execution_nodes::sweep_stale_running(&state.db, 600).await {
+                        Ok(rows) if !rows.is_empty() => {
+                            tracing::info!(count = rows.len(), "swept stale execution nodes");
+                            for row in rows {
+                                let _ = state.events.send(ServerEvent::ExecutionNodeUpdated {
+                                    session_id: row.session_id,
+                                    host_id: String::new(), // no per-row host_id in server-mode sweep
+                                    node_id: row.id,
+                                    tool_use_id: row.tool_use_id,
+                                    status: NodeStatus::Stale,
+                                    kind: row.kind,
+                                    output_summary: row.output_summary,
+                                    exit_code: row.exit_code,
+                                    duration_ms: row.duration_ms,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "stale execution node sweep failed");
+                        }
+                        _ => {}
+                    }
+                }
+                () = shutdown.cancelled() => break,
+            }
+        }
+    });
 }
 
 fn spawn_idle_loop_checker(state: Arc<AppState>, shutdown: CancellationToken) {

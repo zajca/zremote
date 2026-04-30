@@ -264,6 +264,26 @@ pub async fn run_local(
         });
     }
 
+    // Spawn stale execution node sweeper (every 60s, TTL 600s)
+    {
+        let processor = state.agentic_processor.clone();
+        let shutdown_for_sweep = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = processor.sweep_stale_nodes(600).await {
+                            tracing::warn!(error = %e, "stale execution node sweep failed");
+                        }
+                    }
+                    () = shutdown_for_sweep.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // Spawn the PTY output routing loop (includes agentic output processing)
     spawn_pty_output_loop(state.clone());
 
