@@ -180,7 +180,7 @@ pub struct AgenticLoopState {
 /// Thread-safe store for active agentic loop state.
 pub type AgenticLoopStore = Arc<DashMap<AgenticLoopId, AgenticLoopState>>;
 
-pub use zremote_protocol::events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
+pub use zremote_protocol::events::{HostInfo, LoopInfo, NodeStatus, ServerEvent, SessionInfo};
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AgenticLoopId, SessionId};
+use crate::{AgenticLoopId, NodeStatus, SessionId};
 
 /// Status of an agentic loop.
 ///
@@ -56,21 +56,34 @@ pub enum AgenticAgentMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
     },
-    ExecutionNode {
+    /// `PreToolUse` hook, or PTY analyzer at tool start.
+    ExecutionNodeOpened {
         session_id: SessionId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         loop_id: Option<AgenticLoopId>,
+        tool_use_id: String,
         timestamp: i64,
         kind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<String>,
+        working_dir: String,
+    },
+
+    /// `PostToolUse` hook, or PTY analyzer at tool finish.
+    ExecutionNodeClosed {
+        session_id: SessionId,
+        tool_use_id: String,
+        kind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
-        working_dir: String,
         duration_ms: i64,
+        status: NodeStatus,
     },
+
+    /// Stop / `StopFailure` hook: close every running node for this session.
+    SessionExecutionStopped { session_id: SessionId },
 }
 
 #[cfg(test)]
@@ -158,28 +171,46 @@ mod tests {
     }
 
     #[test]
-    fn execution_node_roundtrip() {
-        roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
+    fn execution_node_opened_closed_stopped_roundtrip() {
+        use crate::NodeStatus;
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNodeOpened {
             session_id: Uuid::new_v4(),
             loop_id: Some(Uuid::new_v4()),
+            tool_use_id: "toolu_abc123".to_string(),
             timestamp: 1_711_843_200_000,
-            kind: "tool_call".to_string(),
+            kind: "read".to_string(),
             input: Some("Read src/main.rs".to_string()),
-            output_summary: Some("fn main() {}".to_string()),
-            exit_code: None,
             working_dir: "/home/user/project".to_string(),
-            duration_ms: 1234,
         });
-        roundtrip_agent(&AgenticAgentMessage::ExecutionNode {
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNodeOpened {
             session_id: Uuid::new_v4(),
             loop_id: None,
+            tool_use_id: "pty-00000000-0000-0000-0000-000000000001".to_string(),
             timestamp: 1_711_843_200_000,
-            kind: "shell_command".to_string(),
+            kind: "bash".to_string(),
             input: None,
+            working_dir: "/home/user".to_string(),
+        });
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNodeClosed {
+            session_id: Uuid::new_v4(),
+            tool_use_id: "toolu_abc123".to_string(),
+            kind: "read".to_string(),
+            output_summary: Some("fn main() {}".to_string()),
+            exit_code: None,
+            duration_ms: 1234,
+            status: NodeStatus::Completed,
+        });
+        roundtrip_agent(&AgenticAgentMessage::ExecutionNodeClosed {
+            session_id: Uuid::new_v4(),
+            tool_use_id: "toolu_xyz".to_string(),
+            kind: "bash".to_string(),
             output_summary: None,
             exit_code: Some(0),
-            working_dir: "/home/user".to_string(),
             duration_ms: 50,
+            status: NodeStatus::Stopped,
+        });
+        roundtrip_agent(&AgenticAgentMessage::SessionExecutionStopped {
+            session_id: Uuid::new_v4(),
         });
     }
 

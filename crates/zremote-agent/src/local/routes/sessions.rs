@@ -1702,18 +1702,16 @@ mod tests {
         let session_id = Uuid::new_v4().to_string();
         insert_test_session(&state, &session_id).await;
 
-        for i in 0..3 {
-            zremote_core::queries::execution_nodes::insert_execution_node(
+        for i in 0..3_i64 {
+            zremote_core::queries::execution_nodes::open_execution_node(
                 &state.db,
                 &session_id,
                 None,
+                &format!("toolu_list_{i}"),
                 1000 + i,
                 "tool_call",
                 Some(&format!("Read file{i}.rs")),
-                Some("output"),
-                None,
                 "/home",
-                50,
             )
             .await
             .unwrap();
@@ -1745,45 +1743,39 @@ mod tests {
         let session_id = Uuid::new_v4().to_string();
         insert_test_session(&state, &session_id).await;
 
-        zremote_core::queries::execution_nodes::insert_execution_node(
+        zremote_core::queries::execution_nodes::open_execution_node(
             &state.db,
             &session_id,
             Some("loop-a"),
+            "toolu_la_1",
             1000,
             "tool_call",
             None,
-            None,
-            None,
             "/home",
-            50,
         )
         .await
         .unwrap();
-        zremote_core::queries::execution_nodes::insert_execution_node(
+        zremote_core::queries::execution_nodes::open_execution_node(
             &state.db,
             &session_id,
             Some("loop-b"),
+            "toolu_lb_1",
             1001,
             "tool_call",
             None,
-            None,
-            None,
             "/home",
-            50,
         )
         .await
         .unwrap();
-        zremote_core::queries::execution_nodes::insert_execution_node(
+        zremote_core::queries::execution_nodes::open_execution_node(
             &state.db,
             &session_id,
             Some("loop-a"),
+            "toolu_la_2",
             1002,
             "tool_call",
             None,
-            None,
-            None,
             "/home",
-            50,
         )
         .await
         .unwrap();
@@ -1819,31 +1811,27 @@ mod tests {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let old_ms = now_ms - 31 * 24 * 60 * 60 * 1000; // 31 days ago
 
-        zremote_core::queries::execution_nodes::insert_execution_node(
+        zremote_core::queries::execution_nodes::open_execution_node(
             &state.db,
             &session_id,
             None,
+            "toolu_old",
             old_ms,
             "tool_call",
             None,
-            None,
-            None,
             "/home",
-            50,
         )
         .await
         .unwrap();
-        zremote_core::queries::execution_nodes::insert_execution_node(
+        zremote_core::queries::execution_nodes::open_execution_node(
             &state.db,
             &session_id,
             None,
+            "toolu_now",
             now_ms,
             "tool_call",
             None,
-            None,
-            None,
             "/home",
-            50,
         )
         .await
         .unwrap();
@@ -1891,18 +1879,16 @@ mod tests {
         insert_test_session(&state, &session_id).await;
 
         // Insert nodes
-        for i in 0..5 {
-            zremote_core::queries::execution_nodes::insert_execution_node(
+        for i in 0..5_i64 {
+            zremote_core::queries::execution_nodes::open_execution_node(
                 &state.db,
                 &session_id,
                 Some("loop-1"),
+                &format!("toolu_lc_{i}"),
                 1000 + i,
                 "tool_call",
                 Some(&format!("Read file{i}.rs")),
-                Some("output"),
-                None,
                 "/home",
-                100,
             )
             .await
             .unwrap();
@@ -1961,18 +1947,16 @@ mod tests {
         let session_id = Uuid::new_v4().to_string();
         insert_test_session(&state, &session_id).await;
 
-        for i in 0..10 {
-            zremote_core::queries::execution_nodes::insert_execution_node(
+        for i in 0..10_i64 {
+            zremote_core::queries::execution_nodes::open_execution_node(
                 &state.db,
                 &session_id,
                 None,
+                &format!("toolu_page_{i}"),
                 1000 + i,
                 "tool_call",
                 None,
-                None,
-                None,
                 "/home",
-                50,
             )
             .await
             .unwrap();
@@ -2007,21 +1991,19 @@ mod tests {
         insert_test_session(&state, &session_id).await;
 
         let mut handles = Vec::new();
-        for i in 0..20 {
+        for i in 0..20_u32 {
             let pool = state.db.clone();
             let sid = session_id.clone();
             handles.push(tokio::spawn(async move {
-                zremote_core::queries::execution_nodes::insert_execution_node(
+                zremote_core::queries::execution_nodes::open_execution_node(
                     &pool,
                     &sid,
                     None,
+                    &format!("toolu_conc_{i}"),
                     1000 + i64::from(i),
                     "tool_call",
                     Some(&format!("Task {i}")),
-                    None,
-                    None,
                     "/home",
-                    10,
                 )
                 .await
                 .unwrap();
@@ -2045,18 +2027,16 @@ mod tests {
         let session_id = Uuid::new_v4().to_string();
         insert_test_session(&state, &session_id).await;
 
-        for i in 0..50 {
-            zremote_core::queries::execution_nodes::insert_execution_node(
+        for i in 0..50_i64 {
+            zremote_core::queries::execution_nodes::open_execution_node(
                 &state.db,
                 &session_id,
                 None,
+                &format!("toolu_cap_{i}"),
                 1000 + i,
                 "tool_call",
                 None,
-                None,
-                None,
                 "/home",
-                10,
             )
             .await
             .unwrap();

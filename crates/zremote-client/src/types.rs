@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-export protocol types used in SDK API
 pub use zremote_protocol::{
-    AgenticLoopId, HostId, SessionId,
+    AgenticLoopId, HostId, NodeStatus, SessionId,
     agentic::AgenticStatus,
     claude::{ClaudeSessionInfo, ClaudeTaskStatus},
     knowledge::{
@@ -510,6 +510,10 @@ pub struct ExecutionNode {
     pub working_dir: String,
     #[serde(default)]
     pub duration_ms: i64,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub tool_use_id: String,
 }
 
 // ---------------------------------------------------------------------------

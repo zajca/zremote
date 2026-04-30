@@ -138,7 +138,15 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
 ];
 
 /// Known `AgenticAgentMessage` type tags.
-const AGENTIC_MSG_TYPES: &[&str] = &["LoopDetected", "LoopStateUpdate", "LoopEnded"];
+const AGENTIC_MSG_TYPES: &[&str] = &[
+    "LoopDetected",
+    "LoopStateUpdate",
+    "LoopEnded",
+    "LoopMetricsUpdate",
+    "ExecutionNodeOpened",
+    "ExecutionNodeClosed",
+    "SessionExecutionStopped",
+];
 
 /// Receive and deserialize an agent message from the WebSocket.
 /// Parses to `serde_json::Value` first, then dispatches based on the "type" tag.
@@ -289,7 +297,11 @@ mod tests {
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopDetected"));
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopStateUpdate"));
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopEnded"));
-        assert_eq!(AGENTIC_MSG_TYPES.len(), 3);
+        assert!(AGENTIC_MSG_TYPES.contains(&"LoopMetricsUpdate"));
+        assert!(AGENTIC_MSG_TYPES.contains(&"ExecutionNodeOpened"));
+        assert!(AGENTIC_MSG_TYPES.contains(&"ExecutionNodeClosed"));
+        assert!(AGENTIC_MSG_TYPES.contains(&"SessionExecutionStopped"));
+        assert_eq!(AGENTIC_MSG_TYPES.len(), 7);
     }
 
     #[test]

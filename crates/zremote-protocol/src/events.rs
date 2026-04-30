@@ -85,6 +85,19 @@ pub struct SessionInfo {
     pub status: SessionStatus,
 }
 
+/// Status of an execution node.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    Running,
+    Completed,
+    Stopped,
+    Stale,
+    /// Forward-compat placeholder for statuses added in future agent versions.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Real-time events broadcast to WebSocket clients and integrations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -225,21 +238,30 @@ pub enum ServerEvent {
         session_id: String,
         host_id: String,
         node_id: i64,
-        #[serde(default)]
+        tool_use_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         loop_id: Option<String>,
         #[serde(default)]
         timestamp: i64,
         #[serde(default)]
         kind: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<String>,
-        #[serde(default)]
-        output_summary: Option<String>,
-        #[serde(default)]
-        exit_code: Option<i32>,
-        #[serde(default)]
         working_dir: String,
-        #[serde(default)]
+        status: NodeStatus,
+    },
+    #[serde(rename = "execution_node_updated")]
+    ExecutionNodeUpdated {
+        session_id: String,
+        host_id: String,
+        node_id: i64,
+        tool_use_id: String,
+        status: NodeStatus,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
         duration_ms: i64,
     },
     #[serde(rename = "channel_permission_requested")]
@@ -617,6 +639,62 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
+    }
+
+    // Test #11: Round-trip for ExecutionNodeCreated and ExecutionNodeUpdated
+    #[test]
+    fn execution_node_created_and_updated_roundtrip() {
+        let created = ServerEvent::ExecutionNodeCreated {
+            session_id: "s1".to_string(),
+            host_id: "h1".to_string(),
+            node_id: 42,
+            tool_use_id: "toolu_abc".to_string(),
+            loop_id: Some("l1".to_string()),
+            timestamp: 1_711_843_200_000,
+            kind: "read".to_string(),
+            input: Some("src/main.rs".to_string()),
+            working_dir: "/home/user".to_string(),
+            status: NodeStatus::Running,
+        };
+        let json = serde_json::to_string(&created).unwrap();
+        let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{created:?}"));
+
+        let updated = ServerEvent::ExecutionNodeUpdated {
+            session_id: "s1".to_string(),
+            host_id: "h1".to_string(),
+            node_id: 42,
+            tool_use_id: "toolu_abc".to_string(),
+            status: NodeStatus::Completed,
+            kind: "read".to_string(),
+            output_summary: Some("fn main() {}".to_string()),
+            exit_code: None,
+            duration_ms: 1234,
+        };
+        let json = serde_json::to_string(&updated).unwrap();
+        let parsed: ServerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{parsed:?}"), format!("{updated:?}"));
+    }
+
+    // Test #12: NodeStatus serializes as snake_case
+    #[test]
+    fn node_status_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&NodeStatus::Running).unwrap(),
+            r#""running""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeStatus::Completed).unwrap(),
+            r#""completed""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeStatus::Stopped).unwrap(),
+            r#""stopped""#
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeStatus::Stale).unwrap(),
+            r#""stale""#
+        );
     }
 
     #[test]

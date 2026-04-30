@@ -198,18 +198,9 @@ async fn handle_analyzer_event(
             tracing::debug!(session = %session_id, cwd = %path, "working directory changed");
         }
         AnalyzerEvent::NodeCompleted(node) => {
-            let loop_id = agentic_manager.loop_id_for_session(&session_id);
-            let _ = agentic_tx.try_send(AgenticAgentMessage::ExecutionNode {
-                session_id,
-                loop_id,
-                timestamp: node.timestamp,
-                kind: node.kind.clone(),
-                input: node.input.clone(),
-                output_summary: node.output_summary.clone(),
-                exit_code: node.exit_code,
-                working_dir: node.working_dir.clone(),
-                duration_ms: node.duration_ms,
-            });
+            // TODO(rfc-009 phase 2): replace with Opened/Closed messages
+            let _ = (&session_id, &node);
+            tracing::warn!("PTY execution node not yet forwarded via Opened/Closed");
         }
     }
 }

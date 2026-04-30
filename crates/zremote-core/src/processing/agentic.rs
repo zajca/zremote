@@ -145,29 +145,15 @@ impl AgenticProcessor {
                 self.handle_loop_metrics_update(loop_id, input_tokens, output_tokens, cost_usd)
                     .await?;
             }
-            AgenticAgentMessage::ExecutionNode {
-                session_id,
-                loop_id,
-                timestamp,
-                kind,
-                input,
-                output_summary,
-                exit_code,
-                working_dir,
-                duration_ms,
-            } => {
-                self.handle_execution_node(
-                    session_id,
-                    loop_id,
-                    timestamp,
-                    kind,
-                    input,
-                    output_summary,
-                    exit_code,
-                    working_dir,
-                    duration_ms,
-                )
-                .await?;
+            // TODO(rfc-009 phase 2): replace with Opened/Closed wiring
+            AgenticAgentMessage::ExecutionNodeOpened { session_id, .. } => {
+                tracing::warn!(%session_id, "ExecutionNodeOpened not yet handled in core processor");
+            }
+            AgenticAgentMessage::ExecutionNodeClosed { session_id, .. } => {
+                tracing::warn!(%session_id, "ExecutionNodeClosed not yet handled in core processor");
+            }
+            AgenticAgentMessage::SessionExecutionStopped { session_id } => {
+                tracing::warn!(%session_id, "SessionExecutionStopped not yet handled in core processor");
             }
         }
         Ok(())
@@ -500,61 +486,6 @@ impl AgenticProcessor {
                 hostname: self.hostname.clone(),
             });
         }
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_execution_node(
-        &self,
-        session_id: zremote_protocol::SessionId,
-        loop_id: Option<zremote_protocol::AgenticLoopId>,
-        timestamp: i64,
-        kind: String,
-        input: Option<String>,
-        output_summary: Option<String>,
-        exit_code: Option<i32>,
-        working_dir: String,
-        duration_ms: i64,
-    ) -> Result<(), AppError> {
-        let session_id_str = session_id.to_string();
-        let loop_id_str = loop_id.map(|id| id.to_string());
-
-        let node_id = crate::queries::execution_nodes::insert_execution_node(
-            &self.db,
-            &session_id_str,
-            loop_id_str.as_deref(),
-            timestamp,
-            &kind,
-            input.as_deref(),
-            output_summary.as_deref(),
-            exit_code,
-            &working_dir,
-            duration_ms,
-        )
-        .await?;
-
-        // Enforce per-session cap
-        crate::queries::execution_nodes::enforce_session_node_cap(
-            &self.db,
-            &session_id_str,
-            10_000,
-        )
-        .await?;
-
-        let _ = self.events.send(ServerEvent::ExecutionNodeCreated {
-            session_id: session_id_str,
-            host_id: self.host_id.to_string(),
-            node_id,
-            loop_id: loop_id_str,
-            timestamp,
-            kind,
-            input,
-            output_summary,
-            exit_code,
-            working_dir,
-            duration_ms,
-        });
 
         Ok(())
     }

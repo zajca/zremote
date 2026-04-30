@@ -62,6 +62,7 @@ pub use types::{
     Memory,
     MemoryCategory,
     ModeInfo,
+    NodeStatus,
     PreviewColorSpan,
     PreviewLine,
     PreviewSnapshot,

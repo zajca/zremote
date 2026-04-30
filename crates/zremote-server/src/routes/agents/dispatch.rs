@@ -1684,62 +1684,15 @@ pub(super) async fn handle_agentic_message(
                 });
             }
         }
-        AgenticAgentMessage::ExecutionNode {
-            session_id,
-            loop_id,
-            timestamp,
-            kind,
-            input,
-            output_summary,
-            exit_code,
-            working_dir,
-            duration_ms,
-        } => {
-            let session_id_str = session_id.to_string();
-            let loop_id_str = loop_id.map(|id| id.to_string());
-
-            let node_id = match zremote_core::queries::execution_nodes::insert_execution_node(
-                &state.db,
-                &session_id_str,
-                loop_id_str.as_deref(),
-                timestamp,
-                &kind,
-                input.as_deref(),
-                output_summary.as_deref(),
-                exit_code,
-                &working_dir,
-                duration_ms,
-            )
-            .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to insert execution node");
-                    return Ok(());
-                }
-            };
-
-            // Enforce cap
-            let _ = zremote_core::queries::execution_nodes::enforce_session_node_cap(
-                &state.db,
-                &session_id_str,
-                10_000,
-            )
-            .await;
-
-            let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
-                session_id: session_id_str,
-                host_id: host_id.to_string(),
-                node_id,
-                loop_id: loop_id_str,
-                timestamp,
-                kind,
-                input,
-                output_summary,
-                exit_code,
-                working_dir,
-                duration_ms,
-            });
+        // TODO(rfc-009 phase 2): replace with Opened/Closed wiring
+        AgenticAgentMessage::ExecutionNodeOpened { session_id, .. } => {
+            tracing::warn!(%session_id, "ExecutionNodeOpened not yet handled in server dispatch");
+        }
+        AgenticAgentMessage::ExecutionNodeClosed { session_id, .. } => {
+            tracing::warn!(%session_id, "ExecutionNodeClosed not yet handled in server dispatch");
+        }
+        AgenticAgentMessage::SessionExecutionStopped { session_id } => {
+            tracing::warn!(%session_id, "SessionExecutionStopped not yet handled in server dispatch");
         }
     }
     Ok(())

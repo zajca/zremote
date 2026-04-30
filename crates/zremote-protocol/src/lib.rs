@@ -15,7 +15,7 @@ pub use agents::{
     supported_kinds,
 };
 pub use claude::*;
-pub use events::{HostInfo, LoopInfo, ServerEvent, SessionInfo};
+pub use events::{HostInfo, LoopInfo, NodeStatus, ServerEvent, SessionInfo};
 pub use fs::{FsCompleteEntry, FsCompleteKind, FsCompleteResponse};
 pub use knowledge::*;
 pub use project::*;

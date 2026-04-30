@@ -289,20 +289,9 @@ pub(crate) fn spawn_pty_output_loop(state: Arc<LocalAppState>) {
                             let mgr = state.agentic_manager.lock().await;
                             mgr.loop_id_for_session(&session_id)
                         };
-                        let msg = AgenticAgentMessage::ExecutionNode {
-                            session_id,
-                            loop_id,
-                            timestamp: node.timestamp,
-                            kind: node.kind,
-                            input: node.input,
-                            output_summary: node.output_summary,
-                            exit_code: node.exit_code,
-                            working_dir: node.working_dir,
-                            duration_ms: node.duration_ms,
-                        };
-                        if let Err(e) = state.agentic_processor.handle_message(msg).await {
-                            tracing::warn!(error = %e, "failed to process execution node");
-                        }
+                        // TODO(rfc-009 phase 2): replace with Opened/Closed messages
+                        let _ = (session_id, loop_id, node);
+                        tracing::warn!("PTY execution node not yet forwarded via Opened/Closed");
                     }
                 }
 

@@ -684,9 +684,6 @@ impl MainView {
             timestamp,
             kind,
             input,
-            output_summary,
-            exit_code,
-            duration_ms,
             ..
         } = event
             && let Some(terminal) = &self.terminal
@@ -700,9 +697,9 @@ impl MainView {
                         *timestamp,
                         kind,
                         input.as_deref(),
-                        output_summary.as_deref(),
-                        *exit_code,
-                        *duration_ms,
+                        None,
+                        None,
+                        0,
                     ),
                     cx,
                 );
