@@ -511,7 +511,7 @@ pub struct ExecutionNode {
     #[serde(default)]
     pub duration_ms: i64,
     #[serde(default)]
-    pub status: String,
+    pub status: NodeStatus,
     #[serde(default)]
     pub tool_use_id: String,
 }

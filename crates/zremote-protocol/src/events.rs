@@ -86,7 +86,7 @@ pub struct SessionInfo {
 }
 
 /// Status of an execution node.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Running,
@@ -95,6 +95,7 @@ pub enum NodeStatus {
     Stale,
     /// Forward-compat placeholder for statuses added in future agent versions.
     #[serde(other)]
+    #[default]
     Unknown,
 }
 

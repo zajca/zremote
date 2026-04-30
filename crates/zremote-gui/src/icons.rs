@@ -35,6 +35,8 @@ pub enum Icon {
     FileText,
     Clock,
     RefreshCw,
+    CircleSlash,
+    AlertCircle,
 }
 
 impl Icon {
@@ -73,6 +75,8 @@ impl Icon {
             Self::FileText => "icons/file-text.svg",
             Self::Clock => "icons/clock.svg",
             Self::RefreshCw => "icons/refresh-cw.svg",
+            Self::CircleSlash => "icons/circle-slash.svg",
+            Self::AlertCircle => "icons/alert-circle.svg",
         }
     }
 }

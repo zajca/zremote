@@ -595,6 +595,35 @@ impl TerminalPanel {
         }
     }
 
+    /// Update an existing execution node in the activity feed. Returns true if found and updated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_execution_node(
+        &mut self,
+        node_id: i64,
+        status: zremote_protocol::NodeStatus,
+        kind: &str,
+        output_summary: Option<&str>,
+        exit_code: Option<i32>,
+        duration_ms: i64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(panel) = &self.activity_panel {
+            panel.update(cx, |p, cx| {
+                p.update_node(
+                    node_id,
+                    status,
+                    kind,
+                    output_summary,
+                    exit_code,
+                    duration_ms,
+                    cx,
+                )
+            })
+        } else {
+            false
+        }
+    }
+
     /// Load historical execution nodes for this session from the API.
     /// Fire-and-forget: HTTP request runs on tokio runtime, results delivered back via cx.spawn.
     pub fn load_execution_nodes(&mut self, api: zremote_client::ApiClient, cx: &mut Context<Self>) {
@@ -623,12 +652,14 @@ impl TerminalPanel {
                 .map(|n| {
                     ExecutionNodeItem::new(
                         n.id,
+                        n.tool_use_id.clone(),
                         n.timestamp,
                         &n.kind,
                         n.input.as_deref(),
                         n.output_summary.as_deref(),
                         n.exit_code,
                         n.duration_ms,
+                        n.status,
                     )
                 })
                 .collect();

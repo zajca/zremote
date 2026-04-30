@@ -681,9 +681,11 @@ impl MainView {
         if let ServerEvent::ExecutionNodeCreated {
             session_id,
             node_id,
+            tool_use_id,
             timestamp,
             kind,
             input,
+            status,
             ..
         } = event
             && let Some(terminal) = &self.terminal
@@ -694,13 +696,41 @@ impl MainView {
                 panel.push_execution_node(
                     ExecutionNodeItem::new(
                         *node_id,
+                        tool_use_id.clone(),
                         *timestamp,
                         kind,
                         input.as_deref(),
                         None,
                         None,
                         0,
+                        *status,
                     ),
+                    cx,
+                );
+            });
+        }
+
+        if let ServerEvent::ExecutionNodeUpdated {
+            session_id,
+            node_id,
+            kind,
+            status,
+            output_summary,
+            exit_code,
+            duration_ms,
+            ..
+        } = event
+            && let Some(terminal) = &self.terminal
+            && terminal.read(cx).session_id() == session_id.as_str()
+        {
+            terminal.update(cx, |panel, cx| {
+                panel.update_execution_node(
+                    *node_id,
+                    *status,
+                    kind,
+                    output_summary.as_deref(),
+                    *exit_code,
+                    *duration_ms,
                     cx,
                 );
             });
