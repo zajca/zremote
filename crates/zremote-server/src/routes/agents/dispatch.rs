@@ -6,6 +6,7 @@ use axum::extract::ws::WebSocket;
 use chrono::Utc;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zremote_protocol::NodeStatus;
 use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use zremote_protocol::claude::ClaudeTaskStatus;
 use zremote_protocol::status::SessionStatus;
@@ -1684,15 +1685,160 @@ pub(super) async fn handle_agentic_message(
                 });
             }
         }
-        // TODO(rfc-009 phase 2): replace with Opened/Closed wiring
-        AgenticAgentMessage::ExecutionNodeOpened { session_id, .. } => {
-            tracing::warn!(%session_id, "ExecutionNodeOpened not yet handled in server dispatch");
+        AgenticAgentMessage::ExecutionNodeOpened {
+            session_id,
+            loop_id,
+            tool_use_id,
+            timestamp,
+            kind,
+            input,
+            working_dir,
+        } => {
+            let session_id_str = session_id.to_string();
+            let loop_id_str = loop_id.map(|id| id.to_string());
+
+            let (node_id, was_inserted) =
+                match zremote_core::queries::execution_nodes::open_execution_node(
+                    &state.db,
+                    &session_id_str,
+                    loop_id_str.as_deref(),
+                    &tool_use_id,
+                    timestamp,
+                    &kind,
+                    input.as_deref(),
+                    &working_dir,
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!(
+                            %session_id,
+                            %tool_use_id,
+                            error = %e,
+                            "failed to open execution node"
+                        );
+                        return Ok(());
+                    }
+                };
+
+            // Only broadcast and enforce cap when a new row was inserted.
+            // Duplicate PreToolUse (retried hook) returns the existing id — no second event.
+            if was_inserted {
+                if let Err(e) = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+                    &state.db,
+                    &session_id_str,
+                    10_000,
+                )
+                .await
+                {
+                    tracing::warn!(%session_id, error = %e, "failed to enforce session node cap");
+                }
+
+                let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
+                    session_id: session_id_str,
+                    host_id: host_id.to_string(),
+                    node_id,
+                    tool_use_id,
+                    loop_id: loop_id_str,
+                    timestamp,
+                    kind,
+                    input,
+                    working_dir,
+                    status: NodeStatus::Running,
+                });
+            }
         }
-        AgenticAgentMessage::ExecutionNodeClosed { session_id, .. } => {
-            tracing::warn!(%session_id, "ExecutionNodeClosed not yet handled in server dispatch");
+        AgenticAgentMessage::ExecutionNodeClosed {
+            session_id,
+            tool_use_id,
+            kind,
+            output_summary,
+            exit_code,
+            duration_ms,
+            status,
+        } => {
+            let session_id_str = session_id.to_string();
+
+            let row = match zremote_core::queries::execution_nodes::close_execution_node(
+                &state.db,
+                &session_id_str,
+                &tool_use_id,
+                &kind,
+                output_summary.as_deref(),
+                exit_code,
+                duration_ms,
+                status,
+            )
+            .await
+            {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    tracing::warn!(
+                        %session_id,
+                        %tool_use_id,
+                        "ExecutionNodeClosed: no matching running node"
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        %session_id,
+                        %tool_use_id,
+                        error = %e,
+                        "failed to close execution node"
+                    );
+                    return Ok(());
+                }
+            };
+
+            let _ = state.events.send(ServerEvent::ExecutionNodeUpdated {
+                session_id: session_id_str,
+                host_id: host_id.to_string(),
+                node_id: row.id,
+                tool_use_id: row.tool_use_id,
+                status,
+                kind: row.kind,
+                output_summary: row.output_summary,
+                exit_code: row.exit_code,
+                duration_ms: row.duration_ms,
+            });
         }
         AgenticAgentMessage::SessionExecutionStopped { session_id } => {
-            tracing::warn!(%session_id, "SessionExecutionStopped not yet handled in server dispatch");
+            let session_id_str = session_id.to_string();
+
+            let rows =
+                match zremote_core::queries::execution_nodes::mark_session_running_as_stopped(
+                    &state.db,
+                    &session_id_str,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!(
+                            %session_id,
+                            error = %e,
+                            "failed to stop running execution nodes"
+                        );
+                        return Ok(());
+                    }
+                };
+
+            let host_id_str = host_id.to_string();
+            for row in rows {
+                let _ = state.events.send(ServerEvent::ExecutionNodeUpdated {
+                    session_id: session_id_str.clone(),
+                    host_id: host_id_str.clone(),
+                    node_id: row.id,
+                    tool_use_id: row.tool_use_id,
+                    status: NodeStatus::Stopped,
+                    kind: row.kind,
+                    output_summary: row.output_summary,
+                    exit_code: row.exit_code,
+                    duration_ms: row.duration_ms,
+                });
+            }
         }
     }
     Ok(())

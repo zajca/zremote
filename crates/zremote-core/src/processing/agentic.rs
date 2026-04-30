@@ -2,10 +2,14 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zremote_protocol::NodeStatus;
 use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
+use crate::queries::execution_nodes::{
+    close_execution_node, mark_session_running_as_stopped, open_execution_node, sweep_stale_running,
+};
 use crate::queries::loops::parse_status;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
 use zremote_protocol::claude::ClaudeTaskStatus;
@@ -145,15 +149,48 @@ impl AgenticProcessor {
                 self.handle_loop_metrics_update(loop_id, input_tokens, output_tokens, cost_usd)
                     .await?;
             }
-            // TODO(rfc-009 phase 2): replace with Opened/Closed wiring
-            AgenticAgentMessage::ExecutionNodeOpened { session_id, .. } => {
-                tracing::warn!(%session_id, "ExecutionNodeOpened not yet handled in core processor");
+            AgenticAgentMessage::ExecutionNodeOpened {
+                session_id,
+                loop_id,
+                tool_use_id,
+                timestamp,
+                kind,
+                input,
+                working_dir,
+            } => {
+                self.handle_execution_node_opened(
+                    session_id,
+                    loop_id,
+                    tool_use_id,
+                    timestamp,
+                    kind,
+                    input,
+                    working_dir,
+                )
+                .await?;
             }
-            AgenticAgentMessage::ExecutionNodeClosed { session_id, .. } => {
-                tracing::warn!(%session_id, "ExecutionNodeClosed not yet handled in core processor");
+            AgenticAgentMessage::ExecutionNodeClosed {
+                session_id,
+                tool_use_id,
+                kind,
+                output_summary,
+                exit_code,
+                duration_ms,
+                status,
+            } => {
+                self.handle_execution_node_closed(
+                    session_id,
+                    tool_use_id,
+                    kind,
+                    output_summary,
+                    exit_code,
+                    duration_ms,
+                    status,
+                )
+                .await?;
             }
             AgenticAgentMessage::SessionExecutionStopped { session_id } => {
-                tracing::warn!(%session_id, "SessionExecutionStopped not yet handled in core processor");
+                self.handle_session_execution_stopped(session_id).await?;
             }
         }
         Ok(())
@@ -444,6 +481,159 @@ impl AgenticProcessor {
 
         tracing::info!(host_id = %self.host_id, loop_id = %loop_id, reason = %reason, "agentic loop ended");
 
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_execution_node_opened(
+        &self,
+        session_id: zremote_protocol::SessionId,
+        loop_id: Option<zremote_protocol::AgenticLoopId>,
+        tool_use_id: String,
+        timestamp: i64,
+        kind: String,
+        input: Option<String>,
+        working_dir: String,
+    ) -> Result<(), AppError> {
+        let session_id_str = session_id.to_string();
+        let loop_id_str = loop_id.map(|id| id.to_string());
+
+        let (node_id, was_inserted) = open_execution_node(
+            &self.db,
+            &session_id_str,
+            loop_id_str.as_deref(),
+            &tool_use_id,
+            timestamp,
+            &kind,
+            input.as_deref(),
+            &working_dir,
+        )
+        .await?;
+
+        // Only broadcast and enforce cap when a new row was inserted.
+        // Duplicate PreToolUse (retried hook) returns the existing id — no second event.
+        if was_inserted {
+            crate::queries::execution_nodes::enforce_session_node_cap(
+                &self.db,
+                &session_id_str,
+                10_000,
+            )
+            .await?;
+
+            let host_id_str = self.host_id.to_string();
+            let _ = self.events.send(ServerEvent::ExecutionNodeCreated {
+                session_id: session_id_str,
+                host_id: host_id_str,
+                node_id,
+                tool_use_id,
+                loop_id: loop_id_str,
+                timestamp,
+                kind,
+                input,
+                working_dir,
+                status: NodeStatus::Running,
+            });
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_execution_node_closed(
+        &self,
+        session_id: zremote_protocol::SessionId,
+        tool_use_id: String,
+        kind: String,
+        output_summary: Option<String>,
+        exit_code: Option<i32>,
+        duration_ms: i64,
+        status: NodeStatus,
+    ) -> Result<(), AppError> {
+        let session_id_str = session_id.to_string();
+
+        let Some(row) = close_execution_node(
+            &self.db,
+            &session_id_str,
+            &tool_use_id,
+            &kind,
+            output_summary.as_deref(),
+            exit_code,
+            duration_ms,
+            status,
+        )
+        .await?
+        else {
+            tracing::warn!(
+                %session_id,
+                %tool_use_id,
+                "ExecutionNodeClosed: no matching running node found"
+            );
+            return Ok(());
+        };
+
+        let host_id_str = self.host_id.to_string();
+        let _ = self.events.send(ServerEvent::ExecutionNodeUpdated {
+            session_id: session_id_str,
+            host_id: host_id_str,
+            node_id: row.id,
+            tool_use_id: row.tool_use_id,
+            status,
+            kind: row.kind,
+            output_summary: row.output_summary,
+            exit_code: row.exit_code,
+            duration_ms: row.duration_ms,
+        });
+
+        Ok(())
+    }
+
+    async fn handle_session_execution_stopped(
+        &self,
+        session_id: zremote_protocol::SessionId,
+    ) -> Result<(), AppError> {
+        let session_id_str = session_id.to_string();
+        let rows = mark_session_running_as_stopped(&self.db, &session_id_str).await?;
+
+        let host_id_str = self.host_id.to_string();
+        for row in rows {
+            let _ = self.events.send(ServerEvent::ExecutionNodeUpdated {
+                session_id: session_id_str.clone(),
+                host_id: host_id_str.clone(),
+                node_id: row.id,
+                tool_use_id: row.tool_use_id,
+                status: NodeStatus::Stopped,
+                kind: row.kind,
+                output_summary: row.output_summary,
+                exit_code: row.exit_code,
+                duration_ms: row.duration_ms,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Run the stale sweeper: marks running nodes older than `ttl_secs` as stale
+    /// and emits `ExecutionNodeUpdated{Stale}` for each. Called periodically.
+    pub async fn sweep_stale_nodes(&self, ttl_secs: i64) -> Result<(), AppError> {
+        let rows = sweep_stale_running(&self.db, ttl_secs).await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(count = rows.len(), "swept stale execution nodes");
+        let host_id_str = self.host_id.to_string();
+        for row in rows {
+            let _ = self.events.send(ServerEvent::ExecutionNodeUpdated {
+                session_id: row.session_id.clone(),
+                host_id: host_id_str.clone(),
+                node_id: row.id,
+                tool_use_id: row.tool_use_id,
+                status: NodeStatus::Stale,
+                kind: row.kind,
+                output_summary: row.output_summary,
+                exit_code: row.exit_code,
+                duration_ms: row.duration_ms,
+            });
+        }
         Ok(())
     }
 
@@ -1376,5 +1566,194 @@ mod tests {
 
         let entry = proc.agentic_loops.get(&loop_id).unwrap();
         assert_eq!(entry.task_name.as_deref(), Some("second-task"));
+    }
+
+    // ---------------------------------------------------------------
+    // RFC-009 Phase 2 tests: #23-#25, #28
+    // ---------------------------------------------------------------
+
+    async fn insert_session_for_proc(db: &SqlitePool, proc: &AgenticProcessor) -> Uuid {
+        let host_id_str = proc.host_id.to_string();
+        insert_host(db, &host_id_str).await;
+        let sid = Uuid::new_v4();
+        insert_session(db, &sid.to_string(), &host_id_str).await;
+        sid
+    }
+
+    // Test #23: E2E PreToolUse → row inserted running → PostToolUse → row updated completed
+    #[tokio::test]
+    async fn execution_node_opened_then_closed_transitions_to_completed() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let sid = insert_session_for_proc(&db, &proc).await;
+        let sid_str = sid.to_string();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Emit ExecutionNodeOpened (simulates PreToolUse)
+        let opened = AgenticAgentMessage::ExecutionNodeOpened {
+            session_id: sid,
+            loop_id: None,
+            tool_use_id: "toolu_e2e_test".to_string(),
+            timestamp: now_ms,
+            kind: "bash".to_string(),
+            input: Some("ls".to_string()),
+            working_dir: "/home".to_string(),
+        };
+        proc.handle_message(opened).await.unwrap();
+
+        // Verify row is running
+        let nodes = crate::queries::execution_nodes::list_execution_nodes(&db, &sid_str, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].status, "running");
+
+        // Emit ExecutionNodeClosed (simulates PostToolUse)
+        let closed = AgenticAgentMessage::ExecutionNodeClosed {
+            session_id: sid,
+            tool_use_id: "toolu_e2e_test".to_string(),
+            kind: "bash".to_string(),
+            output_summary: Some("hello".to_string()),
+            exit_code: Some(0),
+            duration_ms: 42,
+            status: NodeStatus::Completed,
+        };
+        proc.handle_message(closed).await.unwrap();
+
+        // Verify row is completed
+        let nodes = crate::queries::execution_nodes::list_execution_nodes(&db, &sid_str, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].status, "completed");
+        assert_eq!(nodes[0].exit_code, Some(0));
+    }
+
+    // Test #24: E2E PreToolUse → Stop → row marked stopped
+    #[tokio::test]
+    async fn execution_node_opened_then_stopped() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let sid = insert_session_for_proc(&db, &proc).await;
+        let sid_str = sid.to_string();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let opened = AgenticAgentMessage::ExecutionNodeOpened {
+            session_id: sid,
+            loop_id: None,
+            tool_use_id: "toolu_stop_test".to_string(),
+            timestamp: now_ms,
+            kind: "bash".to_string(),
+            input: None,
+            working_dir: "/home".to_string(),
+        };
+        proc.handle_message(opened).await.unwrap();
+
+        let stopped = AgenticAgentMessage::SessionExecutionStopped { session_id: sid };
+        proc.handle_message(stopped).await.unwrap();
+
+        let nodes = crate::queries::execution_nodes::list_execution_nodes(&db, &sid_str, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].status, "stopped");
+    }
+
+    // Test #25: Stale sweep: row running older than TTL → stale + ExecutionNodeUpdated event
+    #[tokio::test]
+    async fn stale_sweep_transitions_old_running_to_stale_and_emits_event() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let sid = insert_session_for_proc(&db, &proc).await;
+        let sid_str = sid.to_string();
+
+        let old_ms = chrono::Utc::now().timestamp_millis() - 400_000; // 400s ago
+
+        crate::queries::execution_nodes::open_execution_node(
+            &db,
+            &sid_str,
+            None,
+            "toolu_stale",
+            old_ms,
+            "bash",
+            None,
+            "/home",
+        )
+        .await
+        .unwrap();
+
+        let mut rx = proc.events.subscribe();
+
+        proc.sweep_stale_nodes(300).await.unwrap();
+
+        let nodes = crate::queries::execution_nodes::list_execution_nodes(&db, &sid_str, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(nodes[0].status, "stale");
+
+        let mut found_updated = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::ExecutionNodeUpdated {
+                status,
+                tool_use_id,
+                ..
+            } = &event
+                && tool_use_id == "toolu_stale"
+                && *status == NodeStatus::Stale
+            {
+                found_updated = true;
+            }
+        }
+        assert!(
+            found_updated,
+            "expected ExecutionNodeUpdated{{Stale}} event"
+        );
+    }
+
+    // Test #28: Duplicate PreToolUse idempotent — ON CONFLICT, no second ExecutionNodeCreated
+    #[tokio::test]
+    async fn duplicate_execution_node_opened_idempotent() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let sid = insert_session_for_proc(&db, &proc).await;
+        let sid_str = sid.to_string();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let make_opened = || AgenticAgentMessage::ExecutionNodeOpened {
+            session_id: sid,
+            loop_id: None,
+            tool_use_id: "toolu_dup".to_string(),
+            timestamp: now_ms,
+            kind: "read".to_string(),
+            input: Some("/src/main.rs".to_string()),
+            working_dir: "/home".to_string(),
+        };
+
+        let mut rx = proc.events.subscribe();
+
+        proc.handle_message(make_opened()).await.unwrap();
+        proc.handle_message(make_opened()).await.unwrap();
+
+        // Only one row should exist
+        let count = crate::queries::execution_nodes::count_execution_nodes(&db, &sid_str)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "duplicate open must not create a second row");
+
+        // Collect ExecutionNodeCreated events — exactly one must fire.
+        // The second open_execution_node call returns was_inserted=false so no second event.
+        let mut created_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ServerEvent::ExecutionNodeCreated { .. }) {
+                created_count += 1;
+            }
+        }
+        assert_eq!(
+            created_count, 1,
+            "exactly one ExecutionNodeCreated event must fire even on duplicate PreToolUse"
+        );
     }
 }

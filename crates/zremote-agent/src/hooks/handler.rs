@@ -1,3 +1,13 @@
+// Q1 (subagent session_id): Empirical testing shows CC subagents launched via the Task
+// tool use their OWN session_id, distinct from the parent. SessionMapper's try_resolve_fallback
+// will auto-register the subagent's session_id if there is an unmapped loop in the session.
+// In practice, when a Task subagent runs inside the same PTY session, this fallback succeeds.
+// If the subagent runs in a completely separate context, the hook will be dropped with a warn.
+//
+// Q2 (tool_response vs tool_result field name): CC sends "tool_response" in PostToolUse.
+// The test fixture at server.rs:316 used "tool_result" which was incorrect.
+// Resolution: accept both via #[serde(alias)] for resilience.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -7,6 +17,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use zremote_protocol::NodeStatus;
 use zremote_protocol::claude::ClaudeAgentMessage;
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticStatus, SessionId};
 
@@ -14,6 +25,100 @@ use super::context::HookContextProvider;
 use super::mapper::SessionMapper;
 use super::transcript::extract_slug;
 use crate::knowledge::context_delivery::DeliveryCoordinator;
+
+const INPUT_CAP_BYTES: usize = 1024;
+const SUMMARY_CAP_BYTES: usize = 4096;
+
+/// Pretty input string for an opening node. Falls back to compact JSON.
+fn format_tool_input(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Option<String> {
+    let v = tool_input?;
+    let s = match tool_name {
+        "Read" | "Edit" | "Write" | "MultiEdit" => v
+            .get("file_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "Bash" => v
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "Glob" | "Grep" => v
+            .get("pattern")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "Task" => {
+            let agent = v
+                .get("subagent_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("agent");
+            let prompt = v
+                .get("prompt")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            Some(format!("{agent}: {}", truncate(prompt, 60)))
+        }
+        "WebFetch" => v
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        _ => Some(serde_json::to_string(v).unwrap_or_default()),
+    };
+    s.map(|s| truncate(&s, INPUT_CAP_BYTES))
+}
+
+/// Format tool response for display in output_summary. Handles is_error prefix,
+/// stdout/content/result field fallbacks, and byte-cap with ellipsis.
+fn format_tool_response(
+    tool_response: Option<&serde_json::Value>,
+    is_error: bool,
+) -> Option<String> {
+    let v = tool_response?;
+
+    // Extract content string from common CC response shapes.
+    let content = if let Some(s) = v.as_str() {
+        s.to_string()
+    } else if let Some(arr) = v.as_array() {
+        // Array of content blocks: [{type:"text",text:"..."}, ...]
+        arr.iter()
+            .filter_map(|item| {
+                item.get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| item.get("content").and_then(serde_json::Value::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if let Some(s) = v
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| v.get("content").and_then(serde_json::Value::as_str))
+        .or_else(|| v.get("result").and_then(serde_json::Value::as_str))
+    {
+        s.to_string()
+    } else {
+        serde_json::to_string(v).unwrap_or_default()
+    };
+
+    let truncated = truncate(&content, SUMMARY_CAP_BYTES);
+    let result = if is_error {
+        format!("ERROR: {truncated}")
+    } else {
+        truncated
+    };
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Truncate `s` to at most `max` bytes at a valid UTF-8 char boundary,
+/// appending `…` if truncation occurred.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let boundary = s.floor_char_boundary(max.saturating_sub(3));
+    format!("{}…", &s[..boundary])
+}
 
 /// Shared state for the hooks HTTP handler.
 #[derive(Clone)]
@@ -46,8 +151,8 @@ pub struct HookPayload {
     pub tool_input: Option<serde_json::Value>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
-    // PostToolUse field
-    #[serde(default)]
+    // PostToolUse field — CC sends "tool_response"; accept "tool_result" as alias for resilience.
+    #[serde(default, alias = "tool_result")]
     pub tool_response: Option<serde_json::Value>,
     // Notification field
     #[serde(default)]
@@ -249,6 +354,7 @@ pub async fn handle_hook(
                 cc_session = %payload.session_id,
                 "CC turn ended due to API error"
             );
+            handle_stop(&state, &payload).await;
             HookResponse::default()
         }
         other => {
@@ -295,18 +401,39 @@ async fn try_capture_cc_session_id(
         claude_task_id,
         cc_session_id: cc_session_id.to_string(),
     });
-    if state.outbound_tx.try_send(msg).is_err() {
-        tracing::warn!("outbound channel full, SessionIdCaptured dropped");
+    match state.outbound_tx.try_send(msg) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!("outbound channel full, SessionIdCaptured dropped");
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            // In local mode the outbound channel receiver is intentionally dropped;
+            // this is expected and not an error.
+            tracing::debug!("outbound channel closed (local mode), SessionIdCaptured dropped");
+        }
     }
 }
 
 async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
+    // Drop hook if tool_use_id is missing — we can't correlate without it.
+    let Some(ref tool_use_id) = payload.tool_use_id else {
+        tracing::warn!(
+            cc_session = %payload.session_id,
+            tool = ?payload.tool_name,
+            "PreToolUse missing tool_use_id, dropping"
+        );
+        return HookResponse::default();
+    };
+
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
         .await
     else {
-        tracing::debug!(cc_session = %payload.session_id, "no loop mapping for PreToolUse, ignoring");
+        tracing::warn!(
+            cc_session = %payload.session_id,
+            "PreToolUse: no loop mapping after retry, dropping"
+        );
         return HookResponse::default();
     };
 
@@ -315,7 +442,7 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
     state.mapper.set_hook_mode(mapped.session_id);
 
     // Emit LoopStateUpdate(Working)
-    let msg = AgenticAgentMessage::LoopStateUpdate {
+    let loop_state_msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name: None,
@@ -324,8 +451,24 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
         action_tool_name: None,
         action_description: None,
     };
-    if state.agentic_tx.try_send(msg).is_err() {
+    if state.agentic_tx.try_send(loop_state_msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
+    }
+
+    // Emit ExecutionNodeOpened
+    let tool_name = payload.tool_name.as_deref().unwrap_or("unknown");
+    let input = format_tool_input(tool_name, payload.tool_input.as_ref());
+    let node_opened = AgenticAgentMessage::ExecutionNodeOpened {
+        session_id: mapped.session_id,
+        loop_id: Some(mapped.loop_id),
+        tool_use_id: tool_use_id.clone(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        kind: tool_name.to_lowercase(),
+        input,
+        working_dir: payload.cwd.clone().unwrap_or_default(),
+    };
+    if state.agentic_tx.try_send(node_opened).is_err() {
+        tracing::warn!("agentic channel full, ExecutionNodeOpened dropped");
     }
 
     // Build additionalContext for the hook response
@@ -347,6 +490,15 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
 }
 
 async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
+    let Some(ref tool_use_id) = payload.tool_use_id else {
+        tracing::warn!(
+            cc_session = %payload.session_id,
+            tool = ?payload.tool_name,
+            "PostToolUse missing tool_use_id, dropping"
+        );
+        return HookResponse::default();
+    };
+
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
@@ -362,7 +514,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
     // Try to extract slug from transcript for task_name
     let task_name = extract_task_name_from_transcript(payload, &mapped);
 
-    let msg = AgenticAgentMessage::LoopStateUpdate {
+    let loop_state_msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
         task_name,
@@ -371,8 +523,29 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
         action_tool_name: None,
         action_description: None,
     };
-    if state.agentic_tx.try_send(msg).is_err() {
+    if state.agentic_tx.try_send(loop_state_msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
+    }
+
+    // Emit ExecutionNodeClosed
+    let tool_name = payload.tool_name.as_deref().unwrap_or("unknown");
+    let is_error = payload
+        .tool_response
+        .as_ref()
+        .and_then(|v| v.get("is_error").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    let output_summary = format_tool_response(payload.tool_response.as_ref(), is_error);
+    let node_closed = AgenticAgentMessage::ExecutionNodeClosed {
+        session_id: mapped.session_id,
+        tool_use_id: tool_use_id.clone(),
+        kind: tool_name.to_lowercase(),
+        output_summary,
+        exit_code: None,
+        duration_ms: 0,
+        status: NodeStatus::Completed,
+    };
+    if state.agentic_tx.try_send(node_closed).is_err() {
+        tracing::warn!("agentic channel full, ExecutionNodeClosed dropped");
     }
 
     // PostToolUse: Claude Code does not consume `additional_context` on
@@ -401,6 +574,14 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
     state.mapper.mark_hook_activity(mapped.session_id);
     state.mapper.set_hook_mode(mapped.session_id);
+
+    // Emit SessionExecutionStopped to close any running execution nodes for this session.
+    let stopped_msg = AgenticAgentMessage::SessionExecutionStopped {
+        session_id: mapped.session_id,
+    };
+    if state.agentic_tx.try_send(stopped_msg).is_err() {
+        tracing::warn!("agentic channel full, SessionExecutionStopped dropped");
+    }
 
     // Extract task_name from transcript
     let task_name = extract_task_name_from_transcript(payload, &mapped);
@@ -799,7 +980,8 @@ mod tests {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let (_sid, loop_id) = setup_loop(&state).await;
 
-        let p = payload("PreToolUse", "cc-1");
+        let mut p = payload("PreToolUse", "cc-1");
+        p.tool_use_id = Some("toolu_test1".to_string());
         handle_pre_tool_use(&state, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
@@ -822,7 +1004,8 @@ mod tests {
     async fn pre_tool_use_no_loop_mapping_is_noop() {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         // No loop registered -- resolve will fail after retries
-        let p = payload("PreToolUse", "unknown-cc");
+        let mut p = payload("PreToolUse", "unknown-cc");
+        p.tool_use_id = Some("toolu_unknown".to_string());
         handle_pre_tool_use(&state, &p).await;
         assert!(agentic_rx.try_recv().is_err());
     }
@@ -835,6 +1018,7 @@ mod tests {
 
             let mut p = payload("PreToolUse", "cc-tools");
             p.tool_name = Some(tool.to_string());
+            p.tool_use_id = Some(format!("toolu_{tool}"));
             handle_pre_tool_use(&state, &p).await;
 
             // All tool names should produce a Working status
@@ -861,7 +1045,8 @@ mod tests {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let (_sid, loop_id) = setup_loop(&state).await;
 
-        let p = payload("PostToolUse", "cc-2");
+        let mut p = payload("PostToolUse", "cc-2");
+        p.tool_use_id = Some("toolu_post1".to_string());
         handle_post_tool_use(&state, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
@@ -881,7 +1066,8 @@ mod tests {
     #[tokio::test]
     async fn post_tool_use_no_loop_mapping_is_noop() {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
-        let p = payload("PostToolUse", "unknown-cc");
+        let mut p = payload("PostToolUse", "unknown-cc");
+        p.tool_use_id = Some("toolu_unknown".to_string());
         handle_post_tool_use(&state, &p).await;
         assert!(agentic_rx.try_recv().is_err());
     }
@@ -916,6 +1102,7 @@ mod tests {
 
         let mut p = payload("PostToolUse", cc_id);
         p.transcript_path = Some(transcript_path.clone());
+        p.tool_use_id = Some("toolu_slug_test".to_string());
         handle_post_tool_use(&state, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
@@ -943,8 +1130,16 @@ mod tests {
         let p = payload("Stop", "cc-stop");
         handle_stop(&state, &p).await;
 
-        let msg = agentic_rx.try_recv().unwrap();
-        match msg {
+        // First message: SessionExecutionStopped
+        let msg1 = agentic_rx.try_recv().unwrap();
+        assert!(
+            matches!(msg1, AgenticAgentMessage::SessionExecutionStopped { .. }),
+            "expected SessionExecutionStopped, got {msg1:?}"
+        );
+
+        // Second message: LoopEnded
+        let msg2 = agentic_rx.try_recv().unwrap();
+        match msg2 {
             AgenticAgentMessage::LoopEnded {
                 loop_id: lid,
                 reason,
@@ -991,13 +1186,20 @@ mod tests {
         p.transcript_path = Some(transcript_path.clone());
         handle_stop(&state, &p).await;
 
-        // First message: LoopEnded
+        // First message: SessionExecutionStopped
         let msg1 = agentic_rx.try_recv().unwrap();
-        assert!(matches!(msg1, AgenticAgentMessage::LoopEnded { .. }));
+        assert!(matches!(
+            msg1,
+            AgenticAgentMessage::SessionExecutionStopped { .. }
+        ));
 
-        // Second message: LoopStateUpdate with Completed + task_name
+        // Second message: LoopEnded
         let msg2 = agentic_rx.try_recv().unwrap();
-        match msg2 {
+        assert!(matches!(msg2, AgenticAgentMessage::LoopEnded { .. }));
+
+        // Third message: LoopStateUpdate with Completed + task_name
+        let msg3 = agentic_rx.try_recv().unwrap();
+        match msg3 {
             AgenticAgentMessage::LoopStateUpdate {
                 loop_id: lid,
                 status,
@@ -1811,5 +2013,198 @@ mod tests {
         }"#;
         let payload: HookPayload = serde_json::from_str(json).unwrap();
         assert!(payload.permission_mode.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // RFC-009 Phase 2 tests: #13-#16 (format helpers)
+    // ---------------------------------------------------------------
+
+    // Test #13: format_tool_input("Read", {"file_path":"/x"}) → "/x"
+    #[test]
+    fn format_tool_input_read_returns_file_path() {
+        let input = serde_json::json!({"file_path": "/x"});
+        let result = format_tool_input("Read", Some(&input));
+        assert_eq!(result.as_deref(), Some("/x"));
+    }
+
+    // Test #14: format_tool_input("Bash", long command) truncated to INPUT_CAP_BYTES
+    #[test]
+    fn format_tool_input_bash_truncates_long_command() {
+        let long_cmd = "a".repeat(INPUT_CAP_BYTES + 100);
+        let input = serde_json::json!({"command": long_cmd});
+        let result = format_tool_input("Bash", Some(&input)).unwrap();
+        assert!(
+            result.len() <= INPUT_CAP_BYTES,
+            "expected truncation: len={}",
+            result.len()
+        );
+        assert!(result.ends_with('…'), "expected ellipsis suffix");
+    }
+
+    // Test #15: format_tool_response of large stdout truncated to SUMMARY_CAP_BYTES
+    #[test]
+    fn format_tool_response_truncates_large_output() {
+        let big = "x".repeat(SUMMARY_CAP_BYTES + 500);
+        let response = serde_json::Value::String(big);
+        let result = format_tool_response(Some(&response), false).unwrap();
+        assert!(
+            result.len() <= SUMMARY_CAP_BYTES,
+            "expected truncation: len={}",
+            result.len()
+        );
+        assert!(result.ends_with('…'), "expected ellipsis suffix");
+    }
+
+    // Test #16: format_tool_response with is_error=true prefixes "ERROR: "
+    #[test]
+    fn format_tool_response_error_prefix() {
+        let response = serde_json::Value::String("something went wrong".to_string());
+        let result = format_tool_response(Some(&response), true).unwrap();
+        assert!(
+            result.starts_with("ERROR: "),
+            "expected ERROR: prefix, got: {result}"
+        );
+        assert!(result.contains("something went wrong"));
+    }
+
+    // Test #17: PreToolUse handler with valid mapping: LoopStateUpdate AND
+    // ExecutionNodeOpened both fire on agentic_tx
+    #[tokio::test]
+    async fn pre_tool_use_emits_both_loop_state_update_and_execution_node_opened() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (sid, loop_id) = setup_loop(&state).await;
+
+        let mut p = payload("PreToolUse", "cc-both");
+        p.tool_name = Some("Bash".to_string());
+        p.tool_use_id = Some("toolu_both".to_string());
+        p.tool_input = Some(serde_json::json!({"command": "ls"}));
+        handle_pre_tool_use(&state, &p).await;
+
+        let msg1 = agentic_rx.try_recv().unwrap();
+        match &msg1 {
+            AgenticAgentMessage::LoopStateUpdate {
+                loop_id: lid,
+                status,
+                ..
+            } => {
+                assert_eq!(*lid, loop_id);
+                assert_eq!(*status, AgenticStatus::Working);
+            }
+            other => panic!("expected LoopStateUpdate, got {other:?}"),
+        }
+
+        let msg2 = agentic_rx.try_recv().unwrap();
+        match &msg2 {
+            AgenticAgentMessage::ExecutionNodeOpened {
+                session_id,
+                tool_use_id,
+                kind,
+                input,
+                ..
+            } => {
+                assert_eq!(*session_id, sid);
+                assert_eq!(tool_use_id, "toolu_both");
+                assert_eq!(kind, "bash");
+                assert_eq!(input.as_deref(), Some("ls"));
+            }
+            other => panic!("expected ExecutionNodeOpened, got {other:?}"),
+        }
+    }
+
+    // Test #18: PostToolUse emits ExecutionNodeClosed{Completed} with matching tool_use_id
+    #[tokio::test]
+    async fn post_tool_use_emits_execution_node_closed_completed() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (sid, _loop_id) = setup_loop(&state).await;
+
+        let mut p = payload("PostToolUse", "cc-closed");
+        p.tool_name = Some("Bash".to_string());
+        p.tool_use_id = Some("toolu_closed_test".to_string());
+        p.tool_response = Some(serde_json::Value::String("output".to_string()));
+        handle_post_tool_use(&state, &p).await;
+
+        // First: LoopStateUpdate
+        let _loop_msg = agentic_rx.try_recv().unwrap();
+
+        // Second: ExecutionNodeClosed
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::ExecutionNodeClosed {
+                session_id,
+                tool_use_id,
+                status,
+                output_summary,
+                ..
+            } => {
+                assert_eq!(session_id, sid);
+                assert_eq!(tool_use_id, "toolu_closed_test");
+                assert_eq!(status, NodeStatus::Completed);
+                assert!(output_summary.is_some());
+            }
+            other => panic!("expected ExecutionNodeClosed, got {other:?}"),
+        }
+    }
+
+    // Test #19: Stop hook emits SessionExecutionStopped
+    #[tokio::test]
+    async fn stop_hook_emits_session_execution_stopped() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (sid, _loop_id) = setup_loop(&state).await;
+
+        let p = payload("Stop", "cc-sesstopped");
+        handle_stop(&state, &p).await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::SessionExecutionStopped { session_id } => {
+                assert_eq!(session_id, sid);
+            }
+            other => panic!("expected SessionExecutionStopped, got {other:?}"),
+        }
+    }
+
+    // Test #26: PreToolUse with unknown CC session_id (no mapping after retry) dropped with warn
+    #[tokio::test]
+    async fn pre_tool_use_unknown_session_drops_with_warn() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        // No loop registered at all
+        let mut p = payload("PreToolUse", "totally-unknown-session");
+        p.tool_use_id = Some("toolu_unknown".to_string());
+        handle_pre_tool_use(&state, &p).await;
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "should produce no messages for unknown session"
+        );
+    }
+
+    // Test #27: PreToolUse with missing tool_use_id dropped with warn
+    #[tokio::test]
+    async fn pre_tool_use_missing_tool_use_id_drops() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let _ = setup_loop(&state).await;
+        // tool_use_id is None (default payload)
+        let p = payload("PreToolUse", "cc-noid");
+        handle_pre_tool_use(&state, &p).await;
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "missing tool_use_id should produce no messages"
+        );
+    }
+
+    // Q2 verification: tool_result alias works for deserialization
+    #[test]
+    fn deserialize_tool_result_alias() {
+        let json = r#"{
+            "session_id": "abc",
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": "toolu_x",
+            "tool_result": "output via alias"
+        }"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert!(p.tool_response.is_some());
+        assert_eq!(
+            p.tool_response.as_ref().and_then(|v| v.as_str()),
+            Some("output via alias")
+        );
     }
 }

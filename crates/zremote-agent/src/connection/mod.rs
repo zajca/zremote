@@ -198,9 +198,35 @@ async fn handle_analyzer_event(
             tracing::debug!(session = %session_id, cwd = %path, "working directory changed");
         }
         AnalyzerEvent::NodeCompleted(node) => {
-            // TODO(rfc-009 phase 2): replace with Opened/Closed messages
-            let _ = (&session_id, &node);
-            tracing::warn!("PTY execution node not yet forwarded via Opened/Closed");
+            // Suppress tool_call/agent_response nodes when hooks are the authoritative source
+            // for this session — hooks will emit their own Opened/Closed pair.
+            let suppressed = session_mapper.is_hook_mode(&session_id)
+                && (node.kind == "tool_call" || node.kind == "agent_response");
+
+            if !suppressed {
+                let synth_id = format!("pty-{}", uuid::Uuid::new_v4());
+                let opened = AgenticAgentMessage::ExecutionNodeOpened {
+                    session_id,
+                    loop_id: agentic_manager.loop_id_for_session(&session_id),
+                    tool_use_id: synth_id.clone(),
+                    timestamp: node.timestamp,
+                    kind: node.kind.clone(),
+                    input: node.input.clone(),
+                    working_dir: node.working_dir.clone(),
+                };
+                let _ = agentic_tx.try_send(opened);
+
+                let closed = AgenticAgentMessage::ExecutionNodeClosed {
+                    session_id,
+                    tool_use_id: synth_id,
+                    kind: node.kind.clone(),
+                    output_summary: node.output_summary.clone(),
+                    exit_code: node.exit_code,
+                    duration_ms: node.duration_ms,
+                    status: zremote_protocol::NodeStatus::Completed,
+                };
+                let _ = agentic_tx.try_send(closed);
+            }
         }
     }
 }
@@ -990,5 +1016,161 @@ mod tests {
         let result = connect(&config).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConnectionError::Connect(_)));
+    }
+
+    fn make_completed_node(kind: &str) -> crate::agentic::analyzer::CompletedNode {
+        crate::agentic::analyzer::CompletedNode {
+            timestamp: 0,
+            kind: kind.to_string(),
+            input: None,
+            output_summary: None,
+            exit_code: None,
+            working_dir: "/tmp".to_string(),
+            duration_ms: 10,
+        }
+    }
+
+    async fn make_session_manager() -> (SessionManager, mpsc::Receiver<crate::session::PtyOutput>) {
+        let (pty_tx, pty_rx) = mpsc::channel(8);
+        let mgr = SessionManager::new(
+            pty_tx,
+            crate::config::PersistenceBackend::None,
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+        );
+        (mgr, pty_rx)
+    }
+
+    // Test #20: NodeCompleted{tool_call} is suppressed when session is in hook mode
+    #[tokio::test]
+    async fn node_completed_tool_call_suppressed_in_hook_mode() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(16);
+        let session_id = SessionId::new_v4();
+        let agentic_manager = crate::agentic::manager::AgenticLoopManager::new();
+        let session_mapper = crate::hooks::mapper::SessionMapper::new();
+        let delivery = Arc::new(tokio::sync::Mutex::new(
+            crate::knowledge::context_delivery::DeliveryCoordinator::new(),
+        ));
+        let (mut session_manager, _pty_rx) = make_session_manager().await;
+
+        session_mapper.set_hook_mode(session_id);
+
+        let event = AnalyzerEvent::NodeCompleted(make_completed_node("tool_call"));
+        handle_analyzer_event(
+            session_id,
+            &event,
+            &agentic_tx,
+            &agentic_manager,
+            &session_mapper,
+            &delivery,
+            &mut session_manager,
+        )
+        .await;
+
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "tool_call node should be suppressed when hook mode is active"
+        );
+    }
+
+    // Test #21: NodeCompleted{shell_command} is NOT suppressed even in hook mode
+    #[tokio::test]
+    async fn node_completed_shell_command_not_suppressed_in_hook_mode() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(16);
+        let session_id = SessionId::new_v4();
+        let agentic_manager = crate::agentic::manager::AgenticLoopManager::new();
+        let session_mapper = crate::hooks::mapper::SessionMapper::new();
+        let delivery = Arc::new(tokio::sync::Mutex::new(
+            crate::knowledge::context_delivery::DeliveryCoordinator::new(),
+        ));
+        let (mut session_manager, _pty_rx) = make_session_manager().await;
+
+        session_mapper.set_hook_mode(session_id);
+
+        let event = AnalyzerEvent::NodeCompleted(make_completed_node("shell_command"));
+        handle_analyzer_event(
+            session_id,
+            &event,
+            &agentic_tx,
+            &agentic_manager,
+            &session_mapper,
+            &delivery,
+            &mut session_manager,
+        )
+        .await;
+
+        // shell_command should NOT be suppressed — expect Opened then Closed
+        let first = agentic_rx
+            .try_recv()
+            .expect("should emit ExecutionNodeOpened");
+        assert!(
+            matches!(first, AgenticAgentMessage::ExecutionNodeOpened { kind, .. } if kind == "shell_command"),
+            "first message should be ExecutionNodeOpened for shell_command"
+        );
+        let second = agentic_rx
+            .try_recv()
+            .expect("should emit ExecutionNodeClosed");
+        assert!(
+            matches!(second, AgenticAgentMessage::ExecutionNodeClosed { kind, .. } if kind == "shell_command"),
+            "second message should be ExecutionNodeClosed for shell_command"
+        );
+    }
+
+    // Test #22: PTY fallback (no hook mode) emits Opened + Closed{Completed} with synthesized ID
+    #[tokio::test]
+    async fn node_completed_pty_fallback_emits_opened_and_closed() {
+        let (agentic_tx, mut agentic_rx) = mpsc::channel::<AgenticAgentMessage>(16);
+        let session_id = SessionId::new_v4();
+        let agentic_manager = crate::agentic::manager::AgenticLoopManager::new();
+        let session_mapper = crate::hooks::mapper::SessionMapper::new();
+        // Not setting hook mode — this is the PTY-only fallback path
+        let delivery = Arc::new(tokio::sync::Mutex::new(
+            crate::knowledge::context_delivery::DeliveryCoordinator::new(),
+        ));
+        let (mut session_manager, _pty_rx) = make_session_manager().await;
+
+        let event = AnalyzerEvent::NodeCompleted(make_completed_node("tool_call"));
+        handle_analyzer_event(
+            session_id,
+            &event,
+            &agentic_tx,
+            &agentic_manager,
+            &session_mapper,
+            &delivery,
+            &mut session_manager,
+        )
+        .await;
+
+        let opened = agentic_rx
+            .try_recv()
+            .expect("should emit ExecutionNodeOpened");
+        let (opened_id, opened_kind) = match opened {
+            AgenticAgentMessage::ExecutionNodeOpened {
+                tool_use_id, kind, ..
+            } => (tool_use_id, kind),
+            other => panic!("expected ExecutionNodeOpened, got {other:?}"),
+        };
+        assert!(
+            opened_id.starts_with("pty-"),
+            "synthesized ID should start with 'pty-'"
+        );
+        assert_eq!(opened_kind, "tool_call");
+
+        let closed = agentic_rx
+            .try_recv()
+            .expect("should emit ExecutionNodeClosed");
+        match closed {
+            AgenticAgentMessage::ExecutionNodeClosed {
+                tool_use_id,
+                kind,
+                status,
+                ..
+            } => {
+                assert_eq!(tool_use_id, opened_id, "Opened/Closed IDs should match");
+                assert_eq!(kind, "tool_call");
+                assert_eq!(status, zremote_protocol::NodeStatus::Completed);
+            }
+            other => panic!("expected ExecutionNodeClosed, got {other:?}"),
+        }
     }
 }

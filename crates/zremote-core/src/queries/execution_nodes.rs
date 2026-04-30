@@ -20,8 +20,26 @@ pub struct ExecutionNodeRow {
     pub tool_use_id: String, // empty string for legacy / non-hook PTY path
 }
 
+/// Like `ExecutionNodeRow` but includes `host_id` resolved via JOIN with `sessions`.
+/// Used by the server-mode stale sweeper so broadcast events carry a valid `host_id`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SweepRow {
+    pub id: i64,
+    pub session_id: String,
+    pub host_id: String,
+    pub tool_use_id: String,
+    pub kind: String,
+    pub output_summary: Option<String>,
+    pub exit_code: Option<i32>,
+    pub duration_ms: i64,
+}
+
 /// INSERT a new execution node in the `running` state. Idempotent on
-/// `(session_id, tool_use_id)`. Returns the row id (existing or newly inserted).
+/// `(session_id, tool_use_id)`. Returns `(row_id, was_inserted)`.
+/// `was_inserted` is `true` for a new INSERT, `false` when the unique index
+/// fired (duplicate `tool_use_id`) and the existing row's id is returned.
+/// Callers should only emit `ExecutionNodeCreated` events when `was_inserted`
+/// is `true` to avoid duplicate broadcasts for retried hooks.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_execution_node(
     pool: &SqlitePool,
@@ -32,7 +50,7 @@ pub async fn open_execution_node(
     kind: &str,
     input: Option<&str>,
     working_dir: &str,
-) -> Result<i64, AppError> {
+) -> Result<(i64, bool), AppError> {
     // Try insert; on conflict (unique index on (session_id, tool_use_id) WHERE tool_use_id != '')
     // do nothing and return the existing row's id.
     // When tool_use_id is '' the partial index does not apply, so each call inserts a new row.
@@ -55,7 +73,7 @@ pub async fn open_execution_node(
     .map_err(AppError::Database)?;
 
     if result.rows_affected() > 0 {
-        return Ok(result.last_insert_rowid());
+        return Ok((result.last_insert_rowid(), true));
     }
 
     // Conflict path: the unique index fired (tool_use_id != ''), return the existing row's id.
@@ -67,7 +85,7 @@ pub async fn open_execution_node(
             .await
             .map_err(AppError::Database)?;
 
-    Ok(id)
+    Ok((id, false))
 }
 
 /// UPDATE a running node to a terminal state by `(session_id, tool_use_id)`.
@@ -160,6 +178,7 @@ pub async fn mark_session_running_as_stopped(
 }
 
 /// Find all `running` nodes older than `ttl_secs`, mark them `stale`, return them for broadcast.
+/// Processes at most 1000 rows per call; repeated sweeper ticks will handle larger backlogs.
 pub async fn sweep_stale_running(
     pool: &SqlitePool,
     ttl_secs: i64,
@@ -168,9 +187,10 @@ pub async fn sweep_stale_running(
 
     // Capture ids of running rows that are old enough before the UPDATE so the
     // subsequent SELECT returns only the rows we just transitioned, not any
-    // pre-existing stale ones.
+    // pre-existing stale ones. LIMIT 1000 prevents the IN clause from exceeding
+    // SQLite's SQLITE_MAX_VARIABLE_NUMBER on older builds.
     let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM execution_nodes WHERE status = 'running' AND timestamp < ?",
+        "SELECT id FROM execution_nodes WHERE status = 'running' AND timestamp < ? LIMIT 1000",
     )
     .bind(cutoff_ms)
     .fetch_all(pool)
@@ -196,6 +216,50 @@ pub async fn sweep_stale_running(
          FROM execution_nodes WHERE id IN ({placeholders}) ORDER BY timestamp ASC"
     );
     let mut q = sqlx::query_as::<_, ExecutionNodeRow>(&select_sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    q.fetch_all(pool).await.map_err(AppError::Database)
+}
+
+/// Like `sweep_stale_running` but returns `SweepRow` with `host_id` resolved via JOIN.
+/// Used by server-mode sweeper so broadcast events carry a valid `host_id`.
+/// Processes at most 1000 rows per call (same cap as `sweep_stale_running`).
+pub async fn sweep_stale_running_with_host(
+    pool: &SqlitePool,
+    ttl_secs: i64,
+) -> Result<Vec<SweepRow>, AppError> {
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - ttl_secs * 1000;
+
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM execution_nodes WHERE status = 'running' AND timestamp < ? LIMIT 1000",
+    )
+    .bind(cutoff_ms)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let update_sql =
+        format!("UPDATE execution_nodes SET status = 'stale' WHERE id IN ({placeholders})");
+    let mut q = sqlx::query(&update_sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    q.execute(pool).await.map_err(AppError::Database)?;
+
+    let select_sql = format!(
+        "SELECT en.id, en.session_id, COALESCE(s.host_id, '') AS host_id, \
+         en.tool_use_id, en.kind, en.output_summary, en.exit_code, en.duration_ms \
+         FROM execution_nodes en \
+         LEFT JOIN sessions s ON s.id = en.session_id \
+         WHERE en.id IN ({placeholders}) ORDER BY en.timestamp ASC"
+    );
+    let mut q = sqlx::query_as::<_, SweepRow>(&select_sql);
     for id in &ids {
         q = q.bind(id);
     }
@@ -346,11 +410,11 @@ mod tests {
         );
     }
 
-    // Test #2: open_execution_node inserts a running row and returns id
+    // Test #2: open_execution_node inserts a running row and returns (id, was_inserted=true)
     #[tokio::test]
     async fn open_execution_node_inserts_running_row() {
         let pool = setup_db().await;
-        let id = open_execution_node(
+        let (id, was_inserted) = open_execution_node(
             &pool,
             "sess1",
             None,
@@ -363,6 +427,7 @@ mod tests {
         .await
         .unwrap();
         assert!(id > 0);
+        assert!(was_inserted, "first insert must return was_inserted=true");
 
         let nodes = list_execution_nodes(&pool, "sess1", 10, 0).await.unwrap();
         assert_eq!(nodes.len(), 1);
@@ -370,11 +435,11 @@ mod tests {
         assert_eq!(nodes[0].tool_use_id, "toolu_abc");
     }
 
-    // Test #3: open_execution_node idempotent on duplicate (session_id, tool_use_id)
+    // Test #3: open_execution_node idempotent on duplicate — returns (same_id, was_inserted=false)
     #[tokio::test]
     async fn open_execution_node_is_idempotent() {
         let pool = setup_db().await;
-        let id1 = open_execution_node(
+        let (id1, inserted1) = open_execution_node(
             &pool,
             "sess1",
             None,
@@ -386,7 +451,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id2 = open_execution_node(
+        let (id2, inserted2) = open_execution_node(
             &pool,
             "sess1",
             None,
@@ -399,6 +464,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(id1, id2, "duplicate open must return existing id");
+        assert!(inserted1, "first call must return was_inserted=true");
+        assert!(!inserted2, "second call must return was_inserted=false");
 
         let nodes = list_execution_nodes(&pool, "sess1", 10, 0).await.unwrap();
         assert_eq!(nodes.len(), 1, "only one row must exist");
@@ -793,7 +860,7 @@ mod tests {
     async fn unique_index_enforced_on_tool_use_id() {
         let pool = setup_db().await;
         // open_execution_node uses ON CONFLICT DO NOTHING — so no error, just returns existing id
-        let id1 = open_execution_node(
+        let (id1, _) = open_execution_node(
             &pool,
             "sess1",
             None,
@@ -805,7 +872,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id2 = open_execution_node(
+        let (id2, _) = open_execution_node(
             &pool,
             "sess1",
             None,
@@ -827,10 +894,10 @@ mod tests {
     async fn empty_tool_use_id_allows_multiple_rows() {
         let pool = setup_db().await;
         // Two rows with empty tool_use_id must both succeed and get distinct ids.
-        let id1 = open_execution_node(&pool, "sess1", None, "", 1000, "bash", None, "/home")
+        let (id1, _) = open_execution_node(&pool, "sess1", None, "", 1000, "bash", None, "/home")
             .await
             .unwrap();
-        let id2 = open_execution_node(&pool, "sess1", None, "", 2000, "bash", None, "/home")
+        let (id2, _) = open_execution_node(&pool, "sess1", None, "", 2000, "bash", None, "/home")
             .await
             .unwrap();
         assert_ne!(id1, id2, "empty tool_use_id rows must have distinct ids");
