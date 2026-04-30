@@ -498,7 +498,7 @@ impl AgenticProcessor {
         let session_id_str = session_id.to_string();
         let loop_id_str = loop_id.map(|id| id.to_string());
 
-        let node_id = open_execution_node(
+        let (node_id, was_inserted) = open_execution_node(
             &self.db,
             &session_id_str,
             loop_id_str.as_deref(),
@@ -510,19 +510,30 @@ impl AgenticProcessor {
         )
         .await?;
 
-        let host_id_str = self.host_id.to_string();
-        let _ = self.events.send(ServerEvent::ExecutionNodeCreated {
-            session_id: session_id_str,
-            host_id: host_id_str,
-            node_id,
-            tool_use_id,
-            loop_id: loop_id_str,
-            timestamp,
-            kind,
-            input,
-            working_dir,
-            status: NodeStatus::Running,
-        });
+        // Only broadcast and enforce cap when a new row was inserted.
+        // Duplicate PreToolUse (retried hook) returns the existing id — no second event.
+        if was_inserted {
+            crate::queries::execution_nodes::enforce_session_node_cap(
+                &self.db,
+                &session_id_str,
+                10_000,
+            )
+            .await?;
+
+            let host_id_str = self.host_id.to_string();
+            let _ = self.events.send(ServerEvent::ExecutionNodeCreated {
+                session_id: session_id_str,
+                host_id: host_id_str,
+                node_id,
+                tool_use_id,
+                loop_id: loop_id_str,
+                timestamp,
+                kind,
+                input,
+                working_dir,
+                status: NodeStatus::Running,
+            });
+        }
 
         Ok(())
     }
@@ -1732,17 +1743,17 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "duplicate open must not create a second row");
 
-        // Collect ExecutionNodeCreated events
+        // Collect ExecutionNodeCreated events — exactly one must fire.
+        // The second open_execution_node call returns was_inserted=false so no second event.
         let mut created_count = 0;
         while let Ok(event) = rx.try_recv() {
             if matches!(event, ServerEvent::ExecutionNodeCreated { .. }) {
                 created_count += 1;
             }
         }
-        // Only one event should fire (second insert was ON CONFLICT DO NOTHING,
-        // open_execution_node returns existing id, event is still sent but node_id is same)
-        // The key invariant: only ONE DB row, not two.
-        assert_eq!(count, 1);
-        let _ = created_count; // event count is secondary; DB uniqueness is the contract
+        assert_eq!(
+            created_count, 1,
+            "exactly one ExecutionNodeCreated event must fire even on duplicate PreToolUse"
+        );
     }
 }

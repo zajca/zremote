@@ -477,13 +477,13 @@ fn spawn_stale_node_sweeper(state: Arc<AppState>, shutdown: CancellationToken) {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match zremote_core::queries::execution_nodes::sweep_stale_running(&state.db, 600).await {
+                    match zremote_core::queries::execution_nodes::sweep_stale_running_with_host(&state.db, 600).await {
                         Ok(rows) if !rows.is_empty() => {
                             tracing::info!(count = rows.len(), "swept stale execution nodes");
                             for row in rows {
                                 let _ = state.events.send(ServerEvent::ExecutionNodeUpdated {
                                     session_id: row.session_id,
-                                    host_id: String::new(), // no per-row host_id in server-mode sweep
+                                    host_id: row.host_id,
                                     node_id: row.id,
                                     tool_use_id: row.tool_use_id,
                                     status: NodeStatus::Stale,

@@ -401,8 +401,16 @@ async fn try_capture_cc_session_id(
         claude_task_id,
         cc_session_id: cc_session_id.to_string(),
     });
-    if state.outbound_tx.try_send(msg).is_err() {
-        tracing::warn!("outbound channel full, SessionIdCaptured dropped");
+    match state.outbound_tx.try_send(msg) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!("outbound channel full, SessionIdCaptured dropped");
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            // In local mode the outbound channel receiver is intentionally dropped;
+            // this is expected and not an error.
+            tracing::debug!("outbound channel closed (local mode), SessionIdCaptured dropped");
+        }
     }
 }
 

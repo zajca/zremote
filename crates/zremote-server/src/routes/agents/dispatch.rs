@@ -1697,42 +1697,57 @@ pub(super) async fn handle_agentic_message(
             let session_id_str = session_id.to_string();
             let loop_id_str = loop_id.map(|id| id.to_string());
 
-            let node_id = match zremote_core::queries::execution_nodes::open_execution_node(
-                &state.db,
-                &session_id_str,
-                loop_id_str.as_deref(),
-                &tool_use_id,
-                timestamp,
-                &kind,
-                input.as_deref(),
-                &working_dir,
-            )
-            .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(
-                        %session_id,
-                        %tool_use_id,
-                        error = %e,
-                        "failed to open execution node"
-                    );
-                    return Ok(());
-                }
-            };
+            let (node_id, was_inserted) =
+                match zremote_core::queries::execution_nodes::open_execution_node(
+                    &state.db,
+                    &session_id_str,
+                    loop_id_str.as_deref(),
+                    &tool_use_id,
+                    timestamp,
+                    &kind,
+                    input.as_deref(),
+                    &working_dir,
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!(
+                            %session_id,
+                            %tool_use_id,
+                            error = %e,
+                            "failed to open execution node"
+                        );
+                        return Ok(());
+                    }
+                };
 
-            let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
-                session_id: session_id_str,
-                host_id: host_id.to_string(),
-                node_id,
-                tool_use_id,
-                loop_id: loop_id_str,
-                timestamp,
-                kind,
-                input,
-                working_dir,
-                status: NodeStatus::Running,
-            });
+            // Only broadcast and enforce cap when a new row was inserted.
+            // Duplicate PreToolUse (retried hook) returns the existing id — no second event.
+            if was_inserted {
+                if let Err(e) = zremote_core::queries::execution_nodes::enforce_session_node_cap(
+                    &state.db,
+                    &session_id_str,
+                    10_000,
+                )
+                .await
+                {
+                    tracing::warn!(%session_id, error = %e, "failed to enforce session node cap");
+                }
+
+                let _ = state.events.send(ServerEvent::ExecutionNodeCreated {
+                    session_id: session_id_str,
+                    host_id: host_id.to_string(),
+                    node_id,
+                    tool_use_id,
+                    loop_id: loop_id_str,
+                    timestamp,
+                    kind,
+                    input,
+                    working_dir,
+                    status: NodeStatus::Running,
+                });
+            }
         }
         AgenticAgentMessage::ExecutionNodeClosed {
             session_id,
