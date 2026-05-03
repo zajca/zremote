@@ -23,6 +23,8 @@ pub enum ApiError {
     InvalidUrl(String),
     /// Internal channel was closed.
     ChannelClosed,
+    /// Internal client-side error (e.g. background task panicked or was cancelled).
+    Internal(String),
 }
 
 impl fmt::Display for ApiError {
@@ -36,6 +38,7 @@ impl fmt::Display for ApiError {
             }
             Self::InvalidUrl(msg) => write!(f, "invalid URL: {msg}"),
             Self::ChannelClosed => write!(f, "channel closed"),
+            Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
 }

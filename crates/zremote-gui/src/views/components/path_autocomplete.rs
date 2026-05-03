@@ -62,14 +62,42 @@ pub trait PathAutocompleteApi: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<FsCompleteResponse, ApiError>> + Send>>;
 }
 
-impl PathAutocompleteApi for ApiClient {
+/// `ApiClient::fs_complete` uses `reqwest`, which panics with
+/// "no reactor running" when its future is polled outside a Tokio runtime.
+/// The GPUI executor (`cx.spawn`, used by `PathAutocompleteInput`) is *not*
+/// a Tokio runtime, so we route the call through a stored `tokio::runtime::Handle`
+/// to attach the proper runtime context before awaiting the request.
+pub struct TokioApiClient {
+    client: ApiClient,
+    handle: tokio::runtime::Handle,
+}
+
+impl TokioApiClient {
+    #[must_use]
+    pub fn new(client: ApiClient, handle: tokio::runtime::Handle) -> Self {
+        Self { client, handle }
+    }
+}
+
+impl PathAutocompleteApi for TokioApiClient {
     fn fs_complete(
         &self,
         prefix: String,
         kind: FsCompleteKind,
     ) -> Pin<Box<dyn Future<Output = Result<FsCompleteResponse, ApiError>> + Send>> {
-        let client = self.clone();
-        Box::pin(async move { client.fs_complete(&prefix, kind).await })
+        let client = self.client.clone();
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            match handle
+                .spawn(async move { client.fs_complete(&prefix, kind).await })
+                .await
+            {
+                Ok(result) => result,
+                Err(join_err) => Err(ApiError::Internal(format!(
+                    "fs_complete task failed: {join_err}"
+                ))),
+            }
+        })
     }
 }
 

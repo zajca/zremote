@@ -18,7 +18,7 @@ use crate::theme;
 use crate::views::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteSnapshot, PaletteTab,
 };
-use crate::views::components::path_autocomplete::PathAutocompleteApi;
+use crate::views::components::path_autocomplete::{PathAutocompleteApi, TokioApiClient};
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
@@ -1131,7 +1131,10 @@ impl MainView {
             Rc::clone(snapshot.agent_profiles_rc()),
             Rc::clone(snapshot.agent_kinds_rc()),
         );
-        let path_api: Arc<dyn PathAutocompleteApi> = Arc::new(self.app_state.api.clone());
+        let path_api: Arc<dyn PathAutocompleteApi> = Arc::new(TokioApiClient::new(
+            self.app_state.api.clone(),
+            self.app_state.tokio_handle.clone(),
+        ));
         let palette =
             cx.new(|cx| CommandPalette::new(palette_snapshot, tab, path_api, recent_add_paths, cx));
         cx.subscribe(&palette, Self::on_palette_event).detach();

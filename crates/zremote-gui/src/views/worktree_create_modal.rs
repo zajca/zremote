@@ -23,7 +23,7 @@ use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::components::path_autocomplete::{
-    PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind,
+    PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind, TokioApiClient,
 };
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
@@ -138,7 +138,10 @@ impl WorktreeCreateModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let api: Arc<dyn PathAutocompleteApi> = Arc::new(app_state.api.clone());
+        let api: Arc<dyn PathAutocompleteApi> = Arc::new(TokioApiClient::new(
+            app_state.api.clone(),
+            app_state.tokio_handle.clone(),
+        ));
         let path = cx.new(|cx| {
             PathAutocompleteInput::new(
                 api,
