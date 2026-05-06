@@ -856,6 +856,56 @@ async fn trigger_scan_valid_host() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
+/// Verify the new async `trigger_scan` returns 202 immediately and emits
+/// the `ScanStarted` / `ScanCompleted` event pair on the broadcast channel
+/// — these drive the GUI spinner and the spinner-clear handshake. We just
+/// listen for the events; the scanner walks `$HOME` (or whatever the
+/// surrounding env set), which is fine because we only assert *that*
+/// events are emitted, not their counts.
+#[tokio::test]
+async fn trigger_scan_emits_started_and_completed_events() {
+    use std::time::Duration;
+    use zremote_core::state::ServerEvent;
+
+    let state = test_state().await;
+    let host_id = state.host_id.to_string();
+    let mut rx = state.events.subscribe();
+    let app = build_test_router(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/hosts/{host_id}/projects/scan"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let mut got_started = false;
+    let mut got_completed = false;
+    // Generous deadline: scanning $HOME on a developer machine can take a
+    // while, but we only need the events to fire, not for the scan to
+    // finish quickly.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !(got_started && got_completed) && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Ok(ServerEvent::ScanStarted { host_id: h, .. })) if h == host_id => {
+                got_started = true;
+            }
+            Ok(Ok(ServerEvent::ScanCompleted { host_id: h, .. })) if h == host_id => {
+                got_completed = true;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+    assert!(got_started, "expected ScanStarted to be broadcast");
+    assert!(got_completed, "expected ScanCompleted to be broadcast");
+}
+
 #[tokio::test]
 async fn delete_project_and_verify_gone() {
     let state = test_state().await;

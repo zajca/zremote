@@ -93,6 +93,24 @@ pub struct SidebarView {
     claude_tasks: HashMap<String, ClaudeTaskInfo>,
     /// Cached terminal preview snapshots per session_id.
     preview_snapshots: HashMap<String, PreviewSnapshot>,
+    /// Scan progress per host_id. Present iff a project rescan is currently
+    /// running on that host — drives the spinner that replaces the refresh
+    /// icon in the host header.
+    scan_progress: HashMap<String, ScanState>,
+    /// Per-host task awaiting the `trigger_scan` HTTP response. Stored (not
+    /// detached) so dropping the sidebar cancels any in-flight requests —
+    /// re-clicking a host while its task is still alive replaces (cancels)
+    /// the previous one instead of leaving a parallel future running.
+    scan_http_tasks: HashMap<String, Task<()>>,
+}
+
+/// Per-host project rescan progress. `total` is `0` until the agent has
+/// finished walking its base dirs, so the UI should treat zero as
+/// "indeterminate" rather than "0/0".
+#[derive(Clone, Copy, Default)]
+pub struct ScanState {
+    pub processed: u32,
+    pub total: u32,
 }
 
 impl SidebarView {
@@ -371,6 +389,8 @@ impl SidebarView {
             terminal_titles: HashMap::new(),
             claude_tasks: HashMap::new(),
             preview_snapshots: HashMap::new(),
+            scan_progress: HashMap::new(),
+            scan_http_tasks: HashMap::new(),
         };
         view.load_data(cx);
         view.poll_previews(cx);
@@ -657,6 +677,38 @@ impl SidebarView {
                 // Handled by MainView toast -- sidebar reloads to clear stale state
                 self.load_data(cx);
             }
+            ServerEvent::ScanStarted { host_id, total } => {
+                self.scan_progress.insert(
+                    host_id.clone(),
+                    ScanState {
+                        processed: 0,
+                        total: *total,
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::ScanProgress {
+                host_id,
+                processed,
+                total,
+            } => {
+                self.scan_progress.insert(
+                    host_id.clone(),
+                    ScanState {
+                        processed: *processed,
+                        total: *total,
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::ScanCompleted { host_id, .. } => {
+                self.scan_progress.remove(host_id);
+                // load_data is also kicked off by ProjectsUpdated; the
+                // explicit notify here clears the spinner instantly even if
+                // ProjectsUpdated was lost (or skipped because nothing
+                // changed in old agent builds).
+                cx.notify();
+            }
             ServerEvent::ClaudeTaskStarted {
                 task_id,
                 session_id,
@@ -889,13 +941,31 @@ impl SidebarView {
     }
 
     /// Trigger a project/worktree rescan on the agent for the given host.
-    /// The agent broadcasts `ProjectsUpdated` on completion, which causes
-    /// `handle_server_event` to call `load_data()` and refresh the sidebar.
+    ///
+    /// The HTTP request returns 202 immediately on the agent side; the
+    /// actual scan runs in the background and broadcasts `ScanStarted` /
+    /// `ScanProgress` / `ScanCompleted` plus `ProjectsUpdated` events. We
+    /// optimistically install a `ScanState` here so the spinner appears the
+    /// moment the user clicks, instead of after the broadcast round-trip.
+    /// The `ScanCompleted` handler clears it; if the scan never completes
+    /// (network gone, agent crashed) the spinner is also cleared on failure
+    /// of the `trigger_scan` HTTP call below.
     pub fn refresh_projects(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        // Suppress double-click while a scan is already in flight for this
+        // host — the agent debounces but the UI shouldn't re-trigger work.
+        if self.scan_progress.contains_key(host_id) {
+            return;
+        }
+        self.scan_progress
+            .insert(host_id.to_string(), ScanState::default());
+        cx.notify();
+
         let api = self.app_state.api.clone();
-        let host_id = host_id.to_string();
+        let host_key = host_id.to_string();
         let handle = self.app_state.tokio_handle.clone();
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let task_host_id = host_key.clone();
+        let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let host_id = task_host_id;
             let result = handle
                 .spawn({
                     let host_id = host_id.clone();
@@ -904,10 +974,20 @@ impl SidebarView {
                 .await;
             let Ok(result) = result else {
                 tracing::error!("refresh_projects task panicked or was cancelled");
+                let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                    this.scan_progress.remove(&host_id);
+                    this.scan_http_tasks.remove(&host_id);
+                    cx.notify();
+                });
                 return;
             };
             if let Err(e) = result {
                 tracing::error!(error = %e, host_id = %host_id, "failed to trigger project scan");
+                let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                    this.scan_progress.remove(&host_id);
+                    this.scan_http_tasks.remove(&host_id);
+                    cx.notify();
+                });
                 return;
             }
             // Fall back to an immediate reload in case the broadcast event
@@ -915,10 +995,71 @@ impl SidebarView {
             // WebSocket hiccup in server mode drops the ProjectsUpdated
             // broadcast). load_generation collapses the duplicate fetch.
             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                // Drop the task handle on success too; nothing else holds it.
+                this.scan_http_tasks.remove(&host_id);
                 this.load_data(cx);
             });
-        })
-        .detach();
+        });
+        // Replace any previous task for this host (also implicitly cancels
+        // it) so the field never accumulates stale handles.
+        self.scan_http_tasks.insert(host_key, task);
+    }
+
+    /// Render the refresh-projects button in a host header. Swaps to a
+    /// spinning loader while a scan is in flight and surfaces the live
+    /// "processed/total" count via tooltip; clicks during a scan are no-ops
+    /// (the underlying handler also guards against re-entry).
+    fn render_refresh_button(&self, host_id: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let scan = self.scan_progress.get(&host_id).copied();
+        let scanning = scan.is_some();
+        let tooltip_text = match scan {
+            None => "Refresh projects & worktrees".to_string(),
+            Some(state) if state.total == 0 => "Scanning projects…".to_string(),
+            Some(state) => format!("Scanning projects {} / {}", state.processed, state.total),
+        };
+        let click_host_id = host_id.clone();
+        let icon_element: AnyElement = if scanning {
+            let anim_id = SharedString::from(format!("sidebar-scan-spin-{host_id}"));
+            icon(Icon::Loader)
+                .size(px(14.0))
+                .text_color(theme::accent())
+                .with_animation(
+                    anim_id,
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_easing(linear),
+                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+                )
+                .into_any_element()
+        } else {
+            icon(Icon::RefreshCw)
+                .size(px(14.0))
+                .text_color(theme::text_tertiary())
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(format!("refresh-{host_id}")))
+            .p(px(2.0))
+            .rounded(px(3.0))
+            // Spinner stays visible always while scanning so the user can
+            // see progress even after moving the cursor away from the host
+            // header. Idle refresh icon keeps the existing hover-only
+            // behaviour to avoid header clutter.
+            .when(!scanning, |el| {
+                el.cursor_pointer()
+                    .invisible()
+                    .group_hover("host-header", |mut s| {
+                        s.visibility = Some(gpui::Visibility::Visible);
+                        s
+                    })
+                    .hover(|s| s.bg(theme::bg_tertiary()))
+            })
+            .tooltip(move |_window, cx| cx.new(|_| SidebarTextTooltip(tooltip_text.clone())).into())
+            .child(icon_element)
+            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.refresh_projects(&click_host_id, cx);
+            }))
     }
 
     /// Start an agent task for the given project using the specified profile.
@@ -1276,35 +1417,7 @@ impl SidebarView {
                                 )),
                         )
                     })
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("refresh-{refresh_host_id}")))
-                            .p(px(2.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .invisible()
-                            .group_hover("host-header", |mut s| {
-                                s.visibility = Some(gpui::Visibility::Visible);
-                                s
-                            })
-                            .hover(|s| s.bg(theme::bg_tertiary()))
-                            .tooltip(|_window, cx| {
-                                cx.new(|_| {
-                                    SidebarTextTooltip("Refresh projects & worktrees".to_string())
-                                })
-                                .into()
-                            })
-                            .child(
-                                icon(Icon::RefreshCw)
-                                    .size(px(14.0))
-                                    .text_color(theme::text_tertiary()),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _event: &ClickEvent, _window, cx| {
-                                    this.refresh_projects(&refresh_host_id, cx);
-                                },
-                            )),
-                    )
+                    .child(self.render_refresh_button(refresh_host_id, cx))
                     .child(
                         div()
                             .id(SharedString::from(format!(

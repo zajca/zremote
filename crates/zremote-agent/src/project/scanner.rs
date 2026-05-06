@@ -85,6 +85,67 @@ impl ProjectScanner {
         projects
     }
 
+    /// Cheap two-phase variant of `scan`: walks the configured base dirs and
+    /// returns candidate project paths without doing any git I/O or
+    /// `intelligence::analyze` work. Callers (e.g. the local trigger_scan
+    /// route) feed each candidate to `detect_at` in parallel — that is where
+    /// the expensive per-project work actually lives, so deferring it to a
+    /// fan-out makes the scan dramatically faster on hosts with many repos.
+    pub fn collect_candidates(&mut self) -> Vec<PathBuf> {
+        self.last_scan = Some(Instant::now());
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for base in &self.base_dirs.clone() {
+            Self::walk_candidates(base, 0, self.max_depth, &mut candidates);
+        }
+        candidates.sort();
+        candidates.dedup();
+        candidates
+    }
+
+    /// Cheap candidate-walk: only checks marker-file / `.git` existence and
+    /// recurses; no git subprocess, no manifest parsing.
+    fn walk_candidates(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > max_depth {
+            return;
+        }
+        if Self::is_project_candidate(dir) {
+            out.push(dir.to_path_buf());
+            // Don't recurse into recognized project candidates.
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') || SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            Self::walk_candidates(&path, depth + 1, max_depth, out);
+        }
+    }
+
+    /// Returns true if `dir` contains a recognized project marker, a git
+    /// directory, or is a linked-worktree git file. This mirrors the early
+    /// gate in `detect_project` so `walk_candidates` matches the same set of
+    /// project roots without paying for git/manifest reads.
+    fn is_project_candidate(dir: &Path) -> bool {
+        for &(marker, _) in MARKERS {
+            if dir.join(marker).exists() {
+                return true;
+            }
+        }
+        let git_entry = dir.join(".git");
+        // is_dir() = main repo, is_file() = linked worktree.
+        git_entry.is_dir() || git_entry.is_file()
+    }
+
     /// Resolve base directories from `ZREMOTE_SCAN_DIRS` env var or default to `$HOME`.
     fn resolve_base_dirs() -> Vec<PathBuf> {
         if let Ok(dirs) = std::env::var("ZREMOTE_SCAN_DIRS") {
@@ -568,6 +629,41 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert_eq!(info.main_repo_path.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn collect_candidates_finds_same_paths_as_scan() {
+        // The parallel scan path drives `collect_candidates` first and then
+        // calls `detect_at` on each result. This test pins the invariant
+        // that the cheap walker discovers the same set of project roots as
+        // the legacy serial `scan()` — drift here would silently lose
+        // projects from the rescan UI.
+        let tmp = TempDir::new().unwrap();
+        create_test_tree(&tmp);
+
+        let mut scanner = ProjectScanner {
+            base_dirs: vec![tmp.path().to_path_buf()],
+            max_depth: DEFAULT_MAX_DEPTH,
+            last_scan: None,
+        };
+        let candidates = scanner.collect_candidates();
+
+        // Both `scan()` and `collect_candidates()` build paths by joining
+        // onto the same base in `base_dirs`, so the resulting strings
+        // should match exactly. Compare full sorted-vec equality so a
+        // collision (two same-named directories under different parents)
+        // could not produce a false positive on the leaf name.
+        let mut scan_paths: Vec<String> = scanner.scan().into_iter().map(|p| p.path).collect();
+        let mut candidate_paths: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        scan_paths.sort();
+        candidate_paths.sort();
+        assert_eq!(
+            scan_paths, candidate_paths,
+            "collect_candidates and scan must agree on the full project path set"
+        );
     }
 
     #[test]

@@ -152,6 +152,38 @@ pub enum ServerEvent {
     },
     #[serde(rename = "projects_updated")]
     ProjectsUpdated { host_id: String },
+    /// Project rescan started for a host. `total` is the number of candidate
+    /// directories that will be inspected (i.e. the upper bound for
+    /// `processed` in subsequent `ScanProgress` events).
+    #[serde(rename = "scan_started")]
+    ScanStarted {
+        host_id: String,
+        #[serde(default)]
+        total: u32,
+    },
+    /// Throttled progress update for a running rescan. Emitted at most a few
+    /// times a second; clients use it to drive a counter / progress bar.
+    #[serde(rename = "scan_progress")]
+    ScanProgress {
+        host_id: String,
+        #[serde(default)]
+        processed: u32,
+        #[serde(default)]
+        total: u32,
+    },
+    /// Project rescan finished for a host. Always emitted exactly once per
+    /// `ScanStarted` (success or failure). `ProjectsUpdated` may be emitted
+    /// alongside when the DB actually changed.
+    #[serde(rename = "scan_completed")]
+    ScanCompleted {
+        host_id: String,
+        #[serde(default)]
+        processed: u32,
+        #[serde(default)]
+        total: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     #[serde(rename = "knowledge_status_changed")]
     KnowledgeStatusChanged {
         host_id: String,
@@ -389,6 +421,21 @@ mod tests {
             },
             ServerEvent::ProjectsUpdated {
                 host_id: "h1".to_string(),
+            },
+            ServerEvent::ScanStarted {
+                host_id: "h1".to_string(),
+                total: 47,
+            },
+            ServerEvent::ScanProgress {
+                host_id: "h1".to_string(),
+                processed: 12,
+                total: 47,
+            },
+            ServerEvent::ScanCompleted {
+                host_id: "h1".to_string(),
+                processed: 47,
+                total: 47,
+                error: None,
             },
             ServerEvent::KnowledgeStatusChanged {
                 host_id: "h1".to_string(),
