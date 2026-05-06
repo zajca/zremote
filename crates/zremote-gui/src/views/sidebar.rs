@@ -284,18 +284,26 @@ impl SidebarView {
             .projects
             .iter()
             .filter(|p| p.parent_project_id.as_deref() == Some(project_id))
-            .map(|w| {
-                let w_sessions = self
+            .filter_map(|w| {
+                let w_sessions: Vec<Session> = self
                     .sessions
                     .iter()
-                    .filter(|s| s.project_id.as_deref() == Some(&w.id))
+                    .filter(|s| {
+                        s.project_id.as_deref() == Some(&w.id) && s.status != SessionStatus::Closed
+                    })
                     .cloned()
                     .collect();
-                ProjectNode {
+                // Mirror `compute_items`: worktrees without an active session
+                // are hidden, so the toggle/expand heuristics see the same
+                // children the renderer does.
+                if w_sessions.is_empty() {
+                    return None;
+                }
+                Some(ProjectNode {
                     project: w.clone(),
                     sessions: w_sessions,
                     worktrees: Vec::new(),
-                }
+                })
             })
             .collect();
         Some(ProjectNode {

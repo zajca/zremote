@@ -118,13 +118,22 @@ pub(super) fn compute_items(
 
         let mut worktree_nodes: Vec<ProjectNode> = worktree_refs
             .into_iter()
-            .map(|w| {
+            .filter_map(|w| {
                 let w_sessions = sessions_by_project.remove(&w.id).unwrap_or_default();
-                ProjectNode {
+                // Hide worktrees that have no active session — the surrounding
+                // `active_sessions` filter already drops Closed sessions, so an
+                // empty `w_sessions` here means "no live work happening on this
+                // worktree". Keeping them in the tree spammed the sidebar with
+                // dozens of branch rows that the user can never act on without
+                // first opening a session elsewhere.
+                if w_sessions.is_empty() {
+                    return None;
+                }
+                Some(ProjectNode {
                     project: w.clone(),
                     sessions: w_sessions,
                     worktrees: Vec::new(),
-                }
+                })
             })
             .collect();
         // Stable alphabetical order by branch/name so the sidebar does
@@ -145,10 +154,11 @@ pub(super) fn compute_items(
 
         if project.pinned {
             pinned_roots.push(node);
-        } else if has_worktrees
-            || !node.sessions.is_empty()
-            || node.worktrees.iter().any(|w| !w.sessions.is_empty())
-        {
+        } else if has_worktrees || !node.sessions.is_empty() {
+            // `has_worktrees` already implies "has at least one worktree with
+            // an active session" because the `filter_map` above drops empty
+            // ones — so a separate `worktrees.iter().any(...)` clause would
+            // be redundant.
             active_roots.push(node);
         }
     }
@@ -416,7 +426,13 @@ mod tests {
         let wt_a = make_worktree("wa", "h", "p", "alpha");
         let wt_m = make_worktree("wm", "h", "p", "mu");
         let projects = vec![parent, wt_z, wt_a, wt_m];
-        let sessions = vec![make_session("s1", "h", Some("p"))];
+        // Each worktree needs an active session — otherwise it is hidden.
+        let sessions = vec![
+            make_session("s1", "h", Some("p")),
+            make_session("s_z", "h", Some("wz")),
+            make_session("s_a", "h", Some("wa")),
+            make_session("s_m", "h", Some("wm")),
+        ];
 
         let items = compute_items(&sessions, &projects, "h", None);
         assert_eq!(items.project_nodes.len(), 1);
@@ -429,6 +445,37 @@ mod tests {
             .map(|n| n.project.git_branch.as_deref().unwrap_or(""))
             .collect();
         assert_eq!(branches, vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn worktrees_without_active_session_are_hidden() {
+        let parent = make_project("p", "h");
+        let wt_with = make_worktree("w_live", "h", "p", "live");
+        let wt_without = make_worktree("w_dead", "h", "p", "dead");
+        let projects = vec![parent, wt_with, wt_without];
+        // Only `w_live` has a session; `w_dead` should be filtered out.
+        let sessions = vec![make_session("s_live", "h", Some("w_live"))];
+
+        let items = compute_items(&sessions, &projects, "h", None);
+        let p_node = &items.project_nodes[0];
+        assert_eq!(p_node.worktrees.len(), 1);
+        assert_eq!(p_node.worktrees[0].project.id, "w_live");
+    }
+
+    #[test]
+    fn worktree_with_only_closed_sessions_is_hidden() {
+        let parent = make_project("p", "h");
+        let wt = make_worktree("w", "h", "p", "feat");
+        let projects = vec![parent, wt];
+        let mut closed = make_session("s_closed", "h", Some("w"));
+        closed.status = SessionStatus::Closed;
+        // Parent has an active session so the parent row stays; the
+        // worktree's only session is Closed, so the worktree must be hidden.
+        let sessions = vec![closed, make_session("s_parent", "h", Some("p"))];
+
+        let items = compute_items(&sessions, &projects, "h", None);
+        assert_eq!(items.project_nodes.len(), 1);
+        assert!(items.project_nodes[0].worktrees.is_empty());
     }
 
     #[test]
