@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_kinds_contains_claude() {
+    async fn list_kinds_contains_builtins() {
         let state = test_state().await;
         let app = router(state);
         let resp = app
@@ -396,6 +396,7 @@ mod tests {
         let json = read_json(resp).await;
         let arr = json.as_array().unwrap();
         assert!(arr.iter().any(|k| k["kind"] == "claude"));
+        assert!(arr.iter().any(|k| k["kind"] == "codex"));
     }
 
     #[tokio::test]
@@ -414,7 +415,7 @@ mod tests {
         assert_eq!(resp.status(), HttpStatus::OK);
         let json = read_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
+        assert_eq!(arr.len(), 2);
     }
 
     #[tokio::test]
@@ -453,6 +454,38 @@ mod tests {
             "agent_kind": "claude",
             "model": "sonnet-4-5",
             "allowed_tools": ["Read"],
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agent-profiles")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), HttpStatus::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_codex_profile_happy_path() {
+        let state = test_state().await;
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "name": "Codex review",
+            "agent_kind": "codex",
+            "model": "gpt-5.1-codex",
+            "skip_permissions": true,
+            "settings": {
+                "sandbox": "workspace-write",
+                "approval_policy": "on-request",
+                "config_overrides": ["model_reasoning_effort=\"high\""],
+                "no_alt_screen": true
+            }
         });
 
         let resp = app

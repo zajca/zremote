@@ -112,11 +112,18 @@ pub struct KindInfo {
 /// Adding a new kind here and registering its launcher in
 /// `zremote_agent::agents::LauncherRegistry::with_builtins` is a full
 /// end-to-end integration — no schema migration required.
-pub const SUPPORTED_KINDS: &[KindInfo] = &[KindInfo {
-    kind: "claude",
-    display_name: "Claude Code",
-    description: "Anthropic Claude Code CLI agent",
-}];
+pub const SUPPORTED_KINDS: &[KindInfo] = &[
+    KindInfo {
+        kind: "claude",
+        display_name: "Claude Code",
+        description: "Anthropic Claude Code CLI agent",
+    },
+    KindInfo {
+        kind: "codex",
+        display_name: "Codex",
+        description: "OpenAI Codex CLI agent",
+    },
+];
 
 /// Convenience: extract the `kind` identifiers for validation callers that
 /// only need the set of accepted strings.
@@ -220,9 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn supported_kinds_contains_claude() {
+    fn supported_kinds_contains_builtins() {
         let kinds = supported_kinds();
         assert!(kinds.contains(&"claude"));
+        assert!(kinds.contains(&"codex"));
         assert_eq!(SUPPORTED_KINDS.len(), kinds.len());
     }
 }

@@ -115,6 +115,68 @@ pub fn validate_custom_flags(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the Codex config profile name passed to `codex --profile`.
+///
+/// Codex profile identifiers are config keys, not shell snippets. Keep the
+/// accepted shape intentionally close to model names plus `_`, because profile
+/// names commonly use underscores while still not needing spaces or shell
+/// metacharacters.
+pub fn validate_codex_config_profile(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("codex config profile must not be empty".to_string());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!("invalid codex config profile: {s}"));
+    }
+    Ok(())
+}
+
+/// Validate `codex --sandbox`.
+pub fn validate_codex_sandbox(s: &str) -> Result<(), String> {
+    match s {
+        "read-only" | "workspace-write" | "danger-full-access" => Ok(()),
+        _ => Err(format!("invalid codex sandbox: {s}")),
+    }
+}
+
+/// Validate `codex --ask-for-approval`.
+pub fn validate_codex_approval_policy(s: &str) -> Result<(), String> {
+    match s {
+        "untrusted" | "on-failure" | "on-request" | "never" => Ok(()),
+        _ => Err(format!("invalid codex approval policy: {s}")),
+    }
+}
+
+/// Validate one `codex -c key=value` override.
+///
+/// The override is shell-quoted by the launcher, so this focuses on bounding
+/// the Codex config key shape and forbidding control characters that would
+/// corrupt the terminal write. Values may contain spaces and TOML quotes.
+pub fn validate_codex_config_override(s: &str) -> Result<(), String> {
+    let Some((key, value)) = s.split_once('=') else {
+        return Err(format!("codex config override must be key=value: {s}"));
+    };
+    if key.is_empty() {
+        return Err("codex config override key must not be empty".to_string());
+    }
+    for part in key.split('.') {
+        if part.is_empty()
+            || !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("invalid codex config override key: {key}"));
+        }
+    }
+    if value.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+        return Err("codex config override value contains control characters".to_string());
+    }
+    Ok(())
+}
+
 /// Validate a development channel identifier (claude-specific setting).
 ///
 /// The flag `--dangerously-load-development-channels` takes tagged values like
@@ -299,6 +361,26 @@ struct ClaudeSettingsShape {
     print_mode: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct CodexSettingsShape {
+    #[serde(default)]
+    config_profile: Option<String>,
+    #[serde(default)]
+    sandbox: Option<String>,
+    #[serde(default)]
+    approval_policy: Option<String>,
+    #[serde(default)]
+    config_overrides: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    search: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    no_alt_screen: bool,
+    #[serde(default)]
+    custom_flags: Option<String>,
+}
+
 /// Validate the claude-specific `settings_json` blob.
 ///
 /// The server crate cannot depend on the agent-side launcher, so this is
@@ -334,6 +416,34 @@ pub fn validate_claude_settings(settings: &serde_json::Value) -> Result<(), Stri
     Ok(())
 }
 
+/// Validate the codex-specific `settings_json` blob.
+pub fn validate_codex_settings(settings: &serde_json::Value) -> Result<(), String> {
+    if settings.is_null() {
+        return Ok(());
+    }
+
+    let parsed: CodexSettingsShape = serde_json::from_value(settings.clone())
+        .map_err(|e| format!("invalid codex settings: {e}"))?;
+
+    if let Some(profile) = parsed.config_profile.as_deref() {
+        validate_codex_config_profile(profile)?;
+    }
+    if let Some(sandbox) = parsed.sandbox.as_deref() {
+        validate_codex_sandbox(sandbox)?;
+    }
+    if let Some(policy) = parsed.approval_policy.as_deref() {
+        validate_codex_approval_policy(policy)?;
+    }
+    for override_arg in &parsed.config_overrides {
+        validate_codex_config_override(override_arg)?;
+    }
+    if let Some(flags) = parsed.custom_flags.as_deref() {
+        validate_custom_flags(flags)?;
+    }
+
+    Ok(())
+}
+
 /// Dispatch to the kind-specific settings validator.
 ///
 /// Today only `claude` has a typed settings shape; future kinds can add
@@ -350,6 +460,7 @@ pub fn validate_settings_for_kind(
 ) -> Result<(), String> {
     match agent_kind {
         "claude" => validate_claude_settings(settings),
+        "codex" => validate_codex_settings(settings),
         _ => Ok(()),
     }
 }
@@ -464,6 +575,45 @@ mod tests {
         // verbatim. Security review found this gap post-merge-prep.
         assert!(validate_custom_flags("--foo\\\nrm").is_err());
         assert!(validate_custom_flags("--foo \\").is_err());
+    }
+
+    #[test]
+    fn codex_config_profile_accepts_typical() {
+        assert!(validate_codex_config_profile("default").is_ok());
+        assert!(validate_codex_config_profile("work_profile-1").is_ok());
+    }
+
+    #[test]
+    fn codex_config_profile_rejects_bad_chars() {
+        assert!(validate_codex_config_profile("").is_err());
+        assert!(validate_codex_config_profile("work profile").is_err());
+        assert!(validate_codex_config_profile("work;profile").is_err());
+    }
+
+    #[test]
+    fn codex_sandbox_accepts_known_values() {
+        assert!(validate_codex_sandbox("read-only").is_ok());
+        assert!(validate_codex_sandbox("workspace-write").is_ok());
+        assert!(validate_codex_sandbox("danger-full-access").is_ok());
+        assert!(validate_codex_sandbox("full").is_err());
+    }
+
+    #[test]
+    fn codex_approval_policy_accepts_known_values() {
+        assert!(validate_codex_approval_policy("untrusted").is_ok());
+        assert!(validate_codex_approval_policy("on-failure").is_ok());
+        assert!(validate_codex_approval_policy("on-request").is_ok());
+        assert!(validate_codex_approval_policy("never").is_ok());
+        assert!(validate_codex_approval_policy("sometimes").is_err());
+    }
+
+    #[test]
+    fn codex_config_override_validates_key_and_value() {
+        assert!(validate_codex_config_override("model_reasoning_effort=\"high\"").is_ok());
+        assert!(validate_codex_config_override("shell_environment_policy.inherit=all").is_ok());
+        assert!(validate_codex_config_override("missing_equals").is_err());
+        assert!(validate_codex_config_override("bad key=value").is_err());
+        assert!(validate_codex_config_override("key=line\nnext").is_err());
     }
 
     #[test]
@@ -734,9 +884,37 @@ mod tests {
     }
 
     #[test]
+    fn codex_settings_accepts_valid_shape() {
+        let settings = serde_json::json!({
+            "config_profile": "work",
+            "sandbox": "workspace-write",
+            "approval_policy": "on-request",
+            "config_overrides": ["model_reasoning_effort=\"high\""],
+            "search": true,
+            "no_alt_screen": true,
+            "custom_flags": "--enable experimental",
+        });
+        assert!(validate_codex_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn codex_settings_rejects_bad_override() {
+        let settings = serde_json::json!({
+            "config_overrides": ["bad key=value"],
+        });
+        assert!(validate_codex_settings(&settings).is_err());
+    }
+
+    #[test]
     fn settings_for_kind_dispatches_claude() {
         let bad = serde_json::json!({ "development_channels": ["plugin;ls"] });
         assert!(validate_settings_for_kind("claude", &bad).is_err());
+    }
+
+    #[test]
+    fn settings_for_kind_dispatches_codex() {
+        let bad = serde_json::json!({ "sandbox": "sometimes" });
+        assert!(validate_settings_for_kind("codex", &bad).is_err());
     }
 
     #[test]

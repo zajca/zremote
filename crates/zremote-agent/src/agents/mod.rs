@@ -20,8 +20,10 @@ use uuid::Uuid;
 use zremote_protocol::agents::AgentProfileData;
 
 pub mod claude;
+pub mod codex;
 
 pub use claude::ClaudeLauncher;
+pub use codex::CodexLauncher;
 
 /// Errors returned by the launcher registry and individual launchers.
 ///
@@ -203,6 +205,7 @@ impl LauncherRegistry {
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(ClaudeLauncher));
+        r.register(Arc::new(CodexLauncher));
         r
     }
 
@@ -231,11 +234,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_with_builtins_contains_claude() {
+    fn registry_with_builtins_contains_supported_launchers() {
         let registry = LauncherRegistry::with_builtins();
         let kinds = registry.kinds();
         assert!(kinds.contains(&"claude"));
+        assert!(kinds.contains(&"codex"));
         assert!(registry.get("claude").is_ok());
+        assert!(registry.get("codex").is_ok());
     }
 
     #[test]

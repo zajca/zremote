@@ -447,6 +447,15 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(default.settings["print_mode"], serde_json::json!(false));
+
+        let codex = get_default(&pool, "codex")
+            .await
+            .unwrap()
+            .expect("seed should create a codex default profile");
+        assert!(codex.is_default);
+        assert_eq!(codex.agent_kind, "codex");
+        assert_eq!(codex.name, "Default");
+        assert_eq!(codex.settings["no_alt_screen"], serde_json::json!(true));
     }
 
     #[tokio::test]
@@ -662,10 +671,11 @@ mod tests {
     async fn test_list_profiles_and_by_kind() {
         let pool = test_db().await;
 
-        // The seed adds one claude profile.
+        // The seed adds one default profile per built-in launcher.
         let seeded = list_profiles(&pool).await.unwrap();
-        assert_eq!(seeded.len(), 1);
-        assert_eq!(seeded[0].agent_kind, "claude");
+        assert_eq!(seeded.len(), 2);
+        assert!(seeded.iter().any(|p| p.agent_kind == "claude"));
+        assert!(seeded.iter().any(|p| p.agent_kind == "codex"));
 
         let p1 = sample_profile("k-1", "claude", "Alpha");
         let p2 = sample_profile("k-2", "claude", "Beta");
@@ -681,21 +691,21 @@ mod tests {
         .unwrap();
 
         let all = list_profiles(&pool).await.unwrap();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 5);
 
         let claude_only = list_by_kind(&pool, "claude").await.unwrap();
         assert_eq!(claude_only.len(), 3);
         assert!(claude_only.iter().all(|p| p.agent_kind == "claude"));
 
         let codex_only = list_by_kind(&pool, "codex").await.unwrap();
-        assert_eq!(codex_only.len(), 1);
-        assert_eq!(codex_only[0].id, "k-3");
+        assert_eq!(codex_only.len(), 2);
+        assert!(codex_only.iter().any(|p| p.id == "k-3"));
     }
 
     #[tokio::test]
-    async fn test_get_default_none_when_kind_missing() {
+    async fn test_get_default_none_when_unknown_kind_missing() {
         let pool = test_db().await;
-        let missing = get_default(&pool, "codex").await.unwrap();
+        let missing = get_default(&pool, "future-kind").await.unwrap();
         assert!(missing.is_none());
     }
 }

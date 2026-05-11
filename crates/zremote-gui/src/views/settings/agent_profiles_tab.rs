@@ -71,6 +71,7 @@ enum TagListKind {
     AllowedTools,
     ExtraArgs,
     DevelopmentChannels,
+    CodexConfigOverrides,
 }
 
 /// Which input field is currently receiving key events.
@@ -92,6 +93,11 @@ enum ActiveInput {
     NewEnvValue,
     ClaudeOutputFormat,
     ClaudeCustomFlags,
+    CodexConfigProfile,
+    CodexSandbox,
+    CodexApprovalPolicy,
+    NewCodexConfigOverride,
+    CodexCustomFlags,
 }
 
 /// Mutable form state for the editor pane.
@@ -121,6 +127,14 @@ struct EditForm {
     /// (`ClaudeSettingsShape::custom_flags: Option<String>`). Serialized
     /// to JSON as a single string, or omitted when empty.
     claude_custom_flags: String,
+    // Codex-specific (deserialized from profile.settings JSON on load).
+    codex_config_profile: String,
+    codex_sandbox: String,
+    codex_approval_policy: String,
+    codex_config_overrides: Vec<String>,
+    codex_search: bool,
+    codex_no_alt_screen: bool,
+    codex_custom_flags: String,
 
     // Transient input buffers for the tag-list editors. These are not part
     // of the saved profile; they just hold the string the user is typing
@@ -128,6 +142,7 @@ struct EditForm {
     new_tool_input: String,
     new_arg_input: String,
     new_channel_input: String,
+    new_codex_config_override_input: String,
     new_env_key: String,
     new_env_value: String,
 }
@@ -163,6 +178,43 @@ impl EditForm {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let codex_config_profile = settings
+            .get("config_profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let codex_sandbox = settings
+            .get("sandbox")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let codex_approval_policy = settings
+            .get("approval_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let codex_config_overrides = settings
+            .get("config_overrides")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let codex_search = settings
+            .get("search")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let codex_no_alt_screen = settings
+            .get("no_alt_screen")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let codex_custom_flags = settings
+            .get("custom_flags")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         Self {
             name: profile.name.clone(),
@@ -182,9 +234,17 @@ impl EditForm {
             claude_output_format,
             claude_print_mode,
             claude_custom_flags,
+            codex_config_profile,
+            codex_sandbox,
+            codex_approval_policy,
+            codex_config_overrides,
+            codex_search,
+            codex_no_alt_screen,
+            codex_custom_flags,
             new_tool_input: String::new(),
             new_arg_input: String::new(),
             new_channel_input: String::new(),
+            new_codex_config_override_input: String::new(),
             new_env_key: String::new(),
             new_env_value: String::new(),
         }
@@ -222,6 +282,39 @@ impl EditForm {
             }
             if !self.claude_custom_flags.is_empty() {
                 obj.insert("custom_flags".to_string(), json!(self.claude_custom_flags));
+            }
+            serde_json::Value::Object(obj)
+        } else if self.agent_kind == "codex" {
+            let mut obj = serde_json::Map::new();
+            if !self.codex_config_profile.is_empty() {
+                obj.insert(
+                    "config_profile".to_string(),
+                    json!(self.codex_config_profile),
+                );
+            }
+            if !self.codex_sandbox.is_empty() {
+                obj.insert("sandbox".to_string(), json!(self.codex_sandbox));
+            }
+            if !self.codex_approval_policy.is_empty() {
+                obj.insert(
+                    "approval_policy".to_string(),
+                    json!(self.codex_approval_policy),
+                );
+            }
+            if !self.codex_config_overrides.is_empty() {
+                obj.insert(
+                    "config_overrides".to_string(),
+                    json!(self.codex_config_overrides),
+                );
+            }
+            if self.codex_search {
+                obj.insert("search".to_string(), json!(true));
+            }
+            if self.codex_no_alt_screen {
+                obj.insert("no_alt_screen".to_string(), json!(true));
+            }
+            if !self.codex_custom_flags.is_empty() {
+                obj.insert("custom_flags".to_string(), json!(self.codex_custom_flags));
             }
             serde_json::Value::Object(obj)
         } else {
@@ -305,6 +398,22 @@ impl EditForm {
             if !self.claude_custom_flags.is_empty() {
                 validate_custom_flags(&self.claude_custom_flags)?;
             }
+        } else if self.agent_kind == "codex" {
+            if !self.codex_config_profile.is_empty() {
+                validate_codex_config_profile(&self.codex_config_profile)?;
+            }
+            if !self.codex_sandbox.is_empty() {
+                validate_codex_sandbox(&self.codex_sandbox)?;
+            }
+            if !self.codex_approval_policy.is_empty() {
+                validate_codex_approval_policy(&self.codex_approval_policy)?;
+            }
+            for override_arg in &self.codex_config_overrides {
+                validate_codex_config_override(override_arg)?;
+            }
+            if !self.codex_custom_flags.is_empty() {
+                validate_custom_flags(&self.codex_custom_flags)?;
+            }
         }
 
         Ok(())
@@ -327,7 +436,7 @@ fn non_empty(s: &str) -> Option<String> {
 // divergence from the core rules is obvious during code review.
 // ---------------------------------------------------------------------------
 
-const SHELL_METACHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '\n', '\r', '\0'];
+const SHELL_METACHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '\\', '\n', '\r', '\0'];
 
 fn contains_shell_metachars(s: &str) -> bool {
     s.chars().any(|c| SHELL_METACHARS.contains(&c))
@@ -427,6 +536,55 @@ fn validate_output_format(s: &str) -> Result<(), String> {
 fn validate_custom_flags(s: &str) -> Result<(), String> {
     if contains_shell_metachars(s) {
         return Err(format!("custom flags contain shell metacharacters: {s}"));
+    }
+    Ok(())
+}
+
+fn validate_codex_config_profile(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("codex config profile must not be empty".to_string());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!("invalid codex config profile: {s}"));
+    }
+    Ok(())
+}
+
+fn validate_codex_sandbox(s: &str) -> Result<(), String> {
+    match s {
+        "read-only" | "workspace-write" | "danger-full-access" => Ok(()),
+        _ => Err(format!("invalid codex sandbox: {s}")),
+    }
+}
+
+fn validate_codex_approval_policy(s: &str) -> Result<(), String> {
+    match s {
+        "untrusted" | "on-failure" | "on-request" | "never" => Ok(()),
+        _ => Err(format!("invalid codex approval policy: {s}")),
+    }
+}
+
+fn validate_codex_config_override(s: &str) -> Result<(), String> {
+    let Some((key, value)) = s.split_once('=') else {
+        return Err(format!("codex config override must be key=value: {s}"));
+    };
+    if key.is_empty() {
+        return Err("codex config override key must not be empty".to_string());
+    }
+    for part in key.split('.') {
+        if part.is_empty()
+            || !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!("invalid codex config override key: {key}"));
+        }
+    }
+    if value.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+        return Err("codex config override value contains control characters".to_string());
     }
     Ok(())
 }
@@ -623,6 +781,41 @@ impl AgentProfilesTab {
                     validate_custom_flags(&self.edit_form.claude_custom_flags)
                 }
             }
+            ActiveInput::CodexConfigProfile => {
+                if self.edit_form.codex_config_profile.is_empty() {
+                    Ok(())
+                } else {
+                    validate_codex_config_profile(&self.edit_form.codex_config_profile)
+                }
+            }
+            ActiveInput::CodexSandbox => {
+                if self.edit_form.codex_sandbox.is_empty() {
+                    Ok(())
+                } else {
+                    validate_codex_sandbox(&self.edit_form.codex_sandbox)
+                }
+            }
+            ActiveInput::CodexApprovalPolicy => {
+                if self.edit_form.codex_approval_policy.is_empty() {
+                    Ok(())
+                } else {
+                    validate_codex_approval_policy(&self.edit_form.codex_approval_policy)
+                }
+            }
+            ActiveInput::NewCodexConfigOverride => {
+                if self.edit_form.new_codex_config_override_input.is_empty() {
+                    Ok(())
+                } else {
+                    validate_codex_config_override(&self.edit_form.new_codex_config_override_input)
+                }
+            }
+            ActiveInput::CodexCustomFlags => {
+                if self.edit_form.codex_custom_flags.is_empty() {
+                    Ok(())
+                } else {
+                    validate_custom_flags(&self.edit_form.codex_custom_flags)
+                }
+            }
         };
 
         match result {
@@ -643,6 +836,7 @@ impl AgentProfilesTab {
             ActiveInput::NewTool,
             ActiveInput::NewArg,
             ActiveInput::NewChannel,
+            ActiveInput::NewCodexConfigOverride,
             ActiveInput::NewEnvKey,
             ActiveInput::NewEnvValue,
         ] {
@@ -1004,6 +1198,13 @@ impl AgentProfilesTab {
                     committed = true;
                 }
             }
+            ActiveInput::NewCodexConfigOverride => {
+                let v = std::mem::take(&mut self.edit_form.new_codex_config_override_input);
+                if !v.is_empty() {
+                    self.edit_form.codex_config_overrides.push(v);
+                    committed = true;
+                }
+            }
             ActiveInput::NewEnvKey | ActiveInput::NewEnvValue => {
                 let k = std::mem::take(&mut self.edit_form.new_env_key);
                 let v = std::mem::take(&mut self.edit_form.new_env_value);
@@ -1030,6 +1231,7 @@ impl AgentProfilesTab {
             TagListKind::AllowedTools => &mut self.edit_form.allowed_tools,
             TagListKind::ExtraArgs => &mut self.edit_form.extra_args,
             TagListKind::DevelopmentChannels => &mut self.edit_form.claude_development_channels,
+            TagListKind::CodexConfigOverrides => &mut self.edit_form.codex_config_overrides,
         };
         if idx < vec.len() {
             vec.remove(idx);
@@ -1048,10 +1250,17 @@ impl AgentProfilesTab {
             ActiveInput::NewTool => &mut self.edit_form.new_tool_input,
             ActiveInput::NewArg => &mut self.edit_form.new_arg_input,
             ActiveInput::NewChannel => &mut self.edit_form.new_channel_input,
+            ActiveInput::NewCodexConfigOverride => {
+                &mut self.edit_form.new_codex_config_override_input
+            }
             ActiveInput::NewEnvKey => &mut self.edit_form.new_env_key,
             ActiveInput::NewEnvValue => &mut self.edit_form.new_env_value,
             ActiveInput::ClaudeOutputFormat => &mut self.edit_form.claude_output_format,
             ActiveInput::ClaudeCustomFlags => &mut self.edit_form.claude_custom_flags,
+            ActiveInput::CodexConfigProfile => &mut self.edit_form.codex_config_profile,
+            ActiveInput::CodexSandbox => &mut self.edit_form.codex_sandbox,
+            ActiveInput::CodexApprovalPolicy => &mut self.edit_form.codex_approval_policy,
+            ActiveInput::CodexCustomFlags => &mut self.edit_form.codex_custom_flags,
             // `handle_key_down` early-exits when `active_input` is `None`,
             // so this arm can only be reached from a future call site that
             // forgets the guard. Panic loudly rather than silently routing
@@ -1371,7 +1580,7 @@ impl AgentProfilesTab {
         body = body.child(self.render_text_input(
             "Model",
             false,
-            "Optional: e.g., \"claude-opus-4-6\". Only alphanumerics, dots, dashes.",
+            "Optional model id. Only alphanumerics, dots, dashes.",
             &self.edit_form.model,
             ActiveInput::Model,
             cx,
@@ -1386,7 +1595,7 @@ impl AgentProfilesTab {
         ));
         body = body.child(self.render_checkbox(
             "Skip permissions",
-            Some("When checked, claude runs without asking for tool permissions first."),
+            Some("Runs the launcher in its unsafe no-approval mode when the kind supports it."),
             self.edit_form.skip_permissions,
             cx.listener(|this, _: &ClickEvent, _w, cx| {
                 this.edit_form.skip_permissions = !this.edit_form.skip_permissions;
@@ -1399,7 +1608,7 @@ impl AgentProfilesTab {
         body = body.child(Self::render_section_header("Tools"));
         body = body.child(self.render_tag_list(
             "Allowed tools",
-            "Restrict which tools claude can call. Syntax: alphanumerics + underscore, colon, asterisk (e.g., \"Read\", \"Bash:*\").",
+            "Restrict tools for launchers that support tool allowlists. Syntax: alphanumerics + underscore, colon, asterisk.",
             &self.edit_form.allowed_tools,
             &self.edit_form.new_tool_input,
             ActiveInput::NewTool,
@@ -1408,7 +1617,7 @@ impl AgentProfilesTab {
         ));
         body = body.child(self.render_tag_list(
             "Extra args",
-            "Pass additional CLI flags to claude. Each must start with '-' or '--'. No shell metacharacters.",
+            "Pass additional CLI flags to the launcher. Each must start with '-' or '--'. No shell metacharacters.",
             &self.edit_form.extra_args,
             &self.edit_form.new_arg_input,
             ActiveInput::NewArg,
@@ -1424,6 +1633,9 @@ impl AgentProfilesTab {
         if self.edit_form.agent_kind == "claude" {
             body = body.child(Self::render_section_header("Claude settings"));
             body = body.child(self.render_claude_settings(cx));
+        } else if self.edit_form.agent_kind == "codex" {
+            body = body.child(Self::render_section_header("Codex settings"));
+            body = body.child(self.render_codex_settings(cx));
         }
 
         body.into_any_element()
@@ -1542,9 +1754,23 @@ impl AgentProfilesTab {
                                 this.edit_form.claude_print_mode = false;
                                 this.edit_form.claude_custom_flags.clear();
                                 this.edit_form.new_channel_input.clear();
+                                this.edit_form.codex_config_profile.clear();
+                                this.edit_form.codex_sandbox.clear();
+                                this.edit_form.codex_approval_policy.clear();
+                                this.edit_form.codex_config_overrides.clear();
+                                this.edit_form.codex_search = false;
+                                this.edit_form.codex_no_alt_screen = false;
+                                this.edit_form.codex_custom_flags.clear();
+                                this.edit_form.new_codex_config_override_input.clear();
                                 this.field_errors.remove(&ActiveInput::NewChannel);
                                 this.field_errors.remove(&ActiveInput::ClaudeOutputFormat);
                                 this.field_errors.remove(&ActiveInput::ClaudeCustomFlags);
+                                this.field_errors.remove(&ActiveInput::CodexConfigProfile);
+                                this.field_errors.remove(&ActiveInput::CodexSandbox);
+                                this.field_errors.remove(&ActiveInput::CodexApprovalPolicy);
+                                this.field_errors
+                                    .remove(&ActiveInput::NewCodexConfigOverride);
+                                this.field_errors.remove(&ActiveInput::CodexCustomFlags);
                                 this.edit_form.agent_kind = kind_id.clone();
                                 this.mark_dirty();
                                 cx.notify();
@@ -2115,6 +2341,80 @@ impl AgentProfilesTab {
         section.into_any_element()
     }
 
+    fn render_codex_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut section = div().flex().flex_col().gap(px(12.0));
+
+        section = section.child(self.render_text_input(
+            "Config profile",
+            false,
+            "Optional: passed to codex --profile. Alphanumerics, dot, dash, underscore only.",
+            &self.edit_form.codex_config_profile,
+            ActiveInput::CodexConfigProfile,
+            cx,
+        ));
+
+        section = section.child(self.render_text_input(
+            "Sandbox",
+            false,
+            "Optional: read-only, workspace-write, or danger-full-access.",
+            &self.edit_form.codex_sandbox,
+            ActiveInput::CodexSandbox,
+            cx,
+        ));
+
+        section = section.child(self.render_text_input(
+            "Approval policy",
+            false,
+            "Optional: untrusted, on-failure, on-request, or never.",
+            &self.edit_form.codex_approval_policy,
+            ActiveInput::CodexApprovalPolicy,
+            cx,
+        ));
+
+        section = section.child(self.render_checkbox(
+            "Search",
+            Some("Pass --search so Codex can use live web search."),
+            self.edit_form.codex_search,
+            cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.edit_form.codex_search = !this.edit_form.codex_search;
+                this.mark_dirty();
+                cx.notify();
+            }),
+        ));
+
+        section = section.child(self.render_checkbox(
+            "No alternate screen",
+            Some("Pass --no-alt-screen so terminal scrollback remains visible."),
+            self.edit_form.codex_no_alt_screen,
+            cx.listener(|this, _: &ClickEvent, _w, cx| {
+                this.edit_form.codex_no_alt_screen = !this.edit_form.codex_no_alt_screen;
+                this.mark_dirty();
+                cx.notify();
+            }),
+        ));
+
+        section = section.child(self.render_tag_list(
+            "Config overrides",
+            "Passed as repeated -c key=value overrides, e.g. model_reasoning_effort=\"high\".",
+            &self.edit_form.codex_config_overrides,
+            &self.edit_form.new_codex_config_override_input,
+            ActiveInput::NewCodexConfigOverride,
+            TagListKind::CodexConfigOverrides,
+            cx,
+        ));
+
+        section = section.child(self.render_text_input(
+            "Custom flags",
+            false,
+            "Optional: free-form flags appended to the command line. No shell metacharacters or backslash.",
+            &self.edit_form.codex_custom_flags,
+            ActiveInput::CodexCustomFlags,
+            cx,
+        ));
+
+        section.into_any_element()
+    }
+
     fn render_action_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         // Delete / Duplicate / Set-as-Default all share the same gating
         // rule: only meaningful when an existing profile is selected.
@@ -2352,6 +2652,34 @@ mod tests {
         }
     }
 
+    fn sample_codex_profile() -> AgentProfile {
+        AgentProfile {
+            id: "codex-1".to_string(),
+            name: "Codex Default".to_string(),
+            description: None,
+            agent_kind: "codex".to_string(),
+            is_default: true,
+            sort_order: 0,
+            model: Some("gpt-5.1-codex".to_string()),
+            initial_prompt: Some("hi".to_string()),
+            skip_permissions: true,
+            allowed_tools: vec![],
+            extra_args: vec!["--oss".to_string()],
+            env_vars: BTreeMap::new(),
+            settings: json!({
+                "config_profile": "work",
+                "sandbox": "workspace-write",
+                "approval_policy": "on-request",
+                "config_overrides": ["model_reasoning_effort=\"high\""],
+                "search": true,
+                "no_alt_screen": true,
+                "custom_flags": "--enable experimental",
+            }),
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
     #[core::prelude::rust_2021::test]
     fn edit_form_from_profile_round_trips_claude_settings() {
         let profile = sample_profile();
@@ -2417,6 +2745,63 @@ mod tests {
         assert_eq!(req.agent_kind, "claude");
         assert!(!req.is_default); // Create never sets default.
         assert_eq!(req.allowed_tools, vec!["Read", "Edit"]);
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn edit_form_from_profile_round_trips_codex_settings() {
+        let profile = sample_codex_profile();
+        let form = EditForm::from_profile(&profile);
+        assert_eq!(form.agent_kind, "codex");
+        assert_eq!(form.codex_config_profile, "work");
+        assert_eq!(form.codex_sandbox, "workspace-write");
+        assert_eq!(form.codex_approval_policy, "on-request");
+        assert_eq!(
+            form.codex_config_overrides,
+            vec!["model_reasoning_effort=\"high\""]
+        );
+        assert!(form.codex_search);
+        assert!(form.codex_no_alt_screen);
+        assert_eq!(form.codex_custom_flags, "--enable experimental");
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn edit_form_to_update_request_round_trips_codex_settings() {
+        let form = EditForm::from_profile(&sample_codex_profile());
+        let req = form.to_update_request().expect("should validate");
+        let settings = &req.settings;
+        assert_eq!(
+            settings.get("config_profile").and_then(|v| v.as_str()),
+            Some("work")
+        );
+        assert_eq!(
+            settings.get("sandbox").and_then(|v| v.as_str()),
+            Some("workspace-write")
+        );
+        assert_eq!(
+            settings.get("approval_policy").and_then(|v| v.as_str()),
+            Some("on-request")
+        );
+        assert_eq!(
+            settings
+                .get("config_overrides")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(
+            settings.get("search").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            settings
+                .get("no_alt_screen")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            settings.get("custom_flags").and_then(|v| v.as_str()),
+            Some("--enable experimental")
+        );
     }
 
     #[core::prelude::rust_2021::test]
@@ -2488,6 +2873,20 @@ mod tests {
     fn edit_form_rejects_bad_development_channel() {
         let mut form = EditForm::from_profile(&sample_profile());
         form.claude_development_channels = vec!["plugin with space".to_string()];
+        assert!(form.to_update_request().is_err());
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn edit_form_rejects_bad_codex_sandbox() {
+        let mut form = EditForm::from_profile(&sample_codex_profile());
+        form.codex_sandbox = "sometimes".to_string();
+        assert!(form.to_update_request().is_err());
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn edit_form_rejects_bad_codex_config_override() {
+        let mut form = EditForm::from_profile(&sample_codex_profile());
+        form.codex_config_overrides = vec!["bad key=value".to_string()];
         assert!(form.to_update_request().is_err());
     }
 
