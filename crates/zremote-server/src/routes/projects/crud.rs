@@ -7,14 +7,16 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use zremote_core::queries::projects as q;
 use zremote_core::queries::sessions as sq;
+use zremote_core::services::projects as project_service;
 
 use crate::error::{AppError, AppJson};
 use crate::state::{AppState, ServerEvent};
 
-use super::{parse_host_id, parse_project_id};
+use super::parse_host_id;
 
-pub type ProjectResponse = q::ProjectRow;
-pub type SessionResponse = sq::SessionRow;
+pub type ProjectResponse = project_service::ProjectResponse;
+pub type SessionResponse = project_service::SessionResponse;
+pub type UpdateProjectRequest = project_service::UpdateProjectRequest;
 
 /// Request body for manually adding a project.
 #[derive(Debug, Deserialize)]
@@ -27,8 +29,7 @@ pub async fn list_projects(
     State(state): State<Arc<AppState>>,
     Path(host_id): Path<String>,
 ) -> Result<Json<Vec<ProjectResponse>>, AppError> {
-    let _parsed = parse_host_id(&host_id)?;
-    let projects = q::list_projects(&state.db, &host_id).await?;
+    let projects = project_service::list_projects(&state.db, &host_id).await?;
     Ok(Json(projects))
 }
 
@@ -83,8 +84,7 @@ pub async fn get_project(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> Result<Json<ProjectResponse>, AppError> {
-    let _parsed = parse_project_id(&project_id)?;
-    let project = q::get_project(&state.db, &project_id).await?;
+    let project = project_service::get_project(&state.db, &project_id).await?;
     Ok(Json(project))
 }
 
@@ -93,14 +93,8 @@ pub async fn list_project_sessions(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<SessionResponse>>, AppError> {
-    let _parsed = parse_project_id(&project_id)?;
-    let sessions = sq::list_sessions_by_project(&state.db, &project_id).await?;
+    let sessions = project_service::list_project_sessions(&state.db, &project_id).await?;
     Ok(Json(sessions))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateProjectRequest {
-    pub pinned: Option<bool>,
 }
 
 /// `PATCH /api/projects/:project_id` - update project properties.
@@ -109,18 +103,7 @@ pub async fn update_project(
     Path(project_id): Path<String>,
     AppJson(body): AppJson<UpdateProjectRequest>,
 ) -> Result<Json<ProjectResponse>, AppError> {
-    let _parsed = parse_project_id(&project_id)?;
-
-    if let Some(pinned) = body.pinned {
-        let rows = q::set_project_pinned(&state.db, &project_id, pinned).await?;
-        if rows == 0 {
-            return Err(AppError::NotFound(format!(
-                "project {project_id} not found"
-            )));
-        }
-    }
-
-    let project = q::get_project(&state.db, &project_id).await?;
+    let project = project_service::update_project(&state.db, &project_id, body).await?;
 
     // Broadcast event so sidebar refreshes
     let _ = state.events.send(ServerEvent::ProjectsUpdated {
@@ -135,23 +118,16 @@ pub async fn delete_project(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let _parsed = parse_project_id(&project_id)?;
-
-    if let Some((host_id_str, path)) = q::get_project_host_and_path(&state.db, &project_id).await?
-        && let Ok(host_id) = host_id_str.parse::<uuid::Uuid>()
+    if let Some(target) = project_service::project_removal_target(&state.db, &project_id).await?
+        && let Ok(host_id) = target.host_id.parse::<uuid::Uuid>()
         && let Some(sender) = state.connections.get_sender(&host_id).await
     {
         let _ = sender
-            .send(zremote_protocol::ServerMessage::ProjectRemove { path })
+            .send(zremote_protocol::ServerMessage::ProjectRemove { path: target.path })
             .await;
     }
 
-    let rows = q::delete_project(&state.db, &project_id).await?;
-    if rows == 0 {
-        return Err(AppError::NotFound(format!(
-            "project {project_id} not found"
-        )));
-    }
+    project_service::delete_project(&state.db, &project_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
