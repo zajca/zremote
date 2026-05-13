@@ -203,11 +203,26 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
                             }
                         }
                     }
+                    Some(Ok(Message::Binary(data))) => {
+                        let mut data = data.to_vec();
+                        if data.len() > MAX_INPUT_BYTES {
+                            tracing::warn!(len = data.len(), "browser terminal binary input exceeds 1 MB, truncating");
+                            data.truncate(MAX_INPUT_BYTES);
+                        }
+                        // Flush buffered output before forwarding input
+                        // to keep output/input ordering correct.
+                        if !output_buf.is_empty() {
+                            let frame = encode_binary_output(None, &output_buf);
+                            output_buf.clear();
+                            coalesce_deadline = None;
+                            if socket.send(Message::Binary(frame.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        backend.send_input(&session_id, data).await;
+                    }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    Some(Ok(Message::Binary(_))) => {
-                        tracing::warn!("unexpected binary message from browser terminal");
-                    }
                     Some(Err(e)) => {
                         tracing::warn!(error = %e, "browser terminal WebSocket error");
                         break;

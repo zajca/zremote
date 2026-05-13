@@ -16,6 +16,7 @@ mod sidebar_items;
 #[cfg(test)]
 mod terminal_bench;
 pub mod terminal_element;
+pub mod terminal_mouse;
 pub mod terminal_panel;
 pub mod toast;
 pub mod url_detector;

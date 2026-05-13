@@ -35,21 +35,45 @@ async fn echo_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 async fn echo_ws(mut socket: WebSocket) {
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
-            Message::Text(text) => {
-                // Parse client message, echo input data back as binary main-pane output
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text)
-                    && parsed.get("type").and_then(|t| t.as_str()) == Some("input")
-                    && let Some(data) = parsed.get("data").and_then(|d| d.as_str())
-                {
-                    // Binary frame: 0x01 tag + data bytes
-                    let mut frame = vec![0x01];
-                    frame.extend_from_slice(data.as_bytes());
-                    let _ = socket.send(Message::Binary(frame.into())).await;
-                }
+            Message::Binary(data) => {
+                // Binary input is forwarded byte-for-byte.
+                let mut frame = vec![0x01];
+                frame.extend_from_slice(&data);
+                let _ = socket.send(Message::Binary(frame.into())).await;
             }
             Message::Close(_) => break,
             _ => {}
         }
+    }
+}
+
+#[tokio::test]
+async fn connect_send_non_utf8_input_receive_same_bytes() {
+    let router = Router::new().route("/ws/terminal/{id}", get(echo_handler));
+    let (base, _server) = setup_server(router).await;
+
+    let handle = tokio::runtime::Handle::current();
+    let session = TerminalSession::connect(ws_url(&base, "test-non-utf8"), &handle)
+        .await
+        .expect("connect should succeed");
+    let input = vec![0x1b, b'[', b'M', 32, 200, 201];
+
+    session
+        .input_tx
+        .send(zremote_client::TerminalInput::Data(input.clone()))
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        session.output_rx.recv_async().await.unwrap()
+    })
+    .await
+    .expect("should receive output within timeout");
+
+    match event {
+        TerminalEvent::Output(data) => {
+            assert_eq!(data, input);
+        }
+        other => panic!("expected Output event, got {other:?}"),
     }
 }
 

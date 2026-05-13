@@ -427,63 +427,6 @@ fn parse_preview_color(span: &PreviewColorSpan) -> Option<Rgba> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{SessionSwitcher, parse_preview_color};
-    use gpui::rgb;
-    use zremote_client::{PreviewColorSpan, PreviewLine};
-
-    fn preview_line(text: &str, spans: Vec<PreviewColorSpan>) -> PreviewLine {
-        PreviewLine {
-            text: text.to_string(),
-            spans,
-        }
-    }
-
-    #[test]
-    fn preview_segments_preserve_terminal_spaces() {
-        let line = preview_line("  cargo   test", Vec::new());
-
-        let segments = SessionSwitcher::preview_line_segments(&line);
-
-        assert_eq!(segments.len(), 1);
-        assert_eq!(
-            segments[0].0,
-            "\u{00a0}\u{00a0}cargo\u{00a0}\u{00a0}\u{00a0}test"
-        );
-    }
-
-    #[test]
-    fn preview_segments_apply_color_spans() {
-        let line = preview_line(
-            "ok fail",
-            vec![PreviewColorSpan {
-                start: 3,
-                end: 7,
-                fg: "#ef4444".to_string(),
-            }],
-        );
-
-        let segments = SessionSwitcher::preview_line_segments(&line);
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].0, "ok\u{00a0}");
-        assert_eq!(segments[1].0, "fail");
-        assert_eq!(segments[1].1, rgb(0xef4444));
-    }
-
-    #[test]
-    fn invalid_preview_color_is_ignored() {
-        let span = PreviewColorSpan {
-            start: 0,
-            end: 1,
-            fg: "#zzzzzz".to_string(),
-        };
-
-        assert!(parse_preview_color(&span).is_none());
-    }
-}
-
 impl Render for SessionSwitcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_index;
@@ -692,5 +635,62 @@ fn session_subtitle(host_name: &str, project_name: Option<&str>, mode: &str) -> 
             Some(proj) => format!("{host_name} / {proj}"),
             None => host_name.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionSwitcher, parse_preview_color};
+    use gpui::rgb;
+    use zremote_client::{PreviewColorSpan, PreviewLine};
+
+    fn preview_line(text: &str, spans: Vec<PreviewColorSpan>) -> PreviewLine {
+        PreviewLine {
+            text: text.to_string(),
+            spans,
+        }
+    }
+
+    #[test]
+    fn preview_segments_preserve_terminal_spaces() {
+        let line = preview_line("  cargo   test", Vec::new());
+
+        let segments = SessionSwitcher::preview_line_segments(&line);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].0,
+            "\u{00a0}\u{00a0}cargo\u{00a0}\u{00a0}\u{00a0}test"
+        );
+    }
+
+    #[test]
+    fn preview_segments_apply_color_spans() {
+        let line = preview_line(
+            "ok fail",
+            vec![PreviewColorSpan {
+                start: 3,
+                end: 7,
+                fg: "#ef4444".to_string(),
+            }],
+        );
+
+        let segments = SessionSwitcher::preview_line_segments(&line);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].0, "ok\u{00a0}");
+        assert_eq!(segments[1].0, "fail");
+        assert_eq!(segments[1].1, rgb(0xef4444));
+    }
+
+    #[test]
+    fn invalid_preview_color_is_ignored() {
+        let span = PreviewColorSpan {
+            start: 0,
+            end: 1,
+            fg: "#zzzzzz".to_string(),
+        };
+
+        assert!(parse_preview_color(&span).is_none());
     }
 }

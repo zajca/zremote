@@ -1030,7 +1030,7 @@ mod tests {
         }
     }
 
-    async fn make_session_manager() -> (SessionManager, mpsc::Receiver<crate::session::PtyOutput>) {
+    fn make_session_manager() -> (SessionManager, mpsc::Receiver<crate::session::PtyOutput>) {
         let (pty_tx, pty_rx) = mpsc::channel(8);
         let mgr = SessionManager::new(
             pty_tx,
@@ -1051,7 +1051,7 @@ mod tests {
         let delivery = Arc::new(tokio::sync::Mutex::new(
             crate::knowledge::context_delivery::DeliveryCoordinator::new(),
         ));
-        let (mut session_manager, _pty_rx) = make_session_manager().await;
+        let (mut session_manager, _pty_rx) = make_session_manager();
 
         session_mapper.set_hook_mode(session_id);
 
@@ -1083,7 +1083,7 @@ mod tests {
         let delivery = Arc::new(tokio::sync::Mutex::new(
             crate::knowledge::context_delivery::DeliveryCoordinator::new(),
         ));
-        let (mut session_manager, _pty_rx) = make_session_manager().await;
+        let (mut session_manager, _pty_rx) = make_session_manager();
 
         session_mapper.set_hook_mode(session_id);
 
@@ -1127,7 +1127,7 @@ mod tests {
         let delivery = Arc::new(tokio::sync::Mutex::new(
             crate::knowledge::context_delivery::DeliveryCoordinator::new(),
         ));
-        let (mut session_manager, _pty_rx) = make_session_manager().await;
+        let (mut session_manager, _pty_rx) = make_session_manager();
 
         let event = AnalyzerEvent::NodeCompleted(make_completed_node("tool_call"));
         handle_analyzer_event(

@@ -37,8 +37,9 @@
 //! and triple-click for line selection). Mouse drag updates the selection endpoint.
 //! Mouse up clears empty selections (plain click without drag) and auto-copies
 //! non-empty selections to the system clipboard. Ctrl+C copies selected text
-//! (or sends SIGINT when nothing is selected). Ctrl+V pastes from clipboard
-//! with bracketed paste support.
+//! (or sends SIGINT when nothing is selected). When a TUI application enables terminal
+//! mouse reporting, plain mouse events are forwarded to the PTY and Shift+drag remains
+//! the local selection override. Ctrl+V pastes from clipboard with bracketed paste support.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -63,6 +64,11 @@ use crate::views::command_palette::PaletteTab;
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 use crate::views::terminal_element::{CellRunCache, GlyphCache, TerminalElement};
+use crate::views::terminal_mouse::{
+    MouseButtonKind, MouseEventKind, MouseGridPosition, MouseModifiers, encode_alt_scroll,
+    encode_mouse_event, local_url_action_enabled, terminal_mouse_active,
+    terminal_mouse_captures_local_pointer,
+};
 use crate::views::url_detector::UrlDetector;
 use zremote_client::{AgenticStatus, TerminalEvent};
 
@@ -243,6 +249,8 @@ pub struct TerminalPanel {
     double_shift: DoubleShiftDetector,
     /// Subscription handle for keystroke observation (reset cursor blink on input).
     _keystroke_subscription: Subscription,
+    /// Last focus state reported to applications that enabled focus in/out reporting.
+    last_focus_reported: bool,
     /// Connection mode: "local" or "server".
     mode: String,
     /// Whether the terminal WebSocket connection has been lost
@@ -364,6 +372,7 @@ impl TerminalPanel {
             search_current_idx: None,
             double_shift: DoubleShiftDetector::new(),
             _keystroke_subscription: keystroke_subscription,
+            last_focus_reported: false,
             mode,
             disconnected: false,
             terminal_title: None,
@@ -1001,7 +1010,102 @@ impl TerminalPanel {
         (point, side)
     }
 
-    fn encode_keystroke(keystroke: &Keystroke) -> Option<Vec<u8>> {
+    /// Convert a mouse pixel position to viewport-relative terminal coordinates.
+    ///
+    /// PTY mouse reports use visible-screen coordinates, unlike local text selection
+    /// which needs scrollback-aware grid coordinates.
+    fn pixel_to_mouse_position(
+        position: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        term_cols: usize,
+        term_rows: usize,
+    ) -> MouseGridPosition {
+        let rel_x = position.x - origin.x;
+        let rel_y = position.y - origin.y;
+
+        let col = (rel_x / cell_width).floor() as i32;
+        let row = (rel_y / cell_height).floor() as i32;
+
+        MouseGridPosition {
+            col: col.clamp(0, term_cols.saturating_sub(1) as i32) as usize,
+            row: row.clamp(0, term_rows.saturating_sub(1) as i32) as usize,
+        }
+    }
+
+    fn mouse_modifiers(modifiers: Modifiers) -> MouseModifiers {
+        MouseModifiers {
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            control: modifiers.control,
+        }
+    }
+
+    fn mouse_button_kind(button: MouseButton) -> Option<MouseButtonKind> {
+        match button {
+            MouseButton::Left => Some(MouseButtonKind::Left),
+            MouseButton::Middle => Some(MouseButtonKind::Middle),
+            MouseButton::Right => Some(MouseButtonKind::Right),
+            MouseButton::Navigate(_) => None,
+        }
+    }
+
+    fn encode_mouse_event_at_position(
+        term: &TerminalTerm,
+        info: TerminalLayoutInfo,
+        position: gpui::Point<Pixels>,
+        event: MouseEventKind,
+        button: MouseButton,
+        modifiers: Modifiers,
+    ) -> Option<Vec<u8>> {
+        if info.cell_width == px(0.0) {
+            return None;
+        }
+
+        let button = Self::mouse_button_kind(button)?;
+        let pos = Self::pixel_to_mouse_position(
+            position,
+            info.bounds.origin,
+            info.cell_width,
+            info.cell_height,
+            term.columns(),
+            term.screen_lines(),
+        );
+
+        encode_mouse_event(
+            *term.mode(),
+            event,
+            button,
+            pos,
+            Self::mouse_modifiers(modifiers),
+        )
+    }
+
+    fn report_focus_if_needed(&mut self, focused: bool) {
+        if self.last_focus_reported == focused {
+            return;
+        }
+
+        let should_report = self
+            .term
+            .lock()
+            .ok()
+            .is_some_and(|t| t.mode().contains(TermMode::FOCUS_IN_OUT));
+        if !should_report {
+            return;
+        }
+
+        let bytes = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        let _ = self.handle.input_sender().send(bytes.to_vec());
+        self.last_focus_reported = focused;
+    }
+
+    fn terminal_captures_global_shortcuts(mode: TermMode) -> bool {
+        mode.contains(TermMode::ALT_SCREEN)
+    }
+
+    fn encode_keystroke(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         let key = keystroke.key.as_str();
         let modifiers = &keystroke.modifiers;
 
@@ -1011,8 +1115,10 @@ impl TerminalPanel {
         }
 
         // Ctrl+letter: send the corresponding control character (ASCII 0x01-0x1a).
-        if modifiers.control && !modifiers.shift && !modifiers.alt {
-            return match key {
+        if modifiers.control
+            && !modifiers.shift
+            && !modifiers.alt
+            && let Some(bytes) = match key {
                 "c" => Some(vec![0x03]),
                 "d" => Some(vec![0x04]),
                 "z" => Some(vec![0x1a]),
@@ -1039,7 +1145,9 @@ impl TerminalPanel {
                 "x" => Some(vec![0x18]),
                 "y" => Some(vec![0x19]),
                 _ => None,
-            };
+            }
+        {
+            return Some(bytes);
         }
 
         // Compute xterm modifier parameter for special keys.
@@ -1080,12 +1188,16 @@ impl TerminalPanel {
                 }
             }
             "up" if has_modifiers => Some(format!("\x1b[1;{modifier_param}A").into_bytes()),
+            "up" if mode.contains(TermMode::APP_CURSOR) => Some(b"\x1bOA".to_vec()),
             "up" => Some(b"\x1b[A".to_vec()),
             "down" if has_modifiers => Some(format!("\x1b[1;{modifier_param}B").into_bytes()),
+            "down" if mode.contains(TermMode::APP_CURSOR) => Some(b"\x1bOB".to_vec()),
             "down" => Some(b"\x1b[B".to_vec()),
             "right" if has_modifiers => Some(format!("\x1b[1;{modifier_param}C").into_bytes()),
+            "right" if mode.contains(TermMode::APP_CURSOR) => Some(b"\x1bOC".to_vec()),
             "right" => Some(b"\x1b[C".to_vec()),
             "left" if has_modifiers => Some(format!("\x1b[1;{modifier_param}D").into_bytes()),
+            "left" if mode.contains(TermMode::APP_CURSOR) => Some(b"\x1bOD".to_vec()),
             "left" => Some(b"\x1b[D".to_vec()),
             "home" if has_modifiers => Some(format!("\x1b[1;{modifier_param}H").into_bytes()),
             "home" => Some(b"\x1b[H".to_vec()),
@@ -1173,6 +1285,168 @@ impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 impl Focusable for TerminalPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalPanel;
+    use crate::terminal_handle::TerminalHandle;
+    use alacritty_terminal::term::TermMode;
+    use alacritty_terminal::vte::ansi::Processor;
+    use gpui::Keystroke;
+    use gpui::{Bounds, Modifiers, MouseButton, Point, Size, px};
+    use zremote_client::TerminalInput;
+
+    fn keystroke(source: &str) -> Keystroke {
+        Keystroke::parse(source).expect("valid test keystroke")
+    }
+
+    #[test]
+    fn normal_cursor_keys_use_csi_sequences() {
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("up"), TermMode::NONE),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("down"), TermMode::NONE),
+            Some(b"\x1b[B".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("right"), TermMode::NONE),
+            Some(b"\x1b[C".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("left"), TermMode::NONE),
+            Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
+    fn application_cursor_mode_uses_ss3_sequences_for_unmodified_arrows() {
+        let mode = TermMode::APP_CURSOR;
+
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("up"), mode),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("down"), mode),
+            Some(b"\x1bOB".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("right"), mode),
+            Some(b"\x1bOC".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("left"), mode),
+            Some(b"\x1bOD".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_arrows_keep_xterm_modifier_sequences_in_application_cursor_mode() {
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("shift-up"), TermMode::APP_CURSOR),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("ctrl-right"), TermMode::APP_CURSOR),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+    }
+
+    #[test]
+    fn alt_screen_captures_global_shortcuts_for_tui_apps() {
+        assert!(!TerminalPanel::terminal_captures_global_shortcuts(
+            TermMode::NONE
+        ));
+        assert!(TerminalPanel::terminal_captures_global_shortcuts(
+            TermMode::ALT_SCREEN
+        ));
+    }
+
+    #[gpui::test]
+    fn mouse_mode_forwards_gpui_mouse_events_and_shift_restores_local_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let tokio_handle = runtime.handle().clone();
+        let (input_tx, input_rx) = flume::unbounded();
+        let (_output_tx, output_rx) = flume::unbounded();
+        let (resize_tx, _resize_rx) = flume::unbounded();
+        let handle = TerminalHandle::Test {
+            input_tx,
+            output_rx,
+            resize_tx,
+            image_paste_tx: None,
+        };
+
+        let (panel, cx) = cx.add_window_view(move |_window, cx| {
+            TerminalPanel::new(
+                "test-session".to_string(),
+                handle,
+                &tokio_handle,
+                "test".to_string(),
+                cx,
+            )
+        });
+
+        panel.update(cx, |panel, _cx| {
+            panel.layout_info.set(super::TerminalLayoutInfo {
+                cell_width: px(10.0),
+                cell_height: px(20.0),
+                bounds: Bounds::new(
+                    Point::default(),
+                    Size {
+                        width: px(800.0),
+                        height: px(480.0),
+                    },
+                ),
+            });
+            let mut processor: Processor = Processor::new();
+            let mut term = panel.term.lock().expect("term lock");
+            processor.advance(&mut *term, b"\x1b[?1000h\x1b[?1006h");
+        });
+
+        cx.simulate_mouse_down(
+            Point::new(px(15.0), px(25.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        match input_rx.try_recv().expect("left press forwarded") {
+            TerminalInput::Data(bytes) => assert_eq!(bytes, b"\x1b[<0;2;2M"),
+            other => panic!("expected Data input, got {other:?}"),
+        }
+
+        cx.simulate_mouse_down(
+            Point::new(px(15.0), px(25.0)),
+            MouseButton::Middle,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        match input_rx.try_recv().expect("middle press forwarded") {
+            TerminalInput::Data(bytes) => assert_eq!(bytes, b"\x1b[<1;2;2M"),
+            other => panic!("expected Data input, got {other:?}"),
+        }
+
+        cx.simulate_mouse_down(
+            Point::new(px(15.0), px(25.0)),
+            MouseButton::Left,
+            Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            },
+        );
+        cx.run_until_parked();
+        assert!(
+            input_rx.try_recv().is_err(),
+            "shift-click in mouse mode should stay local"
+        );
     }
 }
 
@@ -1541,6 +1815,8 @@ impl Render for TerminalPanel {
         if !self.focus_handle.is_focused(window) && !self.closed && !self.search_open {
             self.focus_handle.focus(window);
         }
+        let focused = self.focus_handle.is_focused(window);
+        self.report_focus_if_needed(focused);
 
         let terminal_el = self.render_terminal_element();
         let has_hovered_url = self.hovered_url_idx.get().is_some();
@@ -1568,12 +1844,14 @@ impl Render for TerminalPanel {
                 move |event: &KeyDownEvent, _window: &mut Window, cx: &mut App| {
                     let key = event.keystroke.key.as_str();
                     let mods = &event.keystroke.modifiers;
+                    let mode = term.lock().ok().map_or(TermMode::NONE, |t| *t.mode());
 
                     double_shift_kd.on_key_down_during_shift();
 
                     // Global shortcuts via centralized dispatch
-                    if let Some(action) =
-                        dispatch_global_key(key, mods.control, mods.shift, mods.alt)
+                    if !TerminalPanel::terminal_captures_global_shortcuts(mode)
+                        && let Some(action) =
+                            dispatch_global_key(key, mods.control, mods.shift, mods.alt)
                     {
                         let _ =
                             entity.update(
@@ -1637,10 +1915,7 @@ impl Render for TerminalPanel {
                             && let Some(text) = item.text()
                             && !text.is_empty()
                         {
-                            let bracketed = term
-                                .lock()
-                                .ok()
-                                .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+                            let bracketed = mode.contains(TermMode::BRACKETED_PASTE);
                             let mut bytes = Vec::with_capacity(text.len() + 12);
                             if bracketed {
                                 bytes.extend_from_slice(b"\x1b[200~");
@@ -1660,7 +1935,7 @@ impl Render for TerminalPanel {
                         }
                     }
 
-                    if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke) {
+                    if let Some(bytes) = TerminalPanel::encode_keystroke(&event.keystroke, mode) {
                         let _ = input_tx.send(bytes);
                     }
                 }
@@ -1671,7 +1946,7 @@ impl Render for TerminalPanel {
                 let entity_mc = cx.entity().downgrade();
                 let double_shift_mc = self.double_shift.clone();
                 move |event: &ModifiersChangedEvent, _window: &mut Window, cx: &mut App| {
-                    let mods = &event.modifiers;
+                    let mods = event.modifiers;
 
                     if !mods.control && hovered_url_idx.get().is_some() {
                         hovered_url_idx.set(None);
@@ -1703,13 +1978,17 @@ impl Render for TerminalPanel {
             })
             .on_mouse_down(MouseButton::Left, {
                 let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
                 let layout_info = self.layout_info.clone();
                 let entity_id = cx.entity_id();
                 let url_detector = self.url_detector.clone();
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 move |event: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
-                    if event.modifiers.control
-                        && let Some(idx) = hovered_url_idx.get()
+                    let mode = term.lock().ok().map_or(TermMode::NONE, |t| *t.mode());
+                    if local_url_action_enabled(
+                        mode,
+                        TerminalPanel::mouse_modifiers(event.modifiers),
+                    ) && let Some(idx) = hovered_url_idx.get()
                     {
                         if let Ok(t) = term.lock() {
                             let detector = url_detector.borrow();
@@ -1725,6 +2004,26 @@ impl Render for TerminalPanel {
 
                     let info = layout_info.get();
                     if info.cell_width == px(0.0) {
+                        return;
+                    }
+
+                    if terminal_mouse_captures_local_pointer(
+                        mode,
+                        TerminalPanel::mouse_modifiers(event.modifiers),
+                    ) {
+                        let bytes = term.lock().ok().and_then(|t| {
+                            TerminalPanel::encode_mouse_event_at_position(
+                                &t,
+                                info,
+                                event.position,
+                                MouseEventKind::Press,
+                                MouseButton::Left,
+                                event.modifiers,
+                            )
+                        });
+                        if let Some(bytes) = bytes {
+                            let _ = input_tx.send(bytes);
+                        }
                         return;
                     }
 
@@ -1756,17 +2055,97 @@ impl Render for TerminalPanel {
                     cx.notify(entity_id);
                 }
             })
+            .on_mouse_down(MouseButton::Middle, {
+                let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
+                let layout_info = self.layout_info.clone();
+                move |event: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {
+                    let info = layout_info.get();
+                    let bytes = term.lock().ok().and_then(|t| {
+                        if !terminal_mouse_captures_local_pointer(
+                            *t.mode(),
+                            TerminalPanel::mouse_modifiers(event.modifiers),
+                        ) {
+                            return None;
+                        }
+                        TerminalPanel::encode_mouse_event_at_position(
+                            &t,
+                            info,
+                            event.position,
+                            MouseEventKind::Press,
+                            MouseButton::Middle,
+                            event.modifiers,
+                        )
+                    });
+                    if let Some(bytes) = bytes {
+                        let _ = input_tx.send(bytes);
+                    }
+                }
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
+                let layout_info = self.layout_info.clone();
+                move |event: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {
+                    let info = layout_info.get();
+                    let bytes = term.lock().ok().and_then(|t| {
+                        if !terminal_mouse_captures_local_pointer(
+                            *t.mode(),
+                            TerminalPanel::mouse_modifiers(event.modifiers),
+                        ) {
+                            return None;
+                        }
+                        TerminalPanel::encode_mouse_event_at_position(
+                            &t,
+                            info,
+                            event.position,
+                            MouseEventKind::Press,
+                            MouseButton::Right,
+                            event.modifiers,
+                        )
+                    });
+                    if let Some(bytes) = bytes {
+                        let _ = input_tx.send(bytes);
+                    }
+                }
+            })
             .on_mouse_move({
                 let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
                 let layout_info = self.layout_info.clone();
                 let entity_id = cx.entity_id();
                 let url_detector = self.url_detector.clone();
                 let hovered_url_idx = self.hovered_url_idx.clone();
                 let content_generation = self.content_generation.clone();
                 move |event: &MouseMoveEvent, _window: &mut Window, cx: &mut App| {
-                    if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some(pressed_button) = event.pressed_button {
                         let info = layout_info.get();
                         if info.cell_width == px(0.0) {
+                            return;
+                        }
+
+                        let mode = term.lock().ok().map_or(TermMode::NONE, |t| *t.mode());
+                        if terminal_mouse_captures_local_pointer(
+                            mode,
+                            TerminalPanel::mouse_modifiers(event.modifiers),
+                        ) {
+                            let bytes = term.lock().ok().and_then(|t| {
+                                TerminalPanel::encode_mouse_event_at_position(
+                                    &t,
+                                    info,
+                                    event.position,
+                                    MouseEventKind::Drag,
+                                    pressed_button,
+                                    event.modifiers,
+                                )
+                            });
+                            if let Some(bytes) = bytes {
+                                let _ = input_tx.send(bytes);
+                            }
+                            return;
+                        }
+
+                        if pressed_button != MouseButton::Left {
                             return;
                         }
 
@@ -1798,7 +2177,11 @@ impl Render for TerminalPanel {
                         return;
                     }
 
-                    if event.modifiers.control {
+                    let mode = term.lock().ok().map_or(TermMode::NONE, |t| *t.mode());
+                    if local_url_action_enabled(
+                        mode,
+                        TerminalPanel::mouse_modifiers(event.modifiers),
+                    ) {
                         let info = layout_info.get();
                         if info.cell_width == px(0.0) {
                             return;
@@ -1828,6 +2211,28 @@ impl Render for TerminalPanel {
                                 cx.notify(entity_id);
                             }
                         }
+                    } else if terminal_mouse_captures_local_pointer(
+                        mode,
+                        TerminalPanel::mouse_modifiers(event.modifiers),
+                    ) {
+                        let info = layout_info.get();
+                        if info.cell_width == px(0.0) {
+                            return;
+                        }
+
+                        let bytes = term.lock().ok().and_then(|t| {
+                            TerminalPanel::encode_mouse_event_at_position(
+                                &t,
+                                info,
+                                event.position,
+                                MouseEventKind::Move,
+                                MouseButton::Left,
+                                event.modifiers,
+                            )
+                        });
+                        if let Some(bytes) = bytes {
+                            let _ = input_tx.send(bytes);
+                        }
                     } else if hovered_url_idx.get().is_some() {
                         hovered_url_idx.set(None);
                         cx.notify(entity_id);
@@ -1837,7 +2242,32 @@ impl Render for TerminalPanel {
             .on_mouse_up(MouseButton::Left, {
                 let entity_id = cx.entity_id();
                 let term = self.term.clone();
-                move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                let input_tx = self.handle.input_sender();
+                let layout_info = self.layout_info.clone();
+                move |event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                    let info = layout_info.get();
+                    let mode = term.lock().ok().map_or(TermMode::NONE, |t| *t.mode());
+                    if terminal_mouse_captures_local_pointer(
+                        mode,
+                        TerminalPanel::mouse_modifiers(event.modifiers),
+                    ) && info.cell_width != px(0.0)
+                    {
+                        let bytes = term.lock().ok().and_then(|t| {
+                            TerminalPanel::encode_mouse_event_at_position(
+                                &t,
+                                info,
+                                event.position,
+                                MouseEventKind::Release,
+                                MouseButton::Left,
+                                event.modifiers,
+                            )
+                        });
+                        if let Some(bytes) = bytes {
+                            let _ = input_tx.send(bytes);
+                        }
+                        return;
+                    }
+
                     if let Ok(mut t) = term.lock() {
                         if t.selection.as_ref().is_some_and(|s| s.is_empty()) {
                             t.selection = None;
@@ -1848,8 +2278,64 @@ impl Render for TerminalPanel {
                     cx.notify(entity_id);
                 }
             })
+            .on_mouse_up(MouseButton::Middle, {
+                let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
+                let layout_info = self.layout_info.clone();
+                move |event: &MouseUpEvent, _window: &mut Window, _cx: &mut App| {
+                    let info = layout_info.get();
+                    let bytes = term.lock().ok().and_then(|t| {
+                        if !terminal_mouse_captures_local_pointer(
+                            *t.mode(),
+                            TerminalPanel::mouse_modifiers(event.modifiers),
+                        ) {
+                            return None;
+                        }
+                        TerminalPanel::encode_mouse_event_at_position(
+                            &t,
+                            info,
+                            event.position,
+                            MouseEventKind::Release,
+                            MouseButton::Middle,
+                            event.modifiers,
+                        )
+                    });
+                    if let Some(bytes) = bytes {
+                        let _ = input_tx.send(bytes);
+                    }
+                }
+            })
+            .on_mouse_up(MouseButton::Right, {
+                let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
+                let layout_info = self.layout_info.clone();
+                move |event: &MouseUpEvent, _window: &mut Window, _cx: &mut App| {
+                    let info = layout_info.get();
+                    let bytes = term.lock().ok().and_then(|t| {
+                        if !terminal_mouse_captures_local_pointer(
+                            *t.mode(),
+                            TerminalPanel::mouse_modifiers(event.modifiers),
+                        ) {
+                            return None;
+                        }
+                        TerminalPanel::encode_mouse_event_at_position(
+                            &t,
+                            info,
+                            event.position,
+                            MouseEventKind::Release,
+                            MouseButton::Right,
+                            event.modifiers,
+                        )
+                    });
+                    if let Some(bytes) = bytes {
+                        let _ = input_tx.send(bytes);
+                    }
+                }
+            })
             .on_scroll_wheel({
                 let entity_id = cx.entity_id();
+                let term = self.term.clone();
+                let input_tx = self.handle.input_sender();
                 let layout_info = self.layout_info.clone();
                 let scroll_px = self.scroll_px.clone();
                 let pending_scroll_delta = self.pending_scroll_delta.clone();
@@ -1887,6 +2373,45 @@ impl Render for TerminalPanel {
                     if let Some(lines) = line_delta {
                         // precise = touchpad natural scroll: negate; wheel already correct direction
                         let scroll_lines = if is_precise { -lines } else { lines };
+                        let mouse_pos = term.lock().ok().map(|t| {
+                            TerminalPanel::pixel_to_mouse_position(
+                                event.position,
+                                info.bounds.origin,
+                                info.cell_width.max(px(1.0)),
+                                cell_h,
+                                t.columns(),
+                                t.screen_lines(),
+                            )
+                        });
+                        let mode = term.lock().ok().map(|t| *t.mode());
+                        if let (Some(mode), Some(pos)) = (mode, mouse_pos) {
+                            if terminal_mouse_active(mode) {
+                                let button = if scroll_lines > 0 {
+                                    MouseButtonKind::WheelUp
+                                } else {
+                                    MouseButtonKind::WheelDown
+                                };
+                                let count = scroll_lines.unsigned_abs().max(1);
+                                for _ in 0..count {
+                                    if let Some(bytes) = encode_mouse_event(
+                                        mode,
+                                        MouseEventKind::Wheel,
+                                        button,
+                                        pos,
+                                        TerminalPanel::mouse_modifiers(event.modifiers),
+                                    ) {
+                                        let _ = input_tx.send(bytes);
+                                    }
+                                }
+                                return;
+                            }
+
+                            if let Some(bytes) = encode_alt_scroll(mode, scroll_lines) {
+                                let _ = input_tx.send(bytes);
+                                return;
+                            }
+                        }
+
                         pending_scroll_delta.fetch_add(scroll_lines, Ordering::Relaxed);
                         cx.notify(entity_id);
                     }

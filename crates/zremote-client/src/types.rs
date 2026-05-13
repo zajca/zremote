@@ -254,11 +254,6 @@ pub(crate) enum TerminalServerMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum TerminalClientMessage {
-    #[serde(rename = "input")]
-    Input {
-        data: String,
-        pane_id: Option<String>,
-    },
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
     #[serde(rename = "image_paste")]

@@ -7,6 +7,13 @@ pub enum TerminalHandle {
     WebSocket(TerminalSession),
     /// Direct bridge to agent on the same machine (bypasses server relay).
     Bridge(TerminalSession),
+    #[cfg(test)]
+    Test {
+        input_tx: flume::Sender<TerminalInput>,
+        output_rx: flume::Receiver<TerminalEvent>,
+        resize_tx: flume::Sender<(u16, u16)>,
+        image_paste_tx: Option<flume::Sender<String>>,
+    },
 }
 
 /// Clonable sender for raw terminal input bytes.
@@ -57,18 +64,26 @@ impl TerminalHandle {
             Self::WebSocket(session) | Self::Bridge(session) => InputSender {
                 tx: session.input_tx.clone(),
             },
+            #[cfg(test)]
+            Self::Test { input_tx, .. } => InputSender {
+                tx: input_tx.clone(),
+            },
         }
     }
 
     pub fn output_rx(&self) -> &flume::Receiver<TerminalEvent> {
         match self {
             Self::WebSocket(session) | Self::Bridge(session) => &session.output_rx,
+            #[cfg(test)]
+            Self::Test { output_rx, .. } => output_rx,
         }
     }
 
     pub fn resize_tx(&self) -> &flume::Sender<(u16, u16)> {
         match self {
             Self::WebSocket(session) | Self::Bridge(session) => &session.resize_tx,
+            #[cfg(test)]
+            Self::Test { resize_tx, .. } => resize_tx,
         }
     }
 
@@ -78,6 +93,8 @@ impl TerminalHandle {
         match self {
             Self::WebSocket(session) => Some(&session.image_paste_tx),
             Self::Bridge(_) => None,
+            #[cfg(test)]
+            Self::Test { image_paste_tx, .. } => image_paste_tx.as_ref(),
         }
     }
 

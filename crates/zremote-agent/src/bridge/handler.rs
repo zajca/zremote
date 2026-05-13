@@ -152,6 +152,20 @@ async fn handle_bridge_connection(
                             }
                         }
                     }
+                    Some(Ok(Message::Binary(data))) => {
+                        const MAX_INPUT_BYTES: usize = 1_048_576;
+                        let mut data = data.to_vec();
+                        if data.len() > MAX_INPUT_BYTES {
+                            tracing::warn!(session_id = %session_id, len = data.len(), "bridge: binary input exceeds 1 MB, truncating");
+                            data.truncate(MAX_INPUT_BYTES);
+                        }
+                        if state.command_tx.try_send(BridgeCommand::Write {
+                            session_id,
+                            data,
+                        }).is_err() {
+                            tracing::warn!(session_id = %session_id, "bridge: command channel full, input dropped");
+                        }
+                    }
                     Some(Ok(Message::Close(_))) => {
                         tracing::debug!(session_id = %session_id, "bridge: GUI sent close frame");
                         break;
@@ -161,9 +175,6 @@ async fn handle_bridge_connection(
                         break;
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    Some(Ok(Message::Binary(_))) => {
-                        tracing::warn!(session_id = %session_id, "bridge: unexpected binary message from GUI");
-                    }
                     Some(Err(e)) => {
                         tracing::warn!(session_id = %session_id, error = %e, "bridge: WebSocket error");
                         break;
