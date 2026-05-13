@@ -7,6 +7,7 @@ pub mod processing;
 pub mod queries;
 #[cfg(feature = "axum")]
 pub mod request_id;
+pub mod services;
 pub mod snapshot_parser;
 pub mod state;
 #[cfg(feature = "axum")]

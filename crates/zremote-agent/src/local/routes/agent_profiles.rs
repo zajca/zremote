@@ -1,115 +1,28 @@
 //! REST CRUD for `/api/agent-profiles` (local mode).
 //!
-//! Thin wrapper over [`zremote_core::queries::agent_profiles`] that adds:
+//! Thin wrapper over [`zremote_core::services::agent_profiles`] that adds:
 //!
-//! - Input validation via
-//!   [`zremote_core::validation::agent_profile::validate_profile_fields`] and
-//!   the per-launcher `validate_settings` hook from
+//! - The per-launcher `validate_settings` hook from
 //!   [`crate::agents::LauncherRegistry`]. Validation runs **before** any DB
 //!   write so a malformed profile can never land in SQLite.
-//! - HTTP-shaped errors via [`AppError`] (unique constraint violations become
-//!   409 Conflict, unknown kinds and shell-metachar injection become 400 Bad
-//!   Request, missing rows become 404 Not Found).
+//! - HTTP-shaped extraction via [`AppJson`], while shared DTOs, common field
+//!   validation, duplicate-name conflict mapping, and CRUD flow live in core.
 //!
 //! The handlers here are deliberately symmetric with the server-mode routes
-//! in `zremote-server/src/routes/agent_profiles.rs` — same validator, same
-//! error mapping, different state extractor. Any new behavior must land in
-//! both files (grep `validate_profile_fields` to catch drift).
+//! in `zremote-server/src/routes/agent_profiles.rs` — same core service,
+//! different settings validator and state extractor.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::Deserialize;
-use uuid::Uuid;
 use zremote_core::error::{AppError, AppJson};
-use zremote_core::queries::agent_profiles as q;
-use zremote_core::validation::agent_profile::{
-    validate_profile_fields, validate_profile_length_limits,
-};
-use zremote_protocol::agents::{KindInfo, SUPPORTED_KINDS, supported_kinds};
+use zremote_core::services::agent_profiles as profiles;
 
 use crate::agents::LauncherError;
 use crate::local::state::LocalAppState;
-
-/// JSON body accepted by `POST /api/agent-profiles`. All fields mirror
-/// [`q::AgentProfile`] except for auto-managed columns (`id`, `created_at`,
-/// `updated_at`). Optional fields default to sensible empty values so a
-/// minimal `{"name": "...", "agent_kind": "claude"}` body is valid.
-#[derive(Debug, Deserialize)]
-pub struct CreateProfileRequest {
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    pub agent_kind: String,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub sort_order: i64,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub initial_prompt: Option<String>,
-    #[serde(default)]
-    pub skip_permissions: bool,
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
-    #[serde(default)]
-    pub extra_args: Vec<String>,
-    #[serde(default)]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(default)]
-    pub settings: serde_json::Value,
-}
-
-/// JSON body accepted by `PUT /api/agent-profiles/{id}`. `agent_kind` is
-/// intentionally omitted — the kind is immutable after insert (see
-/// `q::update_profile`'s rationale).
-#[derive(Debug, Deserialize)]
-pub struct UpdateProfileRequest {
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub sort_order: i64,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub initial_prompt: Option<String>,
-    #[serde(default)]
-    pub skip_permissions: bool,
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
-    #[serde(default)]
-    pub extra_args: Vec<String>,
-    #[serde(default)]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(default)]
-    pub settings: serde_json::Value,
-}
-
-/// Shape returned by `GET /api/agent-profiles/kinds`. Mirrors
-/// [`zremote_protocol::agents::KindInfo`] but owns its strings so callers can
-/// serialize freely without worrying about `'static` lifetimes.
-#[derive(Debug, serde::Serialize)]
-pub struct KindInfoResponse {
-    pub kind: String,
-    pub display_name: String,
-    pub description: String,
-}
-
-impl From<&KindInfo> for KindInfoResponse {
-    fn from(k: &KindInfo) -> Self {
-        Self {
-            kind: k.kind.to_string(),
-            display_name: k.display_name.to_string(),
-            description: k.description.to_string(),
-        }
-    }
-}
 
 /// Convert a `LauncherError` into an `AppError`. Unknown kinds and invalid
 /// settings both map to 400 — the wire contract for both is "client sent a
@@ -126,69 +39,11 @@ fn launcher_error_to_app(err: LauncherError) -> AppError {
     }
 }
 
-/// Map a SQLite unique-constraint error to a 409 Conflict. Any other SQL
-/// error bubbles through as [`AppError::Database`] (500) via the `?`
-/// operator. This lets the UI show "a profile with this name already exists"
-/// without exposing SQL internals.
-fn map_insert_err(err: AppError) -> AppError {
-    match err {
-        AppError::Database(sqlx::Error::Database(dbe)) if is_unique_violation(dbe.as_ref()) => {
-            AppError::Conflict(
-                "a profile with this name already exists for the given agent kind".to_string(),
-            )
-        }
-        AppError::Database(e) => AppError::Database(e),
-        other => other,
-    }
-}
-
-fn is_unique_violation(err: &dyn sqlx::error::DatabaseError) -> bool {
-    // SQLite reports unique violations as code "2067" (SQLITE_CONSTRAINT_UNIQUE)
-    // or "1555" (SQLITE_CONSTRAINT_PRIMARYKEY). `sqlx` exposes this via
-    // `code()`; a substring match on the message is the fallback because
-    // older sqlite builds don't always populate the extended code.
-    if let Some(code) = err.code()
-        && (code == "2067" || code == "1555")
-    {
-        return true;
-    }
-    let msg = err.message().to_ascii_lowercase();
-    msg.contains("unique constraint") || msg.contains("unique index")
-}
-
-/// Validate the cross-cutting profile fields plus the kind-specific settings
-/// blob. Called by both `create_profile` and `update_profile` so field-level
-/// rules stay in sync between the two codepaths.
-#[allow(clippy::too_many_arguments)]
-fn validate_all(
+fn validate_local_settings(
     registry: &crate::agents::LauncherRegistry,
     agent_kind: &str,
-    name: &str,
-    description: Option<&str>,
-    initial_prompt: Option<&str>,
-    model: Option<&str>,
-    allowed_tools: &[String],
-    extra_args: &[String],
-    env_vars: &BTreeMap<String, String>,
     settings: &serde_json::Value,
 ) -> Result<(), AppError> {
-    let kinds = supported_kinds();
-    validate_profile_fields(
-        agent_kind,
-        &kinds,
-        model,
-        allowed_tools,
-        extra_args,
-        env_vars,
-    )
-    .map_err(AppError::BadRequest)?;
-
-    validate_profile_length_limits(name, description, initial_prompt)
-        .map_err(AppError::BadRequest)?;
-
-    // Per-launcher settings validation. Unknown-kind was already rejected by
-    // `validate_profile_fields`, so `registry.get` failing here is an internal
-    // mismatch — surface it as 500 rather than 400.
     let launcher = registry
         .get(agent_kind)
         .map_err(|e| AppError::Internal(format!("launcher registry mismatch: {e}")))?;
@@ -199,35 +54,23 @@ fn validate_all(
     Ok(())
 }
 
-/// Query params for `GET /api/agent-profiles`. The `kind` filter narrows
-/// the result set to a single `agent_kind`; omitting it returns every
-/// profile across every kind.
-#[derive(Debug, Deserialize, Default)]
-pub struct ListProfilesQuery {
-    #[serde(default)]
-    pub kind: Option<String>,
-}
-
 /// `GET /api/agent-profiles` - List all profiles, optionally filtered by kind.
 ///
 /// Sorted by (sort_order ASC, name ASC). Empty list is a valid response.
 pub async fn list_profiles(
     State(state): State<Arc<LocalAppState>>,
-    Query(query): Query<ListProfilesQuery>,
+    Query(query): Query<profiles::ListProfilesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profiles = match query.kind.as_deref() {
-        Some(k) => q::list_by_kind(&state.db, k).await?,
-        None => q::list_profiles(&state.db).await?,
-    };
-    Ok(Json(profiles))
+    Ok(Json(
+        profiles::list_profiles(&state.db, query.kind.as_deref()).await?,
+    ))
 }
 
 /// `GET /api/agent-profiles/kinds` - List the kinds supported by this agent
 /// binary. Driven by `SUPPORTED_KINDS` in the protocol crate, which is the
 /// single source of truth for accepted `agent_kind` values.
 pub async fn list_kinds() -> impl IntoResponse {
-    let kinds: Vec<KindInfoResponse> = SUPPORTED_KINDS.iter().map(KindInfoResponse::from).collect();
-    Json(kinds)
+    Json(profiles::list_kinds())
 }
 
 /// `GET /api/agent-profiles/{id}` - Fetch a single profile by id.
@@ -235,10 +78,7 @@ pub async fn get_profile(
     State(state): State<Arc<LocalAppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profile = q::get_profile(&state.db, &id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("agent profile {id} not found")))?;
-    Ok(Json(profile))
+    Ok(Json(profiles::get_profile(&state.db, &id).await?))
 }
 
 /// `POST /api/agent-profiles` - Create a new profile.
@@ -247,54 +87,13 @@ pub async fn get_profile(
 /// `(agent_kind, name)` collisions are reported as 409.
 pub async fn create_profile(
     State(state): State<Arc<LocalAppState>>,
-    AppJson(body): AppJson<CreateProfileRequest>,
+    AppJson(body): AppJson<profiles::CreateProfileRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    validate_all(
-        &state.launcher_registry,
-        &body.agent_kind,
-        &body.name,
-        body.description.as_deref(),
-        body.initial_prompt.as_deref(),
-        body.model.as_deref(),
-        &body.allowed_tools,
-        &body.extra_args,
-        &body.env_vars,
-        &body.settings,
-    )?;
-
-    let id = Uuid::new_v4().to_string();
-    let profile = q::AgentProfile {
-        id: id.clone(),
-        name: body.name,
-        description: body.description,
-        agent_kind: body.agent_kind,
-        is_default: false, // use set_default to assign; inserts never auto-promote
-        sort_order: body.sort_order,
-        model: body.model,
-        initial_prompt: body.initial_prompt,
-        skip_permissions: body.skip_permissions,
-        allowed_tools: body.allowed_tools,
-        extra_args: body.extra_args,
-        env_vars: body.env_vars,
-        settings: body.settings,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
-    q::insert_profile(&state.db, &profile)
-        .await
-        .map_err(map_insert_err)?;
-
-    // Honour the explicit `is_default = true` hint from the request body.
-    // Routed through `set_default` so the partial unique index is satisfied
-    // atomically instead of letting the INSERT race another writer.
-    if body.is_default {
-        q::set_default(&state.db, &id).await?;
-    }
-
-    let created = q::get_profile(&state.db, &id)
-        .await?
-        .ok_or_else(|| AppError::Internal("profile vanished after insert".to_string()))?;
+    let registry = state.launcher_registry.clone();
+    let created = profiles::create_profile(&state.db, body, |agent_kind, settings| {
+        validate_local_settings(&registry, agent_kind, settings)
+    })
+    .await?;
 
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -307,50 +106,13 @@ pub async fn create_profile(
 pub async fn update_profile(
     State(state): State<Arc<LocalAppState>>,
     Path(id): Path<String>,
-    AppJson(body): AppJson<UpdateProfileRequest>,
+    AppJson(body): AppJson<profiles::UpdateProfileRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let existing = q::get_profile(&state.db, &id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("agent profile {id} not found")))?;
-
-    validate_all(
-        &state.launcher_registry,
-        &existing.agent_kind,
-        &body.name,
-        body.description.as_deref(),
-        body.initial_prompt.as_deref(),
-        body.model.as_deref(),
-        &body.allowed_tools,
-        &body.extra_args,
-        &body.env_vars,
-        &body.settings,
-    )?;
-
-    let updated = q::AgentProfile {
-        id: existing.id.clone(),
-        name: body.name,
-        description: body.description,
-        agent_kind: existing.agent_kind.clone(),
-        is_default: existing.is_default,
-        sort_order: body.sort_order,
-        model: body.model,
-        initial_prompt: body.initial_prompt,
-        skip_permissions: body.skip_permissions,
-        allowed_tools: body.allowed_tools,
-        extra_args: body.extra_args,
-        env_vars: body.env_vars,
-        settings: body.settings,
-        created_at: existing.created_at,
-        updated_at: String::new(),
-    };
-
-    q::update_profile(&state.db, &id, &updated)
-        .await
-        .map_err(map_insert_err)?;
-
-    let refreshed = q::get_profile(&state.db, &id)
-        .await?
-        .ok_or_else(|| AppError::Internal("profile vanished after update".to_string()))?;
+    let registry = state.launcher_registry.clone();
+    let refreshed = profiles::update_profile(&state.db, &id, body, |agent_kind, settings| {
+        validate_local_settings(&registry, agent_kind, settings)
+    })
+    .await?;
 
     Ok(Json(refreshed))
 }
@@ -363,7 +125,7 @@ pub async fn delete_profile(
     State(state): State<Arc<LocalAppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    q::delete_profile(&state.db, &id).await?;
+    profiles::delete_profile(&state.db, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -373,11 +135,7 @@ pub async fn set_default(
     State(state): State<Arc<LocalAppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    q::set_default(&state.db, &id).await?;
-    let profile = q::get_profile(&state.db, &id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("agent profile {id} not found")))?;
-    Ok(Json(profile))
+    Ok(Json(profiles::set_default(&state.db, &id).await?))
 }
 
 #[cfg(test)]
@@ -386,6 +144,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode as HttpStatus};
     use tower::ServiceExt;
+    use uuid::Uuid;
+    use zremote_core::queries::agent_profiles as q;
 
     async fn test_state() -> Arc<LocalAppState> {
         let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
