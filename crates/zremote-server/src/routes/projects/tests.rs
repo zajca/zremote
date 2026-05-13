@@ -76,7 +76,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/hosts/{host_id}/projects/scan", post(trigger_scan))
         .route(
             "/api/projects/{project_id}",
-            get(get_project).delete(delete_project),
+            get(get_project)
+                .patch(update_project)
+                .delete(delete_project),
         )
         .route(
             "/api/projects/{project_id}/sessions",
@@ -261,6 +263,76 @@ async fn get_project_invalid_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn update_project_pinned_broadcasts_projects_updated() {
+    let state = test_state().await;
+    let host_id = Uuid::new_v4().to_string();
+    let proj_id = Uuid::new_v4().to_string();
+    insert_host(&state, &host_id).await;
+    insert_project(&state, &proj_id, &host_id, "/home/test", "test").await;
+    let mut events = state.events.subscribe();
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::patch(format!("/api/projects/{proj_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pinned":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["id"], proj_id);
+    assert_eq!(json["pinned"], true);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        crate::state::ServerEvent::ProjectsUpdated { host_id: event_host_id }
+            if event_host_id == host_id
+    ));
+}
+
+#[tokio::test]
+async fn update_project_invalid_id() {
+    let state = test_state().await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::patch("/api/projects/not-uuid")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pinned":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn update_project_not_found() {
+    let state = test_state().await;
+    let proj_id = Uuid::new_v4().to_string();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::patch(format!("/api/projects/{proj_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pinned":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
