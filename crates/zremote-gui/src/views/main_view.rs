@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::*;
 
-use zremote_client::{AgenticStatus, ClientEvent, ServerEvent};
+use zremote_client::{AgenticStatus, ClientEvent, Project, ServerEvent, Session};
 
 use crate::views::sidebar::CcMetrics;
 
@@ -35,6 +35,16 @@ use crate::views::worktree_create_modal::{WorktreeCreateModal, WorktreeCreateMod
 /// Suppresses noise from brief pauses between tool calls — a genuine wait
 /// (permission prompt, end-of-turn) persists well beyond this window.
 const WAITING_DEBOUNCE: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct TopBarContext {
+    host: Option<String>,
+    project: Option<String>,
+    worktree: Option<String>,
+    session_id: Option<String>,
+    session_name: Option<String>,
+    session_title: Option<String>,
+}
 
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
@@ -2002,25 +2012,164 @@ impl MainView {
         }
     }
 
-    /// Render the breadcrumb shown above the terminal when a project is
-    /// selected. `parent ▸ branch` for worktrees (parent clickable to reset
-    /// to the root), plain project name for non-worktree projects, nothing
-    /// when selection is empty.
-    fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let selected_id = self
+    fn top_bar_context(&self, cx: &mut Context<Self>) -> TopBarContext {
+        let selected_project_id = self
             .app_state
             .selected_project_id
             .lock()
             .ok()
-            .and_then(|g| g.clone())?;
+            .and_then(|g| g.clone());
 
-        let projects = {
-            let sidebar = self.sidebar.read(cx);
-            sidebar.projects_rc().clone()
+        let current_session_id = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.read(cx).session_id().to_string());
+
+        let sidebar = self.sidebar.read(cx);
+        let hosts = Rc::clone(sidebar.hosts_rc());
+        let sessions = Rc::clone(sidebar.sessions_rc());
+        let projects = Rc::clone(sidebar.projects_rc());
+        let session_title = current_session_id
+            .as_deref()
+            .and_then(|sid| sidebar.terminal_title(sid).map(str::to_string));
+
+        let session: Option<Session> = current_session_id
+            .as_deref()
+            .and_then(|sid| sessions.iter().find(|s| s.id == sid).cloned());
+
+        let project: Option<Project> = selected_project_id
+            .as_deref()
+            .and_then(|pid| projects.iter().find(|p| p.id == pid).cloned())
+            .or_else(|| {
+                session
+                    .as_ref()
+                    .and_then(|s| s.project_id.as_deref())
+                    .and_then(|pid| projects.iter().find(|p| p.id == pid).cloned())
+            });
+
+        let host_id = session
+            .as_ref()
+            .map(|s| s.host_id.as_str())
+            .or_else(|| project.as_ref().map(|p| p.host_id.as_str()))
+            .or(self.current_host_id.as_deref());
+        let host = host_id.and_then(|hid| {
+            hosts
+                .iter()
+                .find(|h| h.id == hid)
+                .map(|h| h.name.clone())
+                .or_else(|| Some(hid.to_string()))
+        });
+
+        let (project_name, worktree_name) = if let Some(project) = project {
+            if let Some(parent_id) = project.parent_project_id.as_deref() {
+                let parent_name = projects
+                    .iter()
+                    .find(|p| p.id == parent_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| project.name.clone());
+                let worktree_name = project
+                    .git_branch
+                    .clone()
+                    .filter(|branch| !branch.is_empty())
+                    .unwrap_or(project.name);
+                (Some(parent_name), Some(worktree_name))
+            } else {
+                (Some(project.name), None)
+            }
+        } else {
+            (None, None)
         };
-        let selected = projects.iter().find(|p| p.id == selected_id)?.clone();
 
-        let mut row = div()
+        TopBarContext {
+            host,
+            project: project_name,
+            worktree: worktree_name,
+            session_id: current_session_id,
+            session_name: session.and_then(|s| s.name),
+            session_title,
+        }
+    }
+
+    fn render_top_bar_segment(label: &'static str, value: String, detail: Option<String>) -> Div {
+        let mut segment = div()
+            .flex()
+            .items_baseline()
+            .gap(px(5.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .text_color(theme::text_tertiary())
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .whitespace_nowrap()
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .truncate()
+                    .child(value),
+            );
+
+        if let Some(detail) = detail {
+            segment = segment.child(
+                div()
+                    .text_color(theme::text_secondary())
+                    .text_size(px(11.0))
+                    .truncate()
+                    .child(detail),
+            );
+        }
+
+        segment
+    }
+
+    fn render_top_bar_separator() -> Div {
+        div()
+            .text_color(theme::text_tertiary())
+            .text_size(px(12.0))
+            .flex_shrink_0()
+            .child(">")
+    }
+
+    fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let ctx = self.top_bar_context(cx);
+        let host = ctx.host.unwrap_or_else(|| "No host".to_string());
+        let project = ctx.project.unwrap_or_else(|| "No project".to_string());
+        let worktree = ctx.worktree.unwrap_or_else(|| "No worktree".to_string());
+
+        let (session_value, session_detail) = if let Some(session_id) = ctx.session_id {
+            let short_id = if session_id.len() > 8 {
+                session_id[..8].to_string()
+            } else {
+                session_id.clone()
+            };
+            let session_value = ctx
+                .session_name
+                .clone()
+                .or_else(|| ctx.session_title.clone())
+                .unwrap_or_else(|| short_id.clone());
+            let mut session_detail_parts = Vec::new();
+            session_detail_parts.push(format!("id {short_id}"));
+            if let Some(title) = ctx.session_title
+                && title != session_value
+            {
+                session_detail_parts.push(title);
+            }
+            let session_detail = if session_detail_parts.is_empty() {
+                None
+            } else {
+                Some(session_detail_parts.join(" / "))
+            };
+            (session_value, session_detail)
+        } else {
+            ("No session".to_string(), None)
+        };
+
+        div()
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -2029,55 +2178,18 @@ impl MainView {
             .border_b_1()
             .border_color(theme::border())
             .bg(theme::bg_secondary())
-            .text_size(px(12.0));
-
-        if let Some(parent_id) = selected.parent_project_id.clone() {
-            let parent = projects.iter().find(|p| p.id == parent_id).cloned();
-            if let Some(parent) = parent {
-                let parent_id_for_click = parent.id.clone();
-                let parent_host = parent.host_id.clone();
-                row = row.child(
-                    div()
-                        .id("breadcrumb-parent")
-                        .cursor_pointer()
-                        .text_color(theme::text_secondary())
-                        .hover(|s| s.text_color(theme::text_primary()))
-                        .child(parent.name.clone())
-                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.sidebar.update(cx, |sidebar, cx| {
-                                sidebar.set_selected_project(
-                                    Some(parent_id_for_click.clone()),
-                                    Some(parent_host.clone()),
-                                    cx,
-                                );
-                            });
-                        })),
-                );
-                row = row.child(div().text_color(theme::text_tertiary()).child("▸"));
-                let branch_label = selected
-                    .git_branch
-                    .clone()
-                    .filter(|b| !b.is_empty())
-                    .unwrap_or_else(|| selected.name.clone());
-                row = row.child(
-                    div()
-                        .text_color(theme::text_primary())
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(branch_label),
-                );
-                return Some(row);
-            }
-        }
-
-        // Non-worktree project: render its name as the only breadcrumb
-        // segment. No click target (already selected).
-        row = row.child(
-            div()
-                .text_color(theme::text_primary())
-                .font_weight(FontWeight::MEDIUM)
-                .child(selected.name.clone()),
-        );
-        Some(row)
+            .overflow_hidden()
+            .child(Self::render_top_bar_segment("host", host, None))
+            .child(Self::render_top_bar_separator())
+            .child(Self::render_top_bar_segment("project", project, None))
+            .child(Self::render_top_bar_separator())
+            .child(Self::render_top_bar_segment("worktree", worktree, None))
+            .child(Self::render_top_bar_separator())
+            .child(Self::render_top_bar_segment(
+                "session",
+                session_value,
+                session_detail,
+            ))
     }
 
     fn render_connection_banner() -> impl IntoElement {
@@ -2267,21 +2379,15 @@ impl Render for MainView {
         let content_area = self.render_content_area(cx);
         let show_banner = !self.server_connected && self.ever_connected;
         let right_column: AnyElement = {
-            let breadcrumb: Option<AnyElement> = self
-                .render_breadcrumb(cx)
-                .map(IntoElement::into_any_element);
-            if show_banner || breadcrumb.is_some() {
-                let mut col = div().flex_1().flex().flex_col();
-                if show_banner {
-                    col = col.child(Self::render_connection_banner());
-                }
-                if let Some(bc) = breadcrumb {
-                    col = col.child(bc);
-                }
-                col.child(content_area).into_any_element()
-            } else {
-                content_area.into_any_element()
+            let mut col = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(self.render_top_bar(cx));
+            if show_banner {
+                col = col.child(Self::render_connection_banner());
             }
+            col.child(content_area).into_any_element()
         };
 
         let mut root = div()
