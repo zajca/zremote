@@ -26,7 +26,14 @@ use crate::theme;
 use crate::views::cc_widgets;
 use crate::views::sidebar::{CcMetrics, CcState};
 use crate::views::terminal_element::FONT_FAMILY;
-use zremote_client::{AgenticStatus, Host, PreviewSnapshot, Project, Session, SessionStatus};
+use zremote_client::{
+    AgenticStatus, Host, PreviewColorSpan, PreviewLine, PreviewSnapshot, Project, Session,
+    SessionStatus,
+};
+
+const PREVIEW_MAX_LINES: usize = 22;
+const PREVIEW_FONT_SIZE: f32 = 11.0;
+const PREVIEW_LINE_HEIGHT: f32 = 14.0;
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -157,6 +164,69 @@ impl SessionSwitcher {
 }
 
 impl SessionSwitcher {
+    fn preview_line_segments(line: &PreviewLine) -> Vec<(String, Rgba)> {
+        let chars: Vec<char> = line.text.chars().collect();
+        if chars.is_empty() {
+            return Vec::new();
+        }
+
+        let default_color = theme::text_secondary();
+        let mut colors = vec![default_color; chars.len()];
+
+        for span in &line.spans {
+            if let Some(color) = parse_preview_color(span) {
+                let start = usize::from(span.start).min(chars.len());
+                let end = usize::from(span.end).min(chars.len());
+                for cell_color in colors.iter_mut().take(end).skip(start) {
+                    *cell_color = color;
+                }
+            }
+        }
+
+        let mut segments = Vec::new();
+        let mut current_color = colors[0];
+        let mut current_text = String::new();
+
+        for (idx, ch) in chars.into_iter().enumerate() {
+            let color = colors[idx];
+            if color != current_color {
+                segments.push((current_text, current_color));
+                current_text = String::new();
+                current_color = color;
+            }
+            if ch == ' ' {
+                current_text.push('\u{00a0}');
+            } else {
+                current_text.push(ch);
+            }
+        }
+
+        segments.push((current_text, current_color));
+        segments
+    }
+
+    fn render_preview_line(line: &PreviewLine) -> Div {
+        let segments = Self::preview_line_segments(line);
+        let mut row = div()
+            .flex()
+            .items_center()
+            .h(px(PREVIEW_LINE_HEIGHT))
+            .min_h(px(PREVIEW_LINE_HEIGHT))
+            .line_height(px(PREVIEW_LINE_HEIGHT))
+            .whitespace_nowrap()
+            .overflow_hidden();
+
+        if segments.is_empty() {
+            return row;
+        }
+
+        for (text, color) in segments {
+            row = row.child(div().text_color(color).child(text));
+        }
+
+        row
+    }
+
     fn render_entry(entry: &SwitcherEntry, is_selected: bool, idx: usize) -> Stateful<Div> {
         div()
             .id(SharedString::from(format!("switcher-{idx}")))
@@ -306,14 +376,15 @@ impl SessionSwitcher {
             .p(px(8.0))
             .overflow_hidden()
             .font_family(FONT_FAMILY)
-            .text_size(px(11.0))
+            .text_size(px(PREVIEW_FONT_SIZE))
+            .line_height(px(PREVIEW_LINE_HEIGHT))
             .when_some(preview, |d, snapshot| {
-                d.children(snapshot.lines.iter().map(|line| {
-                    div()
-                        .whitespace_nowrap()
-                        .text_color(theme::text_secondary())
-                        .child(line.text.clone())
-                }))
+                let start = snapshot.lines.len().saturating_sub(PREVIEW_MAX_LINES);
+                d.children(
+                    snapshot.lines[start..]
+                        .iter()
+                        .map(Self::render_preview_line),
+                )
             })
             .when(preview.is_none(), |d| {
                 d.items_center().justify_center().child(
@@ -335,6 +406,81 @@ impl SessionSwitcher {
                         ),
                 )
             })
+    }
+}
+
+fn parse_preview_color(span: &PreviewColorSpan) -> Option<Rgba> {
+    let hex = span.fg.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+
+    Some(Rgba {
+        r: f32::from(r) / 255.0,
+        g: f32::from(g) / 255.0,
+        b: f32::from(b) / 255.0,
+        a: 1.0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionSwitcher, parse_preview_color};
+    use gpui::rgb;
+    use zremote_client::{PreviewColorSpan, PreviewLine};
+
+    fn preview_line(text: &str, spans: Vec<PreviewColorSpan>) -> PreviewLine {
+        PreviewLine {
+            text: text.to_string(),
+            spans,
+        }
+    }
+
+    #[test]
+    fn preview_segments_preserve_terminal_spaces() {
+        let line = preview_line("  cargo   test", Vec::new());
+
+        let segments = SessionSwitcher::preview_line_segments(&line);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0].0,
+            "\u{00a0}\u{00a0}cargo\u{00a0}\u{00a0}\u{00a0}test"
+        );
+    }
+
+    #[test]
+    fn preview_segments_apply_color_spans() {
+        let line = preview_line(
+            "ok fail",
+            vec![PreviewColorSpan {
+                start: 3,
+                end: 7,
+                fg: "#ef4444".to_string(),
+            }],
+        );
+
+        let segments = SessionSwitcher::preview_line_segments(&line);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].0, "ok\u{00a0}");
+        assert_eq!(segments[1].0, "fail");
+        assert_eq!(segments[1].1, rgb(0xef4444));
+    }
+
+    #[test]
+    fn invalid_preview_color_is_ignored() {
+        let span = PreviewColorSpan {
+            start: 0,
+            end: 1,
+            fg: "#zzzzzz".to_string(),
+        };
+
+        assert!(parse_preview_color(&span).is_none());
     }
 }
 
