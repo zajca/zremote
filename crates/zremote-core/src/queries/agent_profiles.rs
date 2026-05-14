@@ -456,6 +456,35 @@ mod tests {
         assert_eq!(codex.agent_kind, "codex");
         assert_eq!(codex.name, "Default");
         assert_eq!(codex.settings["no_alt_screen"], serde_json::json!(true));
+
+        let codex_profiles = list_by_kind(&pool, "codex").await.unwrap();
+        let names: Vec<&str> = codex_profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Default", "Review", "Implement", "Autonomous", "Full Trust"]
+        );
+
+        let review = codex_profiles
+            .iter()
+            .find(|p| p.name == "Review")
+            .expect("Review preset should be seeded");
+        assert_eq!(review.settings["sandbox"], serde_json::json!("read-only"));
+        assert_eq!(
+            review.settings["approval_policy"],
+            serde_json::json!("on-request")
+        );
+        assert!(
+            review
+                .initial_prompt
+                .as_deref()
+                .is_some_and(|p| p.contains("Review"))
+        );
+
+        let full_trust = codex_profiles
+            .iter()
+            .find(|p| p.name == "Full Trust")
+            .expect("Full Trust preset should be seeded");
+        assert!(full_trust.skip_permissions);
     }
 
     #[tokio::test]
@@ -671,9 +700,9 @@ mod tests {
     async fn test_list_profiles_and_by_kind() {
         let pool = test_db().await;
 
-        // The seed adds one default profile per built-in launcher.
+        // The seed adds one default claude profile and Codex defaults/presets.
         let seeded = list_profiles(&pool).await.unwrap();
-        assert_eq!(seeded.len(), 2);
+        assert_eq!(seeded.len(), 6);
         assert!(seeded.iter().any(|p| p.agent_kind == "claude"));
         assert!(seeded.iter().any(|p| p.agent_kind == "codex"));
 
@@ -691,14 +720,14 @@ mod tests {
         .unwrap();
 
         let all = list_profiles(&pool).await.unwrap();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 9);
 
         let claude_only = list_by_kind(&pool, "claude").await.unwrap();
         assert_eq!(claude_only.len(), 3);
         assert!(claude_only.iter().all(|p| p.agent_kind == "claude"));
 
         let codex_only = list_by_kind(&pool, "codex").await.unwrap();
-        assert_eq!(codex_only.len(), 2);
+        assert_eq!(codex_only.len(), 6);
         assert!(codex_only.iter().any(|p| p.id == "k-3"));
     }
 

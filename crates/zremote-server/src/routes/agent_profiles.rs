@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(resp.status(), HttpStatus::OK);
         let json = read_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 6);
     }
 
     #[tokio::test]

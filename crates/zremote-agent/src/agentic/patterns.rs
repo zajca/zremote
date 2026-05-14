@@ -78,9 +78,24 @@ pub static CODEX_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Matches Codex token usage: "Token usage: 12.5K total"
 pub static CODEX_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)Token usage:\s*([\d,.]+[KMBT]?)\s*total").expect("CODEX_TOKEN_RE")
+});
+
+/// Matches Codex token breakdowns after the total count.
+pub static CODEX_TOKEN_IO_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)Token usage:\s*([\d.]+[KMBT]?)\s*total(?:.*?input[:\s]*([\d.]+[KMBT]?))?(?:.*?output[:\s]*([\d.]+[KMBT]?))?"
-    ).expect("CODEX_TOKEN_RE")
+        r"(?ix)
+        (?:
+            input[:\s]+(?P<input_label>[\d,.]+[KMBT]?).*?
+            output[:\s]+(?P<output_label>[\d,.]+[KMBT]?)
+        )
+        |
+        (?:
+            (?P<input_prefix>[\d,.]+[KMBT]?)\s+input\s*\+\s*
+            (?P<output_prefix>[\d,.]+[KMBT]?)\s+output
+        )",
+    )
+    .expect("CODEX_TOKEN_IO_RE")
 });
 
 /// Matches Codex tool run lines: "• Running ls -la" or "• Ran ls -la"
@@ -91,6 +106,30 @@ pub static CODEX_TOOL_RE: LazyLock<Regex> =
 pub static CODEX_FILE_OP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[•◦]\s*(Edited|Added|Deleted)\s+(.+?)(?:\s*\((\+\d+),\s*(-\d+)\))?$")
         .expect("CODEX_FILE_OP_RE")
+});
+
+/// Matches Codex launch failures where the executable is unavailable.
+pub static CODEX_LAUNCH_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:codex:\s+command not found|command not found:\s+codex|codex:\s+not found|no such file or directory.*\bcodex\b)")
+        .expect("CODEX_LAUNCH_ERROR_RE")
+});
+
+/// Matches Codex authentication failures that require user action.
+pub static CODEX_AUTH_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:not authenticated|authentication required|login required|please log in|please login|sign in to codex|openai api key.*(?:missing|required|not set)|missing api key)")
+        .expect("CODEX_AUTH_ERROR_RE")
+});
+
+/// Matches Codex configuration/profile/model startup failures.
+pub static CODEX_CONFIG_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:(?:failed|error).*(?:config|configuration|config\.toml)|invalid\s+(?:config|configuration|profile|model)|profile .* not found|model .* not found|unknown model)")
+        .expect("CODEX_CONFIG_ERROR_RE")
+});
+
+/// Matches Codex CLI option incompatibilities.
+pub static CODEX_UNKNOWN_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:unknown (?:option|argument|flag)|unexpected (?:argument|option)|unrecognized (?:option|argument|flag)|(?:invalid|unexpected) value).*")
+        .expect("CODEX_UNKNOWN_OPTION_RE")
 });
 
 // ---------------------------------------------------------------------------
@@ -546,6 +585,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_token_re_matches_comma_total() {
+        let caps = CODEX_TOKEN_RE
+            .captures("Token usage: 12,345 total (10,000 input + 2,345 output)")
+            .unwrap();
+        assert_eq!(&caps[1], "12,345");
+    }
+
+    #[test]
+    fn codex_token_io_re_matches_codex_format() {
+        let caps = CODEX_TOKEN_IO_RE
+            .captures("Token usage: 1.9K total (1K input + 900 output)")
+            .unwrap();
+        assert_eq!(&caps["input_prefix"], "1K");
+        assert_eq!(&caps["output_prefix"], "900");
+    }
+
+    #[test]
+    fn codex_token_io_re_matches_label_format() {
+        let caps = CODEX_TOKEN_IO_RE
+            .captures("Token usage: 1.9K total, input: 1K, output: 900")
+            .unwrap();
+        assert_eq!(&caps["input_label"], "1K");
+        assert_eq!(&caps["output_label"], "900");
+    }
+
+    #[test]
     fn codex_token_re_no_match() {
         assert!(CODEX_TOKEN_RE.captures("no usage").is_none());
     }
@@ -584,6 +649,14 @@ mod tests {
     #[test]
     fn codex_file_op_re_no_match() {
         assert!(CODEX_FILE_OP_RE.captures("nothing here").is_none());
+    }
+
+    #[test]
+    fn codex_startup_error_patterns_match_common_failures() {
+        assert!(CODEX_LAUNCH_ERROR_RE.is_match("zsh: command not found: codex"));
+        assert!(CODEX_AUTH_ERROR_RE.is_match("Error: authentication required. Please log in."));
+        assert!(CODEX_CONFIG_ERROR_RE.is_match("error: failed to parse ~/.codex/config.toml"));
+        assert!(CODEX_UNKNOWN_OPTION_RE.is_match("error: unknown option '--foo'"));
     }
 
     // -- Gemini patterns --

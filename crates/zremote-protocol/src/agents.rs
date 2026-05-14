@@ -105,6 +105,22 @@ pub struct KindInfo {
     pub description: &'static str,
 }
 
+/// Best-effort host-side capability information for one agent CLI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentCapabilityInfo {
+    pub kind: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated: Option<bool>,
+    #[serde(default)]
+    pub config_profiles: Vec<String>,
+    pub last_checked_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Single source of truth for the `agent_kind` values the server and agent
 /// accept. REST validation in `zremote-core` is handed this list as
 /// `&[&str]`; `GET /api/agent-profiles/kinds` returns the full metadata.

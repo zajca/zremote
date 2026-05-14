@@ -12,6 +12,7 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 
 **AI Agent Monitoring**
 - Agentic loop tracking: tool calls, transcripts, token usage, costs
+- Generic agent profiles and project-row quick launch for Claude Code and Codex
 - Tool permissions: approve, reject, or auto-approve agent tool calls
 - Claude Code hooks integration for real-time event capture
 - Claude task lifecycle management
