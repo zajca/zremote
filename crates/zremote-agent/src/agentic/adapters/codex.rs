@@ -22,12 +22,7 @@ impl ProviderAdapter for CodexAdapter {
         // Token parsing
         if let Some(caps) = patterns::CODEX_TOKEN_RE.captures(line) {
             let total = patterns::parse_token_count(&caps[1]);
-            let input = caps
-                .get(2)
-                .map_or(0, |m| patterns::parse_token_count(m.as_str()));
-            let output = caps
-                .get(3)
-                .map_or(0, |m| patterns::parse_token_count(m.as_str()));
+            let (input, output) = codex_token_breakdown(line).unwrap_or((0, 0));
 
             // If we have a breakdown, use it; otherwise split total evenly
             let (final_input, final_output) = if input > 0 || output > 0 {
@@ -44,6 +39,13 @@ impl ProviderAdapter for CodexAdapter {
                 model: String::new(),
                 is_cumulative: true,
             });
+            return analysis;
+        }
+
+        // Codex startup/readiness failures. LineAnalysis has no error payload,
+        // so surface these as a blocked/input-needed phase for now.
+        if is_codex_startup_error(line) {
+            analysis.phase_hint = Some(PhaseHint::InputNeeded);
             return analysis;
         }
 
@@ -97,6 +99,33 @@ impl ProviderAdapter for CodexAdapter {
     }
 }
 
+fn codex_token_breakdown(line: &str) -> Option<(u64, u64)> {
+    let caps = patterns::CODEX_TOKEN_IO_RE.captures(line)?;
+    let input = caps
+        .name("input_label")
+        .or_else(|| caps.name("input_prefix"))
+        .map(|m| patterns::parse_token_count(m.as_str()))
+        .unwrap_or(0);
+    let output = caps
+        .name("output_label")
+        .or_else(|| caps.name("output_prefix"))
+        .map(|m| patterns::parse_token_count(m.as_str()))
+        .unwrap_or(0);
+
+    if input > 0 || output > 0 {
+        Some((input, output))
+    } else {
+        None
+    }
+}
+
+fn is_codex_startup_error(line: &str) -> bool {
+    patterns::CODEX_LAUNCH_ERROR_RE.is_match(line)
+        || patterns::CODEX_AUTH_ERROR_RE.is_match(line)
+        || patterns::CODEX_CONFIG_ERROR_RE.is_match(line)
+        || patterns::CODEX_UNKNOWN_OPTION_RE.is_match(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,14 +166,32 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_codex_format_falls_back_to_total_split() {
+    fn token_usage_codex_format_uses_breakdown() {
         let adapter = CodexAdapter;
-        // Codex's actual format "1K input + 900 output" — regex only captures total
         let analysis = adapter.analyze_line("Token usage: 1.9K total (1K input + 900 output)");
         let update = analysis.token_update.unwrap();
-        // Falls back to splitting total evenly
-        assert_eq!(update.input_tokens, 950);
-        assert_eq!(update.output_tokens, 950);
+        assert_eq!(update.input_tokens, 1000);
+        assert_eq!(update.output_tokens, 900);
+    }
+
+    #[test]
+    fn token_usage_comma_breakdown() {
+        let adapter = CodexAdapter;
+        let analysis =
+            adapter.analyze_line("Token usage: 12,345 total, input: 10,000, output: 2,345");
+        let update = analysis.token_update.unwrap();
+        assert_eq!(update.input_tokens, 10_000);
+        assert_eq!(update.output_tokens, 2_345);
+    }
+
+    #[test]
+    fn token_usage_comma_codex_format() {
+        let adapter = CodexAdapter;
+        let analysis =
+            adapter.analyze_line("Token usage: 12,345 total (10,000 input + 2,345 output)");
+        let update = analysis.token_update.unwrap();
+        assert_eq!(update.input_tokens, 10_000);
+        assert_eq!(update.output_tokens, 2_345);
     }
 
     #[test]
@@ -213,5 +260,33 @@ mod tests {
     fn prompt_empty_not_prompt() {
         let adapter = CodexAdapter;
         assert!(!adapter.is_prompt(""));
+    }
+
+    #[test]
+    fn startup_error_command_not_found_needs_input() {
+        let adapter = CodexAdapter;
+        let analysis = adapter.analyze_line("zsh: command not found: codex");
+        assert_eq!(analysis.phase_hint, Some(PhaseHint::InputNeeded));
+    }
+
+    #[test]
+    fn startup_error_auth_needs_input() {
+        let adapter = CodexAdapter;
+        let analysis = adapter.analyze_line("Error: authentication required. Please log in.");
+        assert_eq!(analysis.phase_hint, Some(PhaseHint::InputNeeded));
+    }
+
+    #[test]
+    fn startup_error_config_needs_input() {
+        let adapter = CodexAdapter;
+        let analysis = adapter.analyze_line("error: failed to parse ~/.codex/config.toml");
+        assert_eq!(analysis.phase_hint, Some(PhaseHint::InputNeeded));
+    }
+
+    #[test]
+    fn startup_error_unknown_option_needs_input() {
+        let adapter = CodexAdapter;
+        let analysis = adapter.analyze_line("error: unknown option '--ask-for-approval'");
+        assert_eq!(analysis.phase_hint, Some(PhaseHint::InputNeeded));
     }
 }

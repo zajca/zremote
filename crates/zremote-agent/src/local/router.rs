@@ -51,6 +51,10 @@ pub(crate) fn build_router(
         // Hosts endpoints (synthetic local host)
         .route("/api/hosts", get(routes::hosts::list_hosts))
         .route("/api/hosts/{host_id}", get(routes::hosts::get_host))
+        .route(
+            "/api/hosts/{host_id}/agent-capabilities/codex",
+            get(routes::hosts::get_codex_capability),
+        )
         // Session CRUD
         .route(
             "/api/hosts/{host_id}/sessions",

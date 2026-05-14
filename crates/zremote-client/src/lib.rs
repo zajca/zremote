@@ -23,6 +23,7 @@ pub use flume;
 pub use types::{
     ActionsResponse,
     AddProjectRequest,
+    AgentCapabilityInfo,
     AgentKindInfo,
     AgentProfile,
     // SDK types

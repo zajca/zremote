@@ -94,11 +94,24 @@ enum ActiveInput {
     ClaudeOutputFormat,
     ClaudeCustomFlags,
     CodexConfigProfile,
-    CodexSandbox,
-    CodexApprovalPolicy,
     NewCodexConfigOverride,
     CodexCustomFlags,
 }
+
+const CODEX_SANDBOX_OPTIONS: &[(&str, &str)] = &[
+    ("", "Default"),
+    ("read-only", "Read-only"),
+    ("workspace-write", "Workspace write"),
+    ("danger-full-access", "Danger full access"),
+];
+
+const CODEX_APPROVAL_POLICY_OPTIONS: &[(&str, &str)] = &[
+    ("", "Default"),
+    ("untrusted", "Untrusted"),
+    ("on-failure", "On failure"),
+    ("on-request", "On request"),
+    ("never", "Never"),
+];
 
 /// Mutable form state for the editor pane.
 ///
@@ -788,20 +801,6 @@ impl AgentProfilesTab {
                     validate_codex_config_profile(&self.edit_form.codex_config_profile)
                 }
             }
-            ActiveInput::CodexSandbox => {
-                if self.edit_form.codex_sandbox.is_empty() {
-                    Ok(())
-                } else {
-                    validate_codex_sandbox(&self.edit_form.codex_sandbox)
-                }
-            }
-            ActiveInput::CodexApprovalPolicy => {
-                if self.edit_form.codex_approval_policy.is_empty() {
-                    Ok(())
-                } else {
-                    validate_codex_approval_policy(&self.edit_form.codex_approval_policy)
-                }
-            }
             ActiveInput::NewCodexConfigOverride => {
                 if self.edit_form.new_codex_config_override_input.is_empty() {
                     Ok(())
@@ -1258,8 +1257,6 @@ impl AgentProfilesTab {
             ActiveInput::ClaudeOutputFormat => &mut self.edit_form.claude_output_format,
             ActiveInput::ClaudeCustomFlags => &mut self.edit_form.claude_custom_flags,
             ActiveInput::CodexConfigProfile => &mut self.edit_form.codex_config_profile,
-            ActiveInput::CodexSandbox => &mut self.edit_form.codex_sandbox,
-            ActiveInput::CodexApprovalPolicy => &mut self.edit_form.codex_approval_policy,
             ActiveInput::CodexCustomFlags => &mut self.edit_form.codex_custom_flags,
             // `handle_key_down` early-exits when `active_input` is `None`,
             // so this arm can only be reached from a future call site that
@@ -1410,6 +1407,7 @@ impl AgentProfilesTab {
         let name = profile.name.clone();
         let description = profile.description.clone();
         let is_default = profile.is_default;
+        let is_high_trust = profile.skip_permissions;
 
         div()
             .id(SharedString::from(format!("profile-row-{}", profile.id)))
@@ -1431,18 +1429,38 @@ impl AgentProfilesTab {
                             .text_color(theme::text_primary())
                             .child(name),
                     )
-                    .when(is_default, |s| {
-                        s.child(
-                            div()
-                                .px(px(4.0))
-                                .py(px(1.0))
-                                .rounded(px(3.0))
-                                .bg(theme::accent())
-                                .text_size(px(9.0))
-                                .text_color(theme::text_primary())
-                                .child("default"),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .when(is_high_trust, |s| {
+                                s.child(
+                                    div()
+                                        .px(px(4.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .bg(theme::warning_bg())
+                                        .border_1()
+                                        .border_color(theme::warning())
+                                        .text_size(px(9.0))
+                                        .text_color(theme::warning())
+                                        .child("high trust"),
+                                )
+                            })
+                            .when(is_default, |s| {
+                                s.child(
+                                    div()
+                                        .px(px(4.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .bg(theme::accent())
+                                        .text_size(px(9.0))
+                                        .text_color(theme::text_primary())
+                                        .child("default"),
+                                )
+                            }),
+                    ),
             )
             .when(description.is_some(), |s| {
                 s.child(
@@ -1603,6 +1621,9 @@ impl AgentProfilesTab {
                 cx.notify();
             }),
         ));
+        if self.edit_form.skip_permissions {
+            body = body.child(Self::render_high_trust_warning());
+        }
 
         // --- Tools ---------------------------------------------------------
         body = body.child(Self::render_section_header("Tools"));
@@ -1766,8 +1787,6 @@ impl AgentProfilesTab {
                                 this.field_errors.remove(&ActiveInput::ClaudeOutputFormat);
                                 this.field_errors.remove(&ActiveInput::ClaudeCustomFlags);
                                 this.field_errors.remove(&ActiveInput::CodexConfigProfile);
-                                this.field_errors.remove(&ActiveInput::CodexSandbox);
-                                this.field_errors.remove(&ActiveInput::CodexApprovalPolicy);
                                 this.field_errors
                                     .remove(&ActiveInput::NewCodexConfigOverride);
                                 this.field_errors.remove(&ActiveInput::CodexCustomFlags);
@@ -1996,6 +2015,107 @@ impl AgentProfilesTab {
             wrapper = wrapper.child(div().pl(px(22.0)).child(Self::render_hint(h)));
         }
         wrapper.into_any_element()
+    }
+
+    fn render_choice_selector(
+        &self,
+        label: &str,
+        hint: &str,
+        current_value: &str,
+        options: &'static [(&'static str, &'static str)],
+        set_value: fn(&mut EditForm, String),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut picker = div().flex().flex_wrap().gap(px(6.0));
+        let current_is_known = options.iter().any(|(value, _)| *value == current_value);
+
+        for (value, option_label) in options {
+            let value = (*value).to_string();
+            let is_active = value == current_value;
+            picker = picker.child(
+                div()
+                    .id(SharedString::from(format!("choice-{label}-{value}")))
+                    .cursor_pointer()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(if is_active {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    })
+                    .text_size(px(12.0))
+                    .when(is_active, |s| {
+                        s.bg(theme::accent()).text_color(theme::text_primary())
+                    })
+                    .when(!is_active, |s| {
+                        s.bg(theme::bg_tertiary())
+                            .text_color(theme::text_secondary())
+                    })
+                    .hover(|s| s.text_color(theme::text_primary()))
+                    .child((*option_label).to_string())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                        set_value(&mut this.edit_form, value.clone());
+                        this.active_input = ActiveInput::None;
+                        this.mark_dirty();
+                        cx.notify();
+                    })),
+            );
+        }
+
+        if !current_value.is_empty() && !current_is_known {
+            picker = picker.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(theme::error())
+                    .bg(theme::bg_tertiary())
+                    .text_size(px(12.0))
+                    .text_color(theme::error())
+                    .child(format!("Unknown: {current_value}")),
+            );
+        }
+
+        let mut wrapper = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(Self::render_label(label, false))
+            .child(picker);
+        if !hint.is_empty() {
+            wrapper = wrapper.child(Self::render_hint(hint));
+        }
+        if !current_value.is_empty() && !current_is_known {
+            wrapper = wrapper.child(Self::render_field_error(
+                "Select one of the supported values before saving.",
+            ));
+        }
+        wrapper.into_any_element()
+    }
+
+    fn render_high_trust_warning() -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(theme::warning())
+            .bg(theme::warning_bg())
+            .text_size(px(11.0))
+            .text_color(theme::warning())
+            .child(
+                icon(Icon::AlertTriangle)
+                    .size(px(12.0))
+                    .text_color(theme::warning()),
+            )
+            .child("High trust: approvals and sandboxing may be bypassed for this launcher.")
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2353,21 +2473,21 @@ impl AgentProfilesTab {
             cx,
         ));
 
-        section = section.child(self.render_text_input(
+        section = section.child(self.render_choice_selector(
             "Sandbox",
-            false,
-            "Optional: read-only, workspace-write, or danger-full-access.",
+            "Controls Codex filesystem/network sandboxing. Use danger-full-access only for trusted worktrees.",
             &self.edit_form.codex_sandbox,
-            ActiveInput::CodexSandbox,
+            CODEX_SANDBOX_OPTIONS,
+            |form, value| form.codex_sandbox = value,
             cx,
         ));
 
-        section = section.child(self.render_text_input(
+        section = section.child(self.render_choice_selector(
             "Approval policy",
-            false,
-            "Optional: untrusted, on-failure, on-request, or never.",
+            "Controls when Codex asks before privileged actions.",
             &self.edit_form.codex_approval_policy,
-            ActiveInput::CodexApprovalPolicy,
+            CODEX_APPROVAL_POLICY_OPTIONS,
+            |form, value| form.codex_approval_policy = value,
             cx,
         ));
 
@@ -2802,6 +2922,21 @@ mod tests {
             settings.get("custom_flags").and_then(|v| v.as_str()),
             Some("--enable experimental")
         );
+    }
+
+    #[core::prelude::rust_2021::test]
+    fn codex_selector_options_match_validation_allowlists() {
+        for (value, _) in CODEX_SANDBOX_OPTIONS {
+            if !value.is_empty() {
+                validate_codex_sandbox(value).expect("selector sandbox value must be valid");
+            }
+        }
+        for (value, _) in CODEX_APPROVAL_POLICY_OPTIONS {
+            if !value.is_empty() {
+                validate_codex_approval_policy(value)
+                    .expect("selector approval value must be valid");
+            }
+        }
     }
 
     #[core::prelude::rust_2021::test]

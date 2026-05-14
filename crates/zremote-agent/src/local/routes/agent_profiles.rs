@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(resp.status(), HttpStatus::OK);
         let json = read_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 6);
         assert!(
             arr.iter()
                 .any(|row| row["agent_kind"] == "claude" && row["is_default"] == true)
@@ -299,7 +299,7 @@ mod tests {
 
         // Round-trip through list to confirm persistence
         let profiles = q::list_profiles(&state.db).await.unwrap();
-        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles.len(), 7);
     }
 
     #[tokio::test]

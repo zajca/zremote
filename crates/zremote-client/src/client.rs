@@ -5,13 +5,13 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use crate::error::ApiError;
 use crate::terminal::TerminalSession;
 use crate::types::{
-    ActionsResponse, AddProjectRequest, AgentKindInfo, AgentProfile, AgenticLoop,
-    ClaudeSessionInfo, ClaudeTask, ConfigValue, CreateAgentProfileRequest, CreateClaudeTaskRequest,
-    CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest, DirectoryEntry,
-    ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase, ListClaudeTasksFilter,
-    ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project, ProjectSettings,
-    ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest, Session,
-    SessionPreviewsResponse, SetConfigRequest, StartAgentRequest, StartAgentResponse,
+    ActionsResponse, AddProjectRequest, AgentCapabilityInfo, AgentKindInfo, AgentProfile,
+    AgenticLoop, ClaudeSessionInfo, ClaudeTask, ConfigValue, CreateAgentProfileRequest,
+    CreateClaudeTaskRequest, CreateSessionRequest, CreateSessionResponse, CreateWorktreeRequest,
+    DirectoryEntry, ExtractRequest, ExtractedMemory, Host, IndexRequest, KnowledgeBase,
+    ListClaudeTasksFilter, ListLoopsFilter, Memory, ModeResponse, PreviewSnapshot, Project,
+    ProjectSettings, ResumeClaudeTaskRequest, SearchRequest, SearchResult, ServiceControlRequest,
+    Session, SessionPreviewsResponse, SetConfigRequest, StartAgentRequest, StartAgentResponse,
     UpdateAgentProfileRequest, UpdateHostRequest, UpdateMemoryRequest, UpdateProjectRequest,
     UpdateSessionRequest,
 };
@@ -214,6 +214,24 @@ impl ApiClient {
             .client
             .get(format!(
                 "{}/api/hosts/{}",
+                self.base_url,
+                encode_path(host_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Probe Codex capability on a host.
+    pub async fn get_host_codex_capability(
+        &self,
+        host_id: &str,
+    ) -> Result<AgentCapabilityInfo, ApiError> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/hosts/{}/agent-capabilities/codex",
                 self.base_url,
                 encode_path(host_id)
             ))

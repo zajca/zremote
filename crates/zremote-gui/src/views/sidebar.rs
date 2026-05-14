@@ -102,6 +102,8 @@ pub struct SidebarView {
     /// re-clicking a host while its task is still alive replaces (cancels)
     /// the previous one instead of leaving a parallel future running.
     scan_http_tasks: HashMap<String, Task<()>>,
+    /// Project id whose inline agent profile launcher menu is currently open.
+    agent_menu_project_id: Option<String>,
 }
 
 /// Per-host project rescan progress. `total` is `0` until the agent has
@@ -140,6 +142,41 @@ impl SidebarView {
         self.agent_profiles
             .iter()
             .find(|p| p.agent_kind == agent_kind && p.is_default)
+    }
+
+    fn kind_display_name(&self, agent_kind: &str) -> String {
+        self.agent_kinds
+            .iter()
+            .find(|k| k.kind == agent_kind)
+            .map(|k| k.display_name.clone())
+            .unwrap_or_else(|| agent_kind.to_string())
+    }
+
+    fn sorted_agent_profiles(&self) -> Vec<AgentProfile> {
+        let mut profiles = self.agent_profiles.iter().cloned().collect::<Vec<_>>();
+        profiles.sort_by(|a, b| {
+            b.is_default
+                .cmp(&a.is_default)
+                .then_with(|| {
+                    self.kind_display_name(&a.agent_kind)
+                        .cmp(&self.kind_display_name(&b.agent_kind))
+                })
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        profiles
+    }
+
+    fn is_agent_menu_open(&self, project_id: &str) -> bool {
+        self.agent_menu_project_id.as_deref() == Some(project_id)
+    }
+
+    fn toggle_agent_menu(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if self.is_agent_menu_open(project_id) {
+            self.agent_menu_project_id = None;
+        } else {
+            self.agent_menu_project_id = Some(project_id.to_string());
+        }
+        cx.notify();
     }
 
     pub fn selected_session_id(&self) -> Option<&str> {
@@ -395,6 +432,7 @@ impl SidebarView {
             preview_snapshots: HashMap::new(),
             scan_progress: HashMap::new(),
             scan_http_tasks: HashMap::new(),
+            agent_menu_project_id: None,
         };
         view.load_data(cx);
         view.poll_previews(cx);
@@ -1499,16 +1537,24 @@ impl SidebarView {
         project_id: &str,
         host_id: &str,
         project_path: &str,
-        profile: &AgentProfile,
-        kind_display: String,
+        profiles: &[AgentProfile],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let project_id = project_id.to_string();
         let host_id = host_id.to_string();
         let project_path = project_path.to_string();
-        let profile_id = profile.id.clone();
-        let profile_name = profile.name.clone();
-        let tooltip_text = format!("Start {kind_display} ({profile_name})");
+        let profile_count = profiles.len();
+        let profile_id = profiles.first().map(|p| p.id.clone());
+        let tooltip_text = if profile_count == 1 {
+            let profile = &profiles[0];
+            format!(
+                "Start {} ({})",
+                self.kind_display_name(&profile.agent_kind),
+                profile.name
+            )
+        } else {
+            "Start agent".to_string()
+        };
 
         div()
             .invisible()
@@ -1532,9 +1578,110 @@ impl SidebarView {
                         cx.new(|_| SidebarTextTooltip(tooltip_text.clone())).into()
                     })
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.launch_agent_for_project(&host_id, &project_path, &profile_id, cx);
+                        cx.stop_propagation();
+                        if profile_count == 1 {
+                            if let Some(profile_id) = profile_id.as_deref() {
+                                this.launch_agent_for_project(
+                                    &host_id,
+                                    &project_path,
+                                    profile_id,
+                                    cx,
+                                );
+                            }
+                        } else {
+                            this.toggle_agent_menu(&project_id, cx);
+                        }
                     })),
             )
+    }
+
+    fn render_project_agent_menu(
+        &self,
+        project_id: &str,
+        host_id: &str,
+        project_path: &str,
+        indent: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.is_agent_menu_open(project_id) {
+            return None;
+        }
+
+        let profiles = self.sorted_agent_profiles();
+        if profiles.len() <= 1 {
+            return None;
+        }
+
+        let mut menu = div()
+            .ml(px(indent + 22.0))
+            .mr(px(8.0))
+            .my(px(2.0))
+            .py(px(3.0))
+            .border_1()
+            .border_color(theme::border())
+            .rounded(px(4.0))
+            .bg(theme::bg_secondary())
+            .flex()
+            .flex_col();
+
+        for profile in profiles {
+            let profile_id = profile.id.clone();
+            let host_id = host_id.to_string();
+            let project_path = project_path.to_string();
+            let row_id = SharedString::from(format!("agent-menu-{project_id}-{profile_id}"));
+            let label = format!(
+                "{} / {}",
+                self.kind_display_name(&profile.agent_kind),
+                profile.name
+            );
+            let description = profile.description.clone();
+            let mut item = div()
+                .id(row_id)
+                .px(px(8.0))
+                .py(px(5.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::bg_tertiary()))
+                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.agent_menu_project_id = None;
+                    this.launch_agent_for_project(&host_id, &project_path, &profile_id, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme::text_primary())
+                                .truncate()
+                                .child(label),
+                        )
+                        .when(profile.is_default, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme::text_tertiary())
+                                    .child("Default"),
+                            )
+                        }),
+                );
+            if let Some(description) = description {
+                item = item.child(
+                    div()
+                        .pt(px(1.0))
+                        .text_size(px(10.0))
+                        .text_color(theme::text_tertiary())
+                        .truncate()
+                        .child(description),
+                );
+            }
+            menu = menu.child(item);
+        }
+
+        Some(menu.into_any_element())
     }
 
     /// Hover-visible "New worktree" button rendered only on parent project
@@ -1611,6 +1758,15 @@ impl SidebarView {
         );
 
         let mut container = div().flex().flex_col().w_full().child(row);
+        if let Some(menu) = self.render_project_agent_menu(
+            &project_id,
+            host_id,
+            &node.project.path,
+            indents.project,
+            cx,
+        ) {
+            container = container.child(menu);
+        }
 
         // Parent's own sessions appear directly below the parent row.
         for session in &node.sessions {
@@ -1653,6 +1809,15 @@ impl SidebarView {
             cx,
         );
         let mut container = div().flex().flex_col().w_full().child(row);
+        if let Some(menu) = self.render_project_agent_menu(
+            &project_id,
+            host_id,
+            &node.project.path,
+            indents.worktree,
+            cx,
+        ) {
+            container = container.child(menu);
+        }
         for session in &node.sessions {
             container = container.child(
                 self.render_session_item(session, host_id, px(indents.worktree_session), cx)
@@ -1844,9 +2009,9 @@ impl SidebarView {
         )
     }
 
-    /// Right-side action cluster for a project row: agent launcher (if a
-    /// default Claude profile exists), the "New session" button, and, for
-    /// parent projects, a "New worktree" hover action.
+    /// Right-side action cluster for a project row: agent launcher (if any
+    /// profile exists), the "New session" button, and, for parent projects,
+    /// a "New worktree" hover action.
     fn render_row_actions(
         &self,
         project_id: &str,
@@ -1856,6 +2021,7 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_parent = matches!(kind, RowKind::Parent { .. });
+        let profiles = self.sorted_agent_profiles();
         div()
             .flex()
             .items_center()
@@ -1863,25 +2029,15 @@ impl SidebarView {
             .when(is_parent, |el| {
                 el.child(self.render_new_worktree_button(project_id, host_id, cx))
             })
-            .when_some(
-                self.default_profile_for_kind("claude").cloned(),
-                |el, profile| {
-                    let kind_display = self
-                        .agent_kinds
-                        .iter()
-                        .find(|k| k.kind == profile.agent_kind)
-                        .map(|k| k.display_name.clone())
-                        .unwrap_or_else(|| "Claude".to_string());
-                    el.child(self.render_project_agent_button(
-                        project_id,
-                        host_id,
-                        project_path,
-                        &profile,
-                        kind_display,
-                        cx,
-                    ))
-                },
-            )
+            .when(!profiles.is_empty(), |el| {
+                el.child(self.render_project_agent_button(
+                    project_id,
+                    host_id,
+                    project_path,
+                    &profiles,
+                    cx,
+                ))
+            })
             .child(self.render_project_new_session_button(project_id, host_id, project_path, cx))
     }
 
@@ -1893,6 +2049,7 @@ impl SidebarView {
     /// `SessionSelected` event arrives and swaps the terminal once the
     /// backend responds.
     fn on_project_row_click(&mut self, project_id: &str, host_id: &str, cx: &mut Context<Self>) {
+        self.agent_menu_project_id = None;
         self.set_selected_project(Some(project_id.to_string()), Some(host_id.to_string()), cx);
 
         // Pick the most recently created active session for this project;

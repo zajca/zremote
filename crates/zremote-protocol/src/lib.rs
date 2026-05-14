@@ -11,8 +11,8 @@ mod terminal;
 
 pub use agentic::{AgenticAgentMessage, AgenticStatus};
 pub use agents::{
-    AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo, SUPPORTED_KINDS,
-    supported_kinds,
+    AgentCapabilityInfo, AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo,
+    SUPPORTED_KINDS, supported_kinds,
 };
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, NodeStatus, ServerEvent, SessionInfo};
