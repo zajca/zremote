@@ -170,7 +170,10 @@ pub fn run(config: GuiConfig) {
         });
 }
 
-fn window_options(restored_width: Option<f32>, restored_height: Option<f32>) -> WindowOptions {
+pub(crate) fn window_options(
+    restored_width: Option<f32>,
+    restored_height: Option<f32>,
+) -> WindowOptions {
     let width = restored_width.unwrap_or(1200.0);
     let height = restored_height.unwrap_or(800.0);
     WindowOptions {

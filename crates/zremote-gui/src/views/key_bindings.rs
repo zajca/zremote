@@ -64,6 +64,7 @@ pub enum KeyAction {
     OpenHelp,
     CloseOverlay,
     ToggleActivityPanel,
+    OpenSessionInNewWindow,
     /// Open the new-worktree creation modal for the current-parent context.
     /// Phase 2 ships a single-step shortcut; the D4 leader chord (`Cmd+K, n`)
     /// lands once the leader dispatch infrastructure is in place (Phase 3).
@@ -139,6 +140,14 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::ToggleActivityPanel,
         label: "Ctrl+Shift+I",
         description: "Toggle activity panel",
+    },
+    KeyBinding {
+        key: "o",
+        modifiers: KeyModifiers::new(true, true, false),
+        scope: KeyScope::Global,
+        action: KeyAction::OpenSessionInNewWindow,
+        label: "Ctrl+Shift+O",
+        description: "Open session in new window",
     },
     KeyBinding {
         key: "n",
@@ -295,6 +304,12 @@ mod tests {
     fn dispatch_global_ctrl_i() {
         let action = dispatch_global_key("i", true, true, false);
         assert_eq!(action, Some(KeyAction::ToggleActivityPanel));
+    }
+
+    #[test]
+    fn dispatch_global_ctrl_shift_o() {
+        let action = dispatch_global_key("o", true, true, false);
+        assert_eq!(action, Some(KeyAction::OpenSessionInNewWindow));
     }
 
     #[test]

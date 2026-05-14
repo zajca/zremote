@@ -1067,6 +1067,7 @@ impl MainView {
             }
             KeyAction::OpenHelp => self.open_help_modal(cx),
             KeyAction::OpenNewWorktree => self.trigger_new_worktree_for_selection(cx),
+            KeyAction::OpenSessionInNewWindow => self.open_current_session_in_new_window(cx),
             KeyAction::ToggleActivityPanel => {
                 if let Some(terminal) = &self.terminal {
                     terminal.update(cx, |panel, cx| {
@@ -1088,6 +1089,62 @@ impl MainView {
                     self.close_settings_modal(cx);
                 }
             }
+        }
+    }
+
+    fn open_current_session_in_new_window(&self, cx: &mut Context<Self>) {
+        let Some(terminal) = &self.terminal else {
+            self.show_toast(
+                "No active session to open",
+                ToastLevel::Info,
+                None,
+                ToastContext::default(),
+                cx,
+            );
+            return;
+        };
+        let session_id = terminal.read(cx).session_id().to_string();
+        let host_id = self
+            .current_host_id
+            .clone()
+            .or_else(|| {
+                self.sidebar
+                    .read(cx)
+                    .sessions_rc()
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .map(|s| s.host_id.clone())
+            })
+            .unwrap_or_default();
+        self.open_session_in_new_window(session_id, host_id, cx);
+    }
+
+    fn open_session_in_new_window(
+        &self,
+        session_id: String,
+        host_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let ctx = self.resolve_toast_context(
+            Some(&session_id),
+            Some(&host_id),
+            None,
+            None,
+            None,
+            None,
+            cx,
+        );
+        if let Err(err) =
+            open_session_window(self.app_state.clone(), session_id.clone(), host_id, cx)
+        {
+            tracing::warn!(error = %err, session_id = %session_id, "failed to open session window");
+            self.show_toast(
+                "Failed to open session window",
+                ToastLevel::Error,
+                Some(Icon::AlertTriangle),
+                ctx,
+                cx,
+            );
         }
     }
 
@@ -1176,6 +1233,9 @@ impl MainView {
             TerminalPanelEvent::OpenNewWorktree => {
                 self.trigger_new_worktree_for_selection(cx);
             }
+            TerminalPanelEvent::OpenSessionInNewWindow => {
+                self.open_current_session_in_new_window(cx);
+            }
             TerminalPanelEvent::BridgeFailed { session_id } => {
                 tracing::info!(session_id = %session_id, "bridge failed, falling back to server WS");
                 if let Some(handle) = connect_terminal(&self.app_state, session_id, "", true) {
@@ -1227,6 +1287,12 @@ impl MainView {
             CommandPaletteEvent::CloseSession { session_id } => {
                 self.sidebar
                     .update(cx, |s, cx| s.close_session(session_id, cx));
+            }
+            CommandPaletteEvent::OpenSessionInNewWindow {
+                session_id,
+                host_id,
+            } => {
+                self.open_session_in_new_window(session_id.clone(), host_id.clone(), cx);
             }
             CommandPaletteEvent::OpenSearch => {
                 if let Some(terminal) = &self.terminal {
@@ -2415,6 +2481,130 @@ impl Render for MainView {
 
         root.child(self.toasts.clone())
     }
+}
+
+struct SessionWindow {
+    app_state: Arc<AppState>,
+    session_id: String,
+    host_id: String,
+    terminal: Option<Entity<TerminalPanel>>,
+}
+
+impl SessionWindow {
+    fn new(
+        app_state: Arc<AppState>,
+        session_id: String,
+        host_id: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let terminal = connect_terminal(&app_state, &session_id, &host_id, false).map(|handle| {
+            let tokio_handle = app_state.tokio_handle.clone();
+            let session_id_for_panel = session_id.clone();
+            let terminal = cx.new(|cx| {
+                TerminalPanel::new(
+                    session_id_for_panel,
+                    handle,
+                    &tokio_handle,
+                    app_state.mode.clone(),
+                    cx,
+                )
+            });
+            cx.subscribe(&terminal, Self::on_terminal_event).detach();
+            terminal
+        });
+
+        Self {
+            app_state,
+            session_id,
+            host_id,
+            terminal,
+        }
+    }
+
+    fn on_terminal_event(
+        &mut self,
+        terminal: Entity<TerminalPanel>,
+        event: &TerminalPanelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TerminalPanelEvent::BridgeFailed { session_id } => {
+                tracing::info!(session_id = %session_id, "bridge failed in session window, falling back to server WS");
+                if let Some(handle) = connect_terminal(&self.app_state, session_id, "", true) {
+                    terminal.update(cx, |panel, cx| {
+                        panel.reconnect(handle, &self.app_state.tokio_handle, cx);
+                    });
+                }
+            }
+            TerminalPanelEvent::OpenSessionInNewWindow => {
+                let _ = open_session_window(
+                    self.app_state.clone(),
+                    self.session_id.clone(),
+                    self.host_id.clone(),
+                    cx,
+                )
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        session_id = %self.session_id,
+                        "failed to duplicate session window"
+                    );
+                });
+            }
+            TerminalPanelEvent::ActivityPanelToggled(visible) => {
+                if let Ok(mut p) = self.app_state.persistence.lock() {
+                    p.update(|s| s.activity_panel_visible = *visible);
+                }
+            }
+            TerminalPanelEvent::OpenCommandPalette { .. }
+            | TerminalPanelEvent::OpenSessionSwitcher
+            | TerminalPanelEvent::OpenHelp
+            | TerminalPanelEvent::OpenNewWorktree
+            | TerminalPanelEvent::TitleChanged { .. } => {}
+        }
+    }
+}
+
+impl Render for SessionWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = div().size_full().flex().flex_col().bg(theme::terminal_bg());
+        if let Some(terminal) = &self.terminal {
+            root = root.child(terminal.clone());
+        } else {
+            root = root.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme::error())
+                    .text_size(px(13.0))
+                    .child("Failed to open session"),
+            );
+        }
+        root
+    }
+}
+
+fn open_session_window(
+    app_state: Arc<AppState>,
+    session_id: String,
+    host_id: String,
+    cx: &mut App,
+) -> Result<WindowHandle<SessionWindow>, String> {
+    let title = format!(
+        "ZRemote - {}",
+        if session_id.len() > 8 {
+            &session_id[..8]
+        } else {
+            &session_id
+        }
+    );
+    cx.open_window(crate::window_options(None, None), move |window, cx| {
+        window.set_window_title(&title);
+        cx.new(|cx| SessionWindow::new(app_state, session_id, host_id, cx))
+    })
+    .map_err(|err| err.to_string())
 }
 
 /// Establish a terminal connection for the given session.

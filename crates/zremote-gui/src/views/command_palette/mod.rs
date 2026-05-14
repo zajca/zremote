@@ -124,6 +124,10 @@ pub enum CommandPaletteEvent {
     CloseSession {
         session_id: String,
     },
+    OpenSessionInNewWindow {
+        session_id: String,
+        host_id: String,
+    },
     OpenSearch,
     ToggleProjectPin {
         project_id: String,
@@ -1137,6 +1141,7 @@ impl CommandPalette {
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal
                 }
+                PaletteAction::OpenSessionInNewWindow { .. } => Icon::SquareTerminal,
                 PaletteAction::ToggleProjectPin {
                     currently_pinned, ..
                 } => {
@@ -1359,6 +1364,7 @@ impl CommandPalette {
             PaletteAction::SearchInTerminal => Some("Ctrl+F"),
             PaletteAction::NewSession => Some("Ctrl+N"),
             PaletteAction::SwitchSession => Some("Ctrl+Tab"),
+            PaletteAction::OpenSessionInNewWindow { .. } => Some("Ctrl+Shift+O"),
             _ => None,
         };
         let is_recent = self
@@ -2137,6 +2143,7 @@ impl CommandPalette {
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal
                 }
+                PaletteAction::OpenSessionInNewWindow { .. } => Icon::SquareTerminal,
                 PaletteAction::CloseSession { .. } | PaletteAction::CloseCurrentSession { .. } => {
                     Icon::X
                 }
@@ -2237,6 +2244,7 @@ impl CommandPalette {
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal
                 }
+                PaletteAction::OpenSessionInNewWindow { .. } => Icon::SquareTerminal,
                 PaletteAction::ToggleProjectPin {
                     currently_pinned, ..
                 } => {

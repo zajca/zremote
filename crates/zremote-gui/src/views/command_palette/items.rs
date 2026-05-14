@@ -342,6 +342,22 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
         });
     }
 
+    if let Some(session) = snapshot
+        .active_session_id
+        .as_ref()
+        .and_then(|sid| snapshot.sessions.iter().find(|s| &s.id == sid))
+    {
+        items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::OpenSessionInNewWindow {
+                session_id: session.id.clone(),
+                host_id: session.host_id.clone(),
+            }),
+            title: "Open Current Session in New Window".to_string(),
+            subtitle: "Ctrl+Shift+O".to_string(),
+            selectable: true,
+        });
+    }
+
     // Switch Session action (useful when 2+ active sessions exist)
     let active_count = snapshot
         .sessions

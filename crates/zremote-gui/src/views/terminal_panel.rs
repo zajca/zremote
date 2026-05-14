@@ -1269,6 +1269,7 @@ pub enum TerminalPanelEvent {
     OpenSessionSwitcher,
     OpenHelp,
     OpenNewWorktree,
+    OpenSessionInNewWindow,
     BridgeFailed {
         session_id: String,
     },
@@ -1694,7 +1695,7 @@ impl TerminalPanel {
         }
     }
 
-    fn render_connection_badge(&self) -> impl IntoElement {
+    fn render_connection_badge(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_bridge = self.handle.is_bridge();
         let tooltip_text = if is_bridge {
             "Direct bridge to agent (bypasses server relay)".to_string()
@@ -1736,6 +1737,26 @@ impl TerminalPanel {
             } else {
                 theme::success()
             }))
+            .child(
+                div()
+                    .id("open-session-new-window")
+                    .cursor_pointer()
+                    .p(px(2.0))
+                    .rounded(px(4.0))
+                    .hover(|s| s.bg(theme::bg_tertiary()))
+                    .on_click(cx.listener(|_this, _, _, cx| {
+                        cx.emit(TerminalPanelEvent::OpenSessionInNewWindow);
+                    }))
+                    .child(
+                        icon(Icon::SquareTerminal)
+                            .size(px(10.0))
+                            .text_color(theme::text_tertiary()),
+                    )
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| ConnectionTooltip("Open session in new window".to_string()))
+                            .into()
+                    }),
+            )
             .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into())
     }
 
@@ -1872,6 +1893,9 @@ impl Render for TerminalPanel {
                                     }
                                     KeyAction::ToggleActivityPanel => {
                                         this.toggle_activity_panel(cx);
+                                    }
+                                    KeyAction::OpenSessionInNewWindow => {
+                                        cx.emit(TerminalPanelEvent::OpenSessionInNewWindow);
                                     }
                                     KeyAction::OpenNewWorktree => {
                                         cx.emit(TerminalPanelEvent::OpenNewWorktree);
@@ -2432,7 +2456,7 @@ impl Render for TerminalPanel {
             content = content.child(cc_badge);
         }
 
-        content = content.child(self.render_connection_badge());
+        content = content.child(self.render_connection_badge(cx));
 
         // Horizontal split: terminal (flex-1) | activity panel (300px)
         let mut h_split = div().flex().flex_row().flex_1().overflow_hidden();
