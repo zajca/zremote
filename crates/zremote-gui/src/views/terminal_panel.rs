@@ -770,6 +770,13 @@ impl TerminalPanel {
 
         /// Coalescing window for GUI repaints (~60 Hz, matches vsync).
         const REPAINT_COALESCE_MS: u64 = 16;
+        /// Maximum bytes to feed to the terminal emulator while holding the
+        /// terminal mutex. Large attach scrollback used to decode in one lock,
+        /// which could leave the first GUI paint blocked on a black background.
+        const MAX_VTE_BYTES_PER_LOCK: usize = 64 * 1024;
+        /// During replay, allow occasional intermediate paints for very large
+        /// histories instead of waiting for ScrollbackEnd.
+        const REPLAY_REPAINT_BYTES: usize = 512 * 1024;
 
         // Unified channel for GPUI thread: either a repaint signal or a control event.
         enum GuiSignal {
@@ -786,6 +793,8 @@ impl TerminalPanel {
             let mut processor: Processor = Processor::new();
             let mut needs_repaint = false;
             let mut coalesce_deadline: Option<tokio::time::Instant> = None;
+            let mut replaying_scrollback = false;
+            let mut replay_bytes_since_repaint = 0usize;
 
             loop {
                 let flush_sleep = async {
@@ -800,8 +809,19 @@ impl TerminalPanel {
                         match event {
                             Ok(TerminalEvent::Output(bytes)) => {
                                 let clean = strip_cpr_responses(&bytes);
-                                if let Ok(mut t) = term.lock() {
-                                    processor.advance(&mut *t, &clean);
+                                for chunk in clean.chunks(MAX_VTE_BYTES_PER_LOCK) {
+                                    if let Ok(mut t) = term.lock() {
+                                        processor.advance(&mut *t, chunk);
+                                    }
+                                    if replaying_scrollback {
+                                        replay_bytes_since_repaint += chunk.len();
+                                        if replay_bytes_since_repaint >= REPLAY_REPAINT_BYTES {
+                                            content_generation.fetch_add(1, Ordering::Relaxed);
+                                            let _ = gui_tx.try_send(GuiSignal::Repaint);
+                                            replay_bytes_since_repaint = 0;
+                                            tokio::task::yield_now().await;
+                                        }
+                                    }
                                 }
                                 if let Some(change) = pty_write_listener.take_pending_title() {
                                     let title = match change {
@@ -819,6 +839,8 @@ impl TerminalPanel {
                                 }
                             }
                             Ok(TerminalEvent::ScrollbackStart { cols: sb_cols, rows: sb_rows }) => {
+                                replaying_scrollback = true;
+                                replay_bytes_since_repaint = 0;
                                 pty_write_listener.set_replaying(true);
                                 if let Ok(mut t) = term.lock() {
                                     let size = if sb_cols > 0 && sb_rows > 0 {
@@ -845,6 +867,8 @@ impl TerminalPanel {
                             }
                             Ok(other) => {
                                 if matches!(other, TerminalEvent::ScrollbackEnd { .. }) {
+                                    replaying_scrollback = false;
+                                    replay_bytes_since_repaint = 0;
                                     pty_write_listener.set_replaying(false);
                                 }
                                 // Non-output events: flush pending repaint, then forward.

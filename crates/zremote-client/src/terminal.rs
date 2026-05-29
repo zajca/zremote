@@ -17,6 +17,10 @@ const MAX_TERMINAL_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Maximum cumulative scrollback buffer size (100MB).
 const MAX_SCROLLBACK_BUFFER_SIZE: usize = 100 * 1024 * 1024;
 
+/// Flush replayed scrollback to consumers in bounded chunks so GUI attach does
+/// not wait for the entire replay before it can start decoding and painting.
+const SCROLLBACK_OUTPUT_FLUSH_SIZE: usize = 256 * 1024;
+
 /// Handle for interacting with a terminal WebSocket connection.
 /// Dropping this handle cancels the background tasks.
 pub struct TerminalSession {
@@ -202,7 +206,7 @@ async fn run_terminal_ws(
 
     // Reader: parse WS messages and forward to output channel.
     // Binary frames carry terminal output (no base64/JSON overhead).
-    // During scrollback replay, chunks are buffered and delivered as one Output event.
+    // During scrollback replay, chunks are coalesced into bounded Output events.
     let mut scrollback_buf: Vec<u8> = Vec::new();
     let mut in_scrollback = false;
     let mut scrollback_truncated = false;
@@ -235,6 +239,15 @@ async fn run_terminal_ws(
                                         scrollback_buf.clear();
                                     } else {
                                         scrollback_buf.extend_from_slice(bytes);
+                                        if scrollback_buf.len() >= SCROLLBACK_OUTPUT_FLUSH_SIZE {
+                                            let buf = std::mem::take(&mut scrollback_buf);
+                                            if output_tx
+                                                .send(TerminalEvent::Output(buf))
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
                                     }
                                 } else if output_tx
                                     .send(TerminalEvent::Output(bytes.to_vec()))
@@ -266,6 +279,15 @@ async fn run_terminal_ws(
                                         scrollback_buf.clear();
                                     } else {
                                         scrollback_buf.extend_from_slice(bytes);
+                                        if scrollback_buf.len() >= SCROLLBACK_OUTPUT_FLUSH_SIZE {
+                                            let buf = std::mem::take(&mut scrollback_buf);
+                                            if output_tx
+                                                .send(TerminalEvent::Output(buf))
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
                                     }
                                 } else if output_tx
                                     .send(TerminalEvent::PaneOutput {
