@@ -64,6 +64,7 @@ fn event_type_name(event: &ServerEvent) -> &'static str {
         ServerEvent::LoopStatusChanged { .. } => "agentic_loop_state_update",
         ServerEvent::LoopEnded { .. } => "agentic_loop_ended",
         ServerEvent::LoopMetricsUpdated { .. } => "agentic_loop_metrics_update",
+        ServerEvent::AgentStateChanged { .. } => "agent_state_changed",
         ServerEvent::ProjectsUpdated { .. } => "projects_updated",
         ServerEvent::ScanStarted { .. } => "scan_started",
         ServerEvent::ScanProgress { .. } => "scan_progress",

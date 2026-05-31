@@ -9,7 +9,10 @@ pub mod project;
 pub mod status;
 mod terminal;
 
-pub use agentic::{AgenticAgentMessage, AgenticStatus};
+pub use agentic::{
+    AgentInputRequest, AgentInputRequestKind, AgentRuntimeStatus, AgenticAgentMessage,
+    AgenticStatus,
+};
 pub use agents::{
     AgentCapabilityInfo, AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo,
     SUPPORTED_KINDS, supported_kinds,

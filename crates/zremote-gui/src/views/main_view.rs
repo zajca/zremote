@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use gpui::*;
 
-use zremote_client::{AgenticStatus, ClientEvent, Project, ServerEvent, Session};
+use zremote_client::{
+    AgentInputRequestKind, AgentRuntimeStatus, AgenticStatus, ClientEvent, Project, ServerEvent,
+    Session,
+};
 
 use crate::views::sidebar::CcMetrics;
 
@@ -35,6 +38,15 @@ use crate::views::worktree_create_modal::{WorktreeCreateModal, WorktreeCreateMod
 /// Suppresses noise from brief pauses between tool calls — a genuine wait
 /// (permission prompt, end-of-turn) persists well beyond this window.
 const WAITING_DEBOUNCE: Duration = Duration::from_secs(3);
+
+fn runtime_status_to_agentic(status: AgentRuntimeStatus) -> AgenticStatus {
+    match status {
+        AgentRuntimeStatus::Idle => AgenticStatus::Idle,
+        AgentRuntimeStatus::Working => AgenticStatus::Working,
+        AgentRuntimeStatus::WaitingForInput => AgenticStatus::WaitingForInput,
+        AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
+    }
+}
 
 #[derive(Default)]
 struct TopBarContext {
@@ -256,23 +268,6 @@ impl MainView {
             )
         });
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
-
-        // Restore activity panel visibility from persistence
-        let visible = self
-            .app_state
-            .persistence
-            .lock()
-            .is_ok_and(|p| p.state().activity_panel_visible);
-        if visible {
-            terminal.update(cx, |panel, cx| {
-                panel.set_activity_panel_visible(true, cx);
-            });
-            // Only load historical nodes when the panel will actually be shown.
-            let api = self.app_state.api.clone();
-            terminal.update(cx, |panel, cx| {
-                panel.load_execution_nodes(api, cx);
-            });
-        }
 
         self.terminal = Some(terminal);
         cx.notify();
@@ -636,7 +631,6 @@ impl MainView {
                     rate_limit_5h_pct: *rate_limit_5h_pct,
                     rate_limit_7d_pct: *rate_limit_7d_pct,
                 });
-                panel.sync_activity_metrics(cx);
                 cx.notify();
             });
         }
@@ -648,15 +642,8 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        let was_idle = panel.is_cc_idle();
                         panel.update_cc_status(Some(loop_info.status));
                         panel.update_cc_task_name(loop_info.task_name.clone());
-                        panel.sync_activity_status(cx);
-                        panel.sync_activity_task_name(cx);
-                        // Auto-show activity panel only on first detection (idle -> active).
-                        if was_idle {
-                            panel.show_activity_panel(cx);
-                        }
                         cx.notify();
                     });
                 }
@@ -668,8 +655,24 @@ impl MainView {
                     terminal.update(cx, |panel, cx| {
                         panel.update_cc_status(Some(loop_info.status));
                         panel.update_cc_task_name(loop_info.task_name.clone());
-                        panel.sync_activity_status(cx);
-                        panel.sync_activity_task_name(cx);
+                        cx.notify();
+                    });
+                }
+            }
+            ServerEvent::AgentStateChanged {
+                session_id,
+                status,
+                task_name,
+                ..
+            } => {
+                if let Some(terminal) = &self.terminal
+                    && terminal.read(cx).session_id() == session_id.as_str()
+                {
+                    terminal.update(cx, |panel, cx| {
+                        panel.update_cc_status(Some(runtime_status_to_agentic(*status)));
+                        if task_name.is_some() {
+                            panel.update_cc_task_name(task_name.clone());
+                        }
                         cx.notify();
                     });
                 }
@@ -679,79 +682,242 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        panel.clear_cc_state_with_cx(cx);
+                        panel.clear_cc_state();
                         cx.notify();
                     });
                 }
             }
             _ => {}
         }
-
-        // Forward execution nodes to activity panel
-        if let ServerEvent::ExecutionNodeCreated {
-            session_id,
-            node_id,
-            tool_use_id,
-            timestamp,
-            kind,
-            input,
-            status,
-            ..
-        } = event
-            && let Some(terminal) = &self.terminal
-            && terminal.read(cx).session_id() == session_id.as_str()
-        {
-            use crate::views::activity_panel::ExecutionNodeItem;
-            terminal.update(cx, |panel, cx| {
-                panel.push_execution_node(
-                    ExecutionNodeItem::new(
-                        *node_id,
-                        tool_use_id.clone(),
-                        *timestamp,
-                        kind,
-                        input.as_deref(),
-                        None,
-                        None,
-                        0,
-                        *status,
-                    ),
-                    cx,
-                );
-            });
-        }
-
-        if let ServerEvent::ExecutionNodeUpdated {
-            session_id,
-            node_id,
-            kind,
-            status,
-            output_summary,
-            exit_code,
-            duration_ms,
-            ..
-        } = event
-            && let Some(terminal) = &self.terminal
-            && terminal.read(cx).session_id() == session_id.as_str()
-        {
-            terminal.update(cx, |panel, cx| {
-                panel.update_execution_node(
-                    *node_id,
-                    *status,
-                    kind,
-                    output_summary.as_deref(),
-                    *exit_code,
-                    *duration_ms,
-                    cx,
-                );
-            });
-        }
-
         // Agentic loop notifications
         self.handle_loop_notifications(event, cx);
     }
 
     fn handle_loop_notifications(&mut self, event: &ServerEvent, cx: &mut Context<Self>) {
         match event {
+            ServerEvent::AgentStateChanged {
+                session_id,
+                loop_id: None,
+                host_id,
+                hostname,
+                status,
+                task_name,
+                input_request,
+            } => {
+                let wait_key = format!("session:{session_id}");
+
+                if *status == AgentRuntimeStatus::WaitingForInput {
+                    // Guard: skip if user is already looking at the blocked
+                    // session. The terminal prompt is enough in that case.
+                    if self.window_active
+                        && let Some(terminal) = &self.terminal
+                        && terminal.read(cx).session_id() == session_id.as_str()
+                    {
+                        self.pending_waiting_notifications.remove(&wait_key);
+                        return;
+                    }
+
+                    let task_label = task_name.as_deref().unwrap_or("Agent").to_string();
+                    let msg = if let Some(request) = input_request {
+                        if let Some(tool_name) = &request.tool_name {
+                            if let Some(message) = &request.message {
+                                format!("{task_label}: {tool_name} - {message}")
+                            } else {
+                                format!("{task_label}: Permission needed for {tool_name}")
+                            }
+                        } else if let Some(message) = &request.message {
+                            format!("{task_label}: {message}")
+                        } else {
+                            format!("{task_label} is waiting for input")
+                        }
+                    } else {
+                        format!("{task_label} is waiting for input")
+                    };
+
+                    let ctx = self.resolve_toast_context(
+                        Some(session_id),
+                        Some(host_id),
+                        None,
+                        None,
+                        task_name.as_deref(),
+                        Some(hostname),
+                        cx,
+                    );
+
+                    let is_requires_action = input_request.as_ref().is_some_and(|request| {
+                        matches!(
+                            request.kind,
+                            Some(
+                                AgentInputRequestKind::Permission
+                                    | AgentInputRequestKind::Elicitation
+                            )
+                        )
+                    });
+
+                    if is_requires_action {
+                        if let Some(old_toast_id) = self.waiting_input_toasts.remove(&wait_key) {
+                            self.toasts.update(cx, |c, cx| {
+                                c.dismiss(old_toast_id);
+                                cx.notify();
+                            });
+                        }
+                        self.pending_waiting_notifications.remove(&wait_key);
+
+                        let actions = self.build_input_actions(session_id, cx);
+                        let toast_id = self.toasts.update(cx, |container, cx| {
+                            let id = container.push_actionable(
+                                &msg,
+                                ToastLevel::Warning,
+                                Some(Icon::MessageCircle),
+                                actions,
+                                ToastKind::RequiresAction,
+                                ctx.clone(),
+                            );
+                            cx.notify();
+                            id
+                        });
+
+                        if self.waiting_input_toasts.len() >= 100
+                            && let Some(stale_key) =
+                                self.waiting_input_toasts.keys().next().cloned()
+                            && let Some(stale_id) = self.waiting_input_toasts.remove(&stale_key)
+                        {
+                            self.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                        }
+                        self.waiting_input_toasts.insert(wait_key.clone(), toast_id);
+
+                        if !self.window_active {
+                            let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
+                            let subtitle = ctx.subtitle();
+                            let title = subtitle.as_deref().map_or_else(
+                                || "ZRemote".to_string(),
+                                |sub| format!("ZRemote \u{2014} {sub}"),
+                            );
+                            let body = subtitle.as_deref().map_or_else(
+                                || sanitized.clone(),
+                                |sub| format!("{sanitized}\n{sub}"),
+                            );
+                            let is_recent = self
+                                .last_viewed_session
+                                .as_ref()
+                                .is_some_and(|(h, s)| h == host_id && s == session_id);
+                            let urgency = if is_recent {
+                                NativeUrgency::Auto
+                            } else {
+                                NativeUrgency::Critical
+                            };
+                            crate::notifications::send_native_with_urgency(
+                                &title,
+                                &body,
+                                ToastLevel::Warning,
+                                urgency,
+                                &self.app_state.tokio_handle,
+                            );
+                        }
+                    } else {
+                        let session_id = session_id.clone();
+                        let host_id = host_id.clone();
+                        let wait_key_for_task = wait_key.clone();
+                        let task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                            Timer::after(WAITING_DEBOUNCE).await;
+
+                            this.update(cx, |this, cx| {
+                                if this.window_active
+                                    && let Some(terminal) = &this.terminal
+                                    && terminal.read(cx).session_id() == session_id.as_str()
+                                {
+                                    this.pending_waiting_notifications
+                                        .remove(&wait_key_for_task);
+                                    return;
+                                }
+
+                                if let Some(old_toast_id) =
+                                    this.waiting_input_toasts.remove(&wait_key_for_task)
+                                {
+                                    this.toasts.update(cx, |c, cx| {
+                                        c.dismiss(old_toast_id);
+                                        cx.notify();
+                                    });
+                                }
+
+                                let actions = this.build_input_actions(&session_id, cx);
+                                let toast_id = this.toasts.update(cx, |container, cx| {
+                                    let id = container.push_actionable(
+                                        &msg,
+                                        ToastLevel::Warning,
+                                        Some(Icon::MessageCircle),
+                                        actions,
+                                        ToastKind::WaitingForInput,
+                                        ctx.clone(),
+                                    );
+                                    cx.notify();
+                                    id
+                                });
+
+                                if this.waiting_input_toasts.len() >= 100
+                                    && let Some(stale_key) =
+                                        this.waiting_input_toasts.keys().next().cloned()
+                                    && let Some(stale_id) =
+                                        this.waiting_input_toasts.remove(&stale_key)
+                                {
+                                    this.toasts.update(cx, |c, _| c.dismiss(stale_id));
+                                }
+                                this.waiting_input_toasts
+                                    .insert(wait_key_for_task.clone(), toast_id);
+
+                                if !this.window_active {
+                                    let sanitized = msg.replace('<', "&lt;").replace('>', "&gt;");
+                                    let subtitle = ctx.subtitle();
+                                    let title = subtitle.as_deref().map_or_else(
+                                        || "ZRemote".to_string(),
+                                        |sub| format!("ZRemote \u{2014} {sub}"),
+                                    );
+                                    let body = subtitle.as_deref().map_or_else(
+                                        || sanitized.clone(),
+                                        |sub| format!("{sanitized}\n{sub}"),
+                                    );
+                                    let is_recent = this
+                                        .last_viewed_session
+                                        .as_ref()
+                                        .is_some_and(|(h, s)| h == &host_id && s == &session_id);
+                                    let urgency = if is_recent {
+                                        NativeUrgency::Auto
+                                    } else {
+                                        NativeUrgency::Critical
+                                    };
+                                    crate::notifications::send_native_with_urgency(
+                                        &title,
+                                        &body,
+                                        ToastLevel::Warning,
+                                        urgency,
+                                        &this.app_state.tokio_handle,
+                                    );
+                                }
+
+                                this.pending_waiting_notifications
+                                    .remove(&wait_key_for_task);
+                            })
+                            .ok();
+                        });
+
+                        if self.pending_waiting_notifications.len() >= 100
+                            && let Some(stale_key) =
+                                self.pending_waiting_notifications.keys().next().cloned()
+                        {
+                            self.pending_waiting_notifications.remove(&stale_key);
+                        }
+                        self.pending_waiting_notifications.insert(wait_key, task);
+                    }
+                } else {
+                    self.pending_waiting_notifications.remove(&wait_key);
+                    if let Some(toast_id) = self.waiting_input_toasts.remove(&wait_key) {
+                        self.toasts.update(cx, |c, cx| {
+                            c.dismiss(toast_id);
+                            cx.notify();
+                        });
+                    }
+                }
+            }
             ServerEvent::LoopStatusChanged {
                 loop_info,
                 host_id,
@@ -1068,13 +1234,6 @@ impl MainView {
             KeyAction::OpenHelp => self.open_help_modal(cx),
             KeyAction::OpenNewWorktree => self.trigger_new_worktree_for_selection(cx),
             KeyAction::OpenSessionInNewWindow => self.open_current_session_in_new_window(cx),
-            KeyAction::ToggleActivityPanel => {
-                if let Some(terminal) = &self.terminal {
-                    terminal.update(cx, |panel, cx| {
-                        panel.toggle_activity_panel(cx);
-                    });
-                }
-            }
             KeyAction::CloseOverlay => {
                 // Close topmost modal
                 if self.worktree_create_modal.is_some() {
@@ -1249,11 +1408,6 @@ impl MainView {
                     sidebar.set_terminal_title(session_id.clone(), title.clone());
                     cx.notify();
                 });
-            }
-            TerminalPanelEvent::ActivityPanelToggled(visible) => {
-                if let Ok(mut p) = self.app_state.persistence.lock() {
-                    p.update(|s| s.activity_panel_visible = *visible);
-                }
             }
         }
     }
@@ -2550,11 +2704,6 @@ impl SessionWindow {
                         "failed to duplicate session window"
                     );
                 });
-            }
-            TerminalPanelEvent::ActivityPanelToggled(visible) => {
-                if let Ok(mut p) = self.app_state.persistence.lock() {
-                    p.update(|s| s.activity_panel_visible = *visible);
-                }
             }
             TerminalPanelEvent::OpenCommandPalette { .. }
             | TerminalPanelEvent::OpenSessionSwitcher

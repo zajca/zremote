@@ -139,6 +139,7 @@ const TERMINAL_MSG_TYPES: &[&str] = &[
 
 /// Known `AgenticAgentMessage` type tags.
 const AGENTIC_MSG_TYPES: &[&str] = &[
+    "AgentStateChanged",
     "LoopDetected",
     "LoopStateUpdate",
     "LoopEnded",
@@ -294,6 +295,7 @@ mod tests {
 
     #[test]
     fn agentic_msg_types_contains_expected() {
+        assert!(AGENTIC_MSG_TYPES.contains(&"AgentStateChanged"));
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopDetected"));
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopStateUpdate"));
         assert!(AGENTIC_MSG_TYPES.contains(&"LoopEnded"));
@@ -301,7 +303,7 @@ mod tests {
         assert!(AGENTIC_MSG_TYPES.contains(&"ExecutionNodeOpened"));
         assert!(AGENTIC_MSG_TYPES.contains(&"ExecutionNodeClosed"));
         assert!(AGENTIC_MSG_TYPES.contains(&"SessionExecutionStopped"));
-        assert_eq!(AGENTIC_MSG_TYPES.len(), 7);
+        assert_eq!(AGENTIC_MSG_TYPES.len(), 8);
     }
 
     #[test]

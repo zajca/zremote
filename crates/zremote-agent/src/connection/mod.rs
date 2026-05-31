@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use zremote_protocol::{AgentMessage, AgenticAgentMessage, SessionId};
+use zremote_protocol::{AgentMessage, AgentRuntimeStatus, AgenticAgentMessage, SessionId};
 
 use crate::agentic::analyzer::{AnalyzerEvent, AnalyzerPhase, OutputAnalyzer};
 use crate::agentic::manager::AgenticLoopManager;
@@ -176,6 +176,23 @@ async fn handle_analyzer_event(
                 }
             }
             if let Some(loop_id) = agentic_manager.loop_id_for_session(&session_id) {
+                let _ = agentic_tx.try_send(AgenticAgentMessage::AgentStateChanged {
+                    session_id,
+                    loop_id: Some(loop_id),
+                    status: match status {
+                        zremote_protocol::AgenticStatus::Working => AgentRuntimeStatus::Working,
+                        zremote_protocol::AgenticStatus::Idle => AgentRuntimeStatus::Idle,
+                        zremote_protocol::AgenticStatus::WaitingForInput
+                        | zremote_protocol::AgenticStatus::RequiresAction => {
+                            AgentRuntimeStatus::WaitingForInput
+                        }
+                        zremote_protocol::AgenticStatus::Completed => AgentRuntimeStatus::Idle,
+                        zremote_protocol::AgenticStatus::Error
+                        | zremote_protocol::AgenticStatus::Unknown => AgentRuntimeStatus::Unknown,
+                    },
+                    task_name: None,
+                    input_request: None,
+                });
                 let _ = agentic_tx.try_send(AgenticAgentMessage::LoopStateUpdate {
                     loop_id,
                     status,
@@ -728,6 +745,13 @@ pub async fn run_connection(
                         let mapper = session_mapper.clone();
                         let lid = *loop_id;
                         let sid = *session_id;
+                        let _ = agentic_tx.try_send(AgenticAgentMessage::AgentStateChanged {
+                            session_id: sid,
+                            loop_id: Some(lid),
+                            status: AgentRuntimeStatus::Working,
+                            task_name: None,
+                            input_request: None,
+                        });
                         tokio::spawn(async move {
                             mapper.register_loop(sid, lid).await;
                         });

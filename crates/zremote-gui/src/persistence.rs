@@ -98,8 +98,6 @@ pub struct GuiState {
     pub recent_sessions: Vec<RecentSession>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_actions: Vec<RecentAction>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub activity_panel_visible: bool,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub expanded_projects: HashSet<String>,
     /// Projects the user has explicitly force-collapsed. Wins over
@@ -122,7 +120,6 @@ impl GuiState {
             && self.window_height.is_none()
             && self.recent_sessions.is_empty()
             && self.recent_actions.is_empty()
-            && !self.activity_panel_visible
             && self.expanded_projects.is_empty()
             && self.collapsed_projects.is_empty()
             && self.recent_add_paths.is_empty()
@@ -1139,7 +1136,6 @@ mod tests {
                 timestamp: 1_700_000_000,
             }],
             recent_actions: vec![],
-            activity_panel_visible: false,
             expanded_projects: HashSet::new(),
             collapsed_projects: HashSet::new(),
             recent_add_paths: Vec::new(),

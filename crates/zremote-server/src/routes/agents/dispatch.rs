@@ -6,15 +6,19 @@ use axum::extract::ws::WebSocket;
 use chrono::Utc;
 use tokio::time::Instant;
 use uuid::Uuid;
-use zremote_protocol::NodeStatus;
 use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
 use zremote_protocol::claude::ClaudeTaskStatus;
 use zremote_protocol::status::SessionStatus;
 use zremote_protocol::{AgentMessage, HostId, ServerMessage};
+use zremote_protocol::{AgentRuntimeStatus, NodeStatus};
 
 use crate::state::{AgenticLoopState, AppState, LoopInfo, ServerEvent, SessionInfo};
 
 use super::send_server_message;
+
+const AGENT_TASK_NAME_CAP: usize = 100;
+const AGENT_INPUT_MESSAGE_CAP: usize = 500;
+const AGENT_INPUT_TOOL_NAME_CAP: usize = 100;
 
 /// DB row for an agentic loop, enriched with the project name resolved via
 /// `LEFT JOIN projects ON (host_id, path)`. `project_name` is `None` when no
@@ -1368,6 +1372,125 @@ pub(super) async fn handle_agentic_message(
     msg: AgenticAgentMessage,
 ) -> Result<(), String> {
     match msg {
+        AgenticAgentMessage::AgentStateChanged {
+            session_id,
+            loop_id,
+            status,
+            task_name,
+            input_request,
+        } => {
+            let session_id_str = session_id.to_string();
+            let task_name =
+                truncate_optional(task_name, AGENT_TASK_NAME_CAP).filter(|s| !s.is_empty());
+            let input_request = sanitize_input_request(input_request);
+            let host_id_str = host_id.to_string();
+            let hostname = state
+                .connections
+                .get_hostname(&host_id)
+                .await
+                .unwrap_or_default();
+
+            if let Some(loop_id) = loop_id {
+                let loop_id_str = loop_id.to_string();
+                let owns_loop: Option<(String,)> = sqlx::query_as(
+                    "SELECT l.session_id FROM agentic_loops l \
+                     JOIN sessions s ON s.id = l.session_id \
+                     WHERE l.id = ? AND l.session_id = ? AND s.host_id = ?",
+                )
+                .bind(&loop_id_str)
+                .bind(&session_id_str)
+                .bind(&host_id_str)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| format!("failed to validate agent state loop ownership: {e}"))?;
+                if owns_loop.is_none() {
+                    tracing::warn!(
+                        %host_id,
+                        %session_id,
+                        %loop_id,
+                        "dropping AgentStateChanged for loop outside this host/session"
+                    );
+                    return Ok(());
+                }
+
+                let legacy_status = runtime_status_to_agentic(status, input_request.as_ref());
+                if let Some(mut entry) = state.agentic_loops.get_mut(&loop_id) {
+                    entry.status = legacy_status;
+                    if task_name.is_some() {
+                        entry.task_name.clone_from(&task_name);
+                    }
+                    entry.last_updated = Instant::now();
+                }
+
+                let status_str = serde_json::to_value(legacy_status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("{legacy_status:?}").to_lowercase());
+
+                if let Err(e) = sqlx::query(
+                    "UPDATE agentic_loops SET status = ?, task_name = COALESCE(?, task_name) WHERE id = ?",
+                )
+                .bind(&status_str)
+                .bind(task_name.as_deref())
+                .bind(&loop_id_str)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::warn!(loop_id = %loop_id, error = %e, "failed to update loop status from agent state");
+                }
+
+                if task_name.is_some() {
+                    let _ = sqlx::query(
+                        "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
+                    )
+                    .bind(task_name.as_deref())
+                    .bind(&loop_id_str)
+                    .execute(&state.db)
+                    .await;
+                }
+
+                if let Some(mut loop_info) = fetch_loop_info(state, &loop_id_str).await {
+                    if let Some(request) = input_request.as_ref() {
+                        loop_info.prompt_message = request.message.clone();
+                        loop_info.action_tool_name = request.tool_name.clone();
+                        loop_info.action_description = request.message.clone();
+                    }
+                    let _ = state.events.send(ServerEvent::LoopStatusChanged {
+                        loop_info,
+                        host_id: host_id.to_string(),
+                        hostname: hostname.clone(),
+                    });
+                }
+            } else {
+                let owns_session: Option<(String,)> =
+                    sqlx::query_as("SELECT id FROM sessions WHERE id = ? AND host_id = ?")
+                        .bind(&session_id_str)
+                        .bind(&host_id_str)
+                        .fetch_optional(&state.db)
+                        .await
+                        .map_err(|e| {
+                            format!("failed to validate agent state session ownership: {e}")
+                        })?;
+                if owns_session.is_none() {
+                    tracing::warn!(
+                        %host_id,
+                        %session_id,
+                        "dropping AgentStateChanged for session outside this host"
+                    );
+                    return Ok(());
+                }
+            }
+
+            let _ = state.events.send(ServerEvent::AgentStateChanged {
+                session_id: session_id_str,
+                loop_id: loop_id.map(|id| id.to_string()),
+                host_id: host_id_str,
+                hostname,
+                status,
+                task_name,
+                input_request,
+            });
+        }
         AgenticAgentMessage::LoopDetected {
             loop_id,
             session_id,
@@ -1842,6 +1965,52 @@ pub(super) async fn handle_agentic_message(
         }
     }
     Ok(())
+}
+
+fn runtime_status_to_agentic(
+    status: AgentRuntimeStatus,
+    input_request: Option<&zremote_protocol::AgentInputRequest>,
+) -> AgenticStatus {
+    match status {
+        AgentRuntimeStatus::Idle => AgenticStatus::Idle,
+        AgentRuntimeStatus::Working => AgenticStatus::Working,
+        AgentRuntimeStatus::WaitingForInput => {
+            if input_request.is_some_and(|request| {
+                matches!(
+                    request.kind,
+                    Some(
+                        zremote_protocol::AgentInputRequestKind::Permission
+                            | zremote_protocol::AgentInputRequestKind::Elicitation
+                    )
+                )
+            }) {
+                AgenticStatus::RequiresAction
+            } else {
+                AgenticStatus::WaitingForInput
+            }
+        }
+        AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
+    }
+}
+
+fn truncate_optional(value: Option<String>, cap: usize) -> Option<String> {
+    value.map(|mut value| {
+        if value.len() > cap {
+            let end = value.floor_char_boundary(cap);
+            value.truncate(end);
+        }
+        value
+    })
+}
+
+fn sanitize_input_request(
+    input_request: Option<zremote_protocol::AgentInputRequest>,
+) -> Option<zremote_protocol::AgentInputRequest> {
+    input_request.map(|request| zremote_protocol::AgentInputRequest {
+        kind: request.kind,
+        message: truncate_optional(request.message, AGENT_INPUT_MESSAGE_CAP),
+        tool_name: truncate_optional(request.tool_name, AGENT_INPUT_TOOL_NAME_CAP),
+    })
 }
 
 /// Handle a Claude agent message: update DB state and emit events.

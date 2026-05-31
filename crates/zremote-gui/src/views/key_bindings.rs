@@ -63,7 +63,6 @@ pub enum KeyAction {
     OpenSearch,
     OpenHelp,
     CloseOverlay,
-    ToggleActivityPanel,
     OpenSessionInNewWindow,
     /// Open the new-worktree creation modal for the current-parent context.
     /// Phase 2 ships a single-step shortcut; the D4 leader chord (`Cmd+K, n`)
@@ -132,14 +131,6 @@ pub static BINDINGS: &[KeyBinding] = &[
         action: KeyAction::OpenHelp,
         label: "F1",
         description: "Help",
-    },
-    KeyBinding {
-        key: "i",
-        modifiers: KeyModifiers::new(true, true, false),
-        scope: KeyScope::Global,
-        action: KeyAction::ToggleActivityPanel,
-        label: "Ctrl+Shift+I",
-        description: "Toggle activity panel",
     },
     KeyBinding {
         key: "o",
@@ -298,12 +289,6 @@ mod tests {
     fn dispatch_modal_escape() {
         let action = dispatch_modal_key("escape", false, false, false);
         assert_eq!(action, Some(KeyAction::CloseOverlay));
-    }
-
-    #[test]
-    fn dispatch_global_ctrl_i() {
-        let action = dispatch_global_key("i", true, true, false);
-        assert_eq!(action, Some(KeyAction::ToggleActivityPanel));
     }
 
     #[test]
