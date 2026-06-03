@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
 use zremote_client::{
-    AgentKindInfo, AgentProfile, AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host,
-    HostStatus, ListClaudeTasksFilter, ListLoopsFilter, PreviewSnapshot, Project, ServerEvent,
-    Session, SessionStatus, StartAgentRequest,
+    AgentKindInfo, AgentProfile, AgentRuntimeStatus, AgenticStatus, ClaudeTaskStatus,
+    CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter, ListLoopsFilter,
+    PreviewSnapshot, Project, ServerEvent, Session, SessionStatus, StartAgentRequest,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -25,6 +25,15 @@ pub struct CcState {
     pub status: AgenticStatus,
     pub task_name: Option<String>,
     pub permission_mode: Option<String>,
+}
+
+fn runtime_status_to_agentic(status: AgentRuntimeStatus) -> AgenticStatus {
+    match status {
+        AgentRuntimeStatus::Idle => AgenticStatus::Idle,
+        AgentRuntimeStatus::Working => AgenticStatus::Working,
+        AgentRuntimeStatus::WaitingForInput => AgenticStatus::WaitingForInput,
+        AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
+    }
 }
 
 /// Claude Code session metrics (context, cost, model, rate limits).
@@ -655,6 +664,31 @@ impl SidebarView {
                         status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
                         permission_mode: loop_info.permission_mode.clone().or(existing_mode),
+                    },
+                );
+                cx.notify();
+            }
+            ServerEvent::AgentStateChanged {
+                session_id,
+                status,
+                task_name,
+                ..
+            } => {
+                let existing = self.cc_states.get(session_id);
+                let loop_id = existing
+                    .as_ref()
+                    .map(|state| state.loop_id.clone())
+                    .unwrap_or_else(|| session_id.clone());
+                let existing_task_name =
+                    existing.as_ref().and_then(|state| state.task_name.clone());
+                let permission_mode = existing.and_then(|state| state.permission_mode.clone());
+                self.cc_states.insert(
+                    session_id.clone(),
+                    CcState {
+                        loop_id,
+                        status: runtime_status_to_agentic(*status),
+                        task_name: task_name.clone().or(existing_task_name),
+                        permission_mode,
                     },
                 );
                 cx.notify();

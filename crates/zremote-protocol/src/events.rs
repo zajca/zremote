@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::AgenticStatus;
 use crate::claude::ClaudeTaskStatus;
 use crate::status::{HostStatus, SessionStatus};
+use crate::{AgentInputRequest, AgentRuntimeStatus, AgenticStatus};
 
 /// Lifecycle stage of a worktree creation job. Emitted at least once per
 /// stage — clients treat absent intermediate stages as "skipped fast".
@@ -149,6 +149,19 @@ pub enum ServerEvent {
         loop_info: LoopInfo,
         host_id: String,
         hostname: String,
+    },
+    #[serde(rename = "agent_state_changed")]
+    AgentStateChanged {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_id: Option<String>,
+        host_id: String,
+        hostname: String,
+        status: AgentRuntimeStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request: Option<AgentInputRequest>,
     },
     #[serde(rename = "projects_updated")]
     ProjectsUpdated { host_id: String },
@@ -418,6 +431,15 @@ mod tests {
                 },
                 host_id: "h1".to_string(),
                 hostname: "host".to_string(),
+            },
+            ServerEvent::AgentStateChanged {
+                session_id: "s1".to_string(),
+                loop_id: Some("l1".to_string()),
+                host_id: "h1".to_string(),
+                hostname: "host".to_string(),
+                status: AgentRuntimeStatus::WaitingForInput,
+                task_name: Some("fix bug".to_string()),
+                input_request: None,
             },
             ServerEvent::ProjectsUpdated {
                 host_id: "h1".to_string(),

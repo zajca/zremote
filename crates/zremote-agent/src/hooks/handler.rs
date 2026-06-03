@@ -17,8 +17,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use zremote_protocol::NodeStatus;
 use zremote_protocol::claude::ClaudeAgentMessage;
+use zremote_protocol::{
+    AgentInputRequest, AgentInputRequestKind, AgentRuntimeStatus, AgenticLoopId, NodeStatus,
+};
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticStatus, SessionId};
 
 use super::context::HookContextProvider;
@@ -180,6 +182,26 @@ pub struct HookPayload {
     // Base field: CC permission mode (present in all hook events)
     #[serde(default)]
     pub permission_mode: Option<String>,
+}
+
+fn emit_agent_state(
+    state: &HooksState,
+    session_id: SessionId,
+    loop_id: AgenticLoopId,
+    status: AgentRuntimeStatus,
+    task_name: Option<String>,
+    input_request: Option<AgentInputRequest>,
+) {
+    let msg = AgenticAgentMessage::AgentStateChanged {
+        session_id,
+        loop_id: Some(loop_id),
+        status,
+        task_name,
+        input_request,
+    };
+    if state.agentic_tx.try_send(msg).is_err() {
+        tracing::warn!("agentic channel full, AgentStateChanged dropped");
+    }
 }
 
 /// Response to hook scripts.
@@ -471,6 +493,15 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
         tracing::warn!("agentic channel full, ExecutionNodeOpened dropped");
     }
 
+    emit_agent_state(
+        state,
+        mapped.session_id,
+        mapped.loop_id,
+        AgentRuntimeStatus::Working,
+        None,
+        None,
+    );
+
     // Build additionalContext for the hook response
     let mut coordinator = state.delivery_coordinator.lock().await;
     let additional_context = state
@@ -517,7 +548,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
     let loop_state_msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
         status: AgenticStatus::Working,
-        task_name,
+        task_name: task_name.clone(),
         prompt_message: None,
         permission_mode: payload.permission_mode.clone(),
         action_tool_name: None,
@@ -547,6 +578,15 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
     if state.agentic_tx.try_send(node_closed).is_err() {
         tracing::warn!("agentic channel full, ExecutionNodeClosed dropped");
     }
+
+    emit_agent_state(
+        state,
+        mapped.session_id,
+        mapped.loop_id,
+        AgentRuntimeStatus::Working,
+        task_name,
+        None,
+    );
 
     // PostToolUse: Claude Code does not consume `additional_context` on
     // PostToolUse hooks, so we skip context delivery here. Nudges are
@@ -585,6 +625,15 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
 
     // Extract task_name from transcript
     let task_name = extract_task_name_from_transcript(payload, &mapped);
+
+    emit_agent_state(
+        state,
+        mapped.session_id,
+        mapped.loop_id,
+        AgentRuntimeStatus::Idle,
+        task_name.clone(),
+        None,
+    );
 
     let msg = AgenticAgentMessage::LoopEnded {
         loop_id: mapped.loop_id,
@@ -661,14 +710,45 @@ async fn send_input_status(
         loop_id: mapped.loop_id,
         status,
         task_name: None,
-        prompt_message,
+        prompt_message: prompt_message.clone(),
         permission_mode: None,
-        action_tool_name,
-        action_description,
+        action_tool_name: action_tool_name.clone(),
+        action_description: action_description.clone(),
     };
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, status update dropped");
     }
+
+    let runtime_status = match status {
+        AgenticStatus::Working => AgentRuntimeStatus::Working,
+        AgenticStatus::WaitingForInput | AgenticStatus::RequiresAction => {
+            AgentRuntimeStatus::WaitingForInput
+        }
+        AgenticStatus::Idle | AgenticStatus::Completed => AgentRuntimeStatus::Idle,
+        AgenticStatus::Error | AgenticStatus::Unknown => AgentRuntimeStatus::Unknown,
+    };
+    let request_kind = match (status, event) {
+        (AgenticStatus::RequiresAction, "permission_prompt") => {
+            Some(AgentInputRequestKind::Permission)
+        }
+        (AgenticStatus::RequiresAction, "Elicitation") => Some(AgentInputRequestKind::Elicitation),
+        (AgenticStatus::WaitingForInput, _) => Some(AgentInputRequestKind::Prompt),
+        _ => None,
+    };
+    let input_request =
+        (runtime_status == AgentRuntimeStatus::WaitingForInput).then(|| AgentInputRequest {
+            kind: request_kind,
+            message: prompt_message.or(action_description.clone()),
+            tool_name: action_tool_name,
+        });
+    emit_agent_state(
+        state,
+        mapped.session_id,
+        mapped.loop_id,
+        runtime_status,
+        None,
+        input_request,
+    );
 }
 
 /// Handle typed notification events (idle_prompt, permission_prompt).
@@ -791,6 +871,15 @@ async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
     if state.agentic_tx.try_send(msg).is_err() {
         tracing::warn!("agentic channel full, LoopStateUpdate dropped");
     }
+
+    emit_agent_state(
+        state,
+        mapped.session_id,
+        mapped.loop_id,
+        AgentRuntimeStatus::Working,
+        None,
+        None,
+    );
 }
 
 /// Build a list of project files to watch via CC's `watchPaths` feature.
@@ -1137,9 +1226,22 @@ mod tests {
             "expected SessionExecutionStopped, got {msg1:?}"
         );
 
-        // Second message: LoopEnded
+        // Second message: new minimal state update
         let msg2 = agentic_rx.try_recv().unwrap();
-        match msg2 {
+        assert!(
+            matches!(
+                msg2,
+                AgenticAgentMessage::AgentStateChanged {
+                    status: AgentRuntimeStatus::Idle,
+                    ..
+                }
+            ),
+            "expected AgentStateChanged{{Idle}}, got {msg2:?}"
+        );
+
+        // Third message: LoopEnded
+        let msg3 = agentic_rx.try_recv().unwrap();
+        match msg3 {
             AgenticAgentMessage::LoopEnded {
                 loop_id: lid,
                 reason,
@@ -1193,13 +1295,23 @@ mod tests {
             AgenticAgentMessage::SessionExecutionStopped { .. }
         ));
 
-        // Second message: LoopEnded
+        // Second message: new minimal state update
         let msg2 = agentic_rx.try_recv().unwrap();
-        assert!(matches!(msg2, AgenticAgentMessage::LoopEnded { .. }));
+        assert!(matches!(
+            msg2,
+            AgenticAgentMessage::AgentStateChanged {
+                status: AgentRuntimeStatus::Idle,
+                ..
+            }
+        ));
 
-        // Third message: LoopStateUpdate with Completed + task_name
+        // Third message: LoopEnded
         let msg3 = agentic_rx.try_recv().unwrap();
-        match msg3 {
+        assert!(matches!(msg3, AgenticAgentMessage::LoopEnded { .. }));
+
+        // Fourth message: LoopStateUpdate with Completed + task_name
+        let msg4 = agentic_rx.try_recv().unwrap();
+        match msg4 {
             AgenticAgentMessage::LoopStateUpdate {
                 loop_id: lid,
                 status,

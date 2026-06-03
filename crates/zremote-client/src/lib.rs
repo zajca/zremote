@@ -24,8 +24,11 @@ pub use types::{
     ActionsResponse,
     AddProjectRequest,
     AgentCapabilityInfo,
+    AgentInputRequest,
+    AgentInputRequestKind,
     AgentKindInfo,
     AgentProfile,
+    AgentRuntimeStatus,
     // SDK types
     AgenticLoop,
     // Protocol re-exports

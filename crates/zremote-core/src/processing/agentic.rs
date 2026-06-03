@@ -2,8 +2,8 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
-use zremote_protocol::NodeStatus;
 use zremote_protocol::agentic::{AgenticAgentMessage, AgenticStatus};
+use zremote_protocol::{AgentInputRequest, AgentRuntimeStatus, NodeStatus};
 use zremote_protocol::{AgenticLoopId, HostId};
 
 use crate::error::AppError;
@@ -13,6 +13,10 @@ use crate::queries::execution_nodes::{
 use crate::queries::loops::parse_status;
 use crate::state::{AgenticLoopState, AgenticLoopStore, LoopInfo, ServerEvent};
 use zremote_protocol::claude::ClaudeTaskStatus;
+
+const AGENT_TASK_NAME_CAP: usize = 100;
+const AGENT_INPUT_MESSAGE_CAP: usize = 500;
+const AGENT_INPUT_TOOL_NAME_CAP: usize = 100;
 
 /// DB row for an agentic loop, enriched with the project name resolved via
 /// `LEFT JOIN projects ON (host_id, path)`. `project_name` is `None` when no
@@ -106,8 +110,28 @@ impl AgenticProcessor {
     pub async fn check_idle_loops(&self) {}
 
     /// Handle an agentic agent message: update DB and in-memory state.
+    ///
+    /// This is intentionally a complete protocol dispatcher; behavioral work
+    /// is delegated to per-message handlers below.
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_message(&self, msg: AgenticAgentMessage) -> Result<(), AppError> {
         match msg {
+            AgenticAgentMessage::AgentStateChanged {
+                session_id,
+                loop_id,
+                status,
+                task_name,
+                input_request,
+            } => {
+                self.handle_agent_state_changed(
+                    session_id,
+                    loop_id,
+                    status,
+                    task_name,
+                    input_request,
+                )
+                .await?;
+            }
             AgenticAgentMessage::LoopDetected {
                 loop_id,
                 session_id,
@@ -193,6 +217,126 @@ impl AgenticProcessor {
                 self.handle_session_execution_stopped(session_id).await?;
             }
         }
+        Ok(())
+    }
+
+    // This handler intentionally keeps validation, legacy loop projection, and
+    // the new state event together so both outputs stay behaviorally identical.
+    #[allow(clippy::too_many_lines)]
+    async fn handle_agent_state_changed(
+        &self,
+        session_id: zremote_protocol::SessionId,
+        loop_id: Option<AgenticLoopId>,
+        status: AgentRuntimeStatus,
+        task_name: Option<String>,
+        input_request: Option<AgentInputRequest>,
+    ) -> Result<(), AppError> {
+        let session_id_str = session_id.to_string();
+        let task_name = truncate_optional(task_name, AGENT_TASK_NAME_CAP).filter(|s| !s.is_empty());
+        let input_request = sanitize_input_request(input_request);
+        let host_id_str = self.host_id.to_string();
+
+        if let Some(loop_id) = loop_id {
+            let loop_id_str = loop_id.to_string();
+            let owns_loop: Option<(String,)> = sqlx::query_as(
+                "SELECT l.session_id FROM agentic_loops l \
+                 JOIN sessions s ON s.id = l.session_id \
+                 WHERE l.id = ? AND l.session_id = ? AND s.host_id = ?",
+            )
+            .bind(&loop_id_str)
+            .bind(&session_id_str)
+            .bind(&host_id_str)
+            .fetch_optional(&self.db)
+            .await?;
+            if owns_loop.is_none() {
+                tracing::warn!(
+                    host_id = %self.host_id,
+                    session_id = %session_id,
+                    loop_id = %loop_id,
+                    "dropping AgentStateChanged for loop outside this host/session"
+                );
+                return Ok(());
+            }
+
+            let legacy_status = runtime_status_to_agentic(status, input_request.as_ref());
+            if let Some(mut entry) = self.agentic_loops.get_mut(&loop_id) {
+                entry.status = legacy_status;
+                if task_name.is_some() {
+                    entry.task_name.clone_from(&task_name);
+                }
+                entry.last_updated = Instant::now();
+            }
+
+            let status_str = serde_json::to_value(legacy_status)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{legacy_status:?}").to_lowercase());
+
+            if let Err(e) = sqlx::query(
+                "UPDATE agentic_loops SET status = ?, task_name = COALESCE(?, task_name) WHERE id = ?",
+            )
+            .bind(&status_str)
+            .bind(task_name.as_deref())
+            .bind(&loop_id_str)
+            .execute(&self.db)
+            .await
+            {
+                tracing::warn!(
+                    loop_id = %loop_id,
+                    error = %e,
+                    "failed to update loop status from agent state"
+                );
+            }
+
+            if task_name.is_some() {
+                let _ = sqlx::query(
+                    "UPDATE claude_sessions SET task_name = COALESCE(?, task_name) WHERE loop_id = ?",
+                )
+                .bind(task_name.as_deref())
+                .bind(&loop_id_str)
+                .execute(&self.db)
+                .await;
+            }
+
+            if let Some(mut loop_info) = self.fetch_loop_info(&loop_id_str).await {
+                if let Some(request) = input_request.as_ref() {
+                    loop_info.prompt_message.clone_from(&request.message);
+                    loop_info.action_tool_name.clone_from(&request.tool_name);
+                    loop_info.action_description.clone_from(&request.message);
+                }
+                let _ = self.events.send(ServerEvent::LoopStatusChanged {
+                    loop_info,
+                    host_id: self.host_id.to_string(),
+                    hostname: self.hostname.clone(),
+                });
+            }
+        } else {
+            let owns_session: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM sessions WHERE id = ? AND host_id = ?")
+                    .bind(&session_id_str)
+                    .bind(&host_id_str)
+                    .fetch_optional(&self.db)
+                    .await?;
+            if owns_session.is_none() {
+                tracing::warn!(
+                    host_id = %self.host_id,
+                    session_id = %session_id,
+                    "dropping AgentStateChanged for session outside this host"
+                );
+                return Ok(());
+            }
+        }
+
+        let _ = self.events.send(ServerEvent::AgentStateChanged {
+            session_id: session_id_str,
+            loop_id: loop_id.map(|id| id.to_string()),
+            host_id: host_id_str,
+            hostname: self.hostname.clone(),
+            status,
+            task_name,
+            input_request,
+        });
+
         Ok(())
     }
 
@@ -681,6 +825,50 @@ impl AgenticProcessor {
     }
 }
 
+fn runtime_status_to_agentic(
+    status: AgentRuntimeStatus,
+    input_request: Option<&AgentInputRequest>,
+) -> AgenticStatus {
+    match status {
+        AgentRuntimeStatus::Idle => AgenticStatus::Idle,
+        AgentRuntimeStatus::Working => AgenticStatus::Working,
+        AgentRuntimeStatus::WaitingForInput => {
+            if input_request.is_some_and(|request| {
+                matches!(
+                    request.kind,
+                    Some(
+                        zremote_protocol::AgentInputRequestKind::Permission
+                            | zremote_protocol::AgentInputRequestKind::Elicitation
+                    )
+                )
+            }) {
+                AgenticStatus::RequiresAction
+            } else {
+                AgenticStatus::WaitingForInput
+            }
+        }
+        AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
+    }
+}
+
+fn truncate_optional(value: Option<String>, cap: usize) -> Option<String> {
+    value.map(|mut value| {
+        if value.len() > cap {
+            let end = value.floor_char_boundary(cap);
+            value.truncate(end);
+        }
+        value
+    })
+}
+
+fn sanitize_input_request(input_request: Option<AgentInputRequest>) -> Option<AgentInputRequest> {
+    input_request.map(|request| AgentInputRequest {
+        kind: request.kind,
+        message: truncate_optional(request.message, AGENT_INPUT_MESSAGE_CAP),
+        tool_name: truncate_optional(request.tool_name, AGENT_INPUT_TOOL_NAME_CAP),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1016,87 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(status_str, "waiting_for_input");
+    }
+
+    #[tokio::test]
+    async fn handle_agent_state_changed_updates_loop_and_broadcasts_session_state() {
+        let db = test_db().await;
+        let (tx, mut rx) = broadcast::channel(64);
+        let proc = AgenticProcessor {
+            db: db.clone(),
+            agentic_loops: Arc::new(DashMap::new()),
+            events: tx,
+            host_id: Uuid::new_v4(),
+            hostname: "test-host".to_string(),
+        };
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::LoopDetected {
+            loop_id,
+            session_id,
+            project_path: "/proj".to_string(),
+            tool_name: "claude-code".to_string(),
+        })
+        .await
+        .unwrap();
+
+        proc.handle_message(AgenticAgentMessage::AgentStateChanged {
+            session_id,
+            loop_id: Some(loop_id),
+            status: AgentRuntimeStatus::WaitingForInput,
+            task_name: Some("ship it".to_string()),
+            input_request: Some(AgentInputRequest {
+                kind: Some(zremote_protocol::AgentInputRequestKind::Permission),
+                message: Some("Allow Bash?".to_string()),
+                tool_name: Some("Bash".to_string()),
+            }),
+        })
+        .await
+        .unwrap();
+
+        let entry = proc.agentic_loops.get(&loop_id).unwrap();
+        assert_eq!(entry.status, AgenticStatus::RequiresAction);
+        assert_eq!(entry.task_name.as_deref(), Some("ship it"));
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, task_name FROM agentic_loops WHERE id = ?")
+                .bind(loop_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "requires_action");
+        assert_eq!(row.1.as_deref(), Some("ship it"));
+
+        let mut found_agent_state = false;
+        for _ in 0..8 {
+            let Ok(Ok(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            else {
+                break;
+            };
+            if let ServerEvent::AgentStateChanged {
+                session_id: event_session_id,
+                status,
+                input_request,
+                ..
+            } = event
+            {
+                found_agent_state = true;
+                assert_eq!(event_session_id, session_id.to_string());
+                assert_eq!(status, AgentRuntimeStatus::WaitingForInput);
+                assert_eq!(
+                    input_request.and_then(|r| r.tool_name).as_deref(),
+                    Some("Bash")
+                );
+                break;
+            }
+        }
+        assert!(found_agent_state, "expected AgentStateChanged event");
     }
 
     #[tokio::test]

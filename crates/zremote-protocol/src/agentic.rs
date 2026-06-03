@@ -22,10 +22,53 @@ pub enum AgenticStatus {
     Unknown,
 }
 
+/// Minimal runtime state for an agent attached to a terminal session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeStatus {
+    Idle,
+    Working,
+    WaitingForInput,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Kind of user input an agent is waiting for.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInputRequestKind {
+    Prompt,
+    Permission,
+    Elicitation,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Optional detail for `AgentRuntimeStatus::WaitingForInput`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentInputRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentInputRequestKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
 /// Agentic messages sent from agent to server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum AgenticAgentMessage {
+    AgentStateChanged {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_id: Option<AgenticLoopId>,
+        status: AgentRuntimeStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_request: Option<AgentInputRequest>,
+    },
     LoopDetected {
         loop_id: AgenticLoopId,
         session_id: SessionId,
@@ -99,6 +142,18 @@ mod tests {
 
     #[test]
     fn loop_detected_roundtrip() {
+        roundtrip_agent(&AgenticAgentMessage::AgentStateChanged {
+            session_id: Uuid::new_v4(),
+            loop_id: Some(Uuid::new_v4()),
+            status: AgentRuntimeStatus::WaitingForInput,
+            task_name: Some("fix tests".to_string()),
+            input_request: Some(AgentInputRequest {
+                kind: Some(AgentInputRequestKind::Permission),
+                message: Some("Allow Bash?".to_string()),
+                tool_name: Some("Bash".to_string()),
+            }),
+        });
+
         roundtrip_agent(&AgenticAgentMessage::LoopDetected {
             loop_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
@@ -296,5 +351,17 @@ mod tests {
     fn idle_status_roundtrip() {
         let status: AgenticStatus = serde_json::from_str(r#""idle""#).expect("should deserialize");
         assert_eq!(status, AgenticStatus::Idle);
+    }
+
+    #[test]
+    fn runtime_status_serialization() {
+        assert_eq!(
+            serde_json::to_string(&AgentRuntimeStatus::WaitingForInput).unwrap(),
+            r#""waiting_for_input""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentInputRequestKind::Elicitation).unwrap(),
+            r#""elicitation""#
+        );
     }
 }

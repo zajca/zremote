@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // Re-export protocol types used in SDK API
 pub use zremote_protocol::{
     AgentCapabilityInfo, AgenticLoopId, HostId, NodeStatus, SessionId,
-    agentic::AgenticStatus,
+    agentic::{AgentInputRequest, AgentInputRequestKind, AgentRuntimeStatus, AgenticStatus},
     claude::{ClaudeSessionInfo, ClaudeTaskStatus},
     knowledge::{
         CachedMemory, ExtractedMemory, KnowledgeBaseId, KnowledgeServiceStatus, MemoryCategory,

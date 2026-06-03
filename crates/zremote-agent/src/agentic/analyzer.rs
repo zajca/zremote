@@ -600,24 +600,11 @@ impl OutputAnalyzer {
 
         self.is_busy = false;
 
-        // Check last 5 lines of stripped_buffer for prompts
-        let last_lines: Vec<&str> = self.stripped_buffer.lines().rev().take(5).collect();
-
-        let prompt_found = last_lines.iter().any(|line| {
-            if let Some(idx) = self.active_adapter_idx {
-                self.registry.adapters[idx].is_prompt(line)
-            } else {
-                patterns::is_shell_prompt(line)
-            }
-        });
-
-        let new_phase = if prompt_found {
-            AnalyzerPhase::Idle
-        } else if self.detected_agent.is_some() {
-            AnalyzerPhase::NeedsInput
-        } else {
-            AnalyzerPhase::Idle
-        };
+        // Silence is not proof that an agent is waiting for the user. Long
+        // tool runs and network calls naturally go quiet, so fallback silence
+        // may only settle to Idle; explicit hook/input-needed lines handle
+        // `NeedsInput`.
+        let new_phase = AnalyzerPhase::Idle;
 
         if new_phase == self.current_phase {
             None
@@ -1050,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn silence_needs_input_when_no_prompt() {
+    fn silence_without_prompt_goes_idle_not_needs_input() {
         let mut analyzer = make_analyzer();
 
         // Detect agent, make busy with non-prompt output
@@ -1067,7 +1054,7 @@ mod tests {
         let event = analyzer.check_silence();
         assert!(event.is_some());
         if let Some(AnalyzerEvent::PhaseChanged(phase)) = event {
-            assert_eq!(phase, AnalyzerPhase::NeedsInput);
+            assert_eq!(phase, AnalyzerPhase::Idle);
         }
     }
 

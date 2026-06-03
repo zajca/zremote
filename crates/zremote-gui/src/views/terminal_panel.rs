@@ -264,18 +264,10 @@ pub struct TerminalPanel {
     cc_status: Option<AgenticStatus>,
     /// Claude Code task name for the current session.
     cc_task_name: Option<String>,
-    /// Cached API client for reloading execution nodes on reconnect.
-    api_client: Option<zremote_client::ApiClient>,
     /// Tokio runtime handle for spawning async tasks (coalescing, etc.).
     tokio_handle: tokio::runtime::Handle,
     /// Owned PTY reader task — cancelled on drop or reconnect.
     pty_reader_task: Option<Task<()>>,
-    /// Activity panel showing CC execution progress (toggled on/off).
-    activity_panel: Option<Entity<super::activity_panel::ActivityPanel>>,
-    /// Whether the activity panel is currently visible.
-    activity_panel_visible: bool,
-    /// Subscription for activity panel close event.
-    activity_panel_sub: Option<Subscription>,
 }
 
 impl TerminalPanel {
@@ -379,12 +371,8 @@ impl TerminalPanel {
             cc_metrics: None,
             cc_status: None,
             cc_task_name: None,
-            api_client: None,
             tokio_handle: tokio_handle.clone(),
             pty_reader_task: None, // Set when start_output_reader() is called
-            activity_panel: None,
-            activity_panel_visible: false,
-            activity_panel_sub: None,
         }
     }
 
@@ -474,27 +462,9 @@ impl TerminalPanel {
         self.cc_metrics = Some(metrics);
     }
 
-    /// Forward CC metrics to the activity panel (call after `update_cc_metrics` with cx).
-    pub fn sync_activity_metrics(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.activity_panel
-            && let Some(ref metrics) = self.cc_metrics
-        {
-            let m = metrics.clone();
-            panel.update(cx, |p, cx| p.update_metrics(m, cx));
-        }
-    }
-
     /// Update Claude Code agentic status.
     pub fn update_cc_status(&mut self, status: Option<AgenticStatus>) {
         self.cc_status = status;
-    }
-
-    /// Forward CC status to the activity panel (call after `update_cc_status` with cx).
-    pub fn sync_activity_status(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.activity_panel {
-            let status = self.cc_status;
-            panel.update(cx, |p, cx| p.update_status(status, cx));
-        }
     }
 
     /// Update Claude Code task name.
@@ -502,181 +472,11 @@ impl TerminalPanel {
         self.cc_task_name = name;
     }
 
-    /// Forward CC task name to the activity panel.
-    pub fn sync_activity_task_name(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.activity_panel {
-            let name = self.cc_task_name.clone();
-            panel.update(cx, |p, cx| p.update_task_name(name, cx));
-        }
-    }
-
-    /// Whether CC status is idle (no active loop).
-    pub fn is_cc_idle(&self) -> bool {
-        self.cc_status.is_none()
-    }
-
     /// Clear Claude Code state (e.g., on session close).
     pub fn clear_cc_state(&mut self) {
         self.cc_metrics = None;
         self.cc_status = None;
         self.cc_task_name = None;
-    }
-
-    /// Clear CC state and forward to activity panel.
-    pub fn clear_cc_state_with_cx(&mut self, cx: &mut Context<Self>) {
-        self.cc_metrics = None;
-        self.cc_status = None;
-        self.cc_task_name = None;
-        if let Some(panel) = &self.activity_panel {
-            panel.update(cx, |p, cx| p.clear(cx));
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Activity panel
-    // ------------------------------------------------------------------
-
-    /// Ensure the activity panel entity exists, creating it if needed.
-    fn ensure_activity_panel(&mut self, cx: &mut Context<Self>) {
-        if self.activity_panel.is_some() {
-            return;
-        }
-        let panel =
-            cx.new(|_cx| super::activity_panel::ActivityPanel::new(self.session_id.clone()));
-        let sub = cx.subscribe(
-            &panel,
-            |this: &mut Self, _, event: &super::activity_panel::ActivityPanelEvent, cx| match event
-            {
-                super::activity_panel::ActivityPanelEvent::Close => {
-                    this.activity_panel_visible = false;
-                    cx.emit(TerminalPanelEvent::ActivityPanelToggled(false));
-                    cx.notify();
-                }
-            },
-        );
-        self.activity_panel = Some(panel);
-        self.activity_panel_sub = Some(sub);
-    }
-
-    /// Toggle the activity panel on/off.
-    pub fn toggle_activity_panel(&mut self, cx: &mut Context<Self>) {
-        self.ensure_activity_panel(cx);
-        self.activity_panel_visible = !self.activity_panel_visible;
-        cx.emit(TerminalPanelEvent::ActivityPanelToggled(
-            self.activity_panel_visible,
-        ));
-        cx.notify();
-    }
-
-    /// Show the activity panel (used for auto-show on task start).
-    pub fn show_activity_panel(&mut self, cx: &mut Context<Self>) {
-        self.ensure_activity_panel(cx);
-        if !self.activity_panel_visible {
-            self.activity_panel_visible = true;
-            cx.emit(TerminalPanelEvent::ActivityPanelToggled(true));
-            cx.notify();
-        }
-    }
-
-    /// Set activity panel visibility (used when restoring from persistence).
-    pub fn set_activity_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if visible {
-            self.ensure_activity_panel(cx);
-        }
-        self.activity_panel_visible = visible;
-        cx.notify();
-    }
-
-    /// Whether the activity panel is currently visible.
-    pub fn is_activity_panel_visible(&self) -> bool {
-        self.activity_panel_visible
-    }
-
-    /// Push an execution node to the activity feed.
-    pub fn push_execution_node(
-        &mut self,
-        node: super::activity_panel::ExecutionNodeItem,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_activity_panel(cx);
-        if let Some(panel) = &self.activity_panel {
-            panel.update(cx, |p, cx| p.push_node(node, cx));
-        }
-    }
-
-    /// Update an existing execution node in the activity feed. Returns true if found and updated.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_execution_node(
-        &mut self,
-        node_id: i64,
-        status: zremote_protocol::NodeStatus,
-        kind: &str,
-        output_summary: Option<&str>,
-        exit_code: Option<i32>,
-        duration_ms: i64,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if let Some(panel) = &self.activity_panel {
-            panel.update(cx, |p, cx| {
-                p.update_node(
-                    node_id,
-                    status,
-                    kind,
-                    output_summary,
-                    exit_code,
-                    duration_ms,
-                    cx,
-                )
-            })
-        } else {
-            false
-        }
-    }
-
-    /// Load historical execution nodes for this session from the API.
-    /// Fire-and-forget: HTTP request runs on tokio runtime, results delivered back via cx.spawn.
-    pub fn load_execution_nodes(&mut self, api: zremote_client::ApiClient, cx: &mut Context<Self>) {
-        self.api_client = Some(api.clone());
-        self.ensure_activity_panel(cx);
-        let Some(panel) = self.activity_panel.as_ref().map(Entity::downgrade) else {
-            return;
-        };
-        let session_id = self.session_id.clone();
-        // Run the HTTP request on tokio runtime (reqwest needs tokio for timeouts).
-        let fetch = self.tokio_handle.spawn(async move {
-            api.list_execution_nodes(&session_id, Some(200))
-                .await
-                .unwrap_or_default()
-        });
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let Ok(nodes) = fetch.await else {
-                return;
-            };
-            if nodes.is_empty() {
-                return;
-            }
-            use super::activity_panel::ExecutionNodeItem;
-            let items: Vec<ExecutionNodeItem> = nodes
-                .into_iter()
-                .map(|n| {
-                    ExecutionNodeItem::new(
-                        n.id,
-                        n.tool_use_id.clone(),
-                        n.timestamp,
-                        &n.kind,
-                        n.input.as_deref(),
-                        n.output_summary.as_deref(),
-                        n.exit_code,
-                        n.duration_ms,
-                        n.status,
-                    )
-                })
-                .collect();
-            if let Some(panel) = panel.upgrade() {
-                let _ = panel.update(cx, |p, cx| p.load_nodes(items, cx));
-            }
-        })
-        .detach();
     }
 
     /// Reconnect with a new terminal handle after session resume.
@@ -737,11 +537,6 @@ impl TerminalPanel {
             }
         });
         self.resize_debounce_tx = resize_debounce_tx;
-
-        // Reload execution nodes to fill any gap from the disconnect window.
-        if let Some(api) = self.api_client.clone() {
-            self.load_execution_nodes(api, cx);
-        }
 
         // Trigger immediate resize to sync the new connection with current terminal size.
         if let Ok(term) = self.term.lock() {
@@ -1301,8 +1096,6 @@ pub enum TerminalPanelEvent {
         session_id: String,
         title: Option<String>,
     },
-    /// Activity panel visibility toggled (for persistence).
-    ActivityPanelToggled(bool),
 }
 
 impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
@@ -1784,15 +1577,9 @@ impl TerminalPanel {
             .tooltip(move |_window, cx| cx.new(|_| ConnectionTooltip(tooltip_text.clone())).into())
     }
 
-    fn render_cc_metrics_badge(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_cc_metrics_badge(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         let metrics = self.cc_metrics.as_ref()?;
         let status = self.cc_status?;
-
-        let panel_color = if self.activity_panel_visible {
-            theme::accent()
-        } else {
-            theme::text_tertiary()
-        };
 
         let mut badge = div()
             .id("cc-metrics-badge")
@@ -1829,24 +1616,6 @@ impl TerminalPanel {
                     .child(format!("{pct_200k:.0}%")),
             );
         }
-
-        // Activity panel toggle button
-        badge = badge.child(
-            div()
-                .id("activity-toggle")
-                .cursor_pointer()
-                .p(px(2.0))
-                .rounded(px(4.0))
-                .hover(|s| s.bg(theme::bg_tertiary()))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_activity_panel(cx);
-                }))
-                .child(
-                    icon(Icon::PanelRight)
-                        .size(px(10.0))
-                        .text_color(panel_color),
-                ),
-        );
 
         Some(badge.into_any_element())
     }
@@ -1914,9 +1683,6 @@ impl Render for TerminalPanel {
                                     }
                                     KeyAction::OpenHelp => {
                                         cx.emit(TerminalPanelEvent::OpenHelp);
-                                    }
-                                    KeyAction::ToggleActivityPanel => {
-                                        this.toggle_activity_panel(cx);
                                     }
                                     KeyAction::OpenSessionInNewWindow => {
                                         cx.emit(TerminalPanelEvent::OpenSessionInNewWindow);
@@ -2482,27 +2248,11 @@ impl Render for TerminalPanel {
 
         content = content.child(self.render_connection_badge(cx));
 
-        // Horizontal split: terminal (flex-1) | activity panel (300px)
-        let mut h_split = div().flex().flex_row().flex_1().overflow_hidden();
-        h_split = h_split.child(content);
-        if self.activity_panel_visible
-            && let Some(panel) = &self.activity_panel
-        {
-            h_split = h_split.child(
-                div()
-                    .w(px(300.0))
-                    .h_full()
-                    .border_l_1()
-                    .border_color(theme::border())
-                    .child(panel.clone()),
-            );
-        }
-
         let mut wrapper = div().flex().flex_col().size_full();
         if let Some(overlay) = &self.search_overlay {
             wrapper = wrapper.child(overlay.clone());
         }
-        wrapper.child(h_split)
+        wrapper.child(content)
     }
 }
 
