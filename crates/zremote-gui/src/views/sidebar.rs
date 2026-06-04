@@ -286,7 +286,10 @@ impl SidebarView {
             s.project_id
                 .as_deref()
                 .is_some_and(|pid| worktree_ids.contains(pid))
+                // RFC-013: a resumable session keeps the project visible so the
+                // user can reach + continue it.
                 && (s.status == SessionStatus::Active
+                    || s.status == SessionStatus::Resumable
                     || self.cc_states.get(&s.id).is_some_and(|cc| {
                         matches!(
                             cc.status,
@@ -481,7 +484,11 @@ impl SidebarView {
                         all_sessions.extend(sessions.unwrap_or_default());
                         all_projects.extend(projects.unwrap_or_default());
                     }
-                    // Fetch active + starting Claude tasks
+                    // Fetch active + starting + suspended Claude tasks.
+                    // RFC-013: a task whose terminal session became `resumable`
+                    // after a reboot is reconciled to `suspended`
+                    // (disconnect_reason='agent_restarted'); include it so the
+                    // sidebar can surface it as resumable instead of dropping it.
                     let active_filter = ListClaudeTasksFilter {
                         status: Some("active".to_string()),
                         ..ListClaudeTasksFilter::default()
@@ -490,12 +497,18 @@ impl SidebarView {
                         status: Some("starting".to_string()),
                         ..ListClaudeTasksFilter::default()
                     };
-                    let (active, starting) = tokio::join!(
+                    let suspended_filter = ListClaudeTasksFilter {
+                        status: Some("suspended".to_string()),
+                        ..ListClaudeTasksFilter::default()
+                    };
+                    let (active, starting, suspended) = tokio::join!(
                         api.list_claude_tasks(&active_filter),
                         api.list_claude_tasks(&starting_filter),
+                        api.list_claude_tasks(&suspended_filter),
                     );
                     let mut tasks = active.unwrap_or_default();
                     tasks.extend(starting.unwrap_or_default());
+                    tasks.extend(suspended.unwrap_or_default());
                     // Fetch agent profiles and supported kinds.
                     let (profiles, kinds) =
                         tokio::join!(api.list_agent_profiles(None), api.list_agent_kinds());
@@ -2277,6 +2290,8 @@ impl SidebarView {
         let status_color = match session.status {
             SessionStatus::Active => theme::success(),
             SessionStatus::Suspended => theme::warning(),
+            // RFC-013: resumable reads as "paused, can continue".
+            SessionStatus::Resumable => theme::accent(),
             _ => theme::text_tertiary(),
         };
 
@@ -2402,6 +2417,27 @@ impl SidebarView {
                 name_div = name_div.flex_shrink_0();
 
                 row1 = row1.child(name_div.child(display_name));
+
+                // RFC-013 resumable badge: a session whose agent backend died on
+                // reboot but can be re-opened. Click the row to continue (attach
+                // auto-resumes when configured, else the terminal offers Continue).
+                if session.status == SessionStatus::Resumable {
+                    row1 = row1.child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.0))
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(theme::warning_bg())
+                            .text_color(theme::accent())
+                            .text_size(px(10.0))
+                            .child(icon(Icon::Play).size(px(9.0)).text_color(theme::accent()))
+                            .child("Resumable"),
+                    );
+                }
 
                 // Permission mode badge
                 if let Some(cc) = cc_state
@@ -2680,6 +2716,7 @@ fn build_session_tooltip(
         SessionStatus::Closed => "closed",
         SessionStatus::Creating => "creating",
         SessionStatus::Error => "error",
+        SessionStatus::Resumable => "resumable",
         SessionStatus::Unknown => "unknown",
     };
     lines.push(format!("Status: {status_label}"));

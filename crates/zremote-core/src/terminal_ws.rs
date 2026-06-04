@@ -52,6 +52,30 @@ pub struct RegistrationResult {
 /// Error message returned when a session cannot be connected.
 pub struct SessionError {
     pub message: String,
+    /// RFC-013: set when the session is `resumable` but auto-resume is off.
+    /// The WS handler then sends a typed `session_resumable` message instead of
+    /// a hard `error`, so the GUI can offer an explicit "Continue" action.
+    pub resumable: bool,
+}
+
+impl SessionError {
+    /// A hard, non-resumable error (session missing/closed/stale).
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            resumable: false,
+        }
+    }
+
+    /// A non-fatal "session is resumable, click to continue" signal (RFC-013).
+    #[must_use]
+    pub fn resumable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            resumable: true,
+        }
+    }
 }
 
 /// Abstracts the differences between server and local terminal backends.
@@ -99,13 +123,15 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
     let registration = match backend.register_browser(&session_id).await {
         Ok(r) => r,
         Err(e) => {
-            let error_msg = serde_json::json!({
-                "type": "error",
-                "message": e.message
-            });
-            let _ = socket
-                .send(Message::Text(error_msg.to_string().into()))
-                .await;
+            // RFC-013: a resumable session (auto-resume off) is not a hard error;
+            // send a typed `session_resumable` so the GUI offers "Continue".
+            let payload = if e.resumable {
+                serde_json::to_string(&BrowserMessage::SessionResumable)
+                    .unwrap_or_else(|_| r#"{"type":"session_resumable"}"#.to_string())
+            } else {
+                serde_json::json!({ "type": "error", "message": e.message }).to_string()
+            };
+            let _ = socket.send(Message::Text(payload.into())).await;
             let _ = socket.send(Message::Close(None)).await;
             return;
         }

@@ -38,6 +38,13 @@ impl HooksServer {
                 mapper,
                 outbound_tx,
                 sent_cc_session_ids,
+                // Dedup set for the RFC-012 generic capture path. Owned by the
+                // server (not threaded through callers): the legacy
+                // `sent_cc_session_ids` set stays the per-connection dedup for
+                // `SessionIdCaptured`.
+                sent_agent_session_refs: Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                )),
             },
         }
     }
@@ -194,6 +201,149 @@ mod tests {
         }
 
         // Shutdown
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_captures_agent_session_ref_from_header() {
+        // RFC-012 end-to-end: a SessionStart hook carrying X-ZRemote-Session-Id
+        // emits AgentSessionRefCaptured on the agentic channel, keyed by the
+        // header session id, with the payload session_id as the native id —
+        // even with NO loop/claude-task registered.
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
+        );
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let zremote_id = Uuid::new_v4();
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .header("X-ZRemote-Session-Id", zremote_id.to_string())
+            .json(&serde_json::json!({
+                "session_id": "claude-native-xyz",
+                "hook_event_name": "SessionStart",
+                "source": "startup"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let msg = agentic_rx.try_recv().expect("capture message expected");
+        match msg {
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } => {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(agent, zremote_protocol::AgentKind::Claude);
+                assert_eq!(native_session_id, "claude-native-xyz");
+            }
+            other => panic!("expected AgentSessionRefCaptured, got {other:?}"),
+        }
+
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_routes_codex_agent_header_to_codex_capture() {
+        // RFC-012 P4b end-to-end: X-ZRemote-Agent: codex routes capture to
+        // AgentKind::Codex on the shared /hooks endpoint.
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
+        );
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let zremote_id = Uuid::new_v4();
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .header("X-ZRemote-Session-Id", zremote_id.to_string())
+            .header("X-ZRemote-Agent", "codex")
+            .json(&serde_json::json!({
+                "session_id": "codex-native-001",
+                "hook_event_name": "SessionStart",
+                "source": "startup"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let msg = agentic_rx
+            .try_recv()
+            .expect("codex capture message expected");
+        match msg {
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } => {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(agent, zremote_protocol::AgentKind::Codex);
+                assert_eq!(native_session_id, "codex-native-001");
+            }
+            other => panic!("expected AgentSessionRefCaptured(Codex), got {other:?}"),
+        }
+
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_no_capture_without_header() {
+        // Without the header, SessionStart must NOT emit a capture message.
+        let (agentic_tx, mut agentic_rx) = mpsc::channel(64);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+        let mapper = SessionMapper::new();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let server = HooksServer::new(
+            agentic_tx,
+            mapper,
+            outbound_tx,
+            Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            Arc::new(tokio::sync::Mutex::new(DeliveryCoordinator::new())),
+        );
+        let addr = server.start(shutdown_rx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/hooks"))
+            .json(&serde_json::json!({
+                "session_id": "claude-native-nohdr",
+                "hook_event_name": "SessionStart",
+                "source": "startup"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "no header => no AgentSessionRefCaptured"
+        );
+
         shutdown_tx.send(true).unwrap();
     }
 

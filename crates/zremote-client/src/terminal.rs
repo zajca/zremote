@@ -345,6 +345,9 @@ async fn run_terminal_ws(
                             Ok(TerminalServerMessage::SessionResumed) => {
                                 let _ = output_tx.send(TerminalEvent::SessionResumed);
                             }
+                            Ok(TerminalServerMessage::SessionResumable) => {
+                                let _ = output_tx.send(TerminalEvent::SessionResumable);
+                            }
                             Ok(TerminalServerMessage::PaneAdded { pane_id, index }) => {
                                 let _ = output_tx
                                     .send(TerminalEvent::PaneAdded { pane_id, index });

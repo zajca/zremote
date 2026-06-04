@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use zremote_core::error::AppError;
-use zremote_core::state::BrowserMessage;
+use zremote_core::state::{BrowserMessage, ServerEvent, SessionState};
 use zremote_core::terminal_ws::{
     BROWSER_CHANNEL_SIZE, RegistrationResult, SessionError, TerminalBackend,
     handle_terminal_websocket,
@@ -17,6 +17,7 @@ use zremote_core::terminal_ws::{
 use zremote_protocol::status::SessionStatus;
 
 use crate::local::state::LocalAppState;
+use crate::pty::shell_integration::ShellIntegrationConfig;
 
 /// Local-mode terminal backend that writes directly to PTY.
 struct LocalTerminalBackend {
@@ -35,24 +36,36 @@ impl TerminalBackend for LocalTerminalBackend {
         };
 
         if !session_exists {
-            let error_message =
-                match sqlx::query_as::<_, (String,)>("SELECT status FROM sessions WHERE id = ?")
+            let db_status =
+                sqlx::query_as::<_, (String,)>("SELECT status FROM sessions WHERE id = ?")
                     .bind(session_id.to_string())
                     .fetch_optional(&self.state.db)
-                    .await
-                {
+                    .await;
+
+            // RFC-013: a `resumable` session has no live backend yet. With
+            // auto-resume on, relaunch the agent now (so the happy path below
+            // finds it active); with it off, return a typed resumable signal so
+            // the GUI offers an explicit "Continue" instead of a dead terminal.
+            if matches!(&db_status, Ok(Some((s,))) if s == "resumable") {
+                if crate::config::resume_agents_on_restart() {
+                    self.resume_resumable_session(session_id).await?;
+                    // Fall through: the session is now in memory and active.
+                } else {
+                    return Err(SessionError::resumable(
+                        "session is resumable — click to continue".to_string(),
+                    ));
+                }
+            } else {
+                let error_message = match db_status {
                     Ok(Some((status,))) if status == "active" || status == "creating" => {
                         "session is stale (server restarted)".to_string()
                     }
-                    Ok(Some((status,))) => {
-                        format!("session is {status}")
-                    }
+                    Ok(Some((status,))) => format!("session is {status}"),
                     Ok(None) => "session not found".to_string(),
                     Err(_) => "session not found or not active".to_string(),
                 };
-            return Err(SessionError {
-                message: error_message,
-            });
+                return Err(SessionError::new(error_message));
+            }
         }
 
         // Phase 2: Take write lock for the happy path
@@ -63,18 +76,14 @@ impl TerminalBackend for LocalTerminalBackend {
         {
             let mut sessions = self.state.sessions.write().await;
             let Some(session) = sessions.get_mut(session_id) else {
-                return Err(SessionError {
-                    message: "session was closed while connecting".to_string(),
-                });
+                return Err(SessionError::new("session was closed while connecting"));
             };
 
             if session.status != SessionStatus::Active
                 && session.status != SessionStatus::Creating
                 && session.status != SessionStatus::Suspended
             {
-                return Err(SessionError {
-                    message: format!("session is {}", session.status),
-                });
+                return Err(SessionError::new(format!("session is {}", session.status)));
             }
 
             scrollback_data = session.scrollback.iter().cloned().collect::<Vec<_>>();
@@ -126,6 +135,123 @@ impl TerminalBackend for LocalTerminalBackend {
             tracing::warn!(error = %e, "image paste failed");
         }
     }
+}
+
+impl LocalTerminalBackend {
+    /// Resume-on-attach (RFC-013): re-spawn the agent for a `resumable` session
+    /// during `register_browser`, mapping engine errors to a `SessionError` so
+    /// the WS handler reports a clean failure (and the row stays `resumable`).
+    async fn resume_resumable_session(&self, session_id: &Uuid) -> Result<(), SessionError> {
+        resume_session_by_id(&self.state, session_id)
+            .await
+            .map_err(|e| SessionError::new(format!("failed to resume session: {e}")))?;
+        Ok(())
+    }
+}
+
+/// Shared resume engine for the local agent (RFC-013), used by both
+/// resume-on-attach (`register_browser`) and the explicit
+/// `POST /api/hosts/:host_id/sessions/:id/resume` endpoint.
+///
+/// Re-spawns the agent for an existing `resumable` session using the argv-direct
+/// engine (`SessionManager::resume_session`), reusing the SAME `sessions.id`,
+/// then transitions the row `resumable` -> `active` and re-creates the in-memory
+/// `SessionState`. Returns an error (leaving the row `resumable`) if the session
+/// has no resumable agent ref or the agent CLI cannot be spawned.
+pub async fn resume_session_by_id(
+    state: &Arc<LocalAppState>,
+    session_id: &Uuid,
+) -> Result<(), AppError> {
+    let session_id_str = session_id.to_string();
+
+    // Load status + shell + working_dir in one read.
+    let row: Option<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT status, shell, working_dir FROM sessions WHERE id = ?")
+            .bind(&session_id_str)
+            .fetch_optional(&state.db)
+            .await?;
+    let (status, shell_opt, working_dir) =
+        row.ok_or_else(|| AppError::NotFound(format!("session {session_id_str} not found")))?;
+
+    // Guard: only a `resumable` session may be resumed. Without this an
+    // explicit resume (REST) on an active/closed session would corrupt
+    // timestamps or reactivate a closed row.
+    if status != "resumable" {
+        return Err(AppError::Conflict(format!(
+            "session {session_id_str} is not resumable (status: {status})"
+        )));
+    }
+
+    // Build the resume argv from the persisted agent identity (RFC-012).
+    let Some(resume_argv) =
+        crate::session::build_resume_argv_for_session(&state.db, &session_id_str).await?
+    else {
+        return Err(AppError::BadRequest(format!(
+            "session {session_id_str} is not a resumable agent session"
+        )));
+    };
+
+    let shell = crate::shell::resolve_shell(shell_opt.as_deref());
+    let ai_config = ShellIntegrationConfig::for_ai_session();
+
+    // Spawn the agent as the session's process (argv-direct, no shell race).
+    let pid = {
+        let mut mgr = state.session_manager.lock().await;
+        mgr.resume_session(
+            *session_id,
+            &shell,
+            120,
+            40,
+            working_dir.as_deref(),
+            None,
+            Some(&ai_config),
+            &resume_argv,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn resume PTY: {e}")))?
+    };
+
+    // resumable -> active (reuses the same id; clears suspended/closed stamps).
+    // If the DB update fails AFTER the spawn, tear the spawned backend down so we
+    // don't leave an orphan PTY with the row still `resumable`.
+    if let Err(e) = mark_session_active_and_pid(state, &session_id_str, &shell, pid).await {
+        let mut mgr = state.session_manager.lock().await;
+        let _ = mgr.close(session_id);
+        return Err(e);
+    }
+
+    // Re-create in-memory state only after spawn AND DB update both succeed, so
+    // a failed resume never leaves a dangling SessionState without a backend.
+    {
+        let mut sessions = state.sessions.write().await;
+        let mut session_state = SessionState::new(*session_id, state.host_id);
+        session_state.status = SessionStatus::Active;
+        sessions.insert(*session_id, session_state);
+    }
+
+    let _ = state.events.send(ServerEvent::SessionUpdated {
+        session_id: session_id_str,
+    });
+
+    Ok(())
+}
+
+/// Transition a resumed session row to `active` and record the new shell/pid.
+/// Split out so the caller can roll back the spawned PTY if this fails.
+async fn mark_session_active_and_pid(
+    state: &Arc<LocalAppState>,
+    session_id_str: &str,
+    shell: &str,
+    pid: u32,
+) -> Result<(), AppError> {
+    zremote_core::queries::sessions::mark_session_active(&state.db, session_id_str).await?;
+    sqlx::query("UPDATE sessions SET shell = ?, pid = ? WHERE id = ?")
+        .bind(shell)
+        .bind(i64::from(pid))
+        .bind(session_id_str)
+        .execute(&state.db)
+        .await?;
+    Ok(())
 }
 
 /// Request body for terminal input.
@@ -387,5 +513,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- RFC-013 resume-on-attach + REST resume ---
+
+    // tokio Mutex so the guard can be held across `.await` (env mutation must be
+    // serialized for the whole async test body, including DB setup).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn insert_resumable_agent_session(
+        state: &Arc<LocalAppState>,
+        id: &str,
+        agent_kind: Option<&str>,
+        agent_ref: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions (id, host_id, status, shell, working_dir, agent_kind, agent_session_ref) \
+             VALUES (?, ?, 'resumable', '/bin/sh', '/tmp', ?, ?)",
+        )
+        .bind(id)
+        .bind(state.host_id.to_string())
+        .bind(agent_kind)
+        .bind(agent_ref)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_session_by_id_rejects_non_resumable_session() {
+        // A session with no agent_session_ref cannot be resumed (BadRequest).
+        let state = test_state().await;
+        let id = Uuid::new_v4();
+        insert_resumable_agent_session(&state, &id.to_string(), None, None).await;
+
+        let err = resume_session_by_id(&state, &id).await.unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)), "got {err:?}");
+        // Row stays resumable (not mutated to active on failure).
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status, "resumable");
+    }
+
+    #[tokio::test]
+    async fn resume_session_by_id_rejects_non_resumable_status() {
+        // HIGH #1: resume must be rejected (Conflict) for active/closed sessions
+        // so it can't corrupt timestamps or reactivate a closed row.
+        for status in ["active", "closed"] {
+            let state = test_state().await;
+            let id = Uuid::new_v4();
+            // Insert with an agent ref but the wrong status.
+            sqlx::query(
+                "INSERT INTO sessions (id, host_id, status, agent_kind, agent_session_ref) \
+                 VALUES (?, ?, ?, 'claude', 'cc-xyz')",
+            )
+            .bind(id.to_string())
+            .bind(state.host_id.to_string())
+            .bind(status)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            let err = resume_session_by_id(&state, &id).await.unwrap_err();
+            assert!(
+                matches!(err, AppError::Conflict(_)),
+                "status {status} should be rejected with Conflict, got {err:?}"
+            );
+            // Status unchanged (no mark_session_active side effect).
+            let (got,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(got, status, "status must be untouched on rejected resume");
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_session_by_id_transitions_resumable_to_active() {
+        // Claude agent session -> resume_argv = ["claude","--resume",..]. The
+        // `claude` binary likely isn't on PATH in CI, so the spawn may fail; in
+        // that case the row must STAY resumable (no false 'active'). When the
+        // spawn does succeed, the row must be 'active' and tracked in memory.
+        let state = test_state().await;
+        let id = Uuid::new_v4();
+        insert_resumable_agent_session(&state, &id.to_string(), Some("claude"), Some("cc-xyz"))
+            .await;
+
+        let result = resume_session_by_id(&state, &id).await;
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        if result.is_ok() {
+            assert_eq!(status, "active");
+            assert!(state.sessions.read().await.contains_key(&id));
+        } else {
+            // Spawn failed (no `claude` on PATH): row must remain resumable.
+            assert_eq!(status, "resumable");
+        }
+    }
+
+    #[tokio::test]
+    async fn register_browser_returns_resumable_when_autoresume_off() {
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK; restored at end.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("ZREMOTE_RESUME_AGENTS_ON_RESTART", "false");
+        }
+
+        let state = test_state().await;
+        let id = Uuid::new_v4();
+        insert_resumable_agent_session(&state, &id.to_string(), Some("claude"), Some("cc-xyz"))
+            .await;
+
+        let backend = LocalTerminalBackend {
+            state: state.clone(),
+        };
+        let Err(err) = backend.register_browser(&id).await else {
+            panic!("expected a resumable error, got Ok");
+        };
+        assert!(
+            err.resumable,
+            "expected typed resumable signal, got: {}",
+            err.message
+        );
+        // Row untouched (no resume attempted when the flag is off).
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(status, "resumable");
+
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("ZREMOTE_RESUME_AGENTS_ON_RESTART");
+        }
+    }
+
+    #[tokio::test]
+    async fn register_browser_hard_error_for_closed_session() {
+        // A non-resumable, non-live session still yields a hard (non-resumable)
+        // error so the GUI shows the stale/closed message.
+        let state = test_state().await;
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, host_id, status) VALUES (?, ?, 'closed')")
+            .bind(id.to_string())
+            .bind(state.host_id.to_string())
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let backend = LocalTerminalBackend {
+            state: state.clone(),
+        };
+        let Err(err) = backend.register_browser(&id).await else {
+            panic!("expected a hard error, got Ok");
+        };
+        assert!(!err.resumable);
+        assert!(err.message.contains("closed"), "got: {}", err.message);
     }
 }

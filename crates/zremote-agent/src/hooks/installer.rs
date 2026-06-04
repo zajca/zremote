@@ -1,5 +1,17 @@
 use std::path::Path;
 
+/// Version stamp for the generated hook script body.
+///
+/// Bump this whenever [`generate_hook_script`] changes. The installer embeds it
+/// as a `# ZREMOTE_HOOK_VERSION=<n>` comment in the script and
+/// [`is_already_installed`] treats a script missing the current version as
+/// out-of-date, forcing a re-install. Without this, idempotency was path-only:
+/// an existing (older) script would never be regenerated.
+const ZREMOTE_HOOK_VERSION: u32 = 2;
+
+/// Marker line embedded in the generated script for version detection.
+const HOOK_VERSION_MARKER_PREFIX: &str = "# ZREMOTE_HOOK_VERSION=";
+
 struct HookConfig {
     event: &'static str,
     matcher: &'static str,
@@ -51,8 +63,10 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
         return false;
     }
 
-    // Check hook script exists
-    if !script_path.exists() {
+    // Check hook script exists AND is the current version. An older script body
+    // (missing the current `# ZREMOTE_HOOK_VERSION=<n>` marker) must trigger a
+    // re-install so script changes (e.g. new forwarded headers) actually land.
+    if !installed_script_is_current(script_path).await {
         return false;
     }
 
@@ -102,6 +116,18 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
     true
 }
 
+/// Return `true` if the installed hook script exists and carries the current
+/// [`ZREMOTE_HOOK_VERSION`] marker. A missing file or an older/absent version
+/// marker returns `false`, signalling the installer to regenerate the script.
+async fn installed_script_is_current(script_path: &Path) -> bool {
+    let Ok(content) = tokio::fs::read_to_string(script_path).await else {
+        return false;
+    };
+    let expected = format!("{HOOK_VERSION_MARKER_PREFIX}{ZREMOTE_HOOK_VERSION}");
+    // Match the exact version line (so version 1 does not satisfy a check for 10).
+    content.lines().any(|line| line.trim() == expected)
+}
+
 /// Install hooks at a specific home directory path (testable).
 async fn install_hooks_at(home: &Path) -> Result<(), InstallError> {
     let script_path = home.join(".zremote").join("hooks").join("zremote-hook.sh");
@@ -139,37 +165,201 @@ async fn install_hooks_at(home: &Path) -> Result<(), InstallError> {
     // Update Claude Code settings
     update_claude_settings(home, &script_path).await?;
 
+    // Best-effort: also install the Codex forwarder. Codex may not be present;
+    // a failure here must NOT block the (succeeded) Claude install, so we log
+    // and continue rather than propagate.
+    if let Err(e) = install_codex_hooks_at(home).await {
+        tracing::debug!(error = %e, "codex hook install skipped/failed (non-fatal)");
+    }
+
     Ok(())
 }
 
+/// Resolve an agent's config directory, honoring its env override
+/// ([`AgentIntegration::config_dir_env`], e.g. `CODEX_HOME`/`CLAUDE_CONFIG_DIR`).
+/// When the override is set and non-empty it is used verbatim; otherwise
+/// `<home>/<config_dir>`.
+fn agent_config_dir(
+    home: &Path,
+    integration: &dyn crate::agents::AgentIntegration,
+) -> std::path::PathBuf {
+    if let Some(var) = integration.config_dir_env()
+        && let Ok(dir) = std::env::var(var)
+        && !dir.trim().is_empty()
+    {
+        return std::path::PathBuf::from(dir);
+    }
+    home.join(integration.config_dir())
+}
+
+/// Install the Codex forwarder hook into `<codex_home>/hooks.json`.
+///
+/// Writes the codex hook script (`~/.zremote/hooks/zremote-codex-hook.sh`,
+/// sending `X-ZRemote-Agent: codex`) and registers it for each event in
+/// [`crate::agents::CodexIntegration::hook_events`] inside `hooks.json`, merging
+/// with (and preserving) any existing user hooks. Default is a *normal* codex
+/// hook requiring one-time interactive trust (`/hooks` in the codex CLI); the
+/// managed `requirements.toml` zero-prompt path is intentionally left to an
+/// explicit opt-in and is not written here.
+async fn install_codex_hooks_at(home: &Path) -> Result<(), InstallError> {
+    use crate::agents::{AgentIntegration, CodexIntegration};
+
+    let integration = CodexIntegration;
+    let config_dir = agent_config_dir(home, &integration);
+
+    // Write the codex hook script (shared transport, codex agent header).
+    let script_path = home
+        .join(".zremote")
+        .join("hooks")
+        .join("zremote-codex-hook.sh");
+    let hooks_dir = home.join(".zremote").join("hooks");
+    tokio::fs::create_dir_all(&hooks_dir)
+        .await
+        .map_err(InstallError::Io)?;
+    tokio::fs::write(&script_path, generate_hook_script_for("codex"))
+        .await
+        .map_err(InstallError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(InstallError::Io)?;
+    }
+
+    let hooks_json_path = config_dir.join("hooks.json");
+    let mut root: serde_json::Value = if hooks_json_path.exists() {
+        let content = tokio::fs::read_to_string(&hooks_json_path)
+            .await
+            .map_err(InstallError::Io)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        tokio::fs::create_dir_all(&config_dir)
+            .await
+            .map_err(InstallError::Io)?;
+        serde_json::json!({})
+    };
+
+    let script = script_path.to_string_lossy().to_string();
+    merge_hook_events(&mut root, &script, integration.hook_events())?;
+
+    // Write atomically (tmp + rename) so codex never reads a half-written file.
+    let formatted =
+        serde_json::to_string_pretty(&root).map_err(|_| InstallError::InvalidSettings)?;
+    let tmp_path = hooks_json_path.with_extension("json.tmp");
+    tokio::fs::write(&tmp_path, &formatted)
+        .await
+        .map_err(InstallError::Io)?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &hooks_json_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(InstallError::Io(e));
+    }
+
+    tracing::info!(path = %hooks_json_path.display(), "Codex hooks.json updated with zremote hooks");
+    Ok(())
+}
+
+/// Merge zremote hook entries for `events` into a codex/claude-shaped
+/// `{"hooks": {"<Event>": [...]}}` JSON object, preserving any existing user
+/// entries and not duplicating an already-present zremote entry (matched by the
+/// command string containing the script path).
+fn merge_hook_events(
+    root: &mut serde_json::Value,
+    script: &str,
+    events: &[crate::agents::HookEventSpec],
+) -> Result<(), InstallError> {
+    let hooks = root
+        .as_object_mut()
+        .ok_or(InstallError::InvalidSettings)?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+    let hooks_obj = hooks.as_object_mut().ok_or(InstallError::InvalidSettings)?;
+
+    for spec in events {
+        let event_hooks = hooks_obj.entry(spec.event).or_insert(serde_json::json!([]));
+        let Some(arr) = event_hooks.as_array_mut() else {
+            continue;
+        };
+        // Dedup against the ACTUAL script path we're about to install, not a
+        // hardcoded substring — otherwise a renamed/relocated script would slip
+        // past the check and silently double-insert on every install.
+        let already = arr.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c == script)
+                    })
+                })
+        });
+        if already {
+            continue;
+        }
+        let mut entry = serde_json::json!({
+            "matcher": spec.matcher,
+            "hooks": [{ "type": "command", "command": script }]
+        });
+        if spec.async_hook {
+            entry["hooks"][0]["async"] = serde_json::json!(true);
+        }
+        arr.push(entry);
+    }
+    Ok(())
+}
+
+/// Claude's hook script (the default `agent_kind` is `claude`).
 fn generate_hook_script() -> String {
-    r#"#!/bin/sh
-# ZRemote hook script - forwards Claude Code hook events to the agent sidecar.
+    generate_hook_script_for("claude")
+}
+
+/// Generate the forwarder script for a given `agent_kind` (`"claude"` /
+/// `"codex"`). Both agents share the same transport: read the sidecar port,
+/// POST the hook JSON, forward `X-ZRemote-Session-Id` (from `$ZREMOTE_SESSION_ID`)
+/// and a fixed `X-ZRemote-Agent` header so the handler can pick the right
+/// `AgentIntegration`. The `CLAUDE_ENV_FILE` header is harmless for codex (the
+/// env var is simply never set there).
+///
+/// `agent_kind` is a fixed, trusted `&'static str` from the integration — never
+/// user input — and is embedded as the header value directly.
+fn generate_hook_script_for(agent_kind: &str) -> String {
+    // The leading `# ZREMOTE_HOOK_VERSION=<n>` comment lets `is_already_installed`
+    // detect an out-of-date script body and force a re-install (see the const docs).
+    // Optional headers are accumulated into the positional parameter list with
+    // `set --` so the native session id (and env-file path) are passed as separate
+    // argv elements to curl — never interpolated into the URL or body.
+    format!(
+        r#"#!/bin/sh
+{HOOK_VERSION_MARKER_PREFIX}{ZREMOTE_HOOK_VERSION}
+# ZRemote hook script - forwards {agent_kind} hook events to the agent sidecar.
 # Managed by zremote-agent. Do not edit manually.
 PORT=$(cat ~/.zremote/hooks-port 2>/dev/null) || exit 0
 INPUT=$(cat -)
 # Whitelist valid endpoints to prevent command injection via $1
-case "${1:-hooks}" in
-  hooks|hooks/notification/idle|hooks/notification/permission) ENDPOINT="${1:-hooks}" ;;
+case "${{1:-hooks}}" in
+  hooks|hooks/notification/idle|hooks/notification/permission) ENDPOINT="${{1:-hooks}}" ;;
   *) exit 1 ;;
 esac
+# Build optional headers as positional args (each value stays a separate argv element).
+set -- -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" -H "Content-Type: application/json" -H "X-ZRemote-Agent: {agent_kind}"
 # Forward CLAUDE_ENV_FILE path (set by CC for SessionStart/CwdChanged/FileChanged)
 if [ -n "$CLAUDE_ENV_FILE" ]; then
-  RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
-    -H "Content-Type: application/json" \
-    -H "X-Claude-Env-File: $CLAUDE_ENV_FILE" \
-    -d "$INPUT" 2>/dev/null)
-else
-  RESPONSE=$(curl -s --max-time 60 -X POST "http://127.0.0.1:$PORT/$ENDPOINT" \
-    -H "Content-Type: application/json" \
-    -d "$INPUT" 2>/dev/null)
+  set -- "$@" -H "X-Claude-Env-File: $CLAUDE_ENV_FILE"
 fi
+# Forward the ZRemote session id so the agent can deterministically correlate
+# this hook event with the originating PTY session (RFC-012 capture path).
+if [ -n "$ZREMOTE_SESSION_ID" ]; then
+  set -- "$@" -H "X-ZRemote-Session-Id: $ZREMOTE_SESSION_ID"
+fi
+RESPONSE=$(curl "$@" -d "$INPUT" 2>/dev/null)
 if [ -n "$RESPONSE" ]; then
   echo "$RESPONSE"
 fi
 exit 0
 "#
-    .to_string()
+    )
 }
 
 async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), InstallError> {
@@ -884,6 +1074,118 @@ mod tests {
         assert!(script.contains("exit 1"));
     }
 
+    #[test]
+    fn hook_script_embeds_current_version_marker() {
+        let script = generate_hook_script();
+        let expected = format!("{HOOK_VERSION_MARKER_PREFIX}{ZREMOTE_HOOK_VERSION}");
+        assert!(
+            script.lines().any(|l| l.trim() == expected),
+            "script must embed the current version marker line: {expected}"
+        );
+    }
+
+    #[test]
+    fn hook_script_forwards_zremote_session_id_header() {
+        let script = generate_hook_script();
+        // The session id is forwarded only when the env var is set, as a header
+        // whose value is the env var (kept a separate argv element, never in URL).
+        assert!(
+            script.contains(r#"if [ -n "$ZREMOTE_SESSION_ID" ]; then"#),
+            "script must gate the session-id header on the env var being set"
+        );
+        assert!(
+            script.contains(r#"-H "X-ZRemote-Session-Id: $ZREMOTE_SESSION_ID""#),
+            "script must forward the X-ZRemote-Session-Id header"
+        );
+    }
+
+    #[test]
+    fn claude_script_sends_claude_agent_header() {
+        let script = generate_hook_script();
+        assert!(
+            script.contains(r#"-H "X-ZRemote-Agent: claude""#),
+            "claude script must send the claude agent header"
+        );
+    }
+
+    #[test]
+    fn codex_script_sends_codex_agent_header() {
+        let script = generate_hook_script_for("codex");
+        assert!(
+            script.contains(r#"-H "X-ZRemote-Agent: codex""#),
+            "codex script must send the codex agent header"
+        );
+        // Shared transport: still forwards the session id and is version-stamped.
+        assert!(script.contains(r#"-H "X-ZRemote-Session-Id: $ZREMOTE_SESSION_ID""#));
+        let expected = format!("{HOOK_VERSION_MARKER_PREFIX}{ZREMOTE_HOOK_VERSION}");
+        assert!(script.lines().any(|l| l.trim() == expected));
+    }
+
+    #[test]
+    fn hook_script_still_forwards_env_file_header() {
+        // Regression: the CLAUDE_ENV_FILE forwarding must survive the rewrite.
+        let script = generate_hook_script();
+        assert!(script.contains(r#"if [ -n "$CLAUDE_ENV_FILE" ]; then"#));
+        assert!(script.contains(r#"-H "X-Claude-Env-File: $CLAUDE_ENV_FILE""#));
+    }
+
+    #[tokio::test]
+    async fn installed_script_is_current_detects_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("zremote-hook.sh");
+
+        // Current script -> current
+        tokio::fs::write(&script_path, generate_hook_script())
+            .await
+            .unwrap();
+        assert!(installed_script_is_current(&script_path).await);
+
+        // Missing file -> not current
+        let missing = dir.path().join("does-not-exist.sh");
+        assert!(!installed_script_is_current(&missing).await);
+
+        // Old version marker -> not current
+        let old = "#!/bin/sh\n# ZREMOTE_HOOK_VERSION=0\necho hi\n";
+        tokio::fs::write(&script_path, old).await.unwrap();
+        assert!(!installed_script_is_current(&script_path).await);
+
+        // No marker at all -> not current
+        let no_marker = "#!/bin/sh\necho hi\n";
+        tokio::fs::write(&script_path, no_marker).await.unwrap();
+        assert!(!installed_script_is_current(&script_path).await);
+    }
+
+    #[tokio::test]
+    async fn install_reinstalls_when_script_version_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Full install first (writes current-version script + settings).
+        install_hooks_at(home).await.unwrap();
+        let script_path = home.join(".zremote/hooks/zremote-hook.sh");
+        assert!(installed_script_is_current(&script_path).await);
+
+        // Simulate an older agent's script body: valid settings, but stale script.
+        let stale =
+            "#!/bin/sh\n# ZREMOTE_HOOK_VERSION=0\n# old body without session-id header\nexit 0\n";
+        tokio::fs::write(&script_path, stale).await.unwrap();
+
+        // is_already_installed must now report false due to the stale version...
+        assert!(
+            !is_already_installed(home, &script_path).await,
+            "stale script version should force a reinstall"
+        );
+
+        // ...and reinstalling regenerates the current script with the new header.
+        install_hooks_at(home).await.unwrap();
+        let content = tokio::fs::read_to_string(&script_path).await.unwrap();
+        assert!(installed_script_is_current(&script_path).await);
+        assert!(
+            content.contains("X-ZRemote-Session-Id"),
+            "regenerated script must include the session-id header"
+        );
+    }
+
     #[tokio::test]
     async fn install_creates_script_and_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -1322,6 +1624,152 @@ mod tests {
                     .any(|h| h["command"].as_str().unwrap().contains("myremote-hook"))
             }),
             "myremote hooks should be removed from Stop"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // RFC-012 P4b: Codex install
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn claude_integration_events_match_installer_config() {
+        // Guard against drift between the installer's claude hook_configs and the
+        // ClaudeIntegration trait's declared event set. The installer registers
+        // Notification twice (idle + permission) with the same event name, so we
+        // compare the *deduped, sorted* event-name sets.
+        use crate::agents::{AgentIntegration, ClaudeIntegration};
+        use std::collections::BTreeSet;
+
+        let installer_events: BTreeSet<&str> = [
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "Notification",
+            "Elicitation",
+            "UserPromptSubmit",
+            "SessionStart",
+            "SubagentStart",
+            "SubagentStop",
+            "StopFailure",
+            "FileChanged",
+            "CwdChanged",
+        ]
+        .into_iter()
+        .collect();
+
+        let trait_events: BTreeSet<&str> = ClaudeIntegration
+            .hook_events()
+            .iter()
+            .map(|e| e.event)
+            .collect();
+
+        assert_eq!(
+            trait_events, installer_events,
+            "ClaudeIntegration::hook_events drifted from the installer's claude config"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_codex_writes_script_and_hooks_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        install_codex_hooks_at(home).await.unwrap();
+
+        // Codex hook script written + executable.
+        let script = home.join(".zremote/hooks/zremote-codex-hook.sh");
+        assert!(script.exists(), "codex hook script must be written");
+        let body = tokio::fs::read_to_string(&script).await.unwrap();
+        assert!(body.contains(r#"-H "X-ZRemote-Agent: codex""#));
+
+        // hooks.json written under ~/.codex with the codex event set.
+        let hooks_json = home.join(".codex/hooks.json");
+        assert!(hooks_json.exists(), "codex hooks.json must be written");
+        let content = tokio::fs::read_to_string(&hooks_json).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let hooks = value["hooks"].as_object().expect("hooks object");
+
+        use crate::agents::{AgentIntegration, CodexIntegration};
+        for spec in CodexIntegration.hook_events() {
+            let arr = hooks
+                .get(spec.event)
+                .and_then(|e| e.as_array())
+                .unwrap_or_else(|| panic!("missing codex event {}", spec.event));
+            assert!(
+                arr.iter().any(|entry| {
+                    entry["hooks"].as_array().is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h["command"]
+                                .as_str()
+                                .is_some_and(|c| c.contains("zremote-codex-hook"))
+                        })
+                    })
+                }),
+                "codex event {} must reference the codex hook script",
+                spec.event
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn install_codex_is_idempotent_and_preserves_user_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Pre-seed a user hook in ~/.codex/hooks.json.
+        let codex_dir = home.join(".codex");
+        tokio::fs::create_dir_all(&codex_dir).await.unwrap();
+        let existing = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/user-codex-hook.sh"}]}
+                ]
+            }
+        });
+        tokio::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Install twice.
+        install_codex_hooks_at(home).await.unwrap();
+        install_codex_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(codex_dir.join("hooks.json"))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let pre_tool = value["hooks"]["PreToolUse"].as_array().unwrap();
+
+        // User hook preserved.
+        assert!(
+            pre_tool
+                .iter()
+                .any(|e| e["hooks"].as_array().unwrap().iter().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .unwrap()
+                        .contains("user-codex-hook.sh")
+                })),
+            "user codex hook must be preserved"
+        );
+        // Exactly one zremote codex entry (no duplication on re-install).
+        let zremote_entries = pre_tool
+            .iter()
+            .filter(|e| {
+                e["hooks"].as_array().unwrap().iter().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .unwrap()
+                        .contains("zremote-codex-hook")
+                })
+            })
+            .count();
+        assert_eq!(
+            zremote_entries, 1,
+            "re-install must not duplicate the zremote codex hook"
         );
     }
 }

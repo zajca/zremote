@@ -19,13 +19,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use zremote_protocol::claude::ClaudeAgentMessage;
 use zremote_protocol::{
-    AgentInputRequest, AgentInputRequestKind, AgentRuntimeStatus, AgenticLoopId, NodeStatus,
+    AgentInputRequest, AgentInputRequestKind, AgentKind, AgentRuntimeStatus, AgenticLoopId,
+    NodeStatus,
 };
 use zremote_protocol::{AgentMessage, AgenticAgentMessage, AgenticStatus, SessionId};
 
 use super::context::HookContextProvider;
 use super::mapper::SessionMapper;
-use super::transcript::extract_slug;
+use crate::agents::AgentIntegration;
 use crate::knowledge::context_delivery::DeliveryCoordinator;
 
 const INPUT_CAP_BYTES: usize = 1024;
@@ -131,6 +132,15 @@ pub struct HooksState {
     pub outbound_tx: mpsc::Sender<AgentMessage>,
     /// CC session IDs that have already been sent via `SessionIdCaptured` (dedup).
     pub sent_cc_session_ids: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    /// `(zremote_session_id, agent, native_session_id)` tuples already emitted as
+    /// `AgentSessionRefCaptured`, for dedup of the RFC-012 generic capture path.
+    /// Generalizes [`Self::sent_cc_session_ids`], which is kept for the legacy
+    /// Claude-task `SessionIdCaptured` path during the transition.
+    ///
+    /// A `Mutex` (not `RwLock`) so the check-and-insert is a single critical
+    /// section — two concurrent hooks for the same key cannot both observe it
+    /// absent and double-send.
+    pub sent_agent_session_refs: Arc<tokio::sync::Mutex<HashSet<(SessionId, AgentKind, String)>>>,
     /// Builds `additionalContext` for hook responses.
     pub context_provider: HookContextProvider,
     /// Coordinates pending context nudges for delivery via hooks.
@@ -258,9 +268,19 @@ pub async fn handle_hook(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(String::from);
+    // RFC-012: the forwarder script sets X-ZRemote-Session-Id to the originating
+    // PTY session's id (from $ZREMOTE_SESSION_ID). Validate it as a UUID here;
+    // it is the authoritative key for native-session capture and does not depend
+    // on the detector/loop mapping.
+    let zremote_session_id = parse_zremote_session_header(&headers);
+    // Select the per-agent integration from the X-ZRemote-Agent header (codex vs
+    // claude; absent => claude for back-compat). Drives both the captured agent
+    // kind and the transcript root / task-name extraction.
+    let integration = select_integration(&headers);
     tracing::debug!(
         hook_event = %payload.hook_event_name,
         cc_session = %payload.session_id,
+        agent = ?integration.agent_kind(),
         tool = ?payload.tool_name,
         "hook event received"
     );
@@ -278,10 +298,12 @@ pub async fn handle_hook(
     }
 
     let response = match payload.hook_event_name.as_str() {
-        "PreToolUse" => handle_pre_tool_use(&state, &payload).await,
-        "PostToolUse" => handle_post_tool_use(&state, &payload).await,
+        "PreToolUse" => {
+            handle_pre_tool_use(&state, integration, &payload, zremote_session_id).await
+        }
+        "PostToolUse" => handle_post_tool_use(&state, integration, &payload).await,
         "Stop" => {
-            handle_stop(&state, &payload).await;
+            handle_stop(&state, integration, &payload).await;
             HookResponse::default()
         }
         "Notification" => {
@@ -304,7 +326,7 @@ pub async fn handle_hook(
             HookResponse::default()
         }
         "UserPromptSubmit" => {
-            handle_user_prompt_submit(&state, &payload).await;
+            handle_user_prompt_submit(&state, integration, &payload, zremote_session_id).await;
             HookResponse::default()
         }
         "SessionStart" => {
@@ -313,6 +335,17 @@ pub async fn handle_hook(
                 source = ?payload.source,
                 "CC session started"
             );
+            // RFC-012: capture the native session id keyed by the ZRemote session
+            // id from the header, for the agent selected by X-ZRemote-Agent.
+            // Independent of the loop mapping and of whether this is a UI-started
+            // Claude task.
+            try_capture_agent_session_ref(
+                &state,
+                integration.agent_kind(),
+                zremote_session_id,
+                &payload.session_id,
+            )
+            .await;
             // Write session env vars to CLAUDE_ENV_FILE if provided.
             // These become available in all subsequent Bash tool calls.
             if let Some(ref path) = env_file {
@@ -376,7 +409,7 @@ pub async fn handle_hook(
                 cc_session = %payload.session_id,
                 "CC turn ended due to API error"
             );
-            handle_stop(&state, &payload).await;
+            handle_stop(&state, integration, &payload).await;
             HookResponse::default()
         }
         other => {
@@ -436,7 +469,116 @@ async fn try_capture_cc_session_id(
     }
 }
 
-async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
+/// Static Claude integration instance for per-request selection.
+static CLAUDE_INTEGRATION: crate::agents::ClaudeIntegration = crate::agents::ClaudeIntegration;
+/// Static Codex integration instance for per-request selection.
+static CODEX_INTEGRATION: crate::agents::CodexIntegration = crate::agents::CodexIntegration;
+
+/// Select the [`AgentIntegration`] for a hook request from its `X-ZRemote-Agent`
+/// header. `codex` -> Codex; anything else (including an absent header) ->
+/// Claude, preserving back-compat with the original claude-only forwarder that
+/// sent no agent header.
+fn select_integration(headers: &HeaderMap) -> &'static dyn AgentIntegration {
+    let raw = headers
+        .get("x-zremote-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim);
+    match raw {
+        Some("codex") => &CODEX_INTEGRATION,
+        _ => &CLAUDE_INTEGRATION,
+    }
+}
+
+/// Parse and validate the `X-ZRemote-Session-Id` header as a ZRemote
+/// [`SessionId`] UUID. Returns `None` if the header is absent, non-UTF-8, empty,
+/// or not a valid UUID (callers then skip the generic capture path).
+fn parse_zremote_session_header(headers: &HeaderMap) -> Option<SessionId> {
+    let raw = headers
+        .get("x-zremote-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    match SessionId::parse_str(raw) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            tracing::warn!(
+                header = %raw,
+                "X-ZRemote-Session-Id is not a valid UUID, ignoring for capture"
+            );
+            None
+        }
+    }
+}
+
+/// RFC-012 generic native-session capture.
+///
+/// Emits [`AgenticAgentMessage::AgentSessionRefCaptured`] linking the ZRemote
+/// session id (from the validated `X-ZRemote-Session-Id` header) to the agent's
+/// native session id (`native_session_id`, i.e. the hook payload's
+/// `session_id`). The `agent` kind is selected per-request from the
+/// `X-ZRemote-Agent` header (see [`select_integration`]), so this path serves
+/// both Claude and Codex. Unlike [`try_capture_cc_session_id`], it does **not**
+/// consult `get_claude_task_id` — it captures for *every* session.
+///
+/// Deduplicated per `(zremote_session_id, agent, native_session_id)`. A missing
+/// or invalid header (`zremote_session_id == None`) is a no-op.
+async fn try_capture_agent_session_ref(
+    state: &HooksState,
+    agent: AgentKind,
+    zremote_session_id: Option<SessionId>,
+    native_session_id: &str,
+) {
+    /// Native session ids are short identifiers (UUIDs, rollout ids). Reject
+    /// anything implausibly long so a hostile/buggy payload can't grow the
+    /// dedup set without bound (CWE-400).
+    const MAX_NATIVE_ID_LEN: usize = 256;
+
+    let Some(session_id) = zremote_session_id else {
+        return;
+    };
+    if native_session_id.is_empty() {
+        return;
+    }
+    if native_session_id.len() > MAX_NATIVE_ID_LEN {
+        tracing::warn!(
+            len = native_session_id.len(),
+            "native_session_id exceeds {MAX_NATIVE_ID_LEN} bytes, ignoring for capture"
+        );
+        return;
+    }
+    let key = (session_id, agent, native_session_id.to_string());
+
+    // Check-and-insert under a single Mutex guard so two concurrent hooks for
+    // the same key cannot both observe it absent and double-send. Release the
+    // guard before the (synchronous) try_send.
+    {
+        let mut sent = state.sent_agent_session_refs.lock().await;
+        if sent.contains(&key) {
+            return;
+        }
+        sent.insert(key.clone());
+    }
+
+    let msg = AgenticAgentMessage::AgentSessionRefCaptured {
+        session_id,
+        agent,
+        native_session_id: native_session_id.to_string(),
+    };
+    if state.agentic_tx.try_send(msg).is_err() {
+        // The send failed, so this ref was never delivered. Roll back the dedup
+        // entry, otherwise the key stays forever and the session's native id is
+        // never re-captured — permanently breaking resume for that session.
+        state.sent_agent_session_refs.lock().await.remove(&key);
+        tracing::warn!("agentic channel full, AgentSessionRefCaptured dropped (will retry)");
+    }
+}
+
+async fn handle_pre_tool_use(
+    state: &HooksState,
+    integration: &dyn AgentIntegration,
+    payload: &HookPayload,
+    zremote_session_id: Option<SessionId>,
+) -> HookResponse {
     // Drop hook if tool_use_id is missing — we can't correlate without it.
     let Some(ref tool_use_id) = payload.tool_use_id else {
         tracing::warn!(
@@ -460,6 +602,15 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
     };
 
     try_capture_cc_session_id(state, &payload.session_id, &mapped.session_id).await;
+    // RFC-012 fallback: agents may fire a tool before a SessionStart reaches us.
+    // Capture the native session id here too (dedup makes it first-only).
+    try_capture_agent_session_ref(
+        state,
+        integration.agent_kind(),
+        zremote_session_id,
+        &payload.session_id,
+    )
+    .await;
     state.mapper.mark_hook_activity(mapped.session_id);
     state.mapper.set_hook_mode(mapped.session_id);
 
@@ -520,7 +671,11 @@ async fn handle_pre_tool_use(state: &HooksState, payload: &HookPayload) -> HookR
     }
 }
 
-async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> HookResponse {
+async fn handle_post_tool_use(
+    state: &HooksState,
+    integration: &dyn AgentIntegration,
+    payload: &HookPayload,
+) -> HookResponse {
     let Some(ref tool_use_id) = payload.tool_use_id else {
         tracing::warn!(
             cc_session = %payload.session_id,
@@ -543,7 +698,7 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
     state.mapper.set_hook_mode(mapped.session_id);
 
     // Try to extract slug from transcript for task_name
-    let task_name = extract_task_name_from_transcript(payload, &mapped);
+    let task_name = extract_task_name_from_transcript(integration, payload, &mapped);
 
     let loop_state_msg = AgenticAgentMessage::LoopStateUpdate {
         loop_id: mapped.loop_id,
@@ -599,7 +754,11 @@ async fn handle_post_tool_use(state: &HooksState, payload: &HookPayload) -> Hook
     }
 }
 
-async fn handle_stop(state: &HooksState, payload: &HookPayload) {
+async fn handle_stop(
+    state: &HooksState,
+    integration: &dyn AgentIntegration,
+    payload: &HookPayload,
+) {
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
@@ -624,7 +783,7 @@ async fn handle_stop(state: &HooksState, payload: &HookPayload) {
     }
 
     // Extract task_name from transcript
-    let task_name = extract_task_name_from_transcript(payload, &mapped);
+    let task_name = extract_task_name_from_transcript(integration, payload, &mapped);
 
     emit_agent_state(
         state,
@@ -845,7 +1004,23 @@ async fn handle_elicitation(state: &HooksState, payload: &HookPayload) {
     .await;
 }
 
-async fn handle_user_prompt_submit(state: &HooksState, payload: &HookPayload) {
+async fn handle_user_prompt_submit(
+    state: &HooksState,
+    integration: &dyn AgentIntegration,
+    payload: &HookPayload,
+    zremote_session_id: Option<SessionId>,
+) {
+    // RFC-012 fallback: capture the native session id even before the loop
+    // mapping resolves (it keys off the header, not the mapping). Dedup makes
+    // this first-only across SessionStart / PreToolUse / UserPromptSubmit.
+    try_capture_agent_session_ref(
+        state,
+        integration.agent_kind(),
+        zremote_session_id,
+        &payload.session_id,
+    )
+    .await;
+
     let Some(mapped) = state
         .mapper
         .resolve_loop_id(&payload.session_id, payload.cwd.as_deref())
@@ -956,8 +1131,12 @@ fn sanitize_shell_value(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
-/// Extract `task_name` from the transcript file slug, with path traversal validation.
+/// Extract `task_name` from the agent's transcript, with path-traversal
+/// validation. Agent-specific bits (transcript root + extraction format) are
+/// dispatched through `integration`; the HOME lookup, the prefix-validation
+/// structure, and the 100-char cap are agent-agnostic and stay here.
 fn extract_task_name_from_transcript(
+    integration: &dyn AgentIntegration,
     payload: &HookPayload,
     mapped: &super::mapper::MappedSession,
 ) -> Option<String> {
@@ -966,13 +1145,34 @@ fn extract_task_name_from_transcript(
         .as_ref()
         .or(mapped.transcript_path.as_ref())?;
 
-    // CWE-22: Validate transcript_path is within ~/.claude/projects/
+    // CWE-22: Validate transcript_path is within the agent's transcript root
+    // (for Claude: ~/.claude/projects/). We canonicalize both the candidate and
+    // the allowed root and compare with `Path::starts_with` (component-wise),
+    // not raw `str::starts_with` — the latter is bypassable with `..` segments
+    // (e.g. `~/.claude/projects/../../.ssh/id_rsa`). Canonicalizing resolves
+    // `..` and symlinks; it also requires the file to already exist, which is
+    // fine since we are about to open it.
     let Ok(home) = std::env::var("HOME") else {
         tracing::warn!("HOME not set, cannot validate transcript_path, skipping");
         return None;
     };
-    let allowed_prefix = format!("{home}/.claude/projects/");
-    if !transcript_path.starts_with(&allowed_prefix) {
+    let allowed_root = std::path::Path::new(&home).join(integration.transcript_root());
+    let Ok(canonical_root) = allowed_root.canonicalize() else {
+        // No transcript root on disk -> nothing valid to read.
+        tracing::debug!(
+            root = %allowed_root.display(),
+            "transcript root does not exist, skipping"
+        );
+        return None;
+    };
+    let Ok(canonical_path) = std::path::Path::new(transcript_path).canonicalize() else {
+        tracing::warn!(
+            path = %transcript_path,
+            "transcript_path could not be canonicalized (missing?), ignoring"
+        );
+        return None;
+    };
+    if !canonical_path.starts_with(&canonical_root) {
         tracing::warn!(
             path = %transcript_path,
             "transcript_path outside allowed directory, ignoring"
@@ -981,12 +1181,13 @@ fn extract_task_name_from_transcript(
     }
 
     let offset = mapped.transcript_offset;
-    match extract_slug(transcript_path, offset) {
+    match integration.extract_task_name(transcript_path, offset) {
         Ok((slug, _new_offset)) => {
-            // Cap task_name to 100 chars
+            // Cap task_name to 100 bytes at a valid UTF-8 boundary (a raw
+            // `s[..100]` panics if byte 100 splits a multibyte char).
             slug.map(|s| {
                 if s.len() > 100 {
-                    s[..100].to_string()
+                    s[..s.floor_char_boundary(100)].to_string()
                 } else {
                     s
                 }
@@ -1016,7 +1217,19 @@ mod tests {
         mpsc::Receiver<AgenticAgentMessage>,
         mpsc::Receiver<AgentMessage>,
     ) {
-        let (agentic_tx, agentic_rx) = mpsc::channel(64);
+        test_state_with_agentic_capacity(64)
+    }
+
+    /// Like [`test_state`] but with a custom agentic-channel capacity so tests
+    /// can force `try_send` to fail (channel-full) deterministically.
+    fn test_state_with_agentic_capacity(
+        cap: usize,
+    ) -> (
+        HooksState,
+        mpsc::Receiver<AgenticAgentMessage>,
+        mpsc::Receiver<AgentMessage>,
+    ) {
+        let (agentic_tx, agentic_rx) = mpsc::channel(cap);
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let mapper = SessionMapper::new();
         let state = HooksState {
@@ -1026,6 +1239,7 @@ mod tests {
             mapper,
             outbound_tx,
             sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            sent_agent_session_refs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         };
         (state, agentic_rx, outbound_rx)
     }
@@ -1071,7 +1285,7 @@ mod tests {
 
         let mut p = payload("PreToolUse", "cc-1");
         p.tool_use_id = Some("toolu_test1".to_string());
-        handle_pre_tool_use(&state, &p).await;
+        handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
 
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
@@ -1095,7 +1309,7 @@ mod tests {
         // No loop registered -- resolve will fail after retries
         let mut p = payload("PreToolUse", "unknown-cc");
         p.tool_use_id = Some("toolu_unknown".to_string());
-        handle_pre_tool_use(&state, &p).await;
+        handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
         assert!(agentic_rx.try_recv().is_err());
     }
 
@@ -1108,7 +1322,7 @@ mod tests {
             let mut p = payload("PreToolUse", "cc-tools");
             p.tool_name = Some(tool.to_string());
             p.tool_use_id = Some(format!("toolu_{tool}"));
-            handle_pre_tool_use(&state, &p).await;
+            handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
 
             // All tool names should produce a Working status
             let msg = agentic_rx.try_recv().unwrap();
@@ -1136,7 +1350,7 @@ mod tests {
 
         let mut p = payload("PostToolUse", "cc-2");
         p.tool_use_id = Some("toolu_post1".to_string());
-        handle_post_tool_use(&state, &p).await;
+        handle_post_tool_use(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
@@ -1157,7 +1371,7 @@ mod tests {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let mut p = payload("PostToolUse", "unknown-cc");
         p.tool_use_id = Some("toolu_unknown".to_string());
-        handle_post_tool_use(&state, &p).await;
+        handle_post_tool_use(&state, &crate::agents::ClaudeIntegration, &p).await;
         assert!(agentic_rx.try_recv().is_err());
     }
 
@@ -1192,7 +1406,7 @@ mod tests {
         let mut p = payload("PostToolUse", cc_id);
         p.transcript_path = Some(transcript_path.clone());
         p.tool_use_id = Some("toolu_slug_test".to_string());
-        handle_post_tool_use(&state, &p).await;
+        handle_post_tool_use(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
@@ -1217,7 +1431,7 @@ mod tests {
         let (_sid, loop_id) = setup_loop(&state).await;
 
         let p = payload("Stop", "cc-stop");
-        handle_stop(&state, &p).await;
+        handle_stop(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         // First message: SessionExecutionStopped
         let msg1 = agentic_rx.try_recv().unwrap();
@@ -1257,7 +1471,7 @@ mod tests {
     async fn stop_no_loop_mapping_is_noop() {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let p = payload("Stop", "unknown-cc");
-        handle_stop(&state, &p).await;
+        handle_stop(&state, &crate::agents::ClaudeIntegration, &p).await;
         assert!(agentic_rx.try_recv().is_err());
     }
 
@@ -1286,7 +1500,7 @@ mod tests {
 
         let mut p = payload("Stop", cc_id);
         p.transcript_path = Some(transcript_path.clone());
-        handle_stop(&state, &p).await;
+        handle_stop(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         // First message: SessionExecutionStopped
         let msg1 = agentic_rx.try_recv().unwrap();
@@ -1431,7 +1645,7 @@ mod tests {
 
         let mut p = payload("UserPromptSubmit", "cc-prompt");
         p.prompt = Some("fix the bug".to_string());
-        handle_user_prompt_submit(&state, &p).await;
+        handle_user_prompt_submit(&state, &crate::agents::ClaudeIntegration, &p, None).await;
 
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
@@ -1451,7 +1665,7 @@ mod tests {
     async fn user_prompt_submit_no_loop_mapping_is_noop() {
         let (state, mut agentic_rx, _outbound_rx) = test_state();
         let p = payload("UserPromptSubmit", "unknown-cc");
-        handle_user_prompt_submit(&state, &p).await;
+        handle_user_prompt_submit(&state, &crate::agents::ClaudeIntegration, &p, None).await;
         assert!(agentic_rx.try_recv().is_err());
     }
 
@@ -1591,6 +1805,326 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // RFC-012: X-ZRemote-Session-Id parsing + AgentSessionRefCaptured
+    // ---------------------------------------------------------------
+
+    fn headers_with_session(value: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "x-zremote-session-id",
+            axum::http::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn parse_zremote_session_header_valid_uuid() {
+        let id = Uuid::new_v4();
+        let headers = headers_with_session(&id.to_string());
+        assert_eq!(parse_zremote_session_header(&headers), Some(id));
+    }
+
+    #[test]
+    fn parse_zremote_session_header_trims_whitespace() {
+        let id = Uuid::new_v4();
+        let headers = headers_with_session(&format!("  {id}  "));
+        assert_eq!(parse_zremote_session_header(&headers), Some(id));
+    }
+
+    #[test]
+    fn parse_zremote_session_header_absent_is_none() {
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(parse_zremote_session_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_zremote_session_header_empty_is_none() {
+        let headers = headers_with_session("");
+        assert_eq!(parse_zremote_session_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_zremote_session_header_invalid_uuid_is_none() {
+        let headers = headers_with_session("not-a-uuid");
+        assert_eq!(parse_zremote_session_header(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_emits_for_non_claude_task_session() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        // Deliberately register NO claude task: the generic capture path must not
+        // depend on get_claude_task_id (unlike try_capture_cc_session_id).
+        let zremote_id = Uuid::new_v4();
+
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-native-123")
+            .await;
+
+        let msg = agentic_rx.try_recv().unwrap();
+        match msg {
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } => {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(agent, AgentKind::Claude);
+                assert_eq!(native_session_id, "cc-native-123");
+            }
+            other => panic!("expected AgentSessionRefCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_no_header_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        try_capture_agent_session_ref(&state, AgentKind::Claude, None, "cc-native").await;
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "missing header must produce no capture message"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_empty_native_id_is_noop() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(Uuid::new_v4()), "").await;
+        assert!(agentic_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_deduplicates() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let zremote_id = Uuid::new_v4();
+
+        // First call emits.
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-dedup")
+            .await;
+        assert!(agentic_rx.try_recv().is_ok());
+
+        // Same (session, agent, native) tuple is a no-op.
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-dedup")
+            .await;
+        assert!(agentic_rx.try_recv().is_err());
+
+        // A DIFFERENT native id for the same session still emits.
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-other")
+            .await;
+        assert!(agentic_rx.try_recv().is_ok());
+
+        // A DIFFERENT zremote session id also emits.
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(Uuid::new_v4()), "cc-dedup")
+            .await;
+        assert!(agentic_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_rolls_back_dedup_on_send_failure() {
+        // If try_send fails (channel full), the dedup key must be rolled back so
+        // a later attempt re-captures — otherwise resume is permanently broken
+        // for that session.
+        let (state, mut agentic_rx, _outbound_rx) = test_state_with_agentic_capacity(1);
+        let zremote_id = Uuid::new_v4();
+
+        // Fill the size-1 channel so the capture's try_send will fail.
+        state
+            .agentic_tx
+            .try_send(AgenticAgentMessage::SessionExecutionStopped {
+                session_id: Uuid::new_v4(),
+            })
+            .unwrap();
+
+        // Capture attempt: send fails, key must be rolled back.
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-retry")
+            .await;
+        assert!(
+            state.sent_agent_session_refs.lock().await.is_empty(),
+            "dedup key must be removed after a failed send"
+        );
+
+        // Drain the channel, then retry: capture must now succeed (not deduped).
+        let _ = agentic_rx.try_recv();
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(zremote_id), "cc-retry")
+            .await;
+        match agentic_rx.try_recv() {
+            Ok(AgenticAgentMessage::AgentSessionRefCaptured {
+                native_session_id, ..
+            }) => assert_eq!(native_session_id, "cc-retry"),
+            other => panic!("expected re-captured AgentSessionRefCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_rejects_overlong_native_id() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let oversized = "x".repeat(257); // > MAX_NATIVE_ID_LEN (256)
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(Uuid::new_v4()), &oversized)
+            .await;
+        assert!(
+            agentic_rx.try_recv().is_err(),
+            "native_session_id > 256 bytes must be rejected"
+        );
+        assert!(
+            state.sent_agent_session_refs.lock().await.is_empty(),
+            "oversized id must not enter the dedup set"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_agent_session_ref_accepts_max_length_native_id() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let at_max = "y".repeat(256); // exactly MAX_NATIVE_ID_LEN
+        try_capture_agent_session_ref(&state, AgentKind::Claude, Some(Uuid::new_v4()), &at_max)
+            .await;
+        assert!(
+            agentic_rx.try_recv().is_ok(),
+            "native_session_id of exactly 256 bytes must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_captures_agent_session_ref_via_header() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, _loop_id) = setup_loop(&state).await;
+        let zremote_id = Uuid::new_v4();
+
+        let mut p = payload("PreToolUse", "cc-native-abc");
+        p.tool_use_id = Some("toolu_x".to_string());
+        handle_pre_tool_use(
+            &state,
+            &crate::agents::ClaudeIntegration,
+            &p,
+            Some(zremote_id),
+        )
+        .await;
+
+        // Drain messages; one of them must be AgentSessionRefCaptured with the
+        // header session id and the payload's session_id as the native id.
+        let mut found = false;
+        while let Ok(msg) = agentic_rx.try_recv() {
+            if let AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } = msg
+            {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(agent, AgentKind::Claude);
+                assert_eq!(native_session_id, "cc-native-abc");
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "PreToolUse with a valid header must emit AgentSessionRefCaptured"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_captures_agent_session_ref_via_header() {
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, _loop_id) = setup_loop(&state).await;
+        let zremote_id = Uuid::new_v4();
+
+        let p = payload("UserPromptSubmit", "cc-prompt-native");
+        handle_user_prompt_submit(
+            &state,
+            &crate::agents::ClaudeIntegration,
+            &p,
+            Some(zremote_id),
+        )
+        .await;
+
+        let mut found = false;
+        while let Ok(msg) = agentic_rx.try_recv() {
+            if let AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                native_session_id,
+                ..
+            } = msg
+            {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(native_session_id, "cc-prompt-native");
+                found = true;
+            }
+        }
+        assert!(found, "UserPromptSubmit with a valid header must capture");
+    }
+
+    // ---------------------------------------------------------------
+    // RFC-012 P4b: X-ZRemote-Agent routing -> integration selection
+    // ---------------------------------------------------------------
+
+    fn headers_with_agent(agent: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "x-zremote-agent",
+            axum::http::HeaderValue::from_str(agent).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn select_integration_codex_header() {
+        let h = headers_with_agent("codex");
+        assert_eq!(select_integration(&h).agent_kind(), AgentKind::Codex);
+    }
+
+    #[test]
+    fn select_integration_claude_header() {
+        let h = headers_with_agent("claude");
+        assert_eq!(select_integration(&h).agent_kind(), AgentKind::Claude);
+    }
+
+    #[test]
+    fn select_integration_absent_header_defaults_claude() {
+        let h = axum::http::HeaderMap::new();
+        assert_eq!(select_integration(&h).agent_kind(), AgentKind::Claude);
+    }
+
+    #[test]
+    fn select_integration_unknown_header_defaults_claude() {
+        let h = headers_with_agent("gemini");
+        assert_eq!(select_integration(&h).agent_kind(), AgentKind::Claude);
+    }
+
+    #[tokio::test]
+    async fn capture_via_codex_integration_uses_codex_agent_kind() {
+        // Routing a hook through CodexIntegration must capture AgentKind::Codex.
+        let (state, mut agentic_rx, _outbound_rx) = test_state();
+        let (_sid, _loop_id) = setup_loop(&state).await;
+        let zremote_id = Uuid::new_v4();
+
+        let mut p = payload("PreToolUse", "codex-native-xyz");
+        p.tool_use_id = Some("toolu_codex".to_string());
+        handle_pre_tool_use(
+            &state,
+            &crate::agents::CodexIntegration,
+            &p,
+            Some(zremote_id),
+        )
+        .await;
+
+        let mut found = false;
+        while let Ok(msg) = agentic_rx.try_recv() {
+            if let AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } = msg
+            {
+                assert_eq!(session_id, zremote_id);
+                assert_eq!(agent, AgentKind::Codex);
+                assert_eq!(native_session_id, "codex-native-xyz");
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "codex-routed PreToolUse must capture AgentKind::Codex"
+        );
+    }
+
+    // ---------------------------------------------------------------
     // extract_task_name_from_transcript
     // ---------------------------------------------------------------
 
@@ -1603,7 +2137,8 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         assert!(result.is_none());
     }
 
@@ -1626,7 +2161,8 @@ mod tests {
             transcript_path: Some(transcript_path),
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         assert_eq!(result.as_deref(), Some("fallback-slug"));
 
         std::fs::remove_dir_all(&transcript_dir).ok();
@@ -1654,7 +2190,8 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         assert_eq!(result.as_ref().map(|s| s.len()), Some(100));
 
         std::fs::remove_dir_all(&transcript_dir).ok();
@@ -1678,9 +2215,87 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         // Path traversal validation should reject this
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_task_name_rejects_dotdot_traversal_under_prefix() {
+        // A path that textually starts with the allowed prefix but escapes it via
+        // `..` must be rejected (the old str::starts_with guard was bypassable;
+        // the canonicalize + Path::starts_with guard is not).
+        let home = std::env::var("HOME").unwrap();
+        // Put a real file OUTSIDE the projects dir, then reference it through a
+        // `..`-laden path that begins with the allowed prefix string.
+        let outside_dir = format!("{home}/.claude/_test_handler_escape");
+        std::fs::create_dir_all(&outside_dir).ok();
+        let outside_file = format!("{outside_dir}/secret.jsonl");
+        std::fs::write(
+            &outside_file,
+            "{\"type\":\"result\",\"slug\":\"escaped\"}\n",
+        )
+        .unwrap();
+
+        // `~/.claude/projects/../_test_handler_escape/secret.jsonl` — starts with
+        // the allowed prefix as a raw string, but resolves outside it.
+        let traversal = format!("{home}/.claude/projects/../_test_handler_escape/secret.jsonl");
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(traversal);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
+        assert!(
+            result.is_none(),
+            "`..` traversal escaping the transcript root must be rejected"
+        );
+
+        std::fs::remove_dir_all(&outside_dir).ok();
+    }
+
+    #[test]
+    fn extract_task_name_truncates_multibyte_slug_at_char_boundary() {
+        // A slug whose byte 100 falls inside a multibyte char must NOT panic
+        // (the old `s[..100]` did). Build a slug where a 3-byte char straddles
+        // byte 100: 99 ASCII bytes + a multibyte char.
+        let home = std::env::var("HOME").unwrap();
+        let transcript_dir = format!("{home}/.claude/projects/_test_handler_mb");
+        std::fs::create_dir_all(&transcript_dir).ok();
+        let transcript_path = format!("{transcript_dir}/transcript.jsonl");
+
+        let mut slug = "a".repeat(99); // bytes 0..99
+        slug.push('€'); // 3-byte char occupying bytes 99..102 (straddles 100)
+        slug.push_str(&"b".repeat(20)); // ensure len > 100
+        std::fs::write(
+            &transcript_path,
+            format!("{{\"type\":\"result\",\"slug\":\"{slug}\"}}\n"),
+        )
+        .unwrap();
+
+        let mut p = payload("PostToolUse", "cc-1");
+        p.transcript_path = Some(transcript_path);
+        let mapped = super::super::mapper::MappedSession {
+            loop_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            transcript_path: None,
+            transcript_offset: 0,
+        };
+        // Must not panic; result is capped to a valid char boundary <= 100 bytes.
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped)
+                .expect("slug should be extracted");
+        assert!(result.len() <= 100, "capped length must be <= 100 bytes");
+        // The '€' at byte 99 does not fit fully within 100 bytes, so the cap lands
+        // at byte 99 (the 99 'a's), never splitting the multibyte char.
+        assert_eq!(result, "a".repeat(99));
+
+        std::fs::remove_dir_all(&transcript_dir).ok();
     }
 
     #[test]
@@ -1697,7 +2312,8 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         assert!(result.is_none());
     }
 
@@ -1717,7 +2333,8 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         // Empty string slug is still returned (extract_slug returns it)
         assert_eq!(result.as_deref(), Some(""));
 
@@ -1744,7 +2361,8 @@ mod tests {
             transcript_path: None,
             transcript_offset: 0,
         };
-        let result = extract_task_name_from_transcript(&p, &mapped);
+        let result =
+            extract_task_name_from_transcript(&crate::agents::ClaudeIntegration, &p, &mapped);
         assert!(result.is_none());
 
         std::fs::remove_dir_all(&transcript_dir).ok();
@@ -2190,7 +2808,7 @@ mod tests {
         p.tool_name = Some("Bash".to_string());
         p.tool_use_id = Some("toolu_both".to_string());
         p.tool_input = Some(serde_json::json!({"command": "ls"}));
-        handle_pre_tool_use(&state, &p).await;
+        handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
 
         let msg1 = agentic_rx.try_recv().unwrap();
         match &msg1 {
@@ -2233,7 +2851,7 @@ mod tests {
         p.tool_name = Some("Bash".to_string());
         p.tool_use_id = Some("toolu_closed_test".to_string());
         p.tool_response = Some(serde_json::Value::String("output".to_string()));
-        handle_post_tool_use(&state, &p).await;
+        handle_post_tool_use(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         // First: LoopStateUpdate
         let _loop_msg = agentic_rx.try_recv().unwrap();
@@ -2264,7 +2882,7 @@ mod tests {
         let (sid, _loop_id) = setup_loop(&state).await;
 
         let p = payload("Stop", "cc-sesstopped");
-        handle_stop(&state, &p).await;
+        handle_stop(&state, &crate::agents::ClaudeIntegration, &p).await;
 
         let msg = agentic_rx.try_recv().unwrap();
         match msg {
@@ -2282,7 +2900,7 @@ mod tests {
         // No loop registered at all
         let mut p = payload("PreToolUse", "totally-unknown-session");
         p.tool_use_id = Some("toolu_unknown".to_string());
-        handle_pre_tool_use(&state, &p).await;
+        handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
         assert!(
             agentic_rx.try_recv().is_err(),
             "should produce no messages for unknown session"
@@ -2296,7 +2914,7 @@ mod tests {
         let _ = setup_loop(&state).await;
         // tool_use_id is None (default payload)
         let p = payload("PreToolUse", "cc-noid");
-        handle_pre_tool_use(&state, &p).await;
+        handle_pre_tool_use(&state, &crate::agents::ClaudeIntegration, &p, None).await;
         assert!(
             agentic_rx.try_recv().is_err(),
             "missing tool_use_id should produce no messages"

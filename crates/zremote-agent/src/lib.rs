@@ -144,6 +144,10 @@ pub enum Commands {
         /// Agent instance UUID that owns this daemon
         #[arg(long)]
         owner_id: Option<String>,
+        /// RFC-013 resume: spawn this argv as the PTY child instead of `shell`.
+        /// Repeated, ordered: first is the program, rest are its args.
+        #[arg(long = "init-arg")]
+        init_argv: Vec<String>,
     },
 }
 
@@ -186,6 +190,7 @@ pub fn run(command: Option<Commands>) {
         export_env_vars,
         force_sigwinch,
         owner_id,
+        init_argv,
     }) = command
     {
         // Validate session_id as UUID to prevent path traversal (e.g. "../")
@@ -245,6 +250,12 @@ pub fn run(command: Option<Commands>) {
             None
         };
 
+        let resume_argv = if init_argv.is_empty() {
+            None
+        } else {
+            Some(init_argv)
+        };
+
         rt.block_on(daemon::run_pty_daemon(
             session_id,
             socket,
@@ -256,6 +267,7 @@ pub fn run(command: Option<Commands>) {
             extra_env,
             shell_config,
             owner_id,
+            resume_argv,
         ));
         return;
     }

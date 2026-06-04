@@ -256,6 +256,10 @@ pub struct TerminalPanel {
     /// Whether the terminal WebSocket connection has been lost
     /// (session may still be alive on server, waiting for reconnect).
     disconnected: bool,
+    /// RFC-013: the session is `resumable` and auto-resume is off, so attach
+    /// returned a typed resumable signal instead of connecting. The panel shows
+    /// a "Resumable — click to continue" affordance. Cleared once resumed.
+    resumable: bool,
     /// Terminal title set by OSC escape sequences (e.g. `\e]0;title\a`).
     terminal_title: Option<String>,
     /// Claude Code session metrics for the current session.
@@ -367,6 +371,7 @@ impl TerminalPanel {
             last_focus_reported: false,
             mode,
             disconnected: false,
+            resumable: false,
             terminal_title: None,
             cc_metrics: None,
             cc_status: None,
@@ -479,6 +484,15 @@ impl TerminalPanel {
         self.cc_task_name = None;
     }
 
+    /// RFC-013: record a recoverable resume failure (e.g. agent CLI not on
+    /// PATH). Keeps the panel `resumable` so the overlay shows the error inline
+    /// with a Retry button — never a toast-only dead end.
+    pub fn set_resume_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.error_message = Some(message);
+        self.resumable = true;
+        cx.notify();
+    }
+
     /// Reconnect with a new terminal handle after session resume.
     /// Resets disconnect state, replaces the handle, restarts the reader,
     /// and sets up a new resize debounce pipeline.
@@ -490,6 +504,7 @@ impl TerminalPanel {
     ) {
         self.disconnected = false;
         self.closed = false;
+        self.resumable = false; // RFC-013: cleared once the session reconnects
         self.error_message = None;
         self.terminal_title = None;
         self.reader_started = false; // Allow start_output_reader to run again
@@ -747,6 +762,16 @@ impl TerminalPanel {
                         Ok(GuiSignal::Event(TerminalEvent::Disconnected)) => {
                             let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                                 this.disconnected = true;
+                                cx.notify();
+                            });
+                            break;
+                        }
+                        Ok(GuiSignal::Event(TerminalEvent::SessionResumable)) => {
+                            // RFC-013: agent backend died on reboot and auto-resume
+                            // is off. Show the click-to-continue affordance; the
+                            // server closed this WS, so stop reading.
+                            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                                this.resumable = true;
                                 cx.notify();
                             });
                             break;
@@ -1095,6 +1120,11 @@ pub enum TerminalPanelEvent {
     TitleChanged {
         session_id: String,
         title: Option<String>,
+    },
+    /// RFC-013: the user clicked "Continue" on a resumable session. The parent
+    /// (which holds the API client) POSTs the resume endpoint for this session.
+    ResumeRequested {
+        session_id: String,
     },
 }
 
@@ -1510,6 +1540,96 @@ impl TerminalPanel {
         } else {
             None
         }
+    }
+
+    /// RFC-013: centered "Resumable — click to continue" affordance shown when
+    /// auto-resume is off (or a prior resume failed). Clicking emits
+    /// `ResumeRequested` so the parent POSTs the resume endpoint. A failed resume
+    /// surfaces inline (the row stays resumable) with the same button as retry —
+    /// recoverable, never a toast-only dead end.
+    fn render_resumable_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let session_id = self.session_id.clone();
+        let button_label = if self.error_message.is_some() {
+            "Retry"
+        } else {
+            "Continue"
+        };
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(10.0))
+            .child(icon(Icon::Play).size(px(28.0)).text_color(theme::accent()))
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .text_size(px(14.0))
+                    .child("Resumable session"),
+            )
+            .child(
+                div()
+                    .text_color(theme::text_secondary())
+                    .text_size(px(12.0))
+                    .child(
+                        "The agent stopped after a restart. Continue to re-open the conversation.",
+                    ),
+            );
+
+        // Inline recoverable error (e.g. agent CLI not on PATH).
+        if let Some(ref msg) = self.error_message {
+            col = col.child(
+                div()
+                    .max_w(px(360.0))
+                    .text_color(theme::error())
+                    .text_size(px(11.0))
+                    .child(format!("Resume failed: {msg}")),
+            );
+        }
+
+        col = col.child(
+            div()
+                .id("resume-continue-button")
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .bg(theme::accent())
+                .text_color(theme::bg_primary())
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .tooltip(|_window, cx| {
+                    cx.new(|_| ConnectionTooltip("Re-open this agent session".to_string()))
+                        .into()
+                })
+                .child(
+                    icon(Icon::Play)
+                        .size(px(12.0))
+                        .text_color(theme::bg_primary()),
+                )
+                .child(button_label)
+                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                    // Optimistic: clear the prior error and let the parent drive
+                    // the POST; the WS will reconnect once the row is active.
+                    this.error_message = None;
+                    cx.emit(TerminalPanelEvent::ResumeRequested {
+                        session_id: session_id.clone(),
+                    });
+                    cx.notify();
+                })),
+        );
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::bg_primary())
+            .child(col)
+            .into_any_element()
     }
 
     fn render_connection_badge(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2247,6 +2367,12 @@ impl Render for TerminalPanel {
         }
 
         content = content.child(self.render_connection_badge(cx));
+
+        // RFC-013: resumable affordance overlays the (clean) terminal — no
+        // scrollback restore (decision C). Rendered last so it sits on top.
+        if self.resumable {
+            content = content.child(self.render_resumable_overlay(cx));
+        }
 
         let mut wrapper = div().flex().flex_col().size_full();
         if let Some(overlay) = &self.search_overlay {

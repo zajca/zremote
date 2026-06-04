@@ -1963,6 +1963,40 @@ pub(super) async fn handle_agentic_message(
                 });
             }
         }
+        AgenticAgentMessage::AgentSessionRefCaptured {
+            session_id,
+            agent,
+            native_session_id,
+        } => {
+            // Server-mode persistence of an agent's native session id. Mirrors
+            // the local-mode path in zremote_core's AgenticProcessor; both write
+            // the same `sessions` columns via the shared core query. This is the
+            // durable record RFC-013 reads to resume a stopped agent.
+            // Persistence-only: no broadcast event in this phase.
+            let session_id_str = session_id.to_string();
+            let now = Utc::now().to_rfc3339();
+            if let Err(e) = zremote_core::queries::sessions::set_agent_session_ref(
+                &state.db,
+                &session_id_str,
+                agent.as_str(),
+                &native_session_id,
+                &now,
+            )
+            .await
+            {
+                // Best-effort persistence: a failure only means RFC-013 resume is
+                // disabled for THIS session (the row keeps its prior ref/none).
+                // Do NOT escalate this into dropping the WS connection — the
+                // agent's other messages (state, execution nodes) must keep
+                // flowing; the native id will be re-captured on the next hook.
+                tracing::warn!(
+                    %host_id,
+                    %session_id,
+                    error = %e,
+                    "failed to persist agent native session ref (resume disabled for this session)"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -4160,5 +4194,51 @@ mod tests {
         .unwrap();
         assert_eq!(row.0.as_deref(), Some("v2"));
         assert_eq!(row.1.as_deref(), Some("h2"));
+    }
+
+    // ── handle_agentic_message: AgentSessionRefCaptured ──
+
+    #[tokio::test]
+    async fn handle_agentic_session_ref_captured_persists_to_session_row() {
+        let state = test_state().await;
+        let host_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+
+        insert_test_host(&state, &host_id.to_string(), "test-host").await;
+        insert_test_session(
+            &state,
+            &session_id.to_string(),
+            &host_id.to_string(),
+            "active",
+        )
+        .await;
+
+        handle_agentic_message(
+            &state,
+            host_id,
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent: zremote_protocol::AgentKind::Codex,
+                native_session_id: "rollout-xyz".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (agent_kind, agent_ref, updated_at): (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT agent_kind, agent_session_ref, agent_session_updated_at \
+                 FROM sessions WHERE id = ?",
+            )
+            .bind(session_id.to_string())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(agent_kind.as_deref(), Some("codex"));
+        assert_eq!(agent_ref.as_deref(), Some("rollout-xyz"));
+        assert!(
+            updated_at.is_some(),
+            "agent_session_updated_at should be set"
+        );
     }
 }

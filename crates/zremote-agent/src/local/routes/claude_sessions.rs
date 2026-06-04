@@ -250,43 +250,34 @@ pub async fn resume_claude_task(
 
     let host_id = state.host_id.to_string();
 
-    let new_session_id = Uuid::new_v4();
-    let new_session_id_str = new_session_id.to_string();
-    let new_task_id = Uuid::new_v4();
-    let new_task_id_str = new_task_id.to_string();
+    // RFC-013 (decisions D/E/F/4): resume IN PLACE — reuse the SAME terminal
+    // session id and the SAME claude_sessions row instead of minting new ones,
+    // so cost/tokens keep accumulating on one row and GUI handles stay stable.
+    let session_id: Uuid = original.session_id.parse().map_err(|_| {
+        AppError::Internal(format!(
+            "stored session_id is not a UUID: {}",
+            original.session_id
+        ))
+    })?;
+    let session_id_str = original.session_id.clone();
+    let task_id_str = original.id.clone();
 
     let initial_prompt = resume_req.initial_prompt;
 
-    q::insert_session_for_task(
+    // In-place update of the existing row (status -> starting, clear terminal
+    // stamps, refresh prompt/options). Replaces the old new-row insert.
+    let updated = q::resume_claude_task_in_place(
         &state.db,
-        &new_session_id_str,
-        &host_id,
-        &original.project_path,
-        original.project_id.as_deref(),
-    )
-    .await?;
-
-    q::insert_resumed_claude_task(
-        &state.db,
-        &new_task_id_str,
-        &new_session_id_str,
-        &host_id,
-        &original.project_path,
-        original.project_id.as_deref(),
+        &task_id_str,
         original.model.as_deref(),
         initial_prompt.as_deref(),
-        cc_session_id.as_deref(),
-        &original.id,
         original.options_json.as_deref(),
     )
     .await?;
-
-    {
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(
-            new_session_id,
-            SessionState::new(new_session_id, state.host_id),
-        );
+    if updated == 0 {
+        return Err(AppError::NotFound(format!(
+            "claude task {task_id_str} not found"
+        )));
     }
 
     let (
@@ -297,7 +288,12 @@ pub async fn resume_claude_task(
         development_channels,
         print_mode,
     ) = if let Some(ref opts_str) = original.options_json {
-        let opts: serde_json::Value = serde_json::from_str(opts_str).unwrap_or_default();
+        // Do NOT silently drop options on corrupt JSON: skip_permissions /
+        // allowed_tools are security-relevant, so resuming with defaults would
+        // be a silent behavior change. Propagate the parse error instead.
+        let opts: serde_json::Value = serde_json::from_str(opts_str).map_err(|e| {
+            AppError::Internal(format!("corrupt options_json for task {task_id_str}: {e}"))
+        })?;
         let tools = opts["allowed_tools"]
             .as_array()
             .map(|arr| {
@@ -356,56 +352,79 @@ pub async fn resume_claude_task(
     let cmd = CommandBuilder::build(&cmd_opts)
         .map_err(|e| AppError::BadRequest(format!("invalid command options: {e}")))?;
 
-    // Spawn PTY session
+    // RFC-013 (decision D): relaunch via the shared argv-direct engine. The
+    // claude command needs a shell (it uses `cd`, env prefixes, and
+    // `"$(cat <promptfile>)"` for large prompts), so the session's program is
+    // `<shell> -c '<cmd>; exec <shell>'` — run AS the session command. No 300ms
+    // sleep, no write-into-a-live-shell, so there is no prompt-readiness race.
+    // Every field inside `cmd` is already shell-quoted by CommandBuilder.
+    //
+    // The trailing `; exec <shell>` keeps a live interactive shell after `claude`
+    // exits, matching the claude-task START behavior (which spawns a persistent
+    // shell and types the command into it) — so the session does not die when
+    // the agent finishes.
     let shell = default_shell();
+    let script = format!("{}; exec {}", cmd.trim_end_matches('\n'), shell);
+    let resume_argv = vec![shell.to_string(), "-c".to_string(), script];
     let ai_config = crate::pty::shell_integration::ShellIntegrationConfig::for_ai_session();
+
     let pid = {
         let mut mgr = state.session_manager.lock().await;
-        mgr.create(
-            new_session_id,
+        mgr.resume_session(
+            session_id,
             shell,
             120,
             40,
             Some(&original.project_path),
             None,
             Some(&ai_config),
+            &resume_argv,
         )
         .await
-        .map_err(|e| AppError::Internal(format!("failed to spawn PTY: {e}")))?
+        .map_err(|e| AppError::Internal(format!("failed to spawn resume PTY: {e}")))?
     };
 
-    // Update session status in DB
-    sqlx::query("UPDATE sessions SET status = 'active', shell = ?, pid = ? WHERE id = ?")
-        .bind(shell)
-        .bind(i64::from(pid))
-        .bind(&new_session_id_str)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
-
-    // Brief delay to let the shell initialize before writing the command
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    // Write the claude command into the PTY
-    {
+    // Transition the reused terminal row resumable/closed -> active. If the DB
+    // update fails AFTER the spawn, tear down the spawned backend so we don't
+    // orphan a PTY (and don't insert in-memory state for a row that's not active).
+    let db_result = async {
+        zremote_core::queries::sessions::mark_session_active(&state.db, &session_id_str).await?;
+        sqlx::query("UPDATE sessions SET shell = ?, pid = ? WHERE id = ?")
+            .bind(shell)
+            .bind(i64::from(pid))
+            .bind(&session_id_str)
+            .execute(&state.db)
+            .await
+            .map_err(AppError::Database)?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(e) = db_result {
         let mut mgr = state.session_manager.lock().await;
-        mgr.write_to(&new_session_id, cmd.as_bytes())
-            .map_err(|e| AppError::Internal(format!("failed to write command to PTY: {e}")))?;
+        let _ = mgr.close(&session_id);
+        return Err(e);
+    }
+
+    // Re-create in-memory state under the SAME terminal id, only after the spawn
+    // and DB update both succeeded.
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(session_id, SessionState::new(session_id, state.host_id));
     }
 
     // Register channel dialog auto-approval detector + channel bridge discovery.
-    crate::claude::register_channel_auto_approve(new_session_id, &development_channels, &state)
-        .await;
+    crate::claude::register_channel_auto_approve(session_id, &development_channels, &state).await;
 
     let _ = state.events.send(ServerEvent::ClaudeTaskStarted {
-        task_id: new_task_id_str.clone(),
-        session_id: new_session_id_str.clone(),
+        task_id: task_id_str.clone(),
+        session_id: session_id_str.clone(),
         host_id: host_id.clone(),
         project_path: original.project_path.clone(),
     });
 
-    let task = q::get_claude_task(&state.db, &new_task_id_str).await?;
-    Ok((StatusCode::CREATED, Json(task)))
+    // In-place: return the SAME (updated) task row.
+    let task = q::get_claude_task(&state.db, &task_id_str).await?;
+    Ok((StatusCode::OK, Json(task)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1692,9 +1711,13 @@ mod tests {
         // PTY spawn will fail in test env but it exercises the DB insertion and option parsing paths
         // Status will be 500 (Internal Server Error) because PTY spawn fails, or 201 if it succeeds
         let status = response.status();
+        // RFC-013 in-place resume returns 200 OK with the SAME task row on
+        // success (no longer 201 + a new row). The spawned program is
+        // `sh -c '<claude cmd>'`; `sh` spawns fine in tests, so success is 200.
+        // A spawn failure still surfaces as 500.
         assert!(
-            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
-            "expected 500 or 201, got {status}"
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::OK,
+            "expected 500 or 200, got {status}"
         );
     }
 
@@ -1755,9 +1778,13 @@ mod tests {
 
         // Will fail at PTY spawn but exercises the options parsing path
         let status = response.status();
+        // RFC-013 in-place resume returns 200 OK with the SAME task row on
+        // success (no longer 201 + a new row). The spawned program is
+        // `sh -c '<claude cmd>'`; `sh` spawns fine in tests, so success is 200.
+        // A spawn failure still surfaces as 500.
         assert!(
-            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
-            "expected 500 or 201, got {status}"
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::OK,
+            "expected 500 or 200, got {status}"
         );
     }
 
@@ -1983,9 +2010,154 @@ mod tests {
 
         let status = response.status();
         // Exercises the None options_json branch (defaults: empty tools, no skip, no format, no flags)
+        // RFC-013 in-place resume returns 200 OK with the SAME task row on
+        // success (no longer 201 + a new row). The spawned program is
+        // `sh -c '<claude cmd>'`; `sh` spawns fine in tests, so success is 200.
+        // A spawn failure still surfaces as 500.
         assert!(
-            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::CREATED,
-            "expected 500 or 201, got {status}"
+            status == StatusCode::INTERNAL_SERVER_ERROR || status == StatusCode::OK,
+            "expected 500 or 200, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_is_in_place_same_id_no_new_row() {
+        // RFC-013 decisions E/4: resume reuses the SAME claude_sessions row and
+        // terminal session id — no new task row is created.
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        zremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        zremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            Some("opus"),
+            Some("original"),
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE claude_sessions SET status = 'completed', claude_session_id = 'cc-1' WHERE id = ?",
+        )
+        .bind(&task_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let count_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM claude_sessions")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_test_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"initial_prompt":"keep going"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        // `sh -c` spawns fine in tests -> 200; a spawn failure -> 500. Either way
+        // the in-place invariants below must hold (the in-place DB update runs
+        // before the spawn).
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "got {status}"
+        );
+
+        // No NEW row was created.
+        let count_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM claude_sessions")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            count_after.0, count_before.0,
+            "resume must not insert a new task row"
+        );
+
+        // The SAME row was updated in place: prompt refreshed, still same session_id.
+        let task = zremote_core::queries::claude_sessions::get_claude_task(&state.db, &task_id)
+            .await
+            .unwrap();
+        assert_eq!(task.session_id, session_id);
+        assert_eq!(task.initial_prompt, Some("keep going".to_string()));
+        assert_eq!(task.model, Some("opus".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_rejects_corrupt_options_json() {
+        // MEDIUM #4: corrupt options_json must NOT silently drop security-relevant
+        // options (skip_permissions/allowed_tools). Resume returns 500, not 2xx.
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let session_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+
+        zremote_core::queries::claude_sessions::insert_session_for_task(
+            &state.db,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+        )
+        .await
+        .unwrap();
+        zremote_core::queries::claude_sessions::insert_claude_task(
+            &state.db,
+            &task_id,
+            &session_id,
+            &host_id,
+            "/tmp/project",
+            None,
+            None,
+            None,
+            Some("{not valid json"),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE claude_sessions SET status = 'completed' WHERE id = ?")
+            .bind(&task_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let app = build_test_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/claude-tasks/{task_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "corrupt options_json must surface an error, not resume with dropped options"
         );
     }
 }

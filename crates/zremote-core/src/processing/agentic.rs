@@ -216,7 +216,51 @@ impl AgenticProcessor {
             AgenticAgentMessage::SessionExecutionStopped { session_id } => {
                 self.handle_session_execution_stopped(session_id).await?;
             }
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id,
+                agent,
+                native_session_id,
+            } => {
+                self.handle_agent_session_ref_captured(session_id, agent, native_session_id)
+                    .await?;
+            }
         }
+        Ok(())
+    }
+
+    /// Persist an agent's native session id (Claude `cc_session_id`, Codex
+    /// rollout id, ...) for a managed session. This is the durable record
+    /// RFC-013 reads to resume a stopped agent. Persistence-only: no broadcast
+    /// event is emitted in this phase.
+    ///
+    /// `native_session_id` is opaque — it is only bound as a SQL parameter,
+    /// never interpreted as shell text.
+    async fn handle_agent_session_ref_captured(
+        &self,
+        session_id: zremote_protocol::SessionId,
+        agent: zremote_protocol::AgentKind,
+        native_session_id: String,
+    ) -> Result<(), AppError> {
+        let session_id_str = session_id.to_string();
+        let agent_kind = agent.as_str();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        crate::queries::sessions::set_agent_session_ref(
+            &self.db,
+            &session_id_str,
+            agent_kind,
+            &native_session_id,
+            &now,
+        )
+        .await?;
+
+        tracing::info!(
+            host_id = %self.host_id,
+            session_id = %session_id,
+            agent = %agent_kind,
+            "captured agent native session ref"
+        );
+
         Ok(())
     }
 
@@ -2024,5 +2068,95 @@ mod tests {
             created_count, 1,
             "exactly one ExecutionNodeCreated event must fire even on duplicate PreToolUse"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_agent_session_ref_captured_persists_to_session_row() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::AgentSessionRefCaptured {
+            session_id,
+            agent: zremote_protocol::AgentKind::Claude,
+            native_session_id: "cc-native-123".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let (agent_kind, agent_ref, updated_at): (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT agent_kind, agent_session_ref, agent_session_updated_at \
+                 FROM sessions WHERE id = ?",
+            )
+            .bind(session_id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(agent_kind.as_deref(), Some("claude"));
+        assert_eq!(agent_ref.as_deref(), Some("cc-native-123"));
+        assert!(
+            updated_at.is_some(),
+            "agent_session_updated_at should be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_agent_session_ref_captured_stores_codex_kind() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::AgentSessionRefCaptured {
+            session_id,
+            agent: zremote_protocol::AgentKind::Codex,
+            native_session_id: "rollout-abc".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let (agent_kind, agent_ref): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT agent_kind, agent_session_ref FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(agent_kind.as_deref(), Some("codex"));
+        assert_eq!(agent_ref.as_deref(), Some("rollout-abc"));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_session_ref_captured_unknown_agent_stores_unknown() {
+        let db = test_db().await;
+        let proc = make_processor(db.clone());
+        let host_id_str = proc.host_id.to_string();
+        insert_host(&db, &host_id_str).await;
+
+        let session_id = Uuid::new_v4();
+        insert_session(&db, &session_id.to_string(), &host_id_str).await;
+
+        proc.handle_message(AgenticAgentMessage::AgentSessionRefCaptured {
+            session_id,
+            agent: zremote_protocol::AgentKind::Unknown,
+            native_session_id: "ref".to_string(),
+        })
+        .await
+        .unwrap();
+
+        let (agent_kind,): (Option<String>,) =
+            sqlx::query_as("SELECT agent_kind FROM sessions WHERE id = ?")
+                .bind(session_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(agent_kind.as_deref(), Some("unknown"));
     }
 }

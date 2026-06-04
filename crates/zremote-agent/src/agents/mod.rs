@@ -17,13 +17,287 @@ use std::fmt;
 use std::sync::Arc;
 
 use uuid::Uuid;
+use zremote_protocol::AgentKind;
 use zremote_protocol::agents::AgentProfileData;
 
 pub mod claude;
 pub mod codex;
+pub mod codex_rollout;
+pub mod resume;
 
 pub use claude::ClaudeLauncher;
 pub use codex::CodexLauncher;
+pub use resume::resume_argv;
+
+/// One hook event ZRemote registers with an agent, plus whether the agent
+/// should run it asynchronously. Mirrors the per-event config the installer
+/// writes into the agent's hooks file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookEventSpec {
+    /// Hook event name (e.g. `"PreToolUse"`). Must match the agent's event set.
+    pub event: &'static str,
+    /// Matcher string for the event (`""` for "all").
+    pub matcher: &'static str,
+    /// `true` to mark the hook `async` in the agent config (fire-and-forget).
+    pub async_hook: bool,
+}
+
+/// Per-agent specifics the hook handler would otherwise hard-code for Claude.
+///
+/// The hook HTTP handler (`crate::hooks::handler`) is agent-agnostic: it parses
+/// the common hook payload and dispatches the genuinely agent-specific bits
+/// through a `&dyn AgentIntegration`. This is the extension point for adding new
+/// agents (Codex, ...) without scattering `AgentKind` branches across the
+/// handler.
+///
+/// Only the parts that actually vary per agent live here. The native session id
+/// is **not** a method: both Claude and Codex deliver it in the hook payload's
+/// `session_id` field (RFC-012 §5), so the handler reads it directly.
+pub trait AgentIntegration: Send + Sync {
+    /// Which agent this integration represents. Used as the `agent` field of
+    /// `AgenticAgentMessage::AgentSessionRefCaptured`.
+    fn agent_kind(&self) -> AgentKind;
+
+    /// Path prefix (relative to `$HOME`) under which this agent writes session
+    /// transcripts. The handler validates a hook-supplied `transcript_path`
+    /// against `"$HOME/<root>"` before reading it (CWE-22 path-traversal guard),
+    /// so this must end with a trailing slash. For Claude: `.claude/projects/`.
+    fn transcript_root(&self) -> &'static str;
+
+    /// Extract a human-readable task name from the agent's transcript file,
+    /// resuming from byte `offset`. Returns `(task_name, new_offset)`.
+    ///
+    /// The caller has already validated `transcript_path` lies under
+    /// [`Self::transcript_root`]. For Claude this reads the `slug` field from the
+    /// JSONL transcript; other agents may use a different format.
+    ///
+    /// # Errors
+    /// Propagates I/O errors from reading the transcript file.
+    fn extract_task_name(
+        &self,
+        transcript_path: &str,
+        offset: u64,
+    ) -> std::io::Result<(Option<String>, u64)>;
+
+    /// Build the argv that resumes a native session for this agent, or `None`
+    /// if the agent has no known resume command. The native id is always a
+    /// separate argv element (injection-safe); see [`resume::resume_argv`].
+    fn resume_argv(&self, native_session_id: &str) -> Option<Vec<String>>;
+
+    /// Config directory name (relative to `$HOME`) where this agent reads its
+    /// hook configuration. For Claude: `.claude`; for Codex: `.codex`.
+    fn config_dir(&self) -> &'static str;
+
+    /// Optional environment variable that overrides [`Self::config_dir`] with an
+    /// absolute path. Claude honours `CLAUDE_CONFIG_DIR`; Codex honours
+    /// `CODEX_HOME`. When set and non-empty, the installer uses it verbatim
+    /// instead of `$HOME/<config_dir>`.
+    fn config_dir_env(&self) -> Option<&'static str>;
+
+    /// The hook events ZRemote registers for this agent, with per-event matcher
+    /// and async flag. Order is preserved when writing the config.
+    fn hook_events(&self) -> &'static [HookEventSpec];
+}
+
+/// [`AgentIntegration`] for Claude Code: `~/.claude/projects` transcripts with a
+/// `slug` field, and `claude --resume <id>`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClaudeIntegration;
+
+impl AgentIntegration for ClaudeIntegration {
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+
+    fn transcript_root(&self) -> &'static str {
+        ".claude/projects/"
+    }
+
+    fn extract_task_name(
+        &self,
+        transcript_path: &str,
+        offset: u64,
+    ) -> std::io::Result<(Option<String>, u64)> {
+        crate::hooks::transcript::extract_slug(transcript_path, offset)
+    }
+
+    fn resume_argv(&self, native_session_id: &str) -> Option<Vec<String>> {
+        resume::resume_argv(AgentKind::Claude, native_session_id)
+    }
+
+    fn config_dir(&self) -> &'static str {
+        ".claude"
+    }
+
+    fn config_dir_env(&self) -> Option<&'static str> {
+        Some("CLAUDE_CONFIG_DIR")
+    }
+
+    fn hook_events(&self) -> &'static [HookEventSpec] {
+        CLAUDE_HOOK_EVENTS
+    }
+}
+
+/// Hook events ZRemote registers with Claude Code. Kept in lockstep with the
+/// installer's claude config (a test asserts parity), so the trait surface and
+/// the live install never drift. The `Notification` event is registered twice
+/// by the installer with distinct matchers/endpoints (idle vs permission);
+/// here it appears once since the trait models the event set, not endpoints.
+const CLAUDE_HOOK_EVENTS: &[HookEventSpec] = &[
+    HookEventSpec {
+        event: "PreToolUse",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "PostToolUse",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "Stop",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "Notification",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "Elicitation",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "UserPromptSubmit",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "SessionStart",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "SubagentStart",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "SubagentStop",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "StopFailure",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "FileChanged",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "CwdChanged",
+        matcher: "",
+        async_hook: false,
+    },
+];
+
+/// Hook events ZRemote registers with Codex (`codex-cli` 0.135.0). Codex's event
+/// set differs from Claude's: it has `PermissionRequest` (not Claude's
+/// `Notification` matchers), no `Elicitation`/`FileChanged`/`CwdChanged`/
+/// `StopFailure`, and adds `PreCompact`/`PostCompact`. ZRemote registers the
+/// subset it actually consumes for state + capture. `SessionStart`,
+/// `PreToolUse`, and `UserPromptSubmit` are the capture entry points; the rest
+/// feed RFC-011 state.
+const CODEX_HOOK_EVENTS: &[HookEventSpec] = &[
+    HookEventSpec {
+        event: "SessionStart",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "PreToolUse",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "PostToolUse",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "UserPromptSubmit",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "PermissionRequest",
+        matcher: "",
+        async_hook: false,
+    },
+    HookEventSpec {
+        event: "SubagentStart",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "SubagentStop",
+        matcher: "",
+        async_hook: true,
+    },
+    HookEventSpec {
+        event: "Stop",
+        matcher: "",
+        async_hook: false,
+    },
+];
+
+/// [`AgentIntegration`] for OpenAI Codex (`codex-cli`): `~/.codex/sessions`
+/// rollout transcripts, `~/.codex/hooks.json` config, and `codex resume <id>`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodexIntegration;
+
+impl AgentIntegration for CodexIntegration {
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Codex
+    }
+
+    fn transcript_root(&self) -> &'static str {
+        // Codex stores per-session rollouts under ~/.codex/sessions/<Y>/<M>/<D>/.
+        ".codex/sessions/"
+    }
+
+    fn extract_task_name(
+        &self,
+        _transcript_path: &str,
+        offset: u64,
+    ) -> std::io::Result<(Option<String>, u64)> {
+        // Codex rollouts do not carry a Claude-style `slug`; ZRemote derives no
+        // task name from them in v1. Returning `None` (with the offset unchanged)
+        // keeps the handler's generic flow intact.
+        Ok((None, offset))
+    }
+
+    fn resume_argv(&self, native_session_id: &str) -> Option<Vec<String>> {
+        resume::resume_argv(AgentKind::Codex, native_session_id)
+    }
+
+    fn config_dir(&self) -> &'static str {
+        ".codex"
+    }
+
+    fn config_dir_env(&self) -> Option<&'static str> {
+        Some("CODEX_HOME")
+    }
+
+    fn hook_events(&self) -> &'static [HookEventSpec] {
+        CODEX_HOOK_EVENTS
+    }
+}
 
 /// Errors returned by the launcher registry and individual launchers.
 ///

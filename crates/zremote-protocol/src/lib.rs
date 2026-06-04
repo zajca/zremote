@@ -14,8 +14,8 @@ pub use agentic::{
     AgenticStatus,
 };
 pub use agents::{
-    AgentCapabilityInfo, AgentLifecycleMessage, AgentProfileData, AgentServerMessage, KindInfo,
-    SUPPORTED_KINDS, supported_kinds,
+    AgentCapabilityInfo, AgentKind, AgentLifecycleMessage, AgentProfileData, AgentServerMessage,
+    KindInfo, SUPPORTED_KINDS, supported_kinds,
 };
 pub use claude::*;
 pub use events::{HostInfo, LoopInfo, NodeStatus, ServerEvent, SessionInfo};

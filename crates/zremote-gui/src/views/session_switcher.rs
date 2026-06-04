@@ -537,10 +537,12 @@ fn build_entries(
         .map(|r| (r.session_id.as_str(), r.timestamp))
         .collect();
 
-    // Filter to active sessions only
+    // Filter to live + resumable sessions. RFC-013: a `resumable` session
+    // (agent backend died on reboot) must remain visible and clickable so the
+    // user can continue it — hiding it would be a dead end.
     let mut active: Vec<&Session> = sessions
         .iter()
-        .filter(|s| s.status == SessionStatus::Active)
+        .filter(|s| s.status == SessionStatus::Active || s.status == SessionStatus::Resumable)
         .collect();
 
     // Sort: waiting_for_input first, then working, then MRU order
@@ -692,5 +694,85 @@ mod tests {
         };
 
         assert!(parse_preview_color(&span).is_none());
+    }
+
+    use super::build_entries;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use zremote_client::{Host, HostStatus, Session, SessionStatus};
+
+    fn test_session(id: &str, status: SessionStatus) -> Session {
+        Session {
+            id: id.to_string(),
+            host_id: "h1".to_string(),
+            name: Some(id.to_string()),
+            shell: None,
+            status,
+            working_dir: None,
+            project_id: None,
+            pid: None,
+            exit_code: None,
+            created_at: "2026-06-04T00:00:00Z".to_string(),
+            closed_at: None,
+        }
+    }
+
+    fn test_host() -> Host {
+        Host {
+            id: "h1".to_string(),
+            name: "h1".to_string(),
+            hostname: "host-1".to_string(),
+            status: HostStatus::Online,
+            last_seen_at: None,
+            agent_version: None,
+            os: None,
+            arch: None,
+            created_at: "2026-06-04T00:00:00Z".to_string(),
+            updated_at: "2026-06-04T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_entries_includes_active_and_resumable_excludes_closed_suspended() {
+        // RFC-013: a resumable session must remain visible in the switcher
+        // alongside active ones; closed/suspended must not appear.
+        let sessions = Rc::new(vec![
+            test_session("s_active", SessionStatus::Active),
+            test_session("s_resumable", SessionStatus::Resumable),
+            test_session("s_closed", SessionStatus::Closed),
+            test_session("s_suspended", SessionStatus::Suspended),
+        ]);
+        let hosts = Rc::new(vec![test_host()]);
+        let projects = Rc::new(Vec::new());
+        let cc_states = HashMap::new();
+        let cc_metrics = HashMap::new();
+        let previews = HashMap::new();
+
+        let entries = build_entries(
+            &sessions,
+            &hosts,
+            &projects,
+            &[],
+            None,
+            "local",
+            &cc_states,
+            &cc_metrics,
+            &previews,
+        );
+
+        let ids: Vec<&str> = entries.iter().map(|e| e.session_id.as_str()).collect();
+        assert!(ids.contains(&"s_active"), "active must appear: {ids:?}");
+        assert!(
+            ids.contains(&"s_resumable"),
+            "resumable must appear: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"s_closed"),
+            "closed must NOT appear: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"s_suspended"),
+            "suspended must NOT appear: {ids:?}"
+        );
     }
 }

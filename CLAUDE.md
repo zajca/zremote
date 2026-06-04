@@ -117,7 +117,14 @@ change goes into `zremote-protocol` -- never duplicate types between core and cl
 
 ### Local Mode
 
-Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (127.0.0.1). Only env: `RUST_LOG`.
+Local mode CLI flags: `--port` (3000), `--db` (~/.zremote/local.db), `--bind` (127.0.0.1).
+
+| Variable | Default | Description |
+|---|---|---|
+| `RUST_LOG` | `info` | Tracing filter level |
+| `ZREMOTE_SESSION_BACKEND` | `daemon` | Session persistence backend: `daemon` or `none`/`pty` |
+| `ZREMOTE_RESUME_AGENTS_ON_RESTART` | `true` | Auto-resume a `resumable` agent session on attach (RFC-013). Accepts `1`/`true`/`0`/`false`; unparseable falls back to default. When off, attach surfaces a typed resumable result for an explicit "Continue" action |
+| `ZREMOTE_RECREATE_SHELL_ON_RESTART` | `false` | Re-create a plain shell at the original `working_dir` for non-agent sessions whose daemon did not survive a restart (RFC-013). Accepts `1`/`true`/`0`/`false` |
 
 ### GUI CLI
 

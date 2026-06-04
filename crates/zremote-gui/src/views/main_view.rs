@@ -1446,6 +1446,49 @@ impl MainView {
                     cx.notify();
                 });
             }
+            TerminalPanelEvent::ResumeRequested { session_id } => {
+                // RFC-013 click-to-continue: POST the resume endpoint, then
+                // reconnect the terminal on success. On failure, surface a
+                // recoverable inline error on the panel (row stays resumable).
+                let api = self.app_state.api.clone();
+                let handle = self.app_state.tokio_handle.clone();
+                let host_id = self.current_host_id.clone().unwrap_or_default();
+                let sid = session_id.clone();
+                let terminal = terminal.clone();
+                let app_state = self.app_state.clone();
+                cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let host_for_call = host_id.clone();
+                    let sid_for_call = sid.clone();
+                    let result = handle
+                        .spawn(
+                            async move { api.resume_session(&host_for_call, &sid_for_call).await },
+                        )
+                        .await;
+                    let _ = terminal.update(cx, |panel, cx| match result {
+                        Ok(Ok(_session)) => {
+                            if let Some(new_handle) =
+                                connect_terminal(&app_state, &sid, &host_id, false)
+                            {
+                                panel.reconnect(new_handle, &app_state.tokio_handle, cx);
+                            } else {
+                                panel.set_resume_error(
+                                    "could not open terminal connection".to_string(),
+                                    cx,
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "session resume failed");
+                            panel.set_resume_error(e.to_string(), cx);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "session resume task join failed");
+                            panel.set_resume_error("resume task failed".to_string(), cx);
+                        }
+                    });
+                })
+                .detach();
+            }
         }
     }
 
@@ -2849,6 +2892,47 @@ impl SessionWindow {
                         "failed to duplicate session window"
                     );
                 });
+            }
+            TerminalPanelEvent::ResumeRequested { session_id } => {
+                // RFC-013 click-to-continue in a popped-out session window.
+                let api = self.app_state.api.clone();
+                let handle = self.app_state.tokio_handle.clone();
+                let host_id = self.host_id.clone();
+                let sid = session_id.clone();
+                let terminal = terminal.clone();
+                let app_state = self.app_state.clone();
+                cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let host_for_call = host_id.clone();
+                    let sid_for_call = sid.clone();
+                    let result = handle
+                        .spawn(
+                            async move { api.resume_session(&host_for_call, &sid_for_call).await },
+                        )
+                        .await;
+                    let _ = terminal.update(cx, |panel, cx| match result {
+                        Ok(Ok(_session)) => {
+                            if let Some(new_handle) =
+                                connect_terminal(&app_state, &sid, &host_id, false)
+                            {
+                                panel.reconnect(new_handle, &app_state.tokio_handle, cx);
+                            } else {
+                                panel.set_resume_error(
+                                    "could not open terminal connection".to_string(),
+                                    cx,
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "session resume failed (window)");
+                            panel.set_resume_error(e.to_string(), cx);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "session resume task join failed (window)");
+                            panel.set_resume_error("resume task failed".to_string(), cx);
+                        }
+                    });
+                })
+                .detach();
             }
             TerminalPanelEvent::OpenCommandPalette { .. }
             | TerminalPanelEvent::OpenSessionSwitcher

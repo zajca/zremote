@@ -36,6 +36,7 @@ impl PtySession {
         env: Option<&std::collections::HashMap<String, String>>,
         output_tx: mpsc::Sender<PtyOutput>,
         shell_config: Option<&ShellIntegrationConfig>,
+        resume_argv: Option<&[String]>,
     ) -> Result<(Self, u32, Option<ShellIntegrationState>), Box<dyn std::error::Error + Send + Sync>>
     {
         let pty_system = native_pty_system();
@@ -48,7 +49,18 @@ impl PtySession {
 
         let pair = pty_system.openpty(size)?;
 
-        let mut cmd = CommandBuilder::new(shell);
+        // RFC-013 resume: when `resume_argv` is present, the session's process IS
+        // the agent CLI (e.g. `claude --resume <id>`), spawned directly as
+        // program + args — no shell, no `-c`, no word-splitting, so the native id
+        // is never re-parsed (injection-safe). Otherwise spawn the shell as today.
+        let mut cmd = match resume_argv {
+            Some(argv) if !argv.is_empty() => {
+                let mut c = CommandBuilder::new(&argv[0]);
+                c.args(&argv[1..]);
+                c
+            }
+            _ => CommandBuilder::new(shell),
+        };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         if let Some(dir) = working_dir {
@@ -60,11 +72,23 @@ impl PtySession {
             }
         }
 
-        // Apply shell integration (env vars, autosuggestion disabling, etc.)
-        let mut integration_state = if let Some(config) = shell_config {
-            shell_integration::prepare(session_id, shell, config, &mut cmd)?
-        } else {
-            None
+        // Export ZREMOTE_SESSION_ID / ZREMOTE_TERMINAL unconditionally, before
+        // (and independent of) shell integration. RFC-012 native-session capture
+        // requires these on every spawned session — even when shell_config is
+        // None or integration is disabled. `prepare` may re-set the same values
+        // when `export_env_vars` is on; that is harmless (identical values).
+        // For a resume spawn this exports ZREMOTE_SESSION_ID to the agent process
+        // so it re-reports its (possibly new) native id via the hook.
+        shell_integration::set_session_env(session_id, &mut cmd);
+
+        // Apply shell integration (env vars, autosuggestion disabling, etc.).
+        // Skipped for a resume spawn: the process is the agent CLI, not a shell,
+        // so shell-rc integration does not apply.
+        let mut integration_state = match (shell_config, resume_argv) {
+            (Some(config), None) => {
+                shell_integration::prepare(session_id, shell, config, &mut cmd)?
+            }
+            _ => None,
         };
 
         let child = pair.slave.spawn_command(cmd)?;
@@ -205,7 +229,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
         let (session, pid, _) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
 
         assert!(pid > 0);
         assert_eq!(session.pid(), pid);
@@ -230,6 +254,7 @@ mod tests {
             None,
             tx,
             None,
+            None,
         )
         .unwrap();
 
@@ -242,7 +267,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(256);
         let session_id = uuid::Uuid::new_v4();
         let (mut session, _pid, _) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
 
         // Write a command to the PTY
         session.write(b"echo hello_from_pty\n").unwrap();
@@ -268,11 +293,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_exports_zremote_session_id_without_shell_config() {
+        // RFC-012: ZREMOTE_SESSION_ID must be exported on EVERY spawn, even when
+        // shell_config is None (no shell integration at all). Prove it end-to-end
+        // by reading the var back from the child shell.
+        let (tx, mut rx) = mpsc::channel(256);
+        let session_id = uuid::Uuid::new_v4();
+        let (mut session, _pid, integration_state) =
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
+
+        // No shell_config -> no integration state returned, but env still set.
+        assert!(
+            integration_state.is_none(),
+            "shell_config None should yield no integration state"
+        );
+
+        session
+            .write(b"printf 'SID=%s\\n' \"$ZREMOTE_SESSION_ID\"\n")
+            .unwrap();
+
+        let expected = format!("SID={session_id}");
+        let mut found = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut acc = String::new();
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(output)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                acc.push_str(&String::from_utf8_lossy(&output.data));
+                if acc.contains(&expected) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found,
+            "child shell should see ZREMOTE_SESSION_ID; got output: {acc:?}"
+        );
+
+        drop(session);
+    }
+
+    async fn read_until(
+        rx: &mut mpsc::Receiver<PtyOutput>,
+        needle: &str,
+        secs: u64,
+    ) -> (bool, String) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        let mut acc = String::new();
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(output)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                acc.push_str(&String::from_utf8_lossy(&output.data));
+                if acc.contains(needle) {
+                    return (true, acc);
+                }
+            }
+        }
+        (false, acc)
+    }
+
+    #[tokio::test]
+    async fn spawn_with_resume_argv_runs_that_program() {
+        // RFC-013: when resume_argv is present, the PTY child IS that program,
+        // run directly (no shell, no typing into a live shell). Prove it by
+        // having the program print a unique marker on start.
+        let (tx, mut rx) = mpsc::channel(256);
+        let session_id = uuid::Uuid::new_v4();
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf 'RESUMED=%s\\n' ok".to_string(),
+        ];
+        let (session, _pid, integration_state) = PtySession::spawn(
+            session_id,
+            "/bin/zsh",
+            80,
+            24,
+            None,
+            None,
+            tx,
+            None,
+            Some(&argv),
+        )
+        .unwrap();
+
+        // Resume spawn skips shell integration even if a config is passed; here
+        // shell_config is None anyway, so no integration state.
+        assert!(integration_state.is_none());
+
+        let (found, acc) = read_until(&mut rx, "RESUMED=ok", 3).await;
+        assert!(
+            found,
+            "resume_argv program should have run and printed marker; got: {acc:?}"
+        );
+
+        drop(session);
+    }
+
+    #[tokio::test]
+    async fn spawn_with_resume_argv_passes_metachars_as_single_token() {
+        // Injection safety: a native id full of shell metacharacters must be
+        // delivered to the program as ONE literal argv element — no word-split,
+        // no command substitution at the spawn boundary.
+        //
+        // We run `/bin/sh -c 'printf "<<%s>>" "$1"' sh <evil>`: <evil> arrives as
+        // positional $1 and is printed verbatim. If the spawn had shell-parsed it
+        // (word-split / command-substituted), $1 would not equal the literal.
+        // `/bin/sh` is used as the program (NixOS lacks /bin/echo).
+        let (tx, mut rx) = mpsc::channel(256);
+        let session_id = uuid::Uuid::new_v4();
+        let evil = "$(touch /tmp/zremote_pwned); rm -rf / && echo `whoami`";
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '<<%s>>' \"$1\"".to_string(),
+            "sh".to_string(),
+            evil.to_string(),
+        ];
+        let (session, _pid, _) = PtySession::spawn(
+            session_id,
+            "/bin/sh",
+            80,
+            24,
+            None,
+            None,
+            tx,
+            None,
+            Some(&argv),
+        )
+        .unwrap();
+
+        // The literal string (with all metachars intact) must appear, wrapped in
+        // the markers so we know it came through as the single $1 token.
+        let expected = format!("<<{evil}>>");
+        let (found, acc) = read_until(&mut rx, &expected, 3).await;
+        assert!(
+            found,
+            "metacharacter-laden arg must pass as one literal token (no shell expansion); got: {acc:?}"
+        );
+        // The marker file must NOT have been created by command substitution.
+        assert!(
+            !std::path::Path::new("/tmp/zremote_pwned").exists(),
+            "command substitution must not have executed"
+        );
+
+        drop(session);
+    }
+
+    #[tokio::test]
     async fn resize_session() {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
         let (session, _pid, _) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
 
         // Resize should succeed
         let result = session.resize(120, 40);
@@ -286,7 +462,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
         let (mut session, _pid, _) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
 
         session.kill();
 
@@ -306,7 +482,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let session_id = uuid::Uuid::new_v4();
         let (session, pid, _) =
-            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None).unwrap();
+            PtySession::spawn(session_id, "/bin/sh", 80, 24, None, None, tx, None, None).unwrap();
 
         assert!(pid > 0);
 

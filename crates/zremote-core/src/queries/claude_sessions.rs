@@ -153,6 +153,13 @@ pub async fn insert_claude_task(
     Ok(())
 }
 
+/// Insert a NEW `claude_sessions` row for a resumed task (server mode only).
+///
+/// RFC-013: LOCAL mode no longer creates a new row on resume — it updates the
+/// existing row in place via [`resume_claude_task_in_place`] (decisions E/4),
+/// reusing the same terminal session id. Server mode still uses this new-row
+/// path (`zremote-server/src/routes/claude_sessions.rs`), so this function and
+/// its `_creates_entry` test are intentionally kept.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_resumed_claude_task(
     pool: &SqlitePool,
@@ -185,6 +192,39 @@ pub async fn insert_resumed_claude_task(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Resume a Claude task IN PLACE (RFC-013, decisions E/F/4).
+///
+/// Unlike [`insert_resumed_claude_task`] (which created a NEW row per resume),
+/// this reuses the existing `claude_sessions` row and its terminal `session_id`,
+/// so total cost/tokens keep accumulating on the single row. Sets the row back
+/// to a running state (`starting`), clears the terminal timestamps
+/// (`ended_at`, `disconnect_reason`), and refreshes `model`/`initial_prompt`/
+/// `options_json` from the resume request (last-wins). Returns the number of
+/// rows updated (0 if the task id no longer exists).
+pub async fn resume_claude_task_in_place(
+    pool: &SqlitePool,
+    task_id: &str,
+    model: Option<&str>,
+    initial_prompt: Option<&str>,
+    options_json: Option<&str>,
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        "UPDATE claude_sessions \
+         SET status = 'starting', ended_at = NULL, disconnect_reason = NULL, summary = NULL, \
+             model = COALESCE(?, model), \
+             initial_prompt = ?, \
+             options_json = COALESCE(?, options_json) \
+         WHERE id = ?",
+    )
+    .bind(model)
+    .bind(initial_prompt)
+    .bind(options_json)
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Update real-time metrics for a Claude session from status line data.
@@ -654,6 +694,75 @@ mod tests {
         assert_eq!(task.claude_session_id, Some("cc-session-123".to_string()));
         assert_eq!(task.status, "starting");
         assert_eq!(task.initial_prompt, Some("continue".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_in_place_updates_existing_row() {
+        // RFC-013: in-place resume reuses the SAME task row (no new row), so the
+        // task id and session_id are unchanged; status returns to running and the
+        // prompt/options are refreshed.
+        let pool = test_db().await;
+        let host_id = "host-1";
+        insert_host(&pool, host_id).await;
+        insert_session(&pool, "sess-orig", host_id).await;
+
+        insert_claude_task(
+            &pool,
+            "task-1",
+            "sess-orig",
+            host_id,
+            "/proj",
+            None,
+            Some("sonnet"),
+            Some("first prompt"),
+            Some(r#"{"skip_permissions":true}"#),
+        )
+        .await
+        .unwrap();
+        // Simulate the task having finished.
+        sqlx::query(
+            "UPDATE claude_sessions SET status = 'completed', ended_at = '2026-06-04T09:00:00Z' WHERE id = 'task-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let updated = resume_claude_task_in_place(
+            &pool,
+            "task-1",
+            None,                  // keep existing model (COALESCE)
+            Some("second prompt"), // new follow-up prompt
+            None,                  // keep existing options (COALESCE)
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 1);
+
+        let task = get_claude_task(&pool, "task-1").await.unwrap();
+        // Same row: id + session_id unchanged.
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.session_id, "sess-orig");
+        // Back to running, terminal stamps cleared, prompt refreshed.
+        assert_eq!(task.status, "starting");
+        assert_eq!(task.ended_at, None);
+        assert_eq!(task.initial_prompt, Some("second prompt".to_string()));
+        // COALESCE preserved model + options.
+        assert_eq!(task.model, Some("sonnet".to_string()));
+        assert_eq!(
+            task.options_json,
+            Some(r#"{"skip_permissions":true}"#.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_claude_task_in_place_noop_for_missing_task() {
+        let pool = test_db().await;
+        let host_id = "host-1";
+        insert_host(&pool, host_id).await;
+        let updated = resume_claude_task_in_place(&pool, "nonexistent", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
     }
 
     #[tokio::test]

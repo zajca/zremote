@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AgenticLoopId, NodeStatus, SessionId};
+use crate::{AgentKind, AgenticLoopId, NodeStatus, SessionId};
 
 /// Status of an agentic loop.
 ///
@@ -127,6 +127,23 @@ pub enum AgenticAgentMessage {
 
     /// Stop / `StopFailure` hook: close every running node for this session.
     SessionExecutionStopped { session_id: SessionId },
+
+    /// Kind-agnostic native session id capture.
+    ///
+    /// Emitted when an agent's native session identifier (Claude `cc_session_id`,
+    /// Codex rollout id, ...) is observed for a managed session. Generalizes the
+    /// Claude-task-specific [`crate::claude::ClaudeAgentMessage::SessionIdCaptured`],
+    /// which is kept during the transition and emitted alongside this message for
+    /// Claude-task sessions only.
+    AgentSessionRefCaptured {
+        /// Managed session id (authoritative key, from `ZREMOTE_SESSION_ID`).
+        session_id: SessionId,
+        /// Which agent CLI produced `native_session_id`.
+        agent: AgentKind,
+        /// Native session id from the agent (claude/codex). Treated as opaque
+        /// data, never interpreted as shell text.
+        native_session_id: String,
+    },
 }
 
 #[cfg(test)]
@@ -267,6 +284,67 @@ mod tests {
         roundtrip_agent(&AgenticAgentMessage::SessionExecutionStopped {
             session_id: Uuid::new_v4(),
         });
+    }
+
+    #[test]
+    fn agent_session_ref_captured_roundtrip() {
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let msg = AgenticAgentMessage::AgentSessionRefCaptured {
+                session_id: Uuid::new_v4(),
+                agent,
+                native_session_id: "cc-01HZX9".to_string(),
+            };
+            roundtrip_agent(&msg);
+            // Assert the fields survived the roundtrip, not just that it parsed.
+            let json = serde_json::to_string(&msg).expect("serialize");
+            let parsed: AgenticAgentMessage = serde_json::from_str(&json).expect("deserialize");
+            match parsed {
+                AgenticAgentMessage::AgentSessionRefCaptured {
+                    agent: parsed_agent,
+                    native_session_id,
+                    ..
+                } => {
+                    assert_eq!(parsed_agent, agent);
+                    assert_eq!(native_session_id, "cc-01HZX9");
+                }
+                other => panic!("expected AgentSessionRefCaptured, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn agent_session_ref_captured_agent_serialization() {
+        let session_id = Uuid::new_v4();
+        let json = serde_json::to_string(&AgenticAgentMessage::AgentSessionRefCaptured {
+            session_id,
+            agent: AgentKind::Claude,
+            native_session_id: "abc".to_string(),
+        })
+        .expect("serialize");
+        // The agent kind is tagged snake_case inside the message payload.
+        assert!(json.contains(r#""agent":"claude""#), "json was: {json}");
+    }
+
+    #[test]
+    fn agent_session_ref_captured_unknown_agent_deserializes() {
+        // An unknown agent kind from a newer peer must fall back to Unknown
+        // rather than failing deserialization (forward compatibility).
+        let session_id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"AgentSessionRefCaptured","payload":{{"session_id":"{session_id}","agent":"gemini","native_session_id":"xyz"}}}}"#
+        );
+        let parsed: AgenticAgentMessage = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            AgenticAgentMessage::AgentSessionRefCaptured {
+                agent,
+                native_session_id,
+                ..
+            } => {
+                assert_eq!(agent, AgentKind::Unknown);
+                assert_eq!(native_session_id, "xyz");
+            }
+            other => panic!("expected AgentSessionRefCaptured, got {other:?}"),
+        }
     }
 
     #[test]
