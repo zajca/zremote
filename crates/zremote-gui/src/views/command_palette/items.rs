@@ -324,6 +324,14 @@ pub(super) fn build_action_items(snapshot: &PaletteSnapshot) -> Vec<ResultItem> 
 
     if let Some(ref sid) = snapshot.active_session_id {
         items.push(ResultItem {
+            item: PaletteItem::Action(PaletteAction::RenameSession {
+                session_id: sid.clone(),
+            }),
+            title: "Rename Current Session".to_string(),
+            subtitle: String::new(),
+            selectable: true,
+        });
+        items.push(ResultItem {
             item: PaletteItem::Action(PaletteAction::CloseCurrentSession {
                 session_id: sid.clone(),
             }),
@@ -694,6 +702,18 @@ pub(super) fn build_session_drill_items_from(
         selectable: true,
     });
     action_indices.push(close_idx);
+
+    // "Rename Session" action
+    let rename_idx = items.len();
+    items.push(ResultItem {
+        item: PaletteItem::Action(PaletteAction::RenameSession {
+            session_id: session.id.clone(),
+        }),
+        title: "Rename Session".to_string(),
+        subtitle: String::new(),
+        selectable: true,
+    });
+    action_indices.push(rename_idx);
 
     let groups = vec![CategoryGroup {
         category: PaletteCategory::DrillActions,
@@ -1625,11 +1645,12 @@ mod tests {
         let selectable: Vec<&ResultItem> = items.iter().filter(|i| i.selectable).collect();
         assert_eq!(
             selectable.len(),
-            1,
-            "only 'Close Session' should be selectable"
+            2,
+            "'Close Session' and 'Rename Session' should be selectable"
         );
         assert_eq!(selectable[0].title, "Close Session");
-        assert_eq!(results.selectable_count(), 1);
+        assert_eq!(selectable[1].title, "Rename Session");
+        assert_eq!(results.selectable_count(), 2);
     }
 
     /// Session with no project_id but matching working_dir should resolve project name.

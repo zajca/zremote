@@ -12,6 +12,7 @@ use crate::views::cc_widgets;
 use std::time::Duration;
 
 use crate::views::main_view::SidebarEvent;
+use zremote_client::types::UpdateSessionRequest;
 use zremote_client::{
     AgentKindInfo, AgentProfile, AgentRuntimeStatus, AgenticStatus, ClaudeTaskStatus,
     CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter, ListLoopsFilter,
@@ -113,6 +114,8 @@ pub struct SidebarView {
     scan_http_tasks: HashMap<String, Task<()>>,
     /// Project id whose inline agent profile launcher menu is currently open.
     agent_menu_project_id: Option<String>,
+    /// Session id whose inline action menu is currently open.
+    session_menu_session_id: Option<String>,
 }
 
 /// Per-host project rescan progress. `total` is `0` until the agent has
@@ -442,6 +445,7 @@ impl SidebarView {
             scan_progress: HashMap::new(),
             scan_http_tasks: HashMap::new(),
             agent_menu_project_id: None,
+            session_menu_session_id: None,
         };
         view.load_data(cx);
         view.poll_previews(cx);
@@ -1205,6 +1209,7 @@ impl SidebarView {
         &mut self,
         host_id: &str,
         working_dir: Option<String>,
+        name: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let api = self.app_state.api.clone();
@@ -1213,7 +1218,7 @@ impl SidebarView {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let working_dir_clone = working_dir.clone();
             let req = CreateSessionRequest {
-                name: None,
+                name: name.clone(),
                 shell: None,
                 cols: 80,
                 rows: 24,
@@ -1255,7 +1260,7 @@ impl SidebarView {
                         let session = Session {
                             id: resp.id,
                             host_id: host_id.clone(),
-                            name: None,
+                            name,
                             shell: None,
                             status: SessionStatus::Active,
                             pid: None,
@@ -1276,6 +1281,47 @@ impl SidebarView {
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to create session");
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn rename_session(
+        &mut self,
+        session_id: &str,
+        name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let api = self.app_state.api.clone();
+        let session_id = session_id.to_string();
+        let handle = self.app_state.tokio_handle.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = handle
+                .spawn({
+                    let session_id = session_id.clone();
+                    async move {
+                        api.update_session(&session_id, &UpdateSessionRequest { name })
+                            .await
+                    }
+                })
+                .await
+                .unwrap();
+            match result {
+                Ok(updated) => {
+                    let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
+                        if let Some(session) = Rc::make_mut(&mut this.sessions)
+                            .iter_mut()
+                            .find(|s| s.id == session_id)
+                        {
+                            *session = updated;
+                        }
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to rename session");
                 }
             }
         })
@@ -1518,8 +1564,11 @@ impl SidebarView {
                                     .text_color(theme::text_tertiary()),
                             )
                             .on_click(cx.listener(
-                                move |this, _event: &ClickEvent, _window, cx| {
-                                    this.create_session(&new_session_host_id, None, cx);
+                                move |_this, _event: &ClickEvent, _window, cx| {
+                                    cx.emit(SidebarEvent::OpenSessionNamePrompt {
+                                        host_id: new_session_host_id.clone(),
+                                        working_dir: None,
+                                    });
                                 },
                             )),
                     )
@@ -1556,8 +1605,11 @@ impl SidebarView {
                             .size(px(14.0))
                             .text_color(theme::text_tertiary()),
                     )
-                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.create_session(&host_id, Some(project_path.clone()), cx);
+                    .on_click(cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                        cx.emit(SidebarEvent::OpenSessionNamePrompt {
+                            host_id: host_id.clone(),
+                            working_dir: Some(project_path.clone()),
+                        });
                     })),
             )
     }
@@ -2126,7 +2178,10 @@ impl SidebarView {
             .find(|p| p.id == project_id)
             .map(|p| p.path.clone());
         if let Some(path) = project_path {
-            self.create_session(host_id, Some(path), cx);
+            cx.emit(SidebarEvent::OpenSessionNamePrompt {
+                host_id: host_id.to_string(),
+                working_dir: Some(path),
+            });
         }
         cx.notify();
     }
@@ -2251,7 +2306,9 @@ impl SidebarView {
 
         let session_tooltip = build_session_tooltip(session, &display_name, cc_state, cc_metrics);
 
-        div()
+        let is_menu_open = self.session_menu_session_id.as_deref() == Some(session.id.as_str());
+        let row_session_id_for_menu = session_id.clone();
+        let session_row = div()
             .id(SharedString::from(format!("session-{session_id}")))
             .flex()
             .items_center()
@@ -2272,6 +2329,7 @@ impl SidebarView {
                 let session_id = session_id.clone();
                 let host_id = host_id.clone();
                 cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                    this.session_menu_session_id = None;
                     this.selected_session_id = Some(session_id.clone());
                     cx.emit(SidebarEvent::SessionSelected {
                         session_id: session_id.clone(),
@@ -2280,6 +2338,14 @@ impl SidebarView {
                     cx.notify();
                 })
             })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                    this.session_menu_session_id = Some(row_session_id_for_menu.clone());
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
             .child({
                 // Two-row layout container
                 let mut col = div().flex().flex_col().flex_1().min_w(px(0.0));
@@ -2393,8 +2459,99 @@ impl SidebarView {
 
                 col
             })
-            .child(close_button)
+            .child(close_button);
+
+        let mut wrapper = div().flex().flex_col().w_full().child(session_row);
+        if is_menu_open {
+            wrapper = wrapper.child(self.render_session_action_menu(session, indent, cx));
+        }
+        wrapper
     }
+
+    fn render_session_action_menu(
+        &self,
+        session: &Session,
+        indent: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let session_id = session.id.clone();
+        let host_id = session.host_id.clone();
+        let current_name = session.name.clone();
+        let can_close = session.status != SessionStatus::Closed;
+
+        div()
+            .ml(indent + px(14.0))
+            .mr(px(8.0))
+            .my(px(2.0))
+            .py(px(3.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::bg_secondary())
+            .flex()
+            .flex_col()
+            .child(session_menu_row(
+                "Rename",
+                theme::text_primary().into(),
+                cx.listener({
+                    let session_id = session_id.clone();
+                    move |this, _event: &ClickEvent, _window, cx| {
+                        this.session_menu_session_id = None;
+                        cx.emit(SidebarEvent::OpenSessionRenamePrompt {
+                            session_id: session_id.clone(),
+                            current_name: current_name.clone(),
+                        });
+                        cx.notify();
+                    }
+                }),
+            ))
+            .child(session_menu_row(
+                "Open in New Window",
+                theme::text_primary().into(),
+                cx.listener({
+                    let session_id = session_id.clone();
+                    let host_id = host_id.clone();
+                    move |this, _event: &ClickEvent, _window, cx| {
+                        this.session_menu_session_id = None;
+                        cx.emit(SidebarEvent::OpenSessionInNewWindow {
+                            session_id: session_id.clone(),
+                            host_id: host_id.clone(),
+                        });
+                        cx.notify();
+                    }
+                }),
+            ))
+            .when(can_close, |menu| {
+                menu.child(session_menu_row(
+                    "Close",
+                    theme::error().into(),
+                    cx.listener({
+                        let session_id = session_id.clone();
+                        move |this, _event: &ClickEvent, _window, cx| {
+                            this.session_menu_session_id = None;
+                            this.close_session(&session_id, cx);
+                        }
+                    }),
+                ))
+            })
+    }
+}
+
+fn session_menu_row(
+    label: &'static str,
+    color: Hsla,
+    click_handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("session-menu-{label}")))
+        .px(px(8.0))
+        .py(px(5.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(color)
+        .hover(|s| s.bg(theme::bg_tertiary()))
+        .child(label)
+        .on_click(click_handler)
 }
 
 /// Minimal text-only tooltip view (GPUI tooltips require `AnyView`).
@@ -2721,8 +2878,11 @@ impl SidebarView {
                         .child("New Session")
                         .on_click({
                             let host_id = new_host_id.clone();
-                            cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                                this.create_session(&host_id, None, cx);
+                            cx.listener(move |_this, _event: &ClickEvent, _window, cx| {
+                                cx.emit(SidebarEvent::OpenSessionNamePrompt {
+                                    host_id: host_id.clone(),
+                                    working_dir: None,
+                                });
                             })
                         }),
                 )

@@ -27,6 +27,9 @@ pub enum PaletteAction {
     CloseSession {
         session_id: String,
     },
+    RenameSession {
+        session_id: String,
+    },
     OpenSessionInNewWindow {
         session_id: String,
         host_id: String,
@@ -86,6 +89,7 @@ impl PaletteAction {
             Self::Reconnect => "Reconnect",
             Self::NewSessionInProject { .. } => "NewSessionInProject",
             Self::CloseSession { .. } => "CloseSession",
+            Self::RenameSession { .. } => "RenameSession",
             Self::OpenSessionInNewWindow { .. } => "OpenSessionInNewWindow",
             Self::SwitchToSession { .. } => "SwitchToSession",
             Self::SwitchSession => "SwitchSession",
@@ -130,6 +134,11 @@ impl CommandPalette {
                     PaletteAction::CloseCurrentSession { session_id }
                     | PaletteAction::CloseSession { session_id } => {
                         cx.emit(CommandPaletteEvent::CloseSession {
+                            session_id: session_id.clone(),
+                        });
+                    }
+                    PaletteAction::RenameSession { session_id } => {
+                        cx.emit(CommandPaletteEvent::RenameSession {
                             session_id: session_id.clone(),
                         });
                     }
@@ -289,6 +298,9 @@ mod tests {
                 project_name: "a".into(),
             },
             PaletteAction::CloseSession {
+                session_id: "a".into(),
+            },
+            PaletteAction::RenameSession {
                 session_id: "a".into(),
             },
             PaletteAction::OpenSessionInNewWindow {

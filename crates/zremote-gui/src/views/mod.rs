@@ -7,6 +7,7 @@ pub mod help_modal;
 pub mod key_bindings;
 pub mod main_view;
 pub mod search_overlay;
+pub mod session_name_modal;
 pub mod session_switcher;
 pub mod settings;
 pub mod settings_modal;

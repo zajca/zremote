@@ -124,6 +124,9 @@ pub enum CommandPaletteEvent {
     CloseSession {
         session_id: String,
     },
+    RenameSession {
+        session_id: String,
+    },
     OpenSessionInNewWindow {
         session_id: String,
         host_id: String,
@@ -1137,6 +1140,7 @@ impl CommandPalette {
                 PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
                     Icon::X
                 }
+                PaletteAction::RenameSession { .. } => Icon::FileText,
                 PaletteAction::SearchInTerminal => Icon::Search,
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal
@@ -2147,6 +2151,7 @@ impl CommandPalette {
                 PaletteAction::CloseSession { .. } | PaletteAction::CloseCurrentSession { .. } => {
                     Icon::X
                 }
+                PaletteAction::RenameSession { .. } => Icon::FileText,
                 PaletteAction::NewSession | PaletteAction::NewSessionInProject { .. } => Icon::Plus,
                 PaletteAction::SearchInTerminal => Icon::Search,
                 PaletteAction::ToggleProjectPin {
@@ -2240,6 +2245,7 @@ impl CommandPalette {
                 PaletteAction::CloseCurrentSession { .. } | PaletteAction::CloseSession { .. } => {
                     Icon::X
                 }
+                PaletteAction::RenameSession { .. } => Icon::FileText,
                 PaletteAction::SearchInTerminal => Icon::Search,
                 PaletteAction::SwitchToSession { .. } | PaletteAction::SwitchSession => {
                     Icon::SquareTerminal

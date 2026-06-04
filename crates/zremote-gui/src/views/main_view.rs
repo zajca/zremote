@@ -25,6 +25,7 @@ use crate::views::components::path_autocomplete::{PathAutocompleteApi, TokioApiC
 use crate::views::double_shift::DoubleShiftDetector;
 use crate::views::help_modal::{HelpModal, HelpModalEvent};
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
+use crate::views::session_name_modal::{SessionNameModal, SessionNameModalEvent};
 use crate::views::session_switcher::{SessionSwitcher, SessionSwitcherEvent};
 use crate::views::settings_modal::{SettingsModal, SettingsModalEvent, SettingsTab};
 use crate::views::sidebar::SidebarView;
@@ -58,6 +59,16 @@ struct TopBarContext {
     session_title: Option<String>,
 }
 
+enum SessionNameAction {
+    Create {
+        host_id: String,
+        working_dir: Option<String>,
+    },
+    Rename {
+        session_id: String,
+    },
+}
+
 /// Root view: sidebar (fixed 250px) | content area (terminal or empty state).
 pub struct MainView {
     app_state: Arc<AppState>,
@@ -69,6 +80,8 @@ pub struct MainView {
     help_modal: Option<Entity<HelpModal>>,
     settings_modal: Option<Entity<SettingsModal>>,
     worktree_create_modal: Option<Entity<WorktreeCreateModal>>,
+    session_name_modal: Option<Entity<SessionNameModal>>,
+    session_name_action: Option<SessionNameAction>,
     double_shift: DoubleShiftDetector,
     toasts: Entity<ToastContainer>,
     /// Whether the OS window is currently focused/active.
@@ -147,6 +160,8 @@ impl MainView {
             help_modal: None,
             settings_modal: None,
             worktree_create_modal: None,
+            session_name_modal: None,
+            session_name_action: None,
             double_shift: DoubleShiftDetector::new(),
             toasts,
             window_active: window.is_window_active(),
@@ -233,6 +248,28 @@ impl MainView {
                 host_id,
             } => {
                 self.open_worktree_create_modal(parent_project_id.clone(), host_id.clone(), cx);
+            }
+            SidebarEvent::OpenSessionNamePrompt {
+                host_id,
+                working_dir,
+            } => {
+                self.open_session_name_modal_for_create(host_id.clone(), working_dir.clone(), cx);
+            }
+            SidebarEvent::OpenSessionRenamePrompt {
+                session_id,
+                current_name,
+            } => {
+                self.open_session_name_modal_for_rename(
+                    session_id.clone(),
+                    current_name.clone(),
+                    cx,
+                );
+            }
+            SidebarEvent::OpenSessionInNewWindow {
+                session_id,
+                host_id,
+            } => {
+                self.open_session_in_new_window(session_id.clone(), host_id.clone(), cx);
             }
         }
     }
@@ -1430,17 +1467,28 @@ impl MainView {
                 host_id,
                 working_dir,
             } => {
-                self.sidebar.update(cx, |s, cx| {
-                    s.create_session(host_id, Some(working_dir.clone()), cx);
-                });
+                self.open_session_name_modal_for_create(
+                    host_id.clone(),
+                    Some(working_dir.clone()),
+                    cx,
+                );
             }
             CommandPaletteEvent::CreateSession { host_id } => {
-                self.sidebar
-                    .update(cx, |s, cx| s.create_session(host_id, None, cx));
+                self.open_session_name_modal_for_create(host_id.clone(), None, cx);
             }
             CommandPaletteEvent::CloseSession { session_id } => {
                 self.sidebar
                     .update(cx, |s, cx| s.close_session(session_id, cx));
+            }
+            CommandPaletteEvent::RenameSession { session_id } => {
+                let current_name = self
+                    .sidebar
+                    .read(cx)
+                    .sessions_rc()
+                    .iter()
+                    .find(|s| s.id == *session_id)
+                    .and_then(|s| s.name.clone());
+                self.open_session_name_modal_for_rename(session_id.clone(), current_name, cx);
             }
             CommandPaletteEvent::OpenSessionInNewWindow {
                 session_id,
@@ -2103,6 +2151,86 @@ impl MainView {
         cx.notify();
     }
 
+    fn open_session_name_modal_for_create(
+        &mut self,
+        host_id: String,
+        working_dir: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+        self.session_name_action = Some(SessionNameAction::Create {
+            host_id,
+            working_dir,
+        });
+        let modal =
+            cx.new(|cx| SessionNameModal::new("New Session", "Session name", None, "Create", cx));
+        cx.subscribe(&modal, Self::on_session_name_event).detach();
+        self.session_name_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn open_session_name_modal_for_rename(
+        &mut self,
+        session_id: String,
+        current_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.is_some() {
+            self.close_command_palette(cx);
+        }
+        self.session_name_action = Some(SessionNameAction::Rename { session_id });
+        let modal = cx.new(|cx| {
+            SessionNameModal::new("Rename Session", "Session name", current_name, "Rename", cx)
+        });
+        cx.subscribe(&modal, Self::on_session_name_event).detach();
+        self.session_name_modal = Some(modal);
+        cx.notify();
+    }
+
+    fn close_session_name_modal(&mut self, cx: &mut Context<Self>) {
+        self.session_name_modal = None;
+        self.session_name_action = None;
+        cx.notify();
+    }
+
+    fn on_session_name_event(
+        &mut self,
+        _emitter: Entity<SessionNameModal>,
+        event: &SessionNameModalEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SessionNameModalEvent::Close => {
+                self.close_session_name_modal(cx);
+            }
+            SessionNameModalEvent::Submit(name) => {
+                let Some(action) = self.session_name_action.take() else {
+                    self.close_session_name_modal(cx);
+                    return;
+                };
+                self.session_name_modal = None;
+                match action {
+                    SessionNameAction::Create {
+                        host_id,
+                        working_dir,
+                    } => {
+                        self.sidebar.update(cx, |s, cx| {
+                            s.create_session(&host_id, working_dir, name.clone(), cx);
+                        });
+                    }
+                    SessionNameAction::Rename { session_id } => {
+                        self.sidebar.update(cx, |s, cx| {
+                            s.rename_session(&session_id, name.clone(), cx);
+                        });
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
     fn on_worktree_create_event(
         &mut self,
         _emitter: Entity<WorktreeCreateModal>,
@@ -2126,9 +2254,7 @@ impl MainView {
                 // The agent emits `ProjectsUpdated` when a worktree is added,
                 // which the sidebar already listens for; no manual refresh.
                 if start_session && let (Some(hid), Some(p)) = (host_id, path) {
-                    self.sidebar.update(cx, |sidebar, cx| {
-                        sidebar.create_session(&hid, Some(p), cx);
-                    });
+                    self.open_session_name_modal_for_create(hid, Some(p), cx);
                 }
             }
         }
@@ -2572,6 +2698,22 @@ impl MainView {
         ))
     }
 
+    fn render_session_name_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let modal = self.session_name_modal.as_ref()?;
+        Some(Self::render_modal_overlay(
+            "session-name-backdrop",
+            "session-name-container",
+            px(140.0),
+            px(360.0),
+            None,
+            None,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.close_session_name_modal(cx);
+            }),
+            modal.clone().into_any_element(),
+        ))
+    }
+
     fn render_settings_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let settings = self.settings_modal.as_ref()?;
         let profiles = Rc::clone(self.sidebar.read(cx).agent_profiles_rc());
@@ -2630,6 +2772,9 @@ impl Render for MainView {
             root = root.child(overlay);
         }
         if let Some(overlay) = self.render_worktree_create_overlay(cx) {
+            root = root.child(overlay);
+        }
+        if let Some(overlay) = self.render_session_name_overlay(cx) {
             root = root.child(overlay);
         }
 
@@ -2890,6 +3035,18 @@ pub enum SidebarEvent {
     /// worktree — sidebar/command-palette resolve to the root before emitting).
     OpenNewWorktree {
         parent_project_id: String,
+        host_id: String,
+    },
+    OpenSessionNamePrompt {
+        host_id: String,
+        working_dir: Option<String>,
+    },
+    OpenSessionRenamePrompt {
+        session_id: String,
+        current_name: Option<String>,
+    },
+    OpenSessionInNewWindow {
+        session_id: String,
         host_id: String,
     },
 }
