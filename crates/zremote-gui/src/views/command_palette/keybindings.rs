@@ -4,6 +4,7 @@ use gpui::*;
 
 use super::items::is_item_drillable;
 use super::{CommandPalette, CommandPaletteEvent, DrillDownLevel};
+use crate::views::components::text_input::{clipboard_text, is_paste_keystroke};
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 
 impl CommandPalette {
@@ -117,13 +118,8 @@ impl CommandPalette {
             return;
         }
 
-        // Paste from clipboard
-        if key == "v" && mods.control {
-            if let Some(text) = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .filter(|t| !t.is_empty())
-            {
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
                 self.query.push_str(&text);
                 self.selected_index = 0;
                 self.recompute_results();
@@ -207,6 +203,16 @@ impl CommandPalette {
             return;
         }
 
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
+                self.query.push_str(&text);
+                self.selected_index = 0;
+                self.recompute_results();
+                cx.notify();
+            }
+            return;
+        }
+
         // Consume modifier combos
         if mods.control || mods.alt || mods.platform {
             return;
@@ -284,6 +290,15 @@ impl CommandPalette {
             return;
         }
 
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
+                self.query.push_str(&text);
+                self.selected_index = 0;
+                cx.notify();
+            }
+            return;
+        }
+
         if mods.control || mods.alt || mods.platform {
             return;
         }
@@ -356,6 +371,15 @@ impl CommandPalette {
         if key == "down" {
             self.move_host_picker_selection(1);
             cx.notify();
+            return;
+        }
+
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
+                self.query.push_str(&text);
+                self.selected_index = 0;
+                cx.notify();
+            }
             return;
         }
 

@@ -25,6 +25,7 @@ use zremote_protocol::fs::{FsCompleteEntry, FsCompleteKind, FsCompleteResponse};
 
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
 
 /// Debounce applied between the last keystroke and the outgoing fetch. Long
 /// enough to coalesce a burst of typing, short enough to feel responsive.
@@ -235,6 +236,13 @@ impl PathAutocompleteInput {
                 true
             }
             _ => {
+                if is_paste_keystroke(event) {
+                    if let Some(text) = clipboard_text(cx) {
+                        self.value.push_str(&text);
+                        self.on_value_changed(cx);
+                    }
+                    return true;
+                }
                 if mods.control || mods.alt || mods.platform {
                     return false;
                 }
@@ -354,23 +362,12 @@ impl PathAutocompleteInput {
 
     // ---- render helpers --------------------------------------------------
 
-    fn render_input(&self) -> impl IntoElement {
-        let is_empty = self.value.is_empty();
+    fn render_input(&self, active: bool) -> impl IntoElement {
         let has_error = self.last_error.is_some();
         let border = if has_error {
             theme::error()
         } else {
             theme::border()
-        };
-        let shown = if is_empty {
-            self.placeholder.to_string()
-        } else {
-            self.value.clone()
-        };
-        let color = if is_empty {
-            theme::text_tertiary()
-        } else {
-            theme::text_primary()
         };
         div()
             .flex()
@@ -388,13 +385,11 @@ impl PathAutocompleteInput {
                     .size(px(14.0))
                     .text_color(theme::text_tertiary()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.0))
-                    .text_color(color)
-                    .child(shown),
-            )
+            .child(div().flex_1().text_size(px(12.0)).child(text_with_caret(
+                &self.value,
+                self.placeholder.as_ref(),
+                active,
+            )))
     }
 
     fn render_error_hint(&self) -> Option<impl IntoElement> {
@@ -544,9 +539,10 @@ impl Focusable for PathAutocompleteInput {
 }
 
 impl Render for PathAutocompleteInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dropdown = self.render_dropdown(cx);
         let error_hint = self.render_error_hint();
+        let input_active = self.focus_handle.is_focused(window);
         div()
             .id("path-autocomplete-input")
             .track_focus(&self.focus_handle)
@@ -558,7 +554,7 @@ impl Render for PathAutocompleteInput {
                     cx.stop_propagation();
                 }
             }))
-            .child(self.render_input())
+            .child(self.render_input(input_active))
             .when_some(error_hint, |el, v| el.child(v.into_any_element()))
             .when_some(dropdown, |el, v| el.child(v.into_any_element()))
     }

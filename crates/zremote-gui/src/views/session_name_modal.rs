@@ -3,6 +3,7 @@
 use gpui::*;
 
 use crate::theme;
+use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
 #[derive(Debug, Clone)]
@@ -71,6 +72,14 @@ impl SessionNameModal {
                 cx.stop_propagation();
             }
             _ => {
+                if is_paste_keystroke(event) {
+                    if let Some(text) = clipboard_text(cx) {
+                        self.value.push_str(&text);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if mods.control || mods.alt || mods.platform {
                     return;
                 }
@@ -83,8 +92,7 @@ impl SessionNameModal {
         }
     }
 
-    fn render_input(&self) -> impl IntoElement {
-        let is_empty = self.value.is_empty();
+    fn render_input(&self, active: bool) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -95,21 +103,11 @@ impl SessionNameModal {
             .border_color(theme::border())
             .bg(theme::bg_tertiary())
             .min_h(px(32.0))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.0))
-                    .text_color(if is_empty {
-                        theme::text_tertiary()
-                    } else {
-                        theme::text_primary()
-                    })
-                    .child(if is_empty {
-                        self.placeholder.clone()
-                    } else {
-                        self.value.clone()
-                    }),
-            )
+            .child(div().flex_1().text_size(px(13.0)).child(text_with_caret(
+                &self.value,
+                &self.placeholder,
+                active,
+            )))
     }
 }
 
@@ -124,6 +122,7 @@ impl Render for SessionNameModal {
         if !self.focus_handle.is_focused(window) {
             self.focus_handle.focus(window);
         }
+        let input_active = self.focus_handle.is_focused(window);
 
         let submit_label = self.submit_label.clone();
         div()
@@ -143,7 +142,7 @@ impl Render for SessionNameModal {
                     .text_color(theme::text_primary())
                     .child(self.title.clone()),
             )
-            .child(self.render_input())
+            .child(self.render_input(input_active))
             .child(
                 div()
                     .flex()

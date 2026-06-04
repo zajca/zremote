@@ -2651,6 +2651,7 @@ impl MainView {
                     .absolute()
                     .inset_0()
                     .flex()
+                    .items_start()
                     .justify_center()
                     .pt(top_offset)
                     .child(container),

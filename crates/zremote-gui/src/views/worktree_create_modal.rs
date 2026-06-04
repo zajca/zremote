@@ -25,6 +25,7 @@ use crate::theme;
 use crate::views::components::path_autocomplete::{
     PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind, TokioApiClient,
 };
+use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
 /// Event emitted by the modal for `MainView` to react to.
@@ -430,6 +431,17 @@ impl WorktreeCreateModal {
             return true;
         }
 
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
+                self.active_buffer_mut().push_str(&text);
+                if matches!(self.active_field, ActiveField::Branch) {
+                    self.after_branch_change(cx);
+                }
+                cx.notify();
+            }
+            return true;
+        }
+
         if mods.control || mods.alt || mods.platform {
             return false;
         }
@@ -594,17 +606,6 @@ impl WorktreeCreateModal {
             theme::border()
         };
         let id = SharedString::from(format!("wt-input-{field:?}"));
-        let text = if value.is_empty() {
-            placeholder.to_string()
-        } else {
-            value.to_string()
-        };
-        let text_color = if value.is_empty() {
-            theme::text_tertiary()
-        } else {
-            theme::text_primary()
-        };
-
         let mut wrapper = div().flex().flex_col().gap(px(4.0));
         wrapper = wrapper.child(
             div()
@@ -616,10 +617,9 @@ impl WorktreeCreateModal {
                 .border_1()
                 .border_color(border)
                 .text_size(px(12.0))
-                .text_color(text_color)
                 .min_h(px(28.0))
                 .cursor_pointer()
-                .child(text)
+                .child(text_with_caret(value, placeholder, is_active))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     this.active_field = field;
                     cx.notify();

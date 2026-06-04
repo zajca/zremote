@@ -28,6 +28,7 @@ use crate::views::cc_widgets;
 use crate::views::components::path_autocomplete::{
     PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind,
 };
+use crate::views::components::text_input::text_with_caret;
 use zremote_client::{Host, SessionStatus};
 
 pub use actions::PaletteAction;
@@ -976,13 +977,6 @@ impl CommandPalette {
             self.active_tab.placeholder().to_string()
         };
 
-        let query_display = if self.query.is_empty() {
-            placeholder
-        } else {
-            self.query.clone()
-        };
-        let query_is_empty = self.query.is_empty();
-
         div()
             .flex()
             .items_center()
@@ -1006,12 +1000,7 @@ impl CommandPalette {
                     .border_1()
                     .border_color(theme::border())
                     .text_size(px(13.0))
-                    .text_color(if query_is_empty {
-                        theme::text_tertiary()
-                    } else {
-                        theme::text_primary()
-                    })
-                    .child(query_display),
+                    .child(text_with_caret(&self.query, &placeholder, true)),
             )
             .child(
                 div()
@@ -1494,13 +1483,6 @@ impl CommandPalette {
                 .collect()
         };
 
-        let query_display = if self.query.is_empty() {
-            "Filter hosts...".to_string()
-        } else {
-            self.query.clone()
-        };
-        let query_is_empty = self.query.is_empty();
-
         let mut container = div()
             .id("command-palette-host-picker")
             .track_focus(&self.focus_handle)
@@ -1552,12 +1534,7 @@ impl CommandPalette {
                         .border_1()
                         .border_color(theme::border())
                         .text_size(px(13.0))
-                        .text_color(if query_is_empty {
-                            theme::text_tertiary()
-                        } else {
-                            theme::text_primary()
-                        })
-                        .child(query_display),
+                        .child(text_with_caret(&self.query, "Filter hosts...", true)),
                 ),
         );
 
@@ -1666,13 +1643,6 @@ impl CommandPalette {
                 .collect()
         };
 
-        let query_display = if self.query.is_empty() {
-            "Filter hosts...".to_string()
-        } else {
-            self.query.clone()
-        };
-        let query_is_empty = self.query.is_empty();
-
         let mut container = div()
             .id("command-palette-host-picker-project")
             .track_focus(&self.focus_handle)
@@ -1724,12 +1694,7 @@ impl CommandPalette {
                         .border_1()
                         .border_color(theme::border())
                         .text_size(px(13.0))
-                        .text_color(if query_is_empty {
-                            theme::text_tertiary()
-                        } else {
-                            theme::text_primary()
-                        })
-                        .child(query_display),
+                        .child(text_with_caret(&self.query, "Filter hosts...", true)),
                 ),
         );
 

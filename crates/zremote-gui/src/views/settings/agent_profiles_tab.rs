@@ -34,6 +34,9 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::components::text_input::{
+    clipboard_text, is_paste_keystroke, text_with_caret, textarea_with_caret,
+};
 use zremote_client::{
     AgentKindInfo, AgentProfile, CreateAgentProfileRequest, UpdateAgentProfileRequest,
 };
@@ -1156,6 +1159,18 @@ impl AgentProfilesTab {
             return;
         }
 
+        if is_paste_keystroke(event) {
+            if let Some(text) = clipboard_text(cx) {
+                self.active_buffer_mut().push_str(&text);
+                self.mark_dirty();
+                let active = self.active_input;
+                self.revalidate_field(active);
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         // Consume ctrl/alt/platform combos so they don't leak into parent
         // handlers (the modal's escape handler still runs because we never
         // consume escape here).
@@ -1846,8 +1861,6 @@ impl AgentProfilesTab {
         } else {
             theme::border()
         };
-        let display_value = value.to_string();
-
         let mut wrapper = div()
             .flex()
             .flex_col()
@@ -1867,14 +1880,7 @@ impl AgentProfilesTab {
                     .text_color(theme::text_primary())
                     .min_h(px(28.0))
                     .hover(|s| s.border_color(theme::accent()))
-                    .child(if display_value.is_empty() {
-                        div()
-                            .text_color(theme::text_tertiary())
-                            .child("click to edit")
-                            .into_any_element()
-                    } else {
-                        div().child(display_value).into_any_element()
-                    })
+                    .child(text_with_caret(value, "click to edit", is_active))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = field;
                         cx.notify();
@@ -1908,8 +1914,6 @@ impl AgentProfilesTab {
             theme::border()
         };
         let input_id = SharedString::from(format!("textarea-{label}"));
-        let display_value = value.to_string();
-
         let mut wrapper = div()
             .flex()
             .flex_col()
@@ -1929,25 +1933,7 @@ impl AgentProfilesTab {
                     .text_color(theme::text_primary())
                     .min_h(px(60.0))
                     .hover(|s| s.border_color(theme::accent()))
-                    .child(if display_value.is_empty() {
-                        div()
-                            .text_color(theme::text_tertiary())
-                            .child("click to edit")
-                            .into_any_element()
-                    } else {
-                        // Split on '\n' so multi-line prompts render as
-                        // multiple lines. GPUI does not honor literal
-                        // newlines inside a single text node -- each line
-                        // must be its own child div for wrapping to work.
-                        // An empty trailing line (from a fresh newline)
-                        // still renders as a zero-height row, giving the
-                        // user a visual cue that the cursor moved down.
-                        let mut column = div().flex().flex_col();
-                        for line in display_value.split('\n') {
-                            column = column.child(div().min_h(px(14.0)).child(line.to_string()));
-                        }
-                        column.into_any_element()
-                    })
+                    .child(textarea_with_caret(value, "click to edit", is_active))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = field;
                         cx.notify();
@@ -2139,8 +2125,6 @@ impl AgentProfilesTab {
             theme::border()
         };
         let input_id = SharedString::from(format!("taglist-input-{label}"));
-        let new_display = new_value.to_string();
-
         let mut chips = div().flex().flex_wrap().gap(px(4.0));
         for (idx, value) in values.iter().enumerate() {
             let chip_id = SharedString::from(format!("chip-{label}-{idx}"));
@@ -2192,14 +2176,11 @@ impl AgentProfilesTab {
                     .text_color(theme::text_primary())
                     .min_h(px(24.0))
                     .hover(|s| s.border_color(theme::accent()))
-                    .child(if new_display.is_empty() {
-                        div()
-                            .text_color(theme::text_tertiary())
-                            .child("click, type, Enter to add")
-                            .into_any_element()
-                    } else {
-                        div().child(new_display).into_any_element()
-                    })
+                    .child(text_with_caret(
+                        new_value,
+                        "click, type, Enter to add",
+                        is_active,
+                    ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = new_field;
                         cx.notify();
@@ -2290,9 +2271,6 @@ impl AgentProfilesTab {
         } else {
             theme::border()
         };
-        let key_display = self.edit_form.new_env_key.clone();
-        let value_display = self.edit_form.new_env_value.clone();
-
         let mut wrapper = div()
             .flex()
             .flex_col()
@@ -2318,14 +2296,11 @@ impl AgentProfilesTab {
                             .text_color(theme::text_primary())
                             .min_w(px(80.0))
                             .hover(|s| s.border_color(theme::accent()))
-                            .child(if key_display.is_empty() {
-                                div()
-                                    .text_color(theme::text_tertiary())
-                                    .child("KEY")
-                                    .into_any_element()
-                            } else {
-                                div().child(key_display).into_any_element()
-                            })
+                            .child(text_with_caret(
+                                &self.edit_form.new_env_key,
+                                "KEY",
+                                self.active_input == ActiveInput::NewEnvKey,
+                            ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                 this.active_input = ActiveInput::NewEnvKey;
                                 cx.notify();
@@ -2351,14 +2326,11 @@ impl AgentProfilesTab {
                             .text_size(px(11.0))
                             .text_color(theme::text_primary())
                             .hover(|s| s.border_color(theme::accent()))
-                            .child(if value_display.is_empty() {
-                                div()
-                                    .text_color(theme::text_tertiary())
-                                    .child("value")
-                                    .into_any_element()
-                            } else {
-                                div().child(value_display).into_any_element()
-                            })
+                            .child(text_with_caret(
+                                &self.edit_form.new_env_value,
+                                "value",
+                                self.active_input == ActiveInput::NewEnvValue,
+                            ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                 this.active_input = ActiveInput::NewEnvValue;
                                 cx.notify();

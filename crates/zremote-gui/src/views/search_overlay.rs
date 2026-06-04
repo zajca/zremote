@@ -7,6 +7,7 @@ use gpui::*;
 
 use crate::icons::{Icon, icon};
 use crate::theme;
+use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
 
 /// Events emitted by the search overlay to the parent TerminalPanel.
 pub enum SearchOverlayEvent {
@@ -65,13 +66,6 @@ impl Render for SearchOverlay {
             "0/0".to_string()
         };
 
-        let query_display = if self.query.is_empty() {
-            "Search...".to_string()
-        } else {
-            self.query.clone()
-        };
-        let query_is_empty = self.query.is_empty();
-
         div()
             .id("search-overlay")
             .track_focus(&self.focus_handle)
@@ -114,6 +108,15 @@ impl Render for SearchOverlay {
                         return;
                     }
 
+                    if is_paste_keystroke(event) {
+                        if let Some(text) = clipboard_text(cx) {
+                            this.query.push_str(&text);
+                            cx.emit(SearchOverlayEvent::QueryChanged(this.query.clone()));
+                            cx.notify();
+                        }
+                        return;
+                    }
+
                     // Ignore modifier-only keys and control combos.
                     if mods.control || mods.alt || mods.platform {
                         return;
@@ -145,12 +148,7 @@ impl Render for SearchOverlay {
                     .border_color(theme::border())
                     .min_w(px(120.0))
                     .text_size(px(13.0))
-                    .text_color(if query_is_empty {
-                        theme::text_tertiary()
-                    } else {
-                        theme::text_primary()
-                    })
-                    .child(query_display),
+                    .child(text_with_caret(&self.query, "Search...", true)),
             )
             // Match count
             .child(
