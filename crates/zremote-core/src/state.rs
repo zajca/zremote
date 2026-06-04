@@ -146,6 +146,11 @@ pub enum BrowserMessage {
     SessionSuspended,
     #[serde(rename = "session_resumed")]
     SessionResumed,
+    /// RFC-013: the session is `resumable` but auto-resume is off, so the agent
+    /// did NOT relaunch. The GUI renders a "Continue" affordance that triggers an
+    /// explicit resume instead of showing a dead terminal.
+    #[serde(rename = "session_resumable")]
+    SessionResumable,
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "scrollback_start")]

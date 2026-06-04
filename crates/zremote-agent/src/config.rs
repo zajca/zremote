@@ -150,6 +150,49 @@ pub fn detect_persistence_backend() -> PersistenceBackend {
     PersistenceBackend::Daemon
 }
 
+/// Parse a boolean env var, accepting `1`/`true` and `0`/`false`
+/// (case-insensitive). Returns `default` when the var is unset; on an
+/// unparseable value, logs a warning and falls back to `default` (never a
+/// silent invented value).
+fn parse_bool_env(var: &str, default: bool) -> bool {
+    match std::env::var(var) {
+        Err(_) => default,
+        Ok(raw) => match raw.trim().to_lowercase().as_str() {
+            "1" | "true" => true,
+            "0" | "false" => false,
+            other => {
+                tracing::warn!(
+                    var,
+                    value = other,
+                    default,
+                    "unparseable boolean env value, using default"
+                );
+                default
+            }
+        },
+    }
+}
+
+/// Whether the agent should automatically resume a `resumable` agent session
+/// when the GUI attaches to it (RFC-013).
+///
+/// Defaults to `true`. Override via `ZREMOTE_RESUME_AGENTS_ON_RESTART`
+/// (`1`/`true`/`0`/`false`). When off, attach returns a typed `SessionResumable`
+/// result so the GUI can offer an explicit "Continue" action instead.
+#[must_use]
+pub fn resume_agents_on_restart() -> bool {
+    parse_bool_env("ZREMOTE_RESUME_AGENTS_ON_RESTART", true)
+}
+
+/// Whether the agent should re-create a plain shell at the original
+/// `working_dir` for non-agent sessions whose daemon did not survive a restart
+/// (RFC-013). Defaults to `false`. Override via
+/// `ZREMOTE_RECREATE_SHELL_ON_RESTART` (`1`/`true`/`0`/`false`).
+#[must_use]
+pub fn recreate_shell_on_restart() -> bool {
+    parse_bool_env("ZREMOTE_RECREATE_SHELL_ON_RESTART", false)
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -275,6 +318,62 @@ mod tests {
         unsafe {
             remove_env("ZREMOTE_SERVER_URL");
             remove_env("ZREMOTE_TOKEN");
+        }
+    }
+
+    #[test]
+    fn resume_agents_on_restart_defaults_true() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { remove_env("ZREMOTE_RESUME_AGENTS_ON_RESTART") };
+        assert!(super::resume_agents_on_restart());
+    }
+
+    #[test]
+    fn recreate_shell_on_restart_defaults_false() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { remove_env("ZREMOTE_RECREATE_SHELL_ON_RESTART") };
+        assert!(!super::recreate_shell_on_restart());
+    }
+
+    #[test]
+    fn resume_agents_on_restart_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { set_env("ZREMOTE_RESUME_AGENTS_ON_RESTART", "false") };
+        assert!(!super::resume_agents_on_restart());
+        unsafe { set_env("ZREMOTE_RESUME_AGENTS_ON_RESTART", "0") };
+        assert!(!super::resume_agents_on_restart());
+        unsafe { set_env("ZREMOTE_RESUME_AGENTS_ON_RESTART", "TRUE") };
+        assert!(super::resume_agents_on_restart());
+        unsafe { remove_env("ZREMOTE_RESUME_AGENTS_ON_RESTART") };
+    }
+
+    #[test]
+    fn recreate_shell_on_restart_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        unsafe { set_env("ZREMOTE_RECREATE_SHELL_ON_RESTART", "1") };
+        assert!(super::recreate_shell_on_restart());
+        unsafe { set_env("ZREMOTE_RECREATE_SHELL_ON_RESTART", "true") };
+        assert!(super::recreate_shell_on_restart());
+        unsafe { remove_env("ZREMOTE_RECREATE_SHELL_ON_RESTART") };
+    }
+
+    #[test]
+    fn bool_env_unparseable_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env var manipulation, serialized by ENV_LOCK
+        // Garbage value -> keep the documented default (true here, false there),
+        // never an invented value.
+        unsafe { set_env("ZREMOTE_RESUME_AGENTS_ON_RESTART", "maybe") };
+        assert!(super::resume_agents_on_restart());
+        unsafe { set_env("ZREMOTE_RECREATE_SHELL_ON_RESTART", "yes-please") };
+        assert!(!super::recreate_shell_on_restart());
+        unsafe {
+            remove_env("ZREMOTE_RESUME_AGENTS_ON_RESTART");
+            remove_env("ZREMOTE_RECREATE_SHELL_ON_RESTART");
         }
     }
 }

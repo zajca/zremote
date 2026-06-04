@@ -36,6 +36,7 @@ pub enum Icon {
     RefreshCw,
     CircleSlash,
     AlertCircle,
+    Play,
 }
 
 impl Icon {
@@ -75,6 +76,7 @@ impl Icon {
             Self::RefreshCw => "icons/refresh-cw.svg",
             Self::CircleSlash => "icons/circle-slash.svg",
             Self::AlertCircle => "icons/alert-circle.svg",
+            Self::Play => "icons/play.svg",
         }
     }
 }

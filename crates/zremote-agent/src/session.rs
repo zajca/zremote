@@ -73,6 +73,34 @@ impl SessionManager {
         env: Option<&std::collections::HashMap<String, String>>,
         shell_config: Option<&ShellIntegrationConfig>,
     ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        self.create_inner(
+            session_id,
+            shell,
+            cols,
+            rows,
+            working_dir,
+            env,
+            shell_config,
+            None,
+        )
+        .await
+    }
+
+    /// Shared spawn path for `create` and `resume_session`. When `resume_argv`
+    /// is `Some`, the spawned session's process is that argv directly (RFC-013
+    /// resume) instead of a bare shell; otherwise it spawns the shell as usual.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_inner(
+        &mut self,
+        session_id: SessionId,
+        shell: &str,
+        cols: u16,
+        rows: u16,
+        working_dir: Option<&str>,
+        env: Option<&std::collections::HashMap<String, String>>,
+        shell_config: Option<&ShellIntegrationConfig>,
+        resume_argv: Option<&[String]>,
+    ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         // Extract short shell name (e.g., "/bin/zsh" → "zsh") and cache it.
         // This avoids re-deriving via sysinfo on reconnect (which can degrade to "shell").
         let shell_name = std::path::Path::new(shell)
@@ -92,6 +120,7 @@ impl SessionManager {
                     shell_config,
                     &self.socket_dir,
                     Some(&self.agent_instance_id.to_string()),
+                    resume_argv,
                 )
                 .await?;
                 self.sessions
@@ -109,6 +138,7 @@ impl SessionManager {
                     env,
                     self.output_tx.clone(),
                     shell_config,
+                    resume_argv,
                 )?;
                 self.sessions
                     .insert(session_id, SessionBackend::Pty(session));
@@ -119,6 +149,77 @@ impl SessionManager {
                 Ok(pid)
             }
         }
+    }
+
+    /// Resume a stopped agent session (RFC-013) by re-spawning a backend for the
+    /// **same** `session_id` with `resume_argv` (e.g. `claude --resume <id>`) as
+    /// the session's process. Deterministic — the agent IS the session command,
+    /// so there is no shell-readiness race and no "type into a live shell".
+    ///
+    /// Double-launch guard: if a live daemon for this id already exists, this is
+    /// a no-op attach (returns the existing pid) and the resume command is NOT
+    /// run a second time. Stale daemon state files are cleaned up first.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_session(
+        &mut self,
+        session_id: SessionId,
+        shell: &str,
+        cols: u16,
+        rows: u16,
+        working_dir: Option<&str>,
+        env: Option<&std::collections::HashMap<String, String>>,
+        shell_config: Option<&ShellIntegrationConfig>,
+        resume_argv: &[String],
+    ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        if resume_argv.is_empty() {
+            return Err("resume_argv must not be empty".into());
+        }
+
+        // Defensive: a stale state file may linger after a reboot. Recreation
+        // overwrites it, but clear known-dead entries first so discovery doesn't
+        // re-adopt a corpse.
+        if self.backend != PersistenceBackend::None {
+            crate::daemon::discovery::cleanup_stale_daemons(&self.socket_dir);
+        }
+
+        // Double-launch guard: if ANY backend for this id is already tracked,
+        // attach instead of relaunching so the resume command runs exactly once.
+        // Guard on `has_session` (covers BOTH Daemon and Pty backends) rather
+        // than `is_daemon_alive` (Daemon-only): with PersistenceBackend::None the
+        // backend is a Pty, so a daemon-only guard would never fire and two
+        // concurrent resume callers (REST + attach) could spawn duplicate agents.
+        //
+        // Atomicity: callers hold the `SessionManager` lock for the whole
+        // `resume_session` call, so this guard check and the `create_inner` spawn
+        // below happen under ONE continuous lock hold — a concurrent REST+WS
+        // resume cannot both pass the guard and double-spawn. Callers must NOT do
+        // a separate has_session/is_daemon_alive pre-check outside the lock.
+        if self.has_session(&session_id) {
+            // Sentinel for "tracked but pid unknown" — `u32::MAX`, never `0`
+            // (POSIX pid 0 means the caller's process group; misleading even
+            // though this value is never passed to kill()).
+            let pid = self
+                .session_pids()
+                .find_map(|(id, pid)| (id == session_id).then_some(pid))
+                .unwrap_or(u32::MAX);
+            tracing::info!(
+                %session_id,
+                "resume requested but a backend for this id already exists; attaching instead of relaunching"
+            );
+            return Ok(pid);
+        }
+
+        self.create_inner(
+            session_id,
+            shell,
+            cols,
+            rows,
+            working_dir,
+            env,
+            shell_config,
+            Some(resume_argv),
+        )
+        .await
     }
 
     /// Write data to a session's stdin.
@@ -378,6 +479,39 @@ fn get_process_name(pid: u32) -> String {
         .unwrap_or_else(|| "shell".to_string())
 }
 
+/// Map a persisted `sessions.agent_kind` string back to an [`AgentKind`].
+/// Mirrors the `snake_case` serde representation (see RFC-012 capture).
+fn agent_kind_from_db(kind: &str) -> zremote_protocol::AgentKind {
+    match kind {
+        "claude" => zremote_protocol::AgentKind::Claude,
+        "codex" => zremote_protocol::AgentKind::Codex,
+        _ => zremote_protocol::AgentKind::Unknown,
+    }
+}
+
+/// Build the resume argv for a session from its persisted agent identity
+/// (RFC-013). Reads `agent_kind` + `agent_session_ref` (RFC-012) and turns them
+/// into the agent's native resume command via [`crate::agents::resume_argv`].
+///
+/// Returns `Ok(None)` when the session has no resumable agent ref or the agent
+/// kind has no known resume command (e.g. `Unknown`). The resulting argv is then
+/// passed to [`SessionManager::resume_session`], which spawns it directly as the
+/// session's process — the native id stays a single argv token (injection-safe).
+pub async fn build_resume_argv_for_session(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+) -> Result<Option<Vec<String>>, zremote_core::error::AppError> {
+    let Some((kind, native_id)) =
+        zremote_core::queries::sessions::get_agent_session_ref(pool, session_id).await?
+    else {
+        return Ok(None);
+    };
+    Ok(crate::agents::resume_argv(
+        agent_kind_from_db(&kind),
+        &native_id,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,6 +735,152 @@ mod tests {
         }
         // If create failed (no PTY available), closing nonexistent is fine
         assert!(mgr.close(&session_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_session_rejects_empty_argv() {
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let result = mgr
+            .resume_session(session_id, "/bin/sh", 80, 24, None, None, None, &[])
+            .await;
+        assert!(result.is_err(), "empty resume_argv must be rejected");
+        assert!(!mgr.has_session(&session_id));
+    }
+
+    #[tokio::test]
+    async fn resume_session_spawns_session_for_same_id() {
+        // None backend (PTY). resume_session re-creates a backend for the given
+        // id with the resume argv as the process. Reuses the same session id.
+        let mut mgr = make_manager();
+        let session_id = Uuid::new_v4();
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 1".to_string(),
+        ];
+        if mgr
+            .resume_session(session_id, "/bin/sh", 80, 24, None, None, None, &argv)
+            .await
+            .is_ok()
+        {
+            assert!(
+                mgr.has_session(&session_id),
+                "resumed session must be tracked under the same id"
+            );
+            let _ = mgr.close(&session_id);
+            assert!(!mgr.has_session(&session_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_session_does_not_double_spawn_on_pty_backend() {
+        // Regression (review finding): the double-launch guard must cover the
+        // None/Pty backend, not just Daemon. A second resume_session for an
+        // already-tracked id must NOT create a second backend — it attaches.
+        let mut mgr = make_manager(); // None backend -> Pty
+        let session_id = Uuid::new_v4();
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 5".to_string(),
+        ];
+
+        // First resume spawns the backend. If the env can't spawn a PTY at all,
+        // skip (nothing to guard against).
+        if mgr
+            .resume_session(session_id, "/bin/sh", 80, 24, None, None, None, &argv)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        assert!(mgr.has_session(&session_id));
+        assert_eq!(mgr.count(), 1);
+
+        // Second resume for the SAME id must be a no-op attach: still exactly one
+        // backend, no duplicate process.
+        mgr.resume_session(session_id, "/bin/sh", 80, 24, None, None, None, &argv)
+            .await
+            .expect("second resume should attach, not error");
+        assert_eq!(
+            mgr.count(),
+            1,
+            "second resume must not spawn a second backend for the same id"
+        );
+
+        let _ = mgr.close(&session_id);
+    }
+
+    async fn db_with_session(
+        session_id: &str,
+        kind: Option<&str>,
+        native: Option<&str>,
+    ) -> sqlx::SqlitePool {
+        let pool = zremote_core::db::init_db("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO hosts (id, name, hostname, auth_token_hash, status) \
+             VALUES ('h1', 'h1', 'h1', 'hash', 'online')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, host_id, status, agent_kind, agent_session_ref) VALUES (?, 'h1', 'resumable', ?, ?)")
+            .bind(session_id)
+            .bind(kind)
+            .bind(native)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn build_resume_argv_claude_session() {
+        let pool = db_with_session("s1", Some("claude"), Some("cc-abc")).await;
+        let argv = build_resume_argv_for_session(&pool, "s1").await.unwrap();
+        // resume_argv(Claude, "cc-abc") = ["claude", "--resume", "cc-abc"]
+        let argv = argv.expect("claude session should yield resume argv");
+        assert_eq!(argv.first().map(String::as_str), Some("claude"));
+        assert!(argv.iter().any(|a| a == "cc-abc"));
+        // Native id is its own token (not concatenated into another arg).
+        assert!(argv.contains(&"cc-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn build_resume_argv_none_without_ref() {
+        // Session with no agent_session_ref -> no resume argv.
+        let pool = db_with_session("s1", None, None).await;
+        assert_eq!(
+            build_resume_argv_for_session(&pool, "s1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn build_resume_argv_none_for_unknown_kind() {
+        // Unknown agent kind has no known resume command.
+        let pool = db_with_session("s1", Some("future_agent"), Some("xyz")).await;
+        assert_eq!(
+            build_resume_argv_for_session(&pool, "s1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn build_resume_argv_native_id_stays_single_token() {
+        // Injection safety at the argv-building layer: a metachar-laden native id
+        // must remain exactly one argv element.
+        let evil = "$(touch pwned); rm -rf /";
+        let pool = db_with_session("s1", Some("claude"), Some(evil)).await;
+        let argv = build_resume_argv_for_session(&pool, "s1")
+            .await
+            .unwrap()
+            .expect("claude yields argv");
+        assert!(
+            argv.iter().any(|a| a == evil),
+            "native id must be a single un-split argv token; got {argv:?}"
+        );
     }
 
     #[test]

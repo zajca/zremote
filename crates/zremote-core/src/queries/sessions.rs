@@ -164,12 +164,82 @@ pub async fn list_suspended_session_ids(
 
 pub async fn force_close_session(pool: &SqlitePool, session_id: &str) -> Result<(), AppError> {
     let now = chrono::Utc::now().to_rfc3339();
+    force_close_session_at(pool, session_id, &now).await
+}
+
+/// Like [`force_close_session`] but with a caller-supplied `closed_at`
+/// timestamp, so a batch (e.g. startup recovery) can stamp every closed row with
+/// the same instant.
+pub async fn force_close_session_at(
+    pool: &SqlitePool,
+    session_id: &str,
+    closed_at: &str,
+) -> Result<(), AppError> {
     sqlx::query("UPDATE sessions SET status = 'closed', closed_at = ? WHERE id = ?")
-        .bind(&now)
+        .bind(closed_at)
         .bind(session_id)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// List ALL suspended sessions for a host, each paired with its (possibly null)
+/// `agent_session_ref` (RFC-012). The query does NOT filter by a non-null ref —
+/// the caller inspects the `Option` to decide. Named for the column it returns,
+/// not a filter, to avoid implying only agent sessions come back.
+///
+/// Used by startup recovery to classify a session whose daemon did not survive
+/// the restart: `Some(ref)` means the row backs an agent conversation we can
+/// re-open (-> `resumable`); `None` is a plain session (-> `closed`).
+pub async fn list_suspended_sessions_with_optional_agent_ref(
+    pool: &SqlitePool,
+    host_id: &str,
+) -> Result<Vec<(String, Option<String>)>, AppError> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, agent_session_ref FROM sessions \
+         WHERE host_id = ? AND status = 'suspended'",
+    )
+    .bind(host_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Mark a session as `resumable` (RFC-013): its backend did not survive an
+/// agent restart, but it can be re-opened. The row stays listed
+/// (`list_sessions` includes everything `!= 'closed'`) and attach drives the
+/// resume engine. `suspended_at` is preserved as the time the backend went away.
+pub async fn mark_session_resumable(pool: &SqlitePool, session_id: &str) -> Result<(), AppError> {
+    sqlx::query("UPDATE sessions SET status = 'resumable' WHERE id = ?")
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Reconcile a Claude task whose backing terminal session just became
+/// `resumable` on startup (RFC-013 "Claude-task reconciliation").
+///
+/// Without this, the `claude_sessions` row stays `active`/`starting` and the
+/// sidebar shows a task that maps to a now-dead `session_id` — the "shows but
+/// cannot continue" symptom. We move it to `suspended` with a `disconnect_reason`,
+/// mirroring the existing agent-disconnect reconciliation (a suspended Claude
+/// task is the established "alive but not running, can be resumed" state). Only
+/// rows in a live state (`starting`/`active`) are touched, so terminal tasks
+/// (`completed`/`error`) are left intact. Returns the number of rows updated.
+pub async fn reconcile_claude_session_resumable(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        "UPDATE claude_sessions \
+         SET status = 'suspended', disconnect_reason = 'agent_restarted' \
+         WHERE session_id = ? AND status IN ('starting', 'active')",
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn list_sessions_by_project(
@@ -216,6 +286,72 @@ pub async fn list_active_sessions_under_path(
     .fetch_all(pool)
     .await?;
     Ok(sessions)
+}
+
+/// Persist an agent's native session id for a managed session.
+///
+/// Records which agent CLI (`agent_kind`, e.g. `claude` / `codex`) produced
+/// `native_session_id` and when it was last observed (`now`, ISO 8601). This
+/// row is the durable record RFC-013 reads to build the resume command. The
+/// caller supplies `now` so the timestamp source is explicit (mirrors how
+/// `mark_session_error`/`force_close_session` mint their own `rfc3339`).
+///
+/// The `native_session_id` is treated as opaque data — it is only ever bound
+/// as a parameter, never interpolated into SQL or shell text.
+pub async fn set_agent_session_ref(
+    pool: &SqlitePool,
+    session_id: &str,
+    agent_kind: &str,
+    native_session_id: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE sessions \
+         SET agent_kind = ?, agent_session_ref = ?, agent_session_updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(agent_kind)
+    .bind(native_session_id)
+    .bind(now)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Read the persisted agent identity for a session (RFC-012/013).
+///
+/// Returns `Some((agent_kind, agent_session_ref))` only when BOTH columns are
+/// non-null — i.e. the session backs an agent conversation that can be resumed.
+/// Returns `None` for a plain session or one that never captured a native id.
+/// The resume engine maps `agent_kind` back to an `AgentKind` and builds the
+/// resume argv from `agent_session_ref`.
+pub async fn get_agent_session_ref(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<Option<(String, String)>, AppError> {
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT agent_kind, agent_session_ref FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|(kind, native)| Some((kind?, native?))))
+}
+
+/// Transition a session to `active` after a successful resume (RFC-013).
+///
+/// Clears `suspended_at` and `closed_at` so a previously `resumable` row looks
+/// like a normal live session again. The same `sessions.id` is reused, so GUI
+/// handles and any `claude_sessions` linkage stay stable.
+pub async fn mark_session_active(pool: &SqlitePool, session_id: &str) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE sessions SET status = 'active', suspended_at = NULL, closed_at = NULL \
+         WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Mark a session row as errored.
@@ -343,5 +479,298 @@ mod tests {
         // StartFailed handler can tolerate agent-side rejections that
         // happened before the server committed the session row.
         mark_session_error(&pool, "nonexistent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_029_adds_agent_session_ref_columns() {
+        // Guard that migration 029 applied and the three new columns exist on
+        // `sessions`. A bare SELECT of the columns errors if any is missing.
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT agent_kind, agent_session_ref, agent_session_updated_at \
+             FROM sessions WHERE id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Newly inserted session has no agent ref yet.
+        assert_eq!(row, (None, None, None));
+    }
+
+    #[tokio::test]
+    async fn set_agent_session_ref_persists_values() {
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+
+        set_agent_session_ref(
+            &pool,
+            "s1",
+            "claude",
+            "cc-native-abc",
+            "2026-06-04T10:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT agent_kind, agent_session_ref, agent_session_updated_at \
+             FROM sessions WHERE id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("claude"));
+        assert_eq!(row.1.as_deref(), Some("cc-native-abc"));
+        assert_eq!(row.2.as_deref(), Some("2026-06-04T10:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn set_agent_session_ref_overwrites_previous_values() {
+        // A later capture (e.g. agent reconnect) must replace the stored ref.
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+
+        set_agent_session_ref(&pool, "s1", "claude", "first", "2026-06-04T10:00:00Z")
+            .await
+            .unwrap();
+        set_agent_session_ref(&pool, "s1", "codex", "second", "2026-06-04T11:00:00Z")
+            .await
+            .unwrap();
+
+        let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT agent_kind, agent_session_ref, agent_session_updated_at \
+             FROM sessions WHERE id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("codex"));
+        assert_eq!(row.1.as_deref(), Some("second"));
+        assert_eq!(row.2.as_deref(), Some("2026-06-04T11:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn set_agent_session_ref_is_noop_for_missing_row() {
+        // UPDATE affecting 0 rows returns Ok so the processing path can tolerate
+        // a capture for a session that was purged/closed concurrently.
+        let pool = setup().await;
+        set_agent_session_ref(&pool, "nonexistent", "claude", "x", "2026-06-04T10:00:00Z")
+            .await
+            .unwrap();
+    }
+
+    async fn insert_suspended_session(
+        pool: &SqlitePool,
+        id: &str,
+        agent_session_ref: Option<&str>,
+    ) {
+        insert_session(pool, id, "h1", None, None, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET status = 'suspended', agent_session_ref = ? WHERE id = ?")
+            .bind(agent_session_ref)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_suspended_sessions_with_optional_agent_ref_returns_only_suspended() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s_agent", Some("cc-123")).await;
+        insert_suspended_session(&pool, "s_plain", None).await;
+        // An active session must NOT appear.
+        insert_session(&pool, "s_active", "h1", None, None, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET status = 'active' WHERE id = 's_active'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut rows = list_suspended_sessions_with_optional_agent_ref(&pool, "h1")
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "s_agent");
+        assert_eq!(rows[0].1.as_deref(), Some("cc-123"));
+        assert_eq!(rows[1].0, "s_plain");
+        assert_eq!(rows[1].1, None);
+    }
+
+    #[tokio::test]
+    async fn mark_session_resumable_sets_status() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", Some("cc-123")).await;
+
+        mark_session_resumable(&pool, "s1").await.unwrap();
+
+        let row = get_session(&pool, "s1").await.unwrap();
+        assert_eq!(row.status, "resumable");
+        // A resumable session is NOT closed, so it stays in list_sessions.
+        let listed = list_sessions(&pool, "h1").await.unwrap();
+        assert!(listed.iter().any(|s| s.id == "s1"));
+    }
+
+    #[tokio::test]
+    async fn force_close_session_at_uses_supplied_timestamp() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", None).await;
+
+        force_close_session_at(&pool, "s1", "2026-06-04T09:00:00Z")
+            .await
+            .unwrap();
+
+        let row = get_session(&pool, "s1").await.unwrap();
+        assert_eq!(row.status, "closed");
+        assert_eq!(row.closed_at.as_deref(), Some("2026-06-04T09:00:00Z"));
+    }
+
+    async fn insert_claude_task(pool: &SqlitePool, id: &str, session_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO claude_sessions (id, session_id, host_id, project_path, status) \
+             VALUES (?, ?, 'h1', '/proj', ?)",
+        )
+        .bind(id)
+        .bind(session_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_claude_session_resumable_suspends_live_task() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", Some("cc-123")).await;
+        insert_claude_task(&pool, "t1", "s1", "active").await;
+
+        let updated = reconcile_claude_session_resumable(&pool, "s1")
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let (status, reason): (String, Option<String>) =
+            sqlx::query_as("SELECT status, disconnect_reason FROM claude_sessions WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "suspended");
+        assert_eq!(reason.as_deref(), Some("agent_restarted"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_claude_session_resumable_reconciles_starting_task() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", Some("cc-123")).await;
+        insert_claude_task(&pool, "t1", "s1", "starting").await;
+
+        let updated = reconcile_claude_session_resumable(&pool, "s1")
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let (status,): (String,) =
+            sqlx::query_as("SELECT status FROM claude_sessions WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "suspended");
+    }
+
+    #[tokio::test]
+    async fn reconcile_claude_session_resumable_leaves_terminal_task_untouched() {
+        // A completed/error Claude task must not be revived into 'suspended'.
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", Some("cc-123")).await;
+        insert_claude_task(&pool, "t1", "s1", "completed").await;
+
+        let updated = reconcile_claude_session_resumable(&pool, "s1")
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
+
+        let (status,): (String,) =
+            sqlx::query_as("SELECT status FROM claude_sessions WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn reconcile_claude_session_resumable_noop_without_linked_task() {
+        let pool = setup().await;
+        insert_suspended_session(&pool, "s1", Some("cc-123")).await;
+
+        let updated = reconcile_claude_session_resumable(&pool, "s1")
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
+    }
+
+    #[tokio::test]
+    async fn get_agent_session_ref_returns_pair_when_both_set() {
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+        set_agent_session_ref(&pool, "s1", "claude", "cc-123", "2026-06-04T10:00:00Z")
+            .await
+            .unwrap();
+
+        let got = get_agent_session_ref(&pool, "s1").await.unwrap();
+        assert_eq!(got, Some(("claude".to_string(), "cc-123".to_string())));
+    }
+
+    #[tokio::test]
+    async fn get_agent_session_ref_none_when_unset() {
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+        // Never captured -> both columns null -> None.
+        assert_eq!(get_agent_session_ref(&pool, "s1").await.unwrap(), None);
+        // Missing row -> None.
+        assert_eq!(
+            get_agent_session_ref(&pool, "nonexistent").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_session_active_transitions_resumable_and_clears_timestamps() {
+        let pool = setup().await;
+        insert_session(&pool, "s1", "h1", None, None, None)
+            .await
+            .unwrap();
+        // Put it in resumable with stale suspended/closed timestamps.
+        sqlx::query(
+            "UPDATE sessions SET status = 'resumable', suspended_at = '2026-06-04T08:00:00Z', \
+             closed_at = '2026-06-04T08:30:00Z' WHERE id = 's1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        mark_session_active(&pool, "s1").await.unwrap();
+
+        let (status, suspended_at, closed_at): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, suspended_at, closed_at FROM sessions WHERE id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(suspended_at, None);
+        assert_eq!(closed_at, None);
     }
 }

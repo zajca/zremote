@@ -329,6 +329,28 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// Resume a `resumable` agent session (RFC-013). Re-spawns the agent for the
+    /// SAME session id and returns the re-created (active) session.
+    #[must_use = "session resume returns the re-created session"]
+    pub async fn resume_session(
+        &self,
+        host_id: &str,
+        session_id: &str,
+    ) -> Result<Session, ApiError> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/hosts/{}/sessions/{}/resume",
+                self.base_url,
+                encode_path(host_id),
+                encode_path(session_id)
+            ))
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Update a session.
     #[must_use = "session update returns the updated session"]
     pub async fn update_session(

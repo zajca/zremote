@@ -112,6 +112,7 @@ mod tests {
             mapper,
             outbound_tx,
             sent_cc_session_ids: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            sent_agent_session_refs: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         };
         (state, outbound_rx)
     }

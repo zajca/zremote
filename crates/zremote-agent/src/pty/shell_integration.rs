@@ -128,7 +128,7 @@ pub fn prepare(
     let shell_type = ShellType::detect(shell_cmd);
 
     if config.export_env_vars {
-        apply_env_vars(session_id, cmd);
+        set_session_env(session_id, cmd);
     }
 
     let temp_dir = match &shell_type {
@@ -145,7 +145,19 @@ pub fn prepare(
     }))
 }
 
-fn apply_env_vars(session_id: SessionId, cmd: &mut CommandBuilder) {
+/// Set the session-identity env vars (`ZREMOTE_TERMINAL`, `ZREMOTE_SESSION_ID`)
+/// on a spawn command, unconditionally.
+///
+/// Unlike [`prepare`], this is **not** gated on any [`ShellIntegrationConfig`]
+/// flag or on the shell type, and must be called at every PTY spawn site (both
+/// the in-process [`crate::pty::PtySession`] backend and the [`crate::daemon`]
+/// backend). RFC-012's native-session capture path keys off `ZREMOTE_SESSION_ID`
+/// being present in the agent's environment (forwarded as the
+/// `X-ZRemote-Session-Id` hook header); if it is missing, capture silently
+/// fails for that session. Keeping this separate from `prepare` guarantees the
+/// vars are exported even when shell integration is fully disabled or no
+/// `ShellIntegrationConfig` is supplied.
+pub fn set_session_env(session_id: SessionId, cmd: &mut CommandBuilder) {
     cmd.env("ZREMOTE_TERMINAL", "1");
     cmd.env("ZREMOTE_SESSION_ID", session_id.to_string());
 }
@@ -380,6 +392,22 @@ mod tests {
 
         let result = prepare(session_id, "/bin/zsh", &config, &mut cmd).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn set_session_env_sets_both_vars() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        set_session_env(session_id, &mut cmd);
+
+        assert_eq!(
+            cmd.get_env("ZREMOTE_TERMINAL").and_then(|v| v.to_str()),
+            Some("1")
+        );
+        assert_eq!(
+            cmd.get_env("ZREMOTE_SESSION_ID").and_then(|v| v.to_str()),
+            Some(session_id.to_string().as_str())
+        );
     }
 
     #[test]

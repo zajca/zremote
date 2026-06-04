@@ -98,7 +98,7 @@ impl CommandBuilder {
         // in lockstep with REST validation — a profile that was accepted into
         // SQLite is guaranteed to pass here.
         use zremote_core::validation::agent_profile::{
-            validate_env_var_key, validate_env_var_value, validate_extra_arg,
+            validate_custom_flags, validate_env_var_key, validate_env_var_value, validate_extra_arg,
         };
         for (k, v) in *env_vars {
             validate_env_var_key(k)?;
@@ -106,6 +106,12 @@ impl CommandBuilder {
         }
         for arg in *extra_args {
             validate_extra_arg(arg)?;
+        }
+        // custom_flags is a free-form blob appended verbatim and re-executed via
+        // `sh -c` on resume — reject shell metacharacters so it cannot break out
+        // of its intended position (consistent with extra_args hardening).
+        if let Some(flags) = custom_flags {
+            validate_custom_flags(flags)?;
         }
 
         let mut parts = vec!["cd".to_string(), shell_quote(working_dir), "&&".to_string()];
@@ -148,7 +154,8 @@ impl CommandBuilder {
         }
 
         if let Some(flags) = custom_flags {
-            // Custom flags are appended as-is (user is responsible for correctness)
+            // Appended as-is, but validated above (no shell metacharacters) so it
+            // cannot inject commands when the built string is run via `sh -c`.
             parts.push(flags.to_string());
         }
 
@@ -565,6 +572,32 @@ mod tests {
         };
         let cmd = CommandBuilder::build(&opts).unwrap();
         assert!(cmd.contains("--model 'claude-sonnet-4-20250514'"));
+    }
+
+    #[test]
+    fn build_rejects_custom_flags_with_shell_metacharacters() {
+        // MEDIUM #5: custom_flags is re-executed via `sh -c` on resume, so a
+        // metachar-laden value must be rejected, not passed through raw.
+        let opts = CommandOptions {
+            custom_flags: Some("--verbose; rm -rf /"),
+            ..minimal_opts("/tmp")
+        };
+        let err = CommandBuilder::build(&opts).unwrap_err();
+        assert!(
+            err.contains("shell metacharacters") || err.contains("custom flags"),
+            "expected a custom_flags metachar rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_accepts_plain_custom_flags() {
+        // A normal multi-token flags blob (no metachars) still works.
+        let opts = CommandOptions {
+            custom_flags: Some("--foo bar --baz"),
+            ..minimal_opts("/tmp")
+        };
+        let cmd = CommandBuilder::build(&opts).unwrap();
+        assert!(cmd.contains("--foo bar --baz"));
     }
 
     #[test]

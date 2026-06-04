@@ -46,6 +46,7 @@ impl DaemonSession {
         shell_config: Option<&ShellIntegrationConfig>,
         sock_dir: &std::path::Path,
         owner_id: Option<&str>,
+        resume_argv: Option<&[String]>,
     ) -> Result<(Self, u32), Box<dyn std::error::Error + Send + Sync>> {
         // Use current_exe() for binary name detection, but /proc/PID/exe for
         // the actual spawn path on Linux. After recompilation, cargo replaces
@@ -116,6 +117,17 @@ impl DaemonSession {
         if let Some(id) = owner_id {
             args.push("--owner-id".to_string());
             args.push(id.to_string());
+        }
+
+        // RFC-013 resume: pass the agent resume command as ordered --init-arg
+        // tokens. The daemon subprocess spawns argv[0] with argv[1..] as the PTY
+        // child instead of `shell`. Each element is a separate argv token across
+        // the process boundary, so the native id is never word-split.
+        if let Some(argv) = resume_argv {
+            for arg in argv {
+                args.push("--init-arg".to_string());
+                args.push(arg.clone());
+            }
         }
 
         // Ensure socket directory exists before opening log file

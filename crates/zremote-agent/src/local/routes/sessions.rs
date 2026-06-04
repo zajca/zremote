@@ -212,6 +212,29 @@ pub async fn get_session(
     Ok(Json(session))
 }
 
+/// `POST /api/hosts/:host_id/sessions/:session_id/resume` - explicitly resume a
+/// `resumable` agent session (RFC-013). Re-spawns the agent for the SAME session
+/// id via the shared resume engine, transitions the row to `active`, and returns
+/// the re-created session.
+pub async fn resume_session(
+    State(state): State<Arc<LocalAppState>>,
+    Path((host_id, session_id)): Path<(String, String)>,
+) -> Result<Json<q::SessionRow>, AppError> {
+    let parsed_host_id: Uuid = host_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid host ID: {host_id}")))?;
+    if parsed_host_id != state.host_id {
+        return Err(AppError::NotFound(format!("host {host_id} not found")));
+    }
+    let parsed_session_id: Uuid = session_id
+        .parse()
+        .map_err(|_| AppError::BadRequest(format!("invalid session ID: {session_id}")))?;
+
+    super::terminal::resume_session_by_id(&state, &parsed_session_id).await?;
+    let session = q::get_session(&state.db, &session_id).await?;
+    Ok(Json(session))
+}
+
 /// Request body for updating a session.
 #[derive(Debug, Deserialize)]
 pub struct UpdateSessionRequest {
@@ -356,6 +379,14 @@ pub(crate) async fn close_sessions_for_project(
         if row.status == "closed" {
             continue;
         }
+        // RFC-013: never let a bulk/cascade close (project/worktree cleanup)
+        // silently destroy a `resumable` session — that would permanently lose
+        // the ability to resume the agent conversation. A resumable session has
+        // no live PTY holding the working dir, so skipping it does not block
+        // teardown. It is only closed by an explicit action on that session.
+        if row.status == "resumable" {
+            continue;
+        }
         if !seen.insert(row.id.clone()) {
             continue;
         }
@@ -369,6 +400,9 @@ pub(crate) async fn close_sessions_for_project(
     if let Some(path) = path_scope {
         let by_path = q::list_active_sessions_under_path(&state.db, host_id, path).await?;
         for row in by_path {
+            if row.status == "resumable" {
+                continue;
+            }
             if !seen.insert(row.id.clone()) {
                 continue;
             }
@@ -2090,5 +2124,59 @@ mod tests {
             assert!(!node.working_dir.is_empty());
             assert!(node.duration_ms >= 0);
         }
+    }
+
+    #[tokio::test]
+    async fn close_sessions_for_project_skips_resumable() {
+        // HIGH #2: a bulk/cascade close (project/worktree cleanup) must NOT
+        // destroy a resumable session — only an active one is closed.
+        let state = test_state().await;
+        let host_id = state.host_id.to_string();
+        let project_id = Uuid::new_v4().to_string();
+        zremote_core::queries::projects::insert_project(
+            &state.db,
+            &project_id,
+            &host_id,
+            "/tmp/proj",
+            "proj",
+        )
+        .await
+        .unwrap();
+
+        let active_id = Uuid::new_v4().to_string();
+        let resumable_id = Uuid::new_v4().to_string();
+        for (id, status) in [(&active_id, "active"), (&resumable_id, "resumable")] {
+            sqlx::query(
+                "INSERT INTO sessions (id, host_id, status, project_id, working_dir) \
+                 VALUES (?, ?, ?, ?, '/tmp/proj')",
+            )
+            .bind(id)
+            .bind(&host_id)
+            .bind(status)
+            .bind(&project_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+
+        // Cascade close (no live PTYs in test — close still updates the DB rows).
+        let _ = close_sessions_for_project(&state, &host_id, &project_id, Some("/tmp/proj")).await;
+
+        let active_status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+            .bind(&active_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let resumable_status: String =
+            sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+                .bind(&resumable_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(active_status, "closed", "active session should be closed");
+        assert_eq!(
+            resumable_status, "resumable",
+            "resumable session must be PRESERVED by cascade close"
+        );
     }
 }

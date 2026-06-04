@@ -47,9 +47,7 @@ impl TerminalBackend for ServerTerminalBackend {
                     Ok(None) => "session not found".to_string(),
                     Err(_) => "session not found or not active".to_string(),
                 };
-            return Err(SessionError {
-                message: error_message,
-            });
+            return Err(SessionError::new(error_message));
         }
 
         // Phase 2: Take write lock for the happy path
@@ -60,18 +58,14 @@ impl TerminalBackend for ServerTerminalBackend {
         {
             let mut sessions = self.state.sessions.write().await;
             let Some(session) = sessions.get_mut(session_id) else {
-                return Err(SessionError {
-                    message: "session was closed while connecting".to_string(),
-                });
+                return Err(SessionError::new("session was closed while connecting"));
             };
 
             if session.status != SessionStatus::Active
                 && session.status != SessionStatus::Creating
                 && session.status != SessionStatus::Suspended
             {
-                return Err(SessionError {
-                    message: format!("session is {}", session.status),
-                });
+                return Err(SessionError::new(format!("session is {}", session.status)));
             }
 
             scrollback_data = session.scrollback.iter().cloned().collect::<Vec<_>>();

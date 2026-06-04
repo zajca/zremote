@@ -14,6 +14,42 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Kind-agnostic identifier for an agent CLI.
+///
+/// Serialized as `snake_case` strings (`"claude"`, `"codex"`). Unknown kinds
+/// from newer peers deserialize to [`AgentKind::Unknown`] via `#[serde(other)]`
+/// so the protocol stays forward-compatible. This mirrors the string `kind`
+/// values listed in [`SUPPORTED_KINDS`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentKind {
+    /// Stable lowercase wire/DB string for this kind (`"claude"`, `"codex"`,
+    /// `"unknown"`). Matches the `#[serde(rename_all = "snake_case")]`
+    /// serialization and the `agent_kind` column values persisted on `sessions`.
+    /// Use this instead of re-deriving the string at each call site.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Server -> agent messages for the generic launcher flow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "payload")]
@@ -248,5 +284,70 @@ mod tests {
         assert!(kinds.contains(&"claude"));
         assert!(kinds.contains(&"codex"));
         assert_eq!(SUPPORTED_KINDS.len(), kinds.len());
+    }
+
+    #[test]
+    fn agent_kind_serialization() {
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Claude).unwrap(),
+            r#""claude""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Codex).unwrap(),
+            r#""codex""#
+        );
+    }
+
+    #[test]
+    fn agent_kind_roundtrip() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Unknown] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            let back: AgentKind = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn agent_kind_unknown_deserialization() {
+        // Any unrecognized kind string falls back to Unknown.
+        let parsed: AgentKind = serde_json::from_str(r#""gemini""#).expect("deserialize");
+        assert_eq!(parsed, AgentKind::Unknown);
+    }
+
+    #[test]
+    fn agent_kind_as_str_values() {
+        assert_eq!(AgentKind::Claude.as_str(), "claude");
+        assert_eq!(AgentKind::Codex.as_str(), "codex");
+        assert_eq!(AgentKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn agent_kind_as_str_matches_serde() {
+        // `as_str` must equal the serde snake_case representation so the DB
+        // string (written via as_str) round-trips through deserialization.
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Unknown] {
+            let serde_str = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(format!("\"{}\"", kind.as_str()), serde_str);
+        }
+    }
+
+    #[test]
+    fn agent_kind_as_str_roundtrips_through_from_db() {
+        // Simulate reading back the stored `sessions.agent_kind` string: parsing
+        // `as_str()` must recover the original variant. Claude/Codex round-trip
+        // exactly; the catch-all "unknown" also deserializes back to Unknown.
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Unknown] {
+            let db_value = kind.as_str();
+            let json = format!("\"{db_value}\"");
+            let back: AgentKind = serde_json::from_str(&json).expect("deserialize from db value");
+            assert_eq!(back, kind, "agent_kind {db_value} must round-trip");
+        }
+    }
+
+    #[test]
+    fn agent_kind_display_matches_as_str() {
+        assert_eq!(AgentKind::Claude.to_string(), "claude");
+        assert_eq!(AgentKind::Codex.to_string(), "codex");
+        assert_eq!(AgentKind::Unknown.to_string(), "unknown");
     }
 }

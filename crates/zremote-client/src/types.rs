@@ -239,6 +239,8 @@ pub(crate) enum TerminalServerMessage {
     SessionSuspended,
     #[serde(rename = "session_resumed")]
     SessionResumed,
+    #[serde(rename = "session_resumable")]
+    SessionResumable,
     #[serde(rename = "pane_added")]
     PaneAdded { pane_id: String, index: u16 },
     #[serde(rename = "pane_removed")]
@@ -291,6 +293,9 @@ pub enum TerminalEvent {
     SessionSuspended,
     /// Session was resumed (agent reconnected).
     SessionResumed,
+    /// RFC-013: the session is `resumable` but auto-resume is off — the GUI
+    /// should render a "Continue" affordance that triggers an explicit resume.
+    SessionResumable,
     /// Server-side error (session not found, stale, etc.)
     Error { message: String },
     /// WebSocket connection lost (session may still be alive on the server).

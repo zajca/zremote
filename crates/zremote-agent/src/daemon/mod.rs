@@ -129,6 +129,7 @@ pub async fn run_pty_daemon(
     extra_env: std::collections::HashMap<String, String>,
     shell_config: Option<ShellIntegrationConfig>,
     owner_id: Option<String>,
+    resume_argv: Option<Vec<String>>,
 ) {
     // 1. Ignore SIGHUP (safe, no unsafe block)
     let mut sighup = tokio::signal::unix::signal(SignalKind::hangup())
@@ -156,8 +157,19 @@ pub async fn run_pty_daemon(
         }
     };
 
-    // 3. Spawn shell
-    let mut cmd = CommandBuilder::new(&shell);
+    // 3. Spawn the session process.
+    // RFC-013 resume: when `resume_argv` is present, the PTY child IS the agent
+    // CLI (e.g. `claude --resume <id>`), spawned directly as program + args — no
+    // shell, no `-c`, no word-splitting, so the native id is never re-parsed.
+    // Otherwise spawn the shell as today.
+    let mut cmd = match resume_argv.as_deref() {
+        Some([program, rest @ ..]) => {
+            let mut c = CommandBuilder::new(program);
+            c.args(rest);
+            c
+        }
+        _ => CommandBuilder::new(&shell),
+    };
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     for (key, value) in &extra_env {
@@ -167,22 +179,42 @@ pub async fn run_pty_daemon(
         cmd.cwd(dir);
     }
 
-    // Apply shell integration (env vars, autosuggestion disabling, etc.)
-    // Parse session_id as UUID for the prepare function
-    let _integration_state = if let Some(ref config) = shell_config {
-        if let Ok(sid) = uuid::Uuid::parse_str(&session_id) {
-            match crate::pty::shell_integration::prepare(sid, &shell, config, &mut cmd) {
-                Ok(state) => state,
-                Err(e) => {
-                    tracing::warn!(error = %e, "shell integration failed, continuing without it");
-                    None
-                }
-            }
-        } else {
-            None
+    // Export ZREMOTE_SESSION_ID / ZREMOTE_TERMINAL unconditionally on the daemon
+    // backend, independent of shell integration config. RFC-012 native-session
+    // capture keys off ZREMOTE_SESSION_ID being present in the agent's env (it is
+    // forwarded as the X-ZRemote-Session-Id hook header); without it, capture
+    // silently fails for daemon-backed sessions. `prepare` may re-set the same
+    // values when export_env_vars is on; that is harmless (identical values).
+    match uuid::Uuid::parse_str(&session_id) {
+        Ok(sid) => crate::pty::shell_integration::set_session_env(sid, &mut cmd),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                session_id = %session_id,
+                "session_id is not a valid UUID; ZREMOTE_SESSION_ID not exported"
+            );
         }
-    } else {
-        None
+    }
+
+    // Apply shell integration (env vars, autosuggestion disabling, etc.).
+    // Skipped for a resume spawn: the process is the agent CLI, not a shell, so
+    // shell-rc integration does not apply.
+    // Parse session_id as UUID for the prepare function.
+    let _integration_state = match (shell_config.as_ref(), resume_argv.as_deref()) {
+        (Some(config), None) => {
+            if let Ok(sid) = uuid::Uuid::parse_str(&session_id) {
+                match crate::pty::shell_integration::prepare(sid, &shell, config, &mut cmd) {
+                    Ok(state) => state,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "shell integration failed, continuing without it");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
     };
 
     let child = match pair.slave.spawn_command(cmd) {

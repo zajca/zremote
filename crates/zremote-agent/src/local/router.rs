@@ -61,6 +61,10 @@ pub(crate) fn build_router(
             post(routes::sessions::create_session).get(routes::sessions::list_sessions),
         )
         .route(
+            "/api/hosts/{host_id}/sessions/{session_id}/resume",
+            post(routes::sessions::resume_session),
+        )
+        .route(
             "/api/sessions/{session_id}",
             get(routes::sessions::get_session)
                 .patch(routes::sessions::update_session)

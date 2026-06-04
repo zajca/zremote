@@ -12,6 +12,12 @@ pub enum SessionStatus {
     Suspended,
     Closed,
     Error,
+    /// The session's backend (daemon) did not survive an agent restart/reboot,
+    /// but it can be re-opened: either it backs an agent conversation with a
+    /// persisted `agent_session_ref` (RFC-012), or it is a plain shell the agent
+    /// is configured to re-create. Listed and attachable (attach drives the
+    /// resume engine) but NOT treated as a live/active session. See RFC-013.
+    Resumable,
     /// Forward-compatibility: unknown status values from newer servers.
     #[serde(other)]
     Unknown,
@@ -25,6 +31,7 @@ impl fmt::Display for SessionStatus {
             Self::Suspended => write!(f, "suspended"),
             Self::Closed => write!(f, "closed"),
             Self::Error => write!(f, "error"),
+            Self::Resumable => write!(f, "resumable"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -41,6 +48,7 @@ impl SessionStatus {
             "suspended" => Self::Suspended,
             "closed" => Self::Closed,
             "error" => Self::Error,
+            "resumable" => Self::Resumable,
             _ => Self::Unknown,
         }
     }
@@ -201,11 +209,29 @@ mod tests {
             SessionStatus::Active,
             SessionStatus::Suspended,
             SessionStatus::Closed,
+            SessionStatus::Resumable,
         ] {
             let json = serde_json::to_string(&status).unwrap();
             let parsed: SessionStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, parsed);
         }
+    }
+
+    #[test]
+    fn session_status_resumable_serde_display_parse() {
+        // Serializes/deserializes as "resumable" and is distinct from Unknown
+        // so old peers that don't know the variant fall back via #[serde(other)].
+        assert_eq!(
+            serde_json::to_string(&SessionStatus::Resumable).unwrap(),
+            r#""resumable""#
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionStatus>(r#""resumable""#).unwrap(),
+            SessionStatus::Resumable
+        );
+        assert_eq!(SessionStatus::Resumable.to_string(), "resumable");
+        assert_eq!(SessionStatus::parse("resumable"), SessionStatus::Resumable);
+        assert_ne!(SessionStatus::Resumable, SessionStatus::Unknown);
     }
 
     // --- HostStatus tests ---
