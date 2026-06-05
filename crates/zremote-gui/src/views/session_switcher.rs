@@ -432,7 +432,7 @@ impl Render for SessionSwitcher {
         let selected = self.selected_index;
 
         // Focus on first render
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
 
         // Scroll selected item into view
         self.scroll_handle.scroll_to_item(selected);

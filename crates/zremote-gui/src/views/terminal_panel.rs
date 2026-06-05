@@ -26,7 +26,7 @@
 //!
 //! # Cursor blink
 //!
-//! A detached async task toggles `cursor_visible` every 500ms using `Timer::after()`.
+//! A detached async task toggles `cursor_visible` every 500ms using `cx.background_executor().timer()`.
 //! On any keystroke, `observe_keystrokes` resets `cursor_visible = true` so the cursor
 //! stays solid while the user is actively typing. The blink timer continues independently
 //! and resumes blinking naturally after typing stops.
@@ -796,7 +796,7 @@ impl TerminalPanel {
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
-                Timer::after(CURSOR_BLINK_INTERVAL).await;
+                cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
                 let Ok(()) = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
                     this.cursor_visible = !this.cursor_visible;
                     cx.notify();
@@ -1747,7 +1747,7 @@ impl Render for TerminalPanel {
         self.start_cursor_blink(cx);
 
         if !self.focus_handle.is_focused(window) && !self.closed && !self.search_open {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
         let focused = self.focus_handle.is_focused(window);
         self.report_focus_if_needed(focused);
@@ -1906,8 +1906,8 @@ impl Render for TerminalPanel {
             })
             .on_any_mouse_down({
                 let focus = self.focus_handle.clone();
-                move |_event: &MouseDownEvent, window: &mut Window, _cx: &mut App| {
-                    focus.focus(window);
+                move |_event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                    focus.focus(window, cx);
                 }
             })
             .on_mouse_down(MouseButton::Left, {

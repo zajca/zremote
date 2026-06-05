@@ -742,12 +742,10 @@ impl CommandPalette {
                         u32::MAX
                     }
                 }
-                PaletteAction::SwitchToSession { session_id, .. } => {
-                    if Some(session_id.as_str()) == active_session_id {
-                        0
-                    } else {
-                        u32::MAX
-                    }
+                PaletteAction::SwitchToSession { session_id, .. }
+                    if Some(session_id.as_str()) == active_session_id =>
+                {
+                    0
                 }
                 _ => u32::MAX,
             },
@@ -2350,14 +2348,14 @@ impl Render for CommandPalette {
                 if !child_focus.contains_focused(window, cx)
                     && !self.focus_handle.contains_focused(window, cx)
                 {
-                    child_focus.focus(window);
+                    child_focus.focus(window, cx);
                 }
             }
             return self.render_path_input(cx).into_any_element();
         }
 
         if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
 
         // Special drill-down levels with their own full layout

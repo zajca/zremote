@@ -189,8 +189,8 @@ impl PathAutocompleteInput {
     }
 
     /// Push focus onto the internal key handler.
-    pub fn focus_input(&self, window: &mut Window, _cx: &mut Context<Self>) {
-        self.focus_handle.focus(window);
+    pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
     }
 
     // ---- key handling ----------------------------------------------------
@@ -810,6 +810,7 @@ mod tests {
                     key_char: None,
                 },
                 is_held: false,
+                prefer_character_input: false,
             };
             let handled = this.handle_key(&event, cx);
             assert!(handled);

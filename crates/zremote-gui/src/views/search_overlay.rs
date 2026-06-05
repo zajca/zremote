@@ -57,7 +57,7 @@ impl Render for SearchOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Auto-focus on render.
         if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
 
         let match_text = if self.total_matches > 0 {

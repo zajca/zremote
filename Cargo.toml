@@ -50,7 +50,8 @@ notify = "6"
 rust-embed = { version = "8", features = ["compression"] }
 
 # GUI
-gpui = "0.2"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "86effffd34634945a4971e1c6c65cd45b21ce6a9" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "86effffd34634945a4971e1c6c65cd45b21ce6a9", features = ["wayland", "x11", "font-kit"] }
 arboard = { version = "3", features = ["image-data"] }
 png = "0.17"
 alacritty_terminal = "0.25"
@@ -81,9 +82,6 @@ missing_panics_doc = "allow"
 opt-level = 1
 
 [profile.dev.package.gpui]
-opt-level = 3
-
-[profile.dev.package.cosmic-text]
 opt-level = 3
 
 [profile.dev.package.alacritty_terminal]

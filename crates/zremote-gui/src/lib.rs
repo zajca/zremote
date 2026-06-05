@@ -114,8 +114,10 @@ pub fn run(config: GuiConfig) {
 
     let exit_after = config.exit_after;
 
-    // Launch GPUI application on main thread
-    Application::new()
+    // Launch GPUI application on main thread.
+    // gpui HEAD split OS platform backends into separate crates; the app entry
+    // point now lives in `gpui_platform`, which selects the current platform.
+    gpui_platform::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             let app_state_for_quit = app_state.clone();
@@ -162,8 +164,12 @@ pub fn run(config: GuiConfig) {
 
             if let Some(seconds) = exit_after {
                 cx.spawn(async move |cx: &mut AsyncApp| {
-                    Timer::after(Duration::from_secs(seconds)).await;
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.background_executor()
+                        .timer(Duration::from_secs(seconds))
+                        .await;
+                    // gpui HEAD: `AsyncApp::update` returns the closure value
+                    // directly (here `()`), no longer a `Result` to discard.
+                    cx.update(|cx| cx.quit());
                 })
                 .detach();
             }
