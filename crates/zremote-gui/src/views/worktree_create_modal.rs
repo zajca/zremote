@@ -25,7 +25,7 @@ use crate::theme;
 use crate::views::components::path_autocomplete::{
     PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind, TokioApiClient,
 };
-use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
+use crate::views::components::text_input::{TextSelection, handle_text_input_key, text_with_caret};
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
 /// Event emitted by the modal for `MainView` to react to.
@@ -79,6 +79,7 @@ pub struct WorktreeCreateModal {
 
     branch_input: String,
     base_ref_input: String,
+    input_selection: TextSelection,
     /// Path field is a `PathAutocompleteInput` view with filesystem dropdown and
     /// Tab-completion. The buffer lives inside the entity — read it via
     /// `self.path.read(cx).value(cx)` at submit time.
@@ -190,6 +191,7 @@ impl WorktreeCreateModal {
             parent_host_id,
             branch_input: String::new(),
             base_ref_input: String::new(),
+            input_selection: TextSelection::collapsed(),
             path,
             path_user_edited: false,
             last_auto_suggested_path: None,
@@ -419,42 +421,24 @@ impl WorktreeCreateModal {
             return false;
         }
 
-        if key == "backspace" {
+        let mut selection = self.input_selection;
+        let result = {
             let buffer = self.active_buffer_mut();
-            if !buffer.is_empty() {
-                buffer.pop();
+            handle_text_input_key(buffer, &mut selection, event, false, cx)
+        };
+        self.input_selection = selection;
+        if result.handled {
+            if result.changed {
                 if matches!(self.active_field, ActiveField::Branch) {
                     self.after_branch_change(cx);
                 }
+                cx.notify();
+            } else if result.selection_changed {
                 cx.notify();
             }
             return true;
         }
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.active_buffer_mut().push_str(&text);
-                if matches!(self.active_field, ActiveField::Branch) {
-                    self.after_branch_change(cx);
-                }
-                cx.notify();
-            }
-            return true;
-        }
-
-        if mods.control || mods.alt || mods.platform {
-            return false;
-        }
-
-        if let Some(ch) = &event.keystroke.key_char {
-            let buffer = self.active_buffer_mut();
-            buffer.push_str(ch);
-            if matches!(self.active_field, ActiveField::Branch) {
-                self.after_branch_change(cx);
-            }
-            cx.notify();
-            return true;
-        }
         false
     }
 
@@ -504,6 +488,7 @@ impl WorktreeCreateModal {
             (idx + order.len() - 1) % order.len()
         };
         self.active_field = order[next];
+        self.input_selection.clear();
     }
 
     // ---- render helpers --------------------------------------------------
@@ -619,9 +604,15 @@ impl WorktreeCreateModal {
                 .text_size(px(12.0))
                 .min_h(px(28.0))
                 .cursor_pointer()
-                .child(text_with_caret(value, placeholder, is_active))
+                .child(text_with_caret(
+                    value,
+                    placeholder,
+                    is_active,
+                    self.input_selection,
+                ))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     this.active_field = field;
+                    this.input_selection.clear();
                     cx.notify();
                 })),
         );

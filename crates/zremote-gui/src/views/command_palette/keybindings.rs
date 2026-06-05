@@ -4,10 +4,33 @@ use gpui::*;
 
 use super::items::is_item_drillable;
 use super::{CommandPalette, CommandPaletteEvent, DrillDownLevel};
-use crate::views::components::text_input::{clipboard_text, is_paste_keystroke};
+use crate::views::components::text_input::handle_text_input_key;
 use crate::views::key_bindings::{KeyAction, dispatch_global_key};
 
 impl CommandPalette {
+    fn handle_query_edit_key(
+        &mut self,
+        event: &KeyDownEvent,
+        recompute_results: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result =
+            handle_text_input_key(&mut self.query, &mut self.query_selection, event, false, cx);
+        if !result.handled {
+            return false;
+        }
+        if result.changed {
+            self.selected_index = 0;
+            if recompute_results {
+                self.recompute_results();
+            }
+            cx.notify();
+        } else if result.selection_changed {
+            cx.notify();
+        }
+        true
+    }
+
     pub(super) fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -88,15 +111,8 @@ impl CommandPalette {
             return;
         }
 
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.dismiss(cx);
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
+        if key == "backspace" && self.query.is_empty() && !self.query_selection.is_select_all() {
+            self.dismiss(cx);
             return;
         }
 
@@ -118,28 +134,7 @@ impl CommandPalette {
             return;
         }
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.query.push_str(&text);
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
-            return;
-        }
-
-        // Consume other ctrl+letter combos to prevent leaking
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        // Printable characters
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            self.recompute_results();
-            cx.notify();
-        }
+        let _ = self.handle_query_edit_key(event, true, cx);
     }
 
     pub(super) fn handle_drill_down_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -157,16 +152,9 @@ impl CommandPalette {
             return;
         }
 
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
+        if key == "backspace" && self.query.is_empty() && !self.query_selection.is_select_all() {
+            self.pop_drill_down();
+            cx.notify();
             return;
         }
 
@@ -203,28 +191,7 @@ impl CommandPalette {
             return;
         }
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.query.push_str(&text);
-                self.selected_index = 0;
-                self.recompute_results();
-                cx.notify();
-            }
-            return;
-        }
-
-        // Consume modifier combos
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        // Printable characters
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            self.recompute_results();
-            cx.notify();
-        }
+        let _ = self.handle_query_edit_key(event, true, cx);
     }
 
     pub(super) fn handle_host_picker_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -242,15 +209,9 @@ impl CommandPalette {
             return;
         }
 
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                cx.notify();
-            }
+        if key == "backspace" && self.query.is_empty() && !self.query_selection.is_select_all() {
+            self.pop_drill_down();
+            cx.notify();
             return;
         }
 
@@ -290,24 +251,7 @@ impl CommandPalette {
             return;
         }
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.query.push_str(&text);
-                self.selected_index = 0;
-                cx.notify();
-            }
-            return;
-        }
-
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            cx.notify();
-        }
+        let _ = self.handle_query_edit_key(event, false, cx);
     }
 
     pub(super) fn handle_host_picker_for_project_key(
@@ -329,15 +273,9 @@ impl CommandPalette {
             return;
         }
 
-        if key == "backspace" {
-            if self.query.is_empty() {
-                self.pop_drill_down();
-                cx.notify();
-            } else {
-                self.query.pop();
-                self.selected_index = 0;
-                cx.notify();
-            }
+        if key == "backspace" && self.query.is_empty() && !self.query_selection.is_select_all() {
+            self.pop_drill_down();
+            cx.notify();
             return;
         }
 
@@ -374,23 +312,6 @@ impl CommandPalette {
             return;
         }
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.query.push_str(&text);
-                self.selected_index = 0;
-                cx.notify();
-            }
-            return;
-        }
-
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        if let Some(ch) = &event.keystroke.key_char {
-            self.query.push_str(ch);
-            self.selected_index = 0;
-            cx.notify();
-        }
+        let _ = self.handle_query_edit_key(event, false, cx);
     }
 }

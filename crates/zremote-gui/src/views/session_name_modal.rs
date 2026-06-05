@@ -3,7 +3,7 @@
 use gpui::*;
 
 use crate::theme;
-use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
+use crate::views::components::text_input::{TextSelection, handle_text_input_key, text_with_caret};
 use crate::views::key_bindings::{KeyAction, dispatch_modal_key};
 
 #[derive(Debug, Clone)]
@@ -19,6 +19,7 @@ pub struct SessionNameModal {
     title: String,
     placeholder: String,
     value: String,
+    selection: TextSelection,
     submit_label: String,
 }
 
@@ -35,6 +36,7 @@ impl SessionNameModal {
             title: title.into(),
             placeholder: placeholder.into(),
             value: initial_value.unwrap_or_default(),
+            selection: TextSelection::collapsed(),
             submit_label: submit_label.into(),
         }
     }
@@ -61,34 +63,18 @@ impl SessionNameModal {
             return;
         }
 
-        match key {
-            "enter" => {
-                self.submit(cx);
-                cx.stop_propagation();
-            }
-            "backspace" => {
-                self.value.pop();
+        if key == "enter" {
+            self.submit(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        let result = handle_text_input_key(&mut self.value, &mut self.selection, event, false, cx);
+        if result.handled {
+            if result.changed || result.selection_changed {
                 cx.notify();
-                cx.stop_propagation();
             }
-            _ => {
-                if is_paste_keystroke(event) {
-                    if let Some(text) = clipboard_text(cx) {
-                        self.value.push_str(&text);
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if mods.control || mods.alt || mods.platform {
-                    return;
-                }
-                if let Some(ch) = &event.keystroke.key_char {
-                    self.value.push_str(ch);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-            }
+            cx.stop_propagation();
         }
     }
 
@@ -107,6 +93,7 @@ impl SessionNameModal {
                 &self.value,
                 &self.placeholder,
                 active,
+                self.selection,
             )))
     }
 }

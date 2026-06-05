@@ -28,7 +28,7 @@ use crate::views::cc_widgets;
 use crate::views::components::path_autocomplete::{
     PathAutocompleteApi, PathAutocompleteEvent, PathAutocompleteInput, PathKind,
 };
-use crate::views::components::text_input::text_with_caret;
+use crate::views::components::text_input::{TextSelection, text_with_caret};
 use zremote_client::{Host, SessionStatus};
 
 pub use actions::PaletteAction;
@@ -198,6 +198,7 @@ struct SavedLevelState {
 pub struct CommandPalette {
     focus_handle: FocusHandle,
     pub(super) query: String,
+    pub(super) query_selection: TextSelection,
     active_tab: PaletteTab,
     pub(super) selected_index: usize,
     pub(super) hovered_index: Option<usize>,
@@ -252,6 +253,7 @@ impl CommandPalette {
         let mut palette = Self {
             focus_handle,
             query: String::new(),
+            query_selection: TextSelection::collapsed(),
             active_tab: initial_tab,
             selected_index: 0,
             hovered_index: None,
@@ -1000,7 +1002,12 @@ impl CommandPalette {
                     .border_1()
                     .border_color(theme::border())
                     .text_size(px(13.0))
-                    .child(text_with_caret(&self.query, &placeholder, true)),
+                    .child(text_with_caret(
+                        &self.query,
+                        &placeholder,
+                        true,
+                        self.query_selection,
+                    )),
             )
             .child(
                 div()
@@ -1534,7 +1541,12 @@ impl CommandPalette {
                         .border_1()
                         .border_color(theme::border())
                         .text_size(px(13.0))
-                        .child(text_with_caret(&self.query, "Filter hosts...", true)),
+                        .child(text_with_caret(
+                            &self.query,
+                            "Filter hosts...",
+                            true,
+                            self.query_selection,
+                        )),
                 ),
         );
 
@@ -1694,7 +1706,12 @@ impl CommandPalette {
                         .border_1()
                         .border_color(theme::border())
                         .text_size(px(13.0))
-                        .child(text_with_caret(&self.query, "Filter hosts...", true)),
+                        .child(text_with_caret(
+                            &self.query,
+                            "Filter hosts...",
+                            true,
+                            self.query_selection,
+                        )),
                 ),
         );
 

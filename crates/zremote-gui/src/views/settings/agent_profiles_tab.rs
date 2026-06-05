@@ -35,7 +35,7 @@ use crate::app_state::AppState;
 use crate::icons::{Icon, icon};
 use crate::theme;
 use crate::views::components::text_input::{
-    clipboard_text, is_paste_keystroke, text_with_caret, textarea_with_caret,
+    TextSelection, handle_text_input_key, text_with_caret, textarea_with_caret,
 };
 use zremote_client::{
     AgentKindInfo, AgentProfile, CreateAgentProfileRequest, UpdateAgentProfileRequest,
@@ -620,6 +620,8 @@ pub struct AgentProfilesTab {
     save_error: Option<String>,
     saving: bool,
     active_input: ActiveInput,
+    selected_input: ActiveInput,
+    input_selection: TextSelection,
     /// Set to `true` whenever `edit_form` is mutated by the user, cleared
     /// on a successful save or when a fresh form is loaded. Used by
     /// `set_profiles` to avoid silently clobbering unsaved edits when the
@@ -668,6 +670,8 @@ impl AgentProfilesTab {
             save_error: None,
             saving: false,
             active_input: ActiveInput::None,
+            selected_input: ActiveInput::None,
+            input_selection: TextSelection::collapsed(),
             dirty: false,
             field_errors: HashMap::new(),
         }
@@ -867,6 +871,8 @@ impl AgentProfilesTab {
             self.editor_mode = EditorMode::Edit;
             self.save_error = None;
             self.active_input = ActiveInput::None;
+            self.selected_input = ActiveInput::None;
+            self.input_selection.clear();
             self.dirty = false;
             self.field_errors.clear();
             cx.notify();
@@ -889,6 +895,8 @@ impl AgentProfilesTab {
         self.selected_profile_id = None;
         self.save_error = None;
         self.active_input = ActiveInput::Name;
+        self.selected_input = ActiveInput::Name;
+        self.input_selection.clear();
         // The blank create form starts "dirty" (the user is about to type),
         // but flag it only after they first mutate so the save_error guard
         // above works correctly on repeated clicks of "New".
@@ -1128,7 +1136,6 @@ impl AgentProfilesTab {
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
 
         if self.active_input == ActiveInput::None {
             return;
@@ -1137,53 +1144,34 @@ impl AgentProfilesTab {
         // Enter on a "new chip" input adds the chip. Enter in the
         // multi-line Initial prompt buffer inserts a newline. All other
         // text inputs ignore Enter.
-        if key == "enter" {
-            if self.active_input == ActiveInput::InitialPrompt {
-                self.edit_form.initial_prompt.push('\n');
-                self.mark_dirty();
-                cx.notify();
-            } else {
-                self.commit_chip_on_enter(cx);
-            }
+        if key == "enter" && self.active_input != ActiveInput::InitialPrompt {
+            self.commit_chip_on_enter(cx);
             cx.stop_propagation();
             return;
         }
 
-        if key == "backspace" {
-            self.active_buffer_mut().pop();
-            self.mark_dirty();
-            let active = self.active_input;
-            self.revalidate_field(active);
-            cx.notify();
-            cx.stop_propagation();
-            return;
+        let active = self.active_input;
+        if self.selected_input != active {
+            self.input_selection.clear();
+            self.selected_input = active;
         }
+        let mut selection = self.input_selection;
+        let multiline = active == ActiveInput::InitialPrompt;
+        let result = {
+            let buffer = self.active_buffer_mut();
+            handle_text_input_key(buffer, &mut selection, event, multiline, cx)
+        };
+        self.input_selection = selection;
+        self.selected_input = active;
 
-        if is_paste_keystroke(event) {
-            if let Some(text) = clipboard_text(cx) {
-                self.active_buffer_mut().push_str(&text);
+        if result.handled {
+            if result.changed {
                 self.mark_dirty();
-                let active = self.active_input;
                 self.revalidate_field(active);
                 cx.notify();
+            } else if result.selection_changed {
+                cx.notify();
             }
-            cx.stop_propagation();
-            return;
-        }
-
-        // Consume ctrl/alt/platform combos so they don't leak into parent
-        // handlers (the modal's escape handler still runs because we never
-        // consume escape here).
-        if mods.control || mods.alt || mods.platform {
-            return;
-        }
-
-        if let Some(ch) = &event.keystroke.key_char {
-            self.active_buffer_mut().push_str(ch);
-            self.mark_dirty();
-            let active = self.active_input;
-            self.revalidate_field(active);
-            cx.notify();
             cx.stop_propagation();
         }
     }
@@ -1227,6 +1215,8 @@ impl AgentProfilesTab {
                     committed = true;
                 }
                 self.active_input = ActiveInput::NewEnvKey;
+                self.selected_input = ActiveInput::NewEnvKey;
+                self.input_selection.clear();
             }
             _ => {}
         }
@@ -1280,6 +1270,14 @@ impl AgentProfilesTab {
             ActiveInput::None => {
                 unreachable!("active_buffer_mut called with ActiveInput::None")
             }
+        }
+    }
+
+    fn selection_for(&self, field: ActiveInput) -> TextSelection {
+        if self.active_input == field && self.selected_input == field {
+            self.input_selection
+        } else {
+            TextSelection::collapsed()
         }
     }
 
@@ -1880,9 +1878,16 @@ impl AgentProfilesTab {
                     .text_color(theme::text_primary())
                     .min_h(px(28.0))
                     .hover(|s| s.border_color(theme::accent()))
-                    .child(text_with_caret(value, "click to edit", is_active))
+                    .child(text_with_caret(
+                        value,
+                        "click to edit",
+                        is_active,
+                        self.selection_for(field),
+                    ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = field;
+                        this.selected_input = field;
+                        this.input_selection.clear();
                         cx.notify();
                     })),
             );
@@ -1933,9 +1938,16 @@ impl AgentProfilesTab {
                     .text_color(theme::text_primary())
                     .min_h(px(60.0))
                     .hover(|s| s.border_color(theme::accent()))
-                    .child(textarea_with_caret(value, "click to edit", is_active))
+                    .child(textarea_with_caret(
+                        value,
+                        "click to edit",
+                        is_active,
+                        self.selection_for(field),
+                    ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = field;
+                        this.selected_input = field;
+                        this.input_selection.clear();
                         cx.notify();
                     })),
             );
@@ -2044,6 +2056,8 @@ impl AgentProfilesTab {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         set_value(&mut this.edit_form, value.clone());
                         this.active_input = ActiveInput::None;
+                        this.selected_input = ActiveInput::None;
+                        this.input_selection.clear();
                         this.mark_dirty();
                         cx.notify();
                     })),
@@ -2180,9 +2194,12 @@ impl AgentProfilesTab {
                         new_value,
                         "click, type, Enter to add",
                         is_active,
+                        self.selection_for(new_field),
                     ))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                         this.active_input = new_field;
+                        this.selected_input = new_field;
+                        this.input_selection.clear();
                         cx.notify();
                     })),
             );
@@ -2300,9 +2317,12 @@ impl AgentProfilesTab {
                                 &self.edit_form.new_env_key,
                                 "KEY",
                                 self.active_input == ActiveInput::NewEnvKey,
+                                self.selection_for(ActiveInput::NewEnvKey),
                             ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                 this.active_input = ActiveInput::NewEnvKey;
+                                this.selected_input = ActiveInput::NewEnvKey;
+                                this.input_selection.clear();
                                 cx.notify();
                             })),
                     )
@@ -2330,9 +2350,12 @@ impl AgentProfilesTab {
                                 &self.edit_form.new_env_value,
                                 "value",
                                 self.active_input == ActiveInput::NewEnvValue,
+                                self.selection_for(ActiveInput::NewEnvValue),
                             ))
                             .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                 this.active_input = ActiveInput::NewEnvValue;
+                                this.selected_input = ActiveInput::NewEnvValue;
+                                this.input_selection.clear();
                                 cx.notify();
                             })),
                     )

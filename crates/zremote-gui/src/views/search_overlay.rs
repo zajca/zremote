@@ -7,7 +7,7 @@ use gpui::*;
 
 use crate::icons::{Icon, icon};
 use crate::theme;
-use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
+use crate::views::components::text_input::{TextSelection, handle_text_input_key, text_with_caret};
 
 /// Events emitted by the search overlay to the parent TerminalPanel.
 pub enum SearchOverlayEvent {
@@ -21,6 +21,7 @@ impl EventEmitter<SearchOverlayEvent> for SearchOverlay {}
 
 pub struct SearchOverlay {
     query: String,
+    query_selection: TextSelection,
     focus_handle: FocusHandle,
     current_match: usize,
     total_matches: usize,
@@ -31,6 +32,7 @@ impl SearchOverlay {
         let focus_handle = cx.focus_handle();
         Self {
             query: String::new(),
+            query_selection: TextSelection::collapsed(),
             focus_handle,
             current_match: 0,
             total_matches: 0,
@@ -99,34 +101,20 @@ impl Render for SearchOverlay {
                         return;
                     }
 
-                    if key == "backspace" {
-                        if !this.query.is_empty() {
-                            this.query.pop();
+                    let result = handle_text_input_key(
+                        &mut this.query,
+                        &mut this.query_selection,
+                        event,
+                        false,
+                        cx,
+                    );
+                    if result.handled {
+                        if result.changed {
                             cx.emit(SearchOverlayEvent::QueryChanged(this.query.clone()));
+                        }
+                        if result.changed || result.selection_changed {
                             cx.notify();
                         }
-                        return;
-                    }
-
-                    if is_paste_keystroke(event) {
-                        if let Some(text) = clipboard_text(cx) {
-                            this.query.push_str(&text);
-                            cx.emit(SearchOverlayEvent::QueryChanged(this.query.clone()));
-                            cx.notify();
-                        }
-                        return;
-                    }
-
-                    // Ignore modifier-only keys and control combos.
-                    if mods.control || mods.alt || mods.platform {
-                        return;
-                    }
-
-                    // Append printable character.
-                    if let Some(ch) = &event.keystroke.key_char {
-                        this.query.push_str(ch);
-                        cx.emit(SearchOverlayEvent::QueryChanged(this.query.clone()));
-                        cx.notify();
                     }
                 },
             ))
@@ -148,7 +136,12 @@ impl Render for SearchOverlay {
                     .border_color(theme::border())
                     .min_w(px(120.0))
                     .text_size(px(13.0))
-                    .child(text_with_caret(&self.query, "Search...", true)),
+                    .child(text_with_caret(
+                        &self.query,
+                        "Search...",
+                        true,
+                        self.query_selection,
+                    )),
             )
             // Match count
             .child(

@@ -25,7 +25,7 @@ use zremote_protocol::fs::{FsCompleteEntry, FsCompleteKind, FsCompleteResponse};
 
 use crate::icons::{Icon, icon};
 use crate::theme;
-use crate::views::components::text_input::{clipboard_text, is_paste_keystroke, text_with_caret};
+use crate::views::components::text_input::{TextSelection, handle_text_input_key, text_with_caret};
 
 /// Debounce applied between the last keystroke and the outgoing fetch. Long
 /// enough to coalesce a burst of typing, short enough to feel responsive.
@@ -128,6 +128,7 @@ enum FetchOutcome {
 /// Reusable GPUI view implementing a path-completion input with dropdown.
 pub struct PathAutocompleteInput {
     value: String,
+    selection: TextSelection,
     placeholder: SharedString,
     suggestions: Vec<FsCompleteEntry>,
     recent: Vec<String>,
@@ -155,6 +156,7 @@ impl PathAutocompleteInput {
         let focus_handle = cx.focus_handle();
         Self {
             value: String::new(),
+            selection: TextSelection::collapsed(),
             placeholder: placeholder.into(),
             suggestions: Vec::new(),
             recent,
@@ -178,6 +180,7 @@ impl PathAutocompleteInput {
     /// Replace the buffer (used by the parent to prefill an edit form).
     pub fn set_value(&mut self, v: String, cx: &mut Context<Self>) {
         self.value = v;
+        self.selection.clear();
         self.suggestions.clear();
         self.selected_index = 0;
         self.last_error = None;
@@ -194,7 +197,6 @@ impl PathAutocompleteInput {
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
 
         match key {
             "escape" => {
@@ -229,26 +231,15 @@ impl PathAutocompleteInput {
                 }
                 true
             }
-            "backspace" => {
-                if self.value.pop().is_some() {
-                    self.on_value_changed(cx);
-                }
-                true
-            }
             _ => {
-                if is_paste_keystroke(event) {
-                    if let Some(text) = clipboard_text(cx) {
-                        self.value.push_str(&text);
+                let result =
+                    handle_text_input_key(&mut self.value, &mut self.selection, event, false, cx);
+                if result.handled {
+                    if result.changed {
                         self.on_value_changed(cx);
+                    } else if result.selection_changed {
+                        cx.notify();
                     }
-                    return true;
-                }
-                if mods.control || mods.alt || mods.platform {
-                    return false;
-                }
-                if let Some(ch) = &event.keystroke.key_char {
-                    self.value.push_str(ch);
-                    self.on_value_changed(cx);
                     return true;
                 }
                 false
@@ -389,6 +380,7 @@ impl PathAutocompleteInput {
                 &self.value,
                 self.placeholder.as_ref(),
                 active,
+                self.selection,
             )))
     }
 
