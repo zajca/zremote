@@ -852,7 +852,7 @@ impl WorktreeCreateModal {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.active_field = ActiveField::Path;
                         let child_focus = this.path.read(cx).focus_handle(cx);
-                        child_focus.focus(window);
+                        child_focus.focus(window, cx);
                         cx.notify();
                     })),
             )
@@ -1104,12 +1104,12 @@ impl Render for WorktreeCreateModal {
                 if !child_focus.contains_focused(window, cx)
                     && !self.focus_handle.contains_focused(window, cx)
                 {
-                    child_focus.focus(window);
+                    child_focus.focus(window, cx);
                 }
             }
             ActiveField::Branch | ActiveField::BaseRef => {
                 if !self.focus_handle.contains_focused(window, cx) {
-                    self.focus_handle.focus(window);
+                    self.focus_handle.focus(window, cx);
                 }
             }
         }

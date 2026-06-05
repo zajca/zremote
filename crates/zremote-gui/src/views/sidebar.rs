@@ -479,7 +479,9 @@ impl SidebarView {
         let handle = self.app_state.tokio_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             // Debounce: wait 100ms, then check if this is still the latest request.
-            Timer::after(Duration::from_millis(100)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
             let should_proceed = this
                 .update(cx, |this: &mut Self, _cx| {
                     this.load_generation == generation

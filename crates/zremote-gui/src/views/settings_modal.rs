@@ -204,12 +204,12 @@ impl Render for SettingsModal {
                 if !tab_focus.contains_focused(window, cx)
                     && !self.focus_handle.contains_focused(window, cx)
                 {
-                    tab_focus.focus(window);
+                    tab_focus.focus(window, cx);
                 }
             }
             SettingsTab::General => {
                 if !self.focus_handle.contains_focused(window, cx) {
-                    self.focus_handle.focus(window);
+                    self.focus_handle.focus(window, cx);
                 }
             }
         }

@@ -358,11 +358,17 @@ impl MainView {
         sidebar: &Entity<SidebarView>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        let sidebar = sidebar.clone();
+        // Weak handle so this reconciliation task does not keep the sidebar
+        // alive; `WeakEntity::update` returns `Result`, letting the loop break
+        // when the entity is dropped (gpui HEAD: strong `Entity::update`
+        // returns the value directly, with no drop signal).
+        let sidebar = sidebar.downgrade();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
                 // Wait 5 seconds between reconciliation checks.
-                Timer::after(std::time::Duration::from_secs(5)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
                 let should_continue = sidebar.update(cx, |sidebar, cx| {
                     sidebar.reconcile_loops(cx);
                     sidebar.poll_previews(cx);
@@ -375,10 +381,14 @@ impl MainView {
     }
 
     fn start_toast_tick(toasts: &Entity<ToastContainer>, cx: &mut Context<Self>) -> Task<()> {
-        let toasts = toasts.clone();
+        // Weak handle (see `start_loop_reconciliation`): keeps the break-on-drop
+        // semantics now that strong `Entity::update` no longer returns `Result`.
+        let toasts = toasts.downgrade();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
-                Timer::after(std::time::Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 let result = toasts.update(cx, |container, cx| {
                     if container.tick() {
                         cx.notify();
@@ -879,7 +889,7 @@ impl MainView {
                         let host_id = host_id.clone();
                         let wait_key_for_task = wait_key.clone();
                         let task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                            Timer::after(WAITING_DEBOUNCE).await;
+                            cx.background_executor().timer(WAITING_DEBOUNCE).await;
 
                             this.update(cx, |this, cx| {
                                 if this.window_active
@@ -1100,7 +1110,7 @@ impl MainView {
                             // WaitingForInput: keep existing 3s debounce (backward compat).
                             let task =
                                 cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                                    Timer::after(WAITING_DEBOUNCE).await;
+                                    cx.background_executor().timer(WAITING_DEBOUNCE).await;
 
                                     this.update(cx, |this, cx| {
                                         // Re-check: skip if user navigated to this session
@@ -1487,7 +1497,7 @@ impl MainView {
                             async move { api.resume_session(&host_for_call, &sid_for_call).await },
                         )
                         .await;
-                    let _ = terminal.update(cx, |panel, cx| match result {
+                    terminal.update(cx, |panel, cx| match result {
                         Ok(Ok(_session)) => {
                             if let Some(new_handle) =
                                 connect_terminal(&app_state, &sid, &host_id, false)
@@ -2933,7 +2943,7 @@ impl SessionWindow {
                             async move { api.resume_session(&host_for_call, &sid_for_call).await },
                         )
                         .await;
-                    let _ = terminal.update(cx, |panel, cx| match result {
+                    terminal.update(cx, |panel, cx| match result {
                         Ok(Ok(_session)) => {
                             if let Some(new_handle) =
                                 connect_terminal(&app_state, &sid, &host_id, false)

@@ -98,7 +98,7 @@ impl Focusable for HelpModal {
 impl Render for HelpModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         }
 
         let mut content = div()

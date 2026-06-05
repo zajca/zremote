@@ -657,7 +657,12 @@ impl TerminalElement {
 
                     let cache = glyph_cache.borrow();
                     if let Some(shaped) = cache.get(ch, run.bold, run.italic, run.wide, color) {
-                        let _ = shaped.paint(origin, cell_height, window, cx);
+                        // gpui HEAD: `ShapedLine::paint` gained `align` and
+                        // `align_width`. A terminal cell is positioned manually
+                        // per-glyph, so use left-align with no wrap width to
+                        // preserve the original placement.
+                        let _ =
+                            shaped.paint(origin, cell_height, TextAlign::Left, None, window, cx);
                     }
                 }
             }
