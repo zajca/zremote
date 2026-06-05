@@ -29,16 +29,17 @@ pub use claude::ClaudeLauncher;
 pub use codex::CodexLauncher;
 pub use resume::resume_argv;
 
-/// One hook event ZRemote registers with an agent, plus whether the agent
-/// should run it asynchronously. Mirrors the per-event config the installer
-/// writes into the agent's hooks file.
+/// One hook event ZRemote registers with an agent, plus whether agents that
+/// support async hooks should run it asynchronously. Mirrors the per-event
+/// config the installer writes into the agent's hooks file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookEventSpec {
     /// Hook event name (e.g. `"PreToolUse"`). Must match the agent's event set.
     pub event: &'static str,
     /// Matcher string for the event (`""` for "all").
     pub matcher: &'static str,
-    /// `true` to mark the hook `async` in the agent config (fire-and-forget).
+    /// `true` to mark the hook `async` in agent configs that support it
+    /// (fire-and-forget).
     pub async_hook: bool,
 }
 
@@ -212,7 +213,8 @@ const CLAUDE_HOOK_EVENTS: &[HookEventSpec] = &[
 /// `StopFailure`, and adds `PreCompact`/`PostCompact`. ZRemote registers the
 /// subset it actually consumes for state + capture. `SessionStart`,
 /// `PreToolUse`, and `UserPromptSubmit` are the capture entry points; the rest
-/// feed RFC-011 state.
+/// feed RFC-011 state. Codex does not support async hooks yet, so every event
+/// is installed as a synchronous command hook.
 const CODEX_HOOK_EVENTS: &[HookEventSpec] = &[
     HookEventSpec {
         event: "SessionStart",
@@ -232,7 +234,7 @@ const CODEX_HOOK_EVENTS: &[HookEventSpec] = &[
     HookEventSpec {
         event: "UserPromptSubmit",
         matcher: "",
-        async_hook: true,
+        async_hook: false,
     },
     HookEventSpec {
         event: "PermissionRequest",
@@ -242,12 +244,12 @@ const CODEX_HOOK_EVENTS: &[HookEventSpec] = &[
     HookEventSpec {
         event: "SubagentStart",
         matcher: "",
-        async_hook: true,
+        async_hook: false,
     },
     HookEventSpec {
         event: "SubagentStop",
         matcher: "",
-        async_hook: true,
+        async_hook: false,
     },
     HookEventSpec {
         event: "Stop",

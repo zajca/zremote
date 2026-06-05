@@ -268,10 +268,12 @@ async fn install_codex_hooks_at(home: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Merge zremote hook entries for `events` into a codex/claude-shaped
+/// Merge zremote hook entries for `events` into Codex's
 /// `{"hooks": {"<Event>": [...]}}` JSON object, preserving any existing user
-/// entries and not duplicating an already-present zremote entry (matched by the
-/// command string containing the script path).
+/// entries and not duplicating an already-present zremote entry.
+///
+/// Codex currently rejects `async` hook entries. When an older ZRemote install
+/// already wrote one, repair the matching zremote entry during the dedupe pass.
 fn merge_hook_events(
     root: &mut serde_json::Value,
     script: &str,
@@ -292,8 +294,9 @@ fn merge_hook_events(
         // Dedup against the ACTUAL script path we're about to install, not a
         // hardcoded substring — otherwise a renamed/relocated script would slip
         // past the check and silently double-insert on every install.
-        let already = arr.iter().any(|entry| {
-            entry
+        let mut already = false;
+        for entry in arr.iter_mut() {
+            let matches_script = entry
                 .get("hooks")
                 .and_then(|h| h.as_array())
                 .is_some_and(|hs| {
@@ -302,21 +305,38 @@ fn merge_hook_events(
                             .and_then(|c| c.as_str())
                             .is_some_and(|c| c == script)
                     })
-                })
-        });
+                });
+            if matches_script {
+                remove_unsupported_codex_async_flags(entry, script);
+                already = true;
+            }
+        }
         if already {
             continue;
         }
-        let mut entry = serde_json::json!({
+        let entry = serde_json::json!({
             "matcher": spec.matcher,
             "hooks": [{ "type": "command", "command": script }]
         });
-        if spec.async_hook {
-            entry["hooks"][0]["async"] = serde_json::json!(true);
-        }
         arr.push(entry);
     }
     Ok(())
+}
+
+fn remove_unsupported_codex_async_flags(entry: &mut serde_json::Value, script: &str) {
+    let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+        return;
+    };
+
+    for hook in hooks {
+        let is_zremote_codex_hook = hook
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c == script);
+        if is_zremote_codex_hook && let Some(obj) = hook.as_object_mut() {
+            obj.remove("async");
+        }
+    }
 }
 
 /// Claude's hook script (the default `agent_kind` is `claude`).
@@ -1761,7 +1781,68 @@ mod tests {
                 "codex event {} must reference the codex hook script",
                 spec.event
             );
+            assert!(
+                arr.iter().all(|entry| {
+                    entry["hooks"].as_array().is_some_and(|hs| {
+                        hs.iter().all(|h| {
+                            !h["command"]
+                                .as_str()
+                                .is_some_and(|c| c.contains("zremote-codex-hook"))
+                                || h.get("async").is_none()
+                        })
+                    })
+                }),
+                "codex event {} must not write unsupported async hooks",
+                spec.event
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn install_codex_removes_unsupported_async_from_existing_zremote_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        let codex_dir = home.join(".codex");
+        tokio::fs::create_dir_all(&codex_dir).await.unwrap();
+        let script = home
+            .join(".zremote/hooks/zremote-codex-hook.sh")
+            .to_string_lossy()
+            .to_string();
+        let existing = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": script,
+                                "async": true
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        tokio::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        install_codex_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(codex_dir.join("hooks.json"))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let hook = &value["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert!(
+            hook.get("async").is_none(),
+            "reinstall must remove unsupported codex async flag"
+        );
     }
 
     #[tokio::test]
