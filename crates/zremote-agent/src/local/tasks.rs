@@ -50,10 +50,6 @@ pub(crate) async fn start_hooks_server(state: Arc<LocalAppState>, shutdown: Canc
     match hooks_server.start(shutdown_rx).await {
         Ok(addr) => {
             tracing::info!(port = addr.port(), "hooks sidecar started");
-            // Install hooks into Claude Code settings
-            if let Err(e) = crate::hooks::installer::install_hooks().await {
-                tracing::warn!(error = %e, "failed to install CC hooks (non-fatal)");
-            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to start hooks sidecar (non-fatal)");

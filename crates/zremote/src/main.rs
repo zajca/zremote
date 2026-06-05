@@ -50,6 +50,14 @@ enum Commands {
         command: Option<zremote_agent::Commands>,
     },
 
+    /// Install local integrations for agent tools
+    #[cfg(feature = "agent")]
+    Install {
+        /// Integration target to install
+        #[arg(value_enum, default_value = "agent")]
+        target: zremote_agent::InstallTarget,
+    },
+
     /// Command-line interface for managing hosts, sessions, projects, and more
     #[cfg(feature = "cli")]
     Cli {
@@ -76,6 +84,11 @@ fn main() {
         #[cfg(feature = "agent")]
         Commands::Agent { command } => {
             zremote_agent::run(command);
+        }
+
+        #[cfg(feature = "agent")]
+        Commands::Install { target } => {
+            zremote_agent::run(Some(zremote_agent::Commands::Install { target }));
         }
 
         #[cfg(feature = "cli")]

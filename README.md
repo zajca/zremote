@@ -14,7 +14,8 @@ Remote machine management platform with interactive terminal sessions, AI agent 
 - Agentic loop tracking: tool calls, transcripts, token usage, costs
 - Generic agent profiles and project-row quick launch for Claude Code and Codex
 - Tool permissions: approve, reject, or auto-approve agent tool calls
-- Claude Code hooks integration for real-time event capture
+- Claude Code and Codex hooks integration for real-time event capture
+- Claude Code status line integration via zremote ccline
 - Claude task lifecycle management
 
 **Project Management**
@@ -191,6 +192,29 @@ zremote agent <COMMAND>
 | `server` | Run multi-host server (absorbs zremote-server) |
 | `mcp-serve` | Run as MCP server over stdio |
 | `configure` | Interactive project configuration with Claude |
+| `install` | Install local Claude/Codex hook and status line integrations |
+
+### `zremote install`
+
+Install local integrations explicitly. Agent startup does not modify Claude Code
+or Codex settings automatically.
+
+```
+zremote install [agent|claude|codex|cline]
+```
+
+| Target | Description |
+|--------|-------------|
+| `agent` | Install all local agent integrations: Claude hooks/status line and Codex hooks |
+| `claude` | Install Claude Code hooks and status line |
+| `codex` | Install Codex hooks |
+| `cline` | Install only the Claude Code status line (`ccline`) |
+
+The same installer is also available as:
+
+```
+zremote agent install [agent|claude|codex|cline]
+```
 
 ### `zremote agent local`
 

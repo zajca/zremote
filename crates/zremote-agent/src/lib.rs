@@ -44,7 +44,7 @@ mod worktree;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use rand::Rng;
 use tracing_subscriber::EnvFilter;
 
@@ -105,6 +105,12 @@ pub enum Commands {
         #[arg(long)]
         skip_permissions: bool,
     },
+    /// Install zremote integrations into local agent tools
+    Install {
+        /// Integration target to install
+        #[arg(value_enum, default_value = "agent")]
+        target: InstallTarget,
+    },
     /// Internal: Channel Bridge MCP server for CC (not for direct use)
     #[command(hide = true)]
     #[cfg(feature = "channel")]
@@ -149,6 +155,37 @@ pub enum Commands {
         #[arg(long = "init-arg")]
         init_argv: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum InstallTarget {
+    /// Install all local agent integrations
+    #[value(alias = "all")]
+    Agent,
+    /// Install Claude Code hooks and status line
+    Claude,
+    /// Install Codex hooks
+    Codex,
+    /// Install only the Claude Code status line command
+    #[value(
+        name = "cline",
+        alias = "ccline",
+        alias = "status-line",
+        alias = "statusbar",
+        alias = "claude-status-line"
+    )]
+    Cline,
+}
+
+impl InstallTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cline => "cline",
+        }
+    }
 }
 
 /// Entry point for the agent library. Handles tracing init and tokio runtime
@@ -318,9 +355,31 @@ async fn async_main(command: Option<Commands>) {
         } => {
             run_configure(&project, &model, skip_permissions);
         }
+        Commands::Install { target } => {
+            run_install(target).await;
+        }
         #[cfg(feature = "channel")]
         Commands::ChannelServer => unreachable!("handled above"),
         Commands::Ccline | Commands::PtyDaemon { .. } => unreachable!("handled above"),
+    }
+}
+
+async fn run_install(target: InstallTarget) {
+    let result = match target {
+        InstallTarget::Agent => hooks::installer::install_agent_integrations().await,
+        InstallTarget::Claude => hooks::installer::install_hooks().await,
+        InstallTarget::Codex => hooks::installer::install_codex_hooks().await,
+        InstallTarget::Cline => hooks::installer::install_cline_status_line().await,
+    };
+
+    match result {
+        Ok(()) => {
+            println!("installed {} integration", target.as_str());
+        }
+        Err(e) => {
+            eprintln!("failed to install {} integration: {e}", target.as_str());
+            std::process::exit(1);
+        }
     }
 }
 

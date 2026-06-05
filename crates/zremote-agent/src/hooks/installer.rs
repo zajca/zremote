@@ -19,7 +19,17 @@ struct HookConfig {
     async_hook: bool,
 }
 
-/// Install the zremote hook scripts and update Claude Code settings.
+/// Install the zremote hook scripts and update agent settings.
+///
+/// This is the explicit "all integrations" installer used by
+/// `zremote install agent` / `zremote agent install agent`.
+pub async fn install_agent_integrations() -> Result<(), InstallError> {
+    install_hooks().await?;
+    install_codex_hooks().await?;
+    Ok(())
+}
+
+/// Install the zremote Claude hook scripts and update Claude Code settings.
 ///
 /// Creates:
 /// - `~/.zremote/hooks/zremote-hook.sh` - the hook script that curls the sidecar
@@ -165,13 +175,6 @@ async fn install_hooks_at(home: &Path) -> Result<(), InstallError> {
     // Update Claude Code settings
     update_claude_settings(home, &script_path).await?;
 
-    // Best-effort: also install the Codex forwarder. Codex may not be present;
-    // a failure here must NOT block the (succeeded) Claude install, so we log
-    // and continue rather than propagate.
-    if let Err(e) = install_codex_hooks_at(home).await {
-        tracing::debug!(error = %e, "codex hook install skipped/failed (non-fatal)");
-    }
-
     Ok(())
 }
 
@@ -201,6 +204,12 @@ fn agent_config_dir(
 /// hook requiring one-time interactive trust (`/hooks` in the codex CLI); the
 /// managed `requirements.toml` zero-prompt path is intentionally left to an
 /// explicit opt-in and is not written here.
+/// Install zremote Codex hooks into Codex's `hooks.json`.
+pub async fn install_codex_hooks() -> Result<(), InstallError> {
+    let home = std::env::var("HOME").map_err(|_| InstallError::HomeNotSet)?;
+    install_codex_hooks_at(Path::new(&home)).await
+}
+
 async fn install_codex_hooks_at(home: &Path) -> Result<(), InstallError> {
     use crate::agents::{AgentIntegration, CodexIntegration};
 
@@ -575,6 +584,50 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
     Ok(())
 }
 
+/// Install only the Claude Code status line (`statusLine`) entry.
+pub async fn install_cline_status_line() -> Result<(), InstallError> {
+    let home = std::env::var("HOME").map_err(|_| InstallError::HomeNotSet)?;
+    install_cline_status_line_at(Path::new(&home)).await
+}
+
+async fn install_cline_status_line_at(home: &Path) -> Result<(), InstallError> {
+    let settings_path = home.join(".claude").join("settings.json");
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = tokio::fs::read_to_string(&settings_path)
+            .await
+            .map_err(InstallError::Io)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        if let Some(parent) = settings_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(InstallError::Io)?;
+        }
+        serde_json::json!({})
+    };
+
+    install_status_line(&mut settings);
+
+    let formatted =
+        serde_json::to_string_pretty(&settings).map_err(|_| InstallError::InvalidSettings)?;
+    let tmp_path = settings_path.with_extension("json.tmp");
+    tokio::fs::write(&tmp_path, &formatted)
+        .await
+        .map_err(InstallError::Io)?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &settings_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(InstallError::Io(e));
+    }
+
+    tracing::info!(
+        path = %settings_path.display(),
+        "Claude Code statusLine updated with zremote ccline"
+    );
+
+    Ok(())
+}
+
 /// Resolve the path of the currently running binary to a stable, on-disk path.
 ///
 /// On Linux, `std::env::current_exe()` reads `/proc/self/exe`, which returns a
@@ -828,7 +881,7 @@ impl std::fmt::Display for InstallError {
         match self {
             Self::HomeNotSet => write!(f, "HOME environment variable not set"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::InvalidSettings => write!(f, "invalid Claude Code settings.json format"),
+            Self::InvalidSettings => write!(f, "invalid agent settings.json format"),
         }
     }
 }
