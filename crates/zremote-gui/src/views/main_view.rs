@@ -8,8 +8,8 @@ use std::time::Duration;
 use gpui::*;
 
 use zremote_client::{
-    AgentInputRequestKind, AgentRuntimeStatus, AgenticStatus, ClientEvent, Project, ServerEvent,
-    Session,
+    AgentInputRequest, AgentInputRequestKind, AgentRuntimeStatus, AgenticStatus, ClientEvent,
+    Project, ServerEvent, Session,
 };
 
 use crate::views::sidebar::CcMetrics;
@@ -40,11 +40,25 @@ use crate::views::worktree_create_modal::{WorktreeCreateModal, WorktreeCreateMod
 /// (permission prompt, end-of-turn) persists well beyond this window.
 const WAITING_DEBOUNCE: Duration = Duration::from_secs(3);
 
-fn runtime_status_to_agentic(status: AgentRuntimeStatus) -> AgenticStatus {
+fn runtime_status_to_agentic(
+    status: AgentRuntimeStatus,
+    input_request: Option<&AgentInputRequest>,
+) -> AgenticStatus {
     match status {
         AgentRuntimeStatus::Idle => AgenticStatus::Idle,
         AgentRuntimeStatus::Working => AgenticStatus::Working,
-        AgentRuntimeStatus::WaitingForInput => AgenticStatus::WaitingForInput,
+        AgentRuntimeStatus::WaitingForInput => {
+            if input_request.is_some_and(|request| {
+                matches!(
+                    request.kind,
+                    Some(AgentInputRequestKind::Permission | AgentInputRequestKind::Elicitation)
+                )
+            }) {
+                AgenticStatus::RequiresAction
+            } else {
+                AgenticStatus::WaitingForInput
+            }
+        }
         AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
     }
 }
@@ -690,7 +704,11 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        panel.update_cc_status(Some(loop_info.status));
+                        let runtime_status = match loop_info.status {
+                            AgenticStatus::Completed => AgenticStatus::Idle,
+                            status => status,
+                        };
+                        panel.update_cc_status(Some(runtime_status));
                         panel.update_cc_task_name(loop_info.task_name.clone());
                         cx.notify();
                     });
@@ -700,13 +718,17 @@ impl MainView {
                 session_id,
                 status,
                 task_name,
+                input_request,
                 ..
             } => {
                 if let Some(terminal) = &self.terminal
                     && terminal.read(cx).session_id() == session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        panel.update_cc_status(Some(runtime_status_to_agentic(*status)));
+                        panel.update_cc_status(Some(runtime_status_to_agentic(
+                            *status,
+                            input_request.as_ref(),
+                        )));
                         if task_name.is_some() {
                             panel.update_cc_task_name(task_name.clone());
                         }
@@ -719,7 +741,8 @@ impl MainView {
                     && terminal.read(cx).session_id() == loop_info.session_id.as_str()
                 {
                     terminal.update(cx, |panel, cx| {
-                        panel.clear_cc_state();
+                        panel.update_cc_status(Some(AgenticStatus::Idle));
+                        panel.update_cc_task_name(loop_info.task_name.clone());
                         cx.notify();
                     });
                 }

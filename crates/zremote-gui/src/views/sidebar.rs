@@ -14,9 +14,10 @@ use std::time::Duration;
 use crate::views::main_view::SidebarEvent;
 use zremote_client::types::UpdateSessionRequest;
 use zremote_client::{
-    AgentKindInfo, AgentProfile, AgentRuntimeStatus, AgenticStatus, ClaudeTaskStatus,
-    CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter, ListLoopsFilter,
-    PreviewSnapshot, Project, ServerEvent, Session, SessionStatus, StartAgentRequest,
+    AgentInputRequest, AgentInputRequestKind, AgentKindInfo, AgentProfile, AgentRuntimeStatus,
+    AgenticStatus, ClaudeTaskStatus, CreateSessionRequest, Host, HostStatus, ListClaudeTasksFilter,
+    ListLoopsFilter, PreviewSnapshot, Project, ServerEvent, Session, SessionStatus,
+    StartAgentRequest,
 };
 
 /// Tracks the Claude Code agentic loop state for a session.
@@ -26,13 +27,28 @@ pub struct CcState {
     pub status: AgenticStatus,
     pub task_name: Option<String>,
     pub permission_mode: Option<String>,
+    pub runtime_authoritative: bool,
 }
 
-fn runtime_status_to_agentic(status: AgentRuntimeStatus) -> AgenticStatus {
+fn runtime_status_to_agentic(
+    status: AgentRuntimeStatus,
+    input_request: Option<&AgentInputRequest>,
+) -> AgenticStatus {
     match status {
         AgentRuntimeStatus::Idle => AgenticStatus::Idle,
         AgentRuntimeStatus::Working => AgenticStatus::Working,
-        AgentRuntimeStatus::WaitingForInput => AgenticStatus::WaitingForInput,
+        AgentRuntimeStatus::WaitingForInput => {
+            if input_request.is_some_and(|request| {
+                matches!(
+                    request.kind,
+                    Some(AgentInputRequestKind::Permission | AgentInputRequestKind::Elicitation)
+                )
+            }) {
+                AgenticStatus::RequiresAction
+            } else {
+                AgenticStatus::WaitingForInput
+            }
+        }
         AgentRuntimeStatus::Unknown => AgenticStatus::Unknown,
     }
 }
@@ -664,16 +680,23 @@ impl SidebarView {
                         status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
                         permission_mode: loop_info.permission_mode.clone(),
+                        runtime_authoritative: false,
                     },
                 );
                 cx.notify();
             }
             ServerEvent::LoopStatusChanged { loop_info, .. } => {
                 // Preserve existing permission_mode if the update doesn't carry one
-                let existing_mode = self
-                    .cc_states
-                    .get(&loop_info.session_id)
-                    .and_then(|s| s.permission_mode.clone());
+                let existing = self.cc_states.get(&loop_info.session_id);
+                if existing.is_some_and(|state| {
+                    state.runtime_authoritative
+                        && state.status == AgenticStatus::Idle
+                        && loop_info.status == AgenticStatus::Completed
+                }) {
+                    cx.notify();
+                    return;
+                }
+                let existing_mode = existing.and_then(|s| s.permission_mode.clone());
                 self.cc_states.insert(
                     loop_info.session_id.clone(),
                     CcState {
@@ -681,6 +704,7 @@ impl SidebarView {
                         status: loop_info.status,
                         task_name: loop_info.task_name.clone(),
                         permission_mode: loop_info.permission_mode.clone().or(existing_mode),
+                        runtime_authoritative: false,
                     },
                 );
                 cx.notify();
@@ -689,6 +713,7 @@ impl SidebarView {
                 session_id,
                 status,
                 task_name,
+                input_request,
                 ..
             } => {
                 let existing = self.cc_states.get(session_id);
@@ -703,19 +728,22 @@ impl SidebarView {
                     session_id.clone(),
                     CcState {
                         loop_id,
-                        status: runtime_status_to_agentic(*status),
+                        status: runtime_status_to_agentic(*status, input_request.as_ref()),
                         task_name: task_name.clone().or(existing_task_name),
                         permission_mode,
+                        runtime_authoritative: true,
                     },
                 );
                 cx.notify();
             }
             ServerEvent::LoopEnded { loop_info, .. } => {
-                // Update with final status instead of removing — keeps robot icon
-                // visible so the user can see completed (green) or error (red).
                 if let Some(state) = self.cc_states.get(&loop_info.session_id)
                     && state.loop_id == loop_info.id
                 {
+                    if state.runtime_authoritative && state.status == AgenticStatus::Idle {
+                        cx.notify();
+                        return;
+                    }
                     let existing_mode = state.permission_mode.clone();
                     self.cc_states.insert(
                         loop_info.session_id.clone(),
@@ -724,6 +752,7 @@ impl SidebarView {
                             status: loop_info.status,
                             task_name: loop_info.task_name.clone(),
                             permission_mode: loop_info.permission_mode.clone().or(existing_mode),
+                            runtime_authoritative: false,
                         },
                     );
                 }
@@ -930,9 +959,13 @@ impl SidebarView {
                 // Add or update entries from server
                 for loop_info in &active_loops {
                     if let Some(cc) = this.cc_states.get_mut(&loop_info.session_id) {
-                        if cc.status != loop_info.status || cc.task_name != loop_info.task_name {
+                        if cc.status != loop_info.status
+                            || cc.task_name != loop_info.task_name
+                            || cc.runtime_authoritative
+                        {
                             cc.status = loop_info.status;
                             cc.task_name.clone_from(&loop_info.task_name);
+                            cc.runtime_authoritative = false;
                             changed = true;
                         }
                     } else {
@@ -944,6 +977,7 @@ impl SidebarView {
                                 status: loop_info.status,
                                 task_name: loop_info.task_name.clone(),
                                 permission_mode: loop_info.permission_mode.clone(),
+                                runtime_authoritative: false,
                             },
                         );
                         changed = true;
@@ -951,7 +985,13 @@ impl SidebarView {
                 }
 
                 for sid in &stale_session_ids {
-                    if !active_session_ids.contains(sid) && this.cc_states.remove(sid).is_some() {
+                    if !active_session_ids.contains(sid)
+                        && !this
+                            .cc_states
+                            .get(sid)
+                            .is_some_and(|state| state.runtime_authoritative)
+                        && this.cc_states.remove(sid).is_some()
+                    {
                         changed = true;
                     }
                 }
