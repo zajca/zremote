@@ -1014,6 +1014,12 @@ impl TerminalPanel {
         // Special keys with CSI sequences that support modifier parameters.
         // Format: \x1b[1;{mod}{letter} for arrow/home/end, \x1b[{num};{mod}~ for others.
         match key {
+            "enter" if modifiers.shift || modifiers.alt => {
+                // Claude Code and Codex both accept Ctrl+J/LF as a terminal-agnostic
+                // prompt newline. ZRemote is the terminal here, so translate modified
+                // Enter directly instead of letting it collapse to plain Enter.
+                Some(vec![b'\n'])
+            }
             "enter" => Some(vec![b'\r']),
             "tab" => Some(vec![b'\t']),
             "backspace" => {
@@ -1201,6 +1207,22 @@ mod tests {
         assert_eq!(
             TerminalPanel::encode_keystroke(&keystroke("ctrl-right"), TermMode::APP_CURSOR),
             Some(b"\x1b[1;5C".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_enter_inserts_prompt_newline_for_agent_tuis() {
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("enter"), TermMode::NONE),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("shift-enter"), TermMode::NONE),
+            Some(b"\n".to_vec())
+        );
+        assert_eq!(
+            TerminalPanel::encode_keystroke(&keystroke("alt-enter"), TermMode::NONE),
+            Some(b"\n".to_vec())
         );
     }
 

@@ -351,16 +351,7 @@ pub async fn handle_hook(
             if let Some(ref path) = env_file {
                 write_claude_env_file(path, &payload).await;
             }
-            // Return watchPaths for project files CC should monitor.
-            // FileChanged hook fires when any of these change.
-            let watch_paths = build_watch_paths(payload.cwd.as_deref());
-            HookResponse {
-                hook_specific_output: watch_paths.map(|paths| HookSpecificOutput::SessionStart {
-                    watch_paths: Some(paths),
-                    additional_context: None,
-                }),
-                ..Default::default()
-            }
+            build_session_start_response(integration, payload.cwd.as_deref())
         }
         "SubagentStart" | "SubagentStop" => {
             let event_name = payload.hook_event_name.as_str();
@@ -419,6 +410,31 @@ pub async fn handle_hook(
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Build event-specific output for `SessionStart`.
+///
+/// `watchPaths` is a Claude Code hook extension. Codex validates its
+/// `SessionStart` response more narrowly, so keep the response empty there while
+/// still letting the shared handler capture the native session id above.
+fn build_session_start_response(
+    integration: &dyn AgentIntegration,
+    cwd: Option<&str>,
+) -> HookResponse {
+    if integration.agent_kind() != AgentKind::Claude {
+        return HookResponse::default();
+    }
+
+    // Return watchPaths for project files CC should monitor.
+    // FileChanged hook fires when any of these change.
+    let watch_paths = build_watch_paths(cwd);
+    HookResponse {
+        hook_specific_output: watch_paths.map(|paths| HookSpecificOutput::SessionStart {
+            watch_paths: Some(paths),
+            additional_context: None,
+        }),
+        ..Default::default()
+    }
 }
 
 /// If this CC session belongs to a Claude task and we haven't sent its ID yet,
@@ -2473,6 +2489,25 @@ mod tests {
         let output = value.get("hookSpecificOutput").unwrap();
         assert_eq!(output["hookEventName"], "SessionStart");
         assert_eq!(output["watchPaths"][0], "/tmp/Cargo.toml");
+    }
+
+    #[test]
+    fn session_start_response_keeps_watch_paths_for_claude_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let cwd = dir.path().to_str().unwrap();
+
+        let claude = build_session_start_response(&crate::agents::ClaudeIntegration, Some(cwd));
+        assert!(
+            claude.hook_specific_output.is_some(),
+            "Claude SessionStart should include hook-specific watch paths"
+        );
+
+        let codex = build_session_start_response(&crate::agents::CodexIntegration, Some(cwd));
+        assert!(
+            codex.hook_specific_output.is_none(),
+            "Codex SessionStart must not receive Claude-only watchPaths output"
+        );
     }
 
     #[test]
