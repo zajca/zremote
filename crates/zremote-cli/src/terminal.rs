@@ -38,7 +38,7 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
     let resize_tx = session.resize_tx.clone();
 
     // Input task: read crossterm events and forward to WebSocket
-    let mut input_handle = tokio::spawn(async move {
+    let mut input_handle = Some(tokio::spawn(async move {
         let mut reader = EventStream::new();
         let mut escape_state = EscapeState::AfterNewline; // start as if after newline
 
@@ -72,7 +72,7 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
             }
         }
         DetachReason::InputClosed
-    });
+    }));
 
     // Output loop: read from WebSocket and write to stdout. Also races the
     // input task so that a `~.` escape (which makes the input task return
@@ -82,12 +82,11 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
     let mut stdout = std::io::stdout();
     let outcome = run_output_loop(&session.output_rx, &mut input_handle, &mut stdout).await;
 
-    // Cancel input task only when it was not already consumed by
-    // run_output_loop's JoinHandle branch. Polling a completed JoinHandle again
-    // panics in Tokio.
-    if !input_handle.is_finished() {
+    // Cancel the input task only when run_output_loop did not already consume
+    // it via the JoinHandle branch.
+    if let Some(input_handle) = input_handle.take() {
         input_handle.abort();
-        let _ = (&mut input_handle).await;
+        let _ = input_handle.await;
     }
 
     match outcome {
@@ -115,11 +114,11 @@ enum LoopOutcome {
 ///
 /// Extracted from [`run_attach`] so it can be exercised in unit tests
 /// without a live WebSocket or real stdin. The loop takes a mutable
-/// reference to the input task's `JoinHandle` so the caller retains
-/// ownership for post-loop cleanup (`abort` + `await`).
+/// reference to an optional input task. When the task completes inside this
+/// loop, the handle is removed so the caller cannot poll it again.
 async fn run_output_loop<W: Write>(
     output_rx: &flume::Receiver<TerminalEvent>,
-    input_handle: &mut tokio::task::JoinHandle<DetachReason>,
+    input_handle: &mut Option<tokio::task::JoinHandle<DetachReason>>,
     stdout: &mut W,
 ) -> LoopOutcome {
     loop {
@@ -128,7 +127,7 @@ async fn run_output_loop<W: Write>(
             // If the input task finishes first with UserDetach, exit the
             // loop so the outer function can print "[detached]" and return.
             // An InputClosed / panic falls through to treat as regular exit.
-            join_result = &mut *input_handle => {
+            join_result = await_input_handle(input_handle), if input_handle.is_some() => {
                 return match join_result {
                     Ok(DetachReason::UserDetach) => LoopOutcome::UserDetach,
                     _ => LoopOutcome::Exit(0),
@@ -162,6 +161,18 @@ async fn run_output_loop<W: Write>(
             },
         }
     }
+}
+
+async fn await_input_handle(
+    input_handle: &mut Option<tokio::task::JoinHandle<DetachReason>>,
+) -> Result<DetachReason, tokio::task::JoinError> {
+    let Some(handle) = input_handle.as_mut() else {
+        return std::future::pending().await;
+    };
+
+    let result = handle.await;
+    *input_handle = None;
+    result
 }
 
 /// RAII guard to restore terminal mode on drop.
@@ -568,7 +579,7 @@ mod tests {
         let _keep_alive = tx.clone();
 
         // Input task that immediately signals a user-initiated detach.
-        let mut input_handle = tokio::spawn(async { DetachReason::UserDetach });
+        let mut input_handle = Some(tokio::spawn(async { DetachReason::UserDetach }));
 
         let mut out: Vec<u8> = Vec::new();
         let outcome = tokio::time::timeout(
@@ -579,8 +590,22 @@ mod tests {
         .expect("run_output_loop must exit when input task returns UserDetach");
 
         assert_eq!(outcome, LoopOutcome::UserDetach);
+        assert!(input_handle.is_none());
         // No output bytes should have been written for a bare detach.
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn consumed_input_handle_is_not_cleaned_up_twice() {
+        let (tx, rx) = flume::bounded::<TerminalEvent>(8);
+        let _keep_alive = tx.clone();
+        let mut input_handle = Some(tokio::spawn(async { DetachReason::UserDetach }));
+
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = run_output_loop(&rx, &mut input_handle, &mut out).await;
+
+        assert_eq!(outcome, LoopOutcome::UserDetach);
+        assert!(input_handle.take().is_none());
     }
 
     // The output loop must still exit on SessionClosed when the input task
@@ -590,10 +615,10 @@ mod tests {
         let (tx, rx) = flume::bounded::<TerminalEvent>(8);
         // Input task that never resolves, so only the output channel can
         // drive loop termination.
-        let mut input_handle = tokio::spawn(async {
+        let mut input_handle = Some(tokio::spawn(async {
             futures_util::future::pending::<()>().await;
             DetachReason::InputClosed
-        });
+        }));
 
         tx.send_async(TerminalEvent::SessionClosed {
             exit_code: Some(42),
@@ -610,7 +635,9 @@ mod tests {
         .expect("run_output_loop must exit on SessionClosed");
 
         assert_eq!(outcome, LoopOutcome::Exit(42));
-        input_handle.abort();
-        let _ = input_handle.await;
+        if let Some(input_handle) = input_handle.take() {
+            input_handle.abort();
+            let _ = input_handle.await;
+        }
     }
 }
