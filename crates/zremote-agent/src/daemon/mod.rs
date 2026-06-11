@@ -10,6 +10,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use tokio::net::UnixListener;
 use tokio::signal::unix::SignalKind;
 use tokio::sync::mpsc;
+use zremote_core::snapshot_parser::{SnapshotParser, screen_snapshot_redraw_bytes};
 
 use protocol::{DaemonRequest, DaemonResponse, RING_BUFFER_CAPACITY, read_request, send_response};
 
@@ -345,6 +346,7 @@ pub async fn run_pty_daemon(
 
     // 8. Event loop
     let mut ring_buffer: VecDeque<u8> = VecDeque::with_capacity(RING_BUFFER_CAPACITY);
+    let mut snapshot_parser = SnapshotParser::new();
     let mut current_cols = cols;
     let mut current_rows = rows;
 
@@ -436,6 +438,8 @@ pub async fn run_pty_daemon(
 
             // PTY output from blocking reader
             Some(data) = pty_rx.recv() => {
+                snapshot_parser.advance(&data);
+
                 // Append to ring buffer
                 ring_buffer.extend(&data);
                 let overflow = ring_buffer.len().saturating_sub(RING_BUFFER_CAPACITY);
@@ -497,7 +501,10 @@ pub async fn run_pty_daemon(
                     }
                     DaemonRequest::GetState => {
                         if let Some(ref mut w) = client_writer {
-                            let scrollback: Vec<u8> = ring_buffer.iter().copied().collect();
+                            let mut scrollback: Vec<u8> = ring_buffer.iter().copied().collect();
+                            if let Some(redraw) = screen_snapshot_redraw_bytes(&snapshot_parser.snapshot()) {
+                                scrollback.extend_from_slice(&redraw);
+                            }
                             let resp = DaemonResponse::State {
                                 session_id: session_id.clone(),
                                 shell_pid,

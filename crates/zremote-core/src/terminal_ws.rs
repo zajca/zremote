@@ -13,6 +13,7 @@ use tokio::time::Instant;
 use zremote_protocol::SessionId;
 use zremote_protocol::status::SessionStatus;
 
+use crate::snapshot_parser::{ScreenSnapshot, screen_snapshot_redraw_bytes};
 use crate::state::{BrowserMessage, encode_binary_output};
 
 /// Buffer size for the browser message channel.
@@ -42,6 +43,8 @@ pub struct RegistrationResult {
     pub rx: mpsc::Receiver<BrowserMessage>,
     /// Scrollback chunks to replay.
     pub scrollback: Vec<Vec<u8>>,
+    /// Current visible terminal screen reconstructed by the server-side parser.
+    pub current_screen: ScreenSnapshot,
     /// Terminal dimensions at time of connection.
     pub cols: u16,
     pub rows: u16,
@@ -140,6 +143,7 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
     let RegistrationResult {
         mut rx,
         scrollback,
+        current_screen,
         cols,
         rows,
         status,
@@ -165,6 +169,17 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
         if let Ok(json) = serde_json::to_string(&end_msg)
             && socket.send(Message::Text(json.into())).await.is_err()
         {
+            return;
+        }
+    }
+
+    // Raw scrollback is intentionally bounded and may begin in the middle of a
+    // fullscreen TUI repaint. Send a synthetic redraw of the server's current
+    // visible screen so reconnecting clients do not have to reconstruct state
+    // from an incomplete ANSI stream.
+    if let Some(redraw) = screen_snapshot_redraw_bytes(&current_screen) {
+        let frame = encode_binary_output(None, &redraw);
+        if socket.send(Message::Binary(frame.into())).await.is_err() {
             return;
         }
     }

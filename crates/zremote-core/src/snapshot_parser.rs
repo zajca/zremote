@@ -436,6 +436,74 @@ fn color_256(idx: u16) -> String {
     format!("#{level:02x}{level:02x}{level:02x}")
 }
 
+/// Render a visible screen snapshot as ANSI bytes that repaint the current
+/// terminal viewport from a clean screen.
+#[must_use]
+pub fn screen_snapshot_redraw_bytes(snapshot: &ScreenSnapshot) -> Option<Vec<u8>> {
+    if snapshot.lines.iter().all(|line| line.text.is_empty()) {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\x1b[0m\x1b[r\x1b[2J\x1b[H");
+
+    for (row_idx, line) in snapshot.lines.iter().enumerate() {
+        if line.text.is_empty() {
+            continue;
+        }
+
+        let row = row_idx + 1;
+        out.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+        append_line_with_spans(&mut out, &line.text, &line.spans);
+    }
+
+    out.extend_from_slice(b"\x1b[0m\x1b[H");
+    Some(out)
+}
+
+fn append_line_with_spans(out: &mut Vec<u8>, text: &str, spans: &[ColorSpan]) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut col = 0usize;
+
+    for span in spans {
+        let start = usize::from(span.start).min(chars.len());
+        let end = usize::from(span.end).min(chars.len());
+        if start > col {
+            append_chars(out, &chars[col..start]);
+        }
+        if end > start {
+            if let Some((r, g, b)) = parse_hex_color(&span.fg) {
+                out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+            }
+            append_chars(out, &chars[start..end]);
+            out.extend_from_slice(b"\x1b[39m");
+        }
+        col = col.max(end);
+    }
+
+    if col < chars.len() {
+        append_chars(out, &chars[col..]);
+    }
+}
+
+fn append_chars(out: &mut Vec<u8>, chars: &[char]) {
+    for ch in chars {
+        let mut buf = [0; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    }
+}
+
+fn parse_hex_color(color: &str) -> Option<(u8, u8, u8)> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +699,46 @@ mod tests {
         parser.advance(b"\x1b[2K");
         let snap = parser.snapshot();
         assert!(snap.lines.is_empty());
+    }
+
+    #[test]
+    fn screen_redraw_empty_snapshot_returns_none() {
+        let snapshot = ScreenSnapshot::default();
+        assert!(screen_snapshot_redraw_bytes(&snapshot).is_none());
+    }
+
+    #[test]
+    fn screen_redraw_clears_and_draws_visible_lines() {
+        let snapshot = ScreenSnapshot {
+            cols: 120,
+            rows: 30,
+            lines: vec![
+                ScreenLine {
+                    text: "ready".to_string(),
+                    spans: vec![ColorSpan {
+                        start: 0,
+                        end: 5,
+                        fg: "#00aa00".to_string(),
+                    }],
+                },
+                ScreenLine {
+                    text: String::new(),
+                    spans: vec![],
+                },
+                ScreenLine {
+                    text: "prompt>".to_string(),
+                    spans: vec![],
+                },
+            ],
+        };
+
+        let redraw = String::from_utf8(screen_snapshot_redraw_bytes(&snapshot).unwrap()).unwrap();
+
+        assert!(redraw.starts_with("\x1b[0m\x1b[r\x1b[2J\x1b[H"));
+        assert!(redraw.contains("\x1b[1;1H"));
+        assert!(redraw.contains("\x1b[38;2;0;170;0mready\x1b[39m"));
+        assert!(redraw.contains("\x1b[3;1Hprompt>"));
+        assert!(redraw.ends_with("\x1b[0m\x1b[H"));
     }
 
     #[test]

@@ -82,10 +82,13 @@ pub async fn run_attach(client: &ApiClient, session_id: &str) -> i32 {
     let mut stdout = std::io::stdout();
     let outcome = run_output_loop(&session.output_rx, &mut input_handle, &mut stdout).await;
 
-    // Cancel input task if it is still running (only true for output-driven
-    // exits; a `UserDetach` outcome means the task already completed).
-    input_handle.abort();
-    let _ = (&mut input_handle).await;
+    // Cancel input task only when it was not already consumed by
+    // run_output_loop's JoinHandle branch. Polling a completed JoinHandle again
+    // panics in Tokio.
+    if !input_handle.is_finished() {
+        input_handle.abort();
+        let _ = (&mut input_handle).await;
+    }
 
     match outcome {
         LoopOutcome::UserDetach => {

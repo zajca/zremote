@@ -72,6 +72,7 @@ impl TerminalBackend for LocalTerminalBackend {
         let (tx, rx) = mpsc::channel::<BrowserMessage>(BROWSER_CHANNEL_SIZE);
 
         let scrollback_data;
+        let current_screen;
         let status;
         {
             let mut sessions = self.state.sessions.write().await;
@@ -87,6 +88,7 @@ impl TerminalBackend for LocalTerminalBackend {
             }
 
             scrollback_data = session.scrollback.iter().cloned().collect::<Vec<_>>();
+            current_screen = session.screen_snapshot();
             status = session.status;
             session.browser_senders.push(tx);
         }
@@ -102,6 +104,7 @@ impl TerminalBackend for LocalTerminalBackend {
         Ok(RegistrationResult {
             rx,
             scrollback: scrollback_data,
+            current_screen,
             cols,
             rows,
             status,
