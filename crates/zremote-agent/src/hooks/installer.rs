@@ -123,6 +123,29 @@ async fn is_already_installed(home: &Path, script_path: &Path) -> bool {
         }
     }
 
+    let user_prompt_submit_is_sync = hooks
+        .get("UserPromptSubmit")
+        .and_then(|e| e.as_array())
+        .is_some_and(|arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            let is_zremote_hook = h
+                                .get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains("zremote-hook"));
+                            is_zremote_hook && h.get("async").is_none()
+                        })
+                    })
+            })
+        });
+    if !user_prompt_submit_is_sync {
+        return false;
+    }
+
     true
 }
 
@@ -455,7 +478,7 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
             event: "UserPromptSubmit",
             matcher: "",
             command_arg: "hooks",
-            async_hook: true,
+            async_hook: false,
         },
         HookConfig {
             event: "SessionStart",
@@ -535,34 +558,48 @@ async fn update_claude_settings(home: &Path, script_path: &Path) -> Result<(), I
             .or_insert(serde_json::json!([]));
 
         if let Some(arr) = event_hooks.as_array_mut() {
+            let command = if config.command_arg == "hooks" {
+                script.clone()
+            } else {
+                format!("{script} {}", config.command_arg)
+            };
+
             // Check if this specific zremote hook entry is already present
-            // (match by both command containing "zremote-hook" and same matcher)
-            let already_installed = arr.iter().any(|entry| {
+            // (match by both command containing "zremote-hook" and same matcher).
+            // If it is present, update it in place so installer changes (such
+            // as async flag changes) are applied on reinstall.
+            let mut already_installed = false;
+            for entry in arr.iter_mut() {
                 let matcher_matches = entry
                     .get("matcher")
                     .and_then(|m| m.as_str())
                     .is_some_and(|m| m == config.matcher);
-                let command_matches =
-                    entry
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.contains("zremote-hook"))
-                            })
-                        });
-                matcher_matches && command_matches
-            });
+                if !matcher_matches {
+                    continue;
+                }
+                let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                    continue;
+                };
+                for hook in hooks {
+                    let is_zremote_hook = hook
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c.contains("zremote-hook"));
+                    if !is_zremote_hook {
+                        continue;
+                    }
+
+                    hook["command"] = serde_json::json!(command.clone());
+                    if config.async_hook {
+                        hook["async"] = serde_json::json!(true);
+                    } else if let Some(obj) = hook.as_object_mut() {
+                        obj.remove("async");
+                    }
+                    already_installed = true;
+                }
+            }
 
             if !already_installed {
-                let command = if config.command_arg == "hooks" {
-                    script.clone()
-                } else {
-                    format!("{script} {}", config.command_arg)
-                };
-
                 let mut hook_entry = serde_json::json!({
                     "matcher": config.matcher,
                     "hooks": [{
@@ -1319,6 +1356,16 @@ mod tests {
             "SessionStart should not be async"
         );
 
+        // UserPromptSubmit is the transition from prompt/idle back to working.
+        // Keep it synchronous so the UI state changes before Claude starts
+        // thinking; async delivery can leave the sidebar stuck on idle.
+        let user_prompt_submit = hooks["UserPromptSubmit"].as_array().unwrap();
+        let user_prompt_submit_hook = &user_prompt_submit[0]["hooks"][0];
+        assert!(
+            user_prompt_submit_hook.get("async").is_none(),
+            "UserPromptSubmit should not be async"
+        );
+
         // Verify Notification has separate entries for idle_prompt and permission_prompt
         // (no catch-all -- CC fires ALL matching hooks, catch-all would duplicate)
         let notifications = hooks["Notification"].as_array().unwrap();
@@ -1357,6 +1404,42 @@ mod tests {
 
         let pre_tool = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool.len(), 1, "should not duplicate hooks");
+    }
+
+    #[tokio::test]
+    async fn install_updates_existing_zremote_hook_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        install_hooks_at(home).await.unwrap();
+
+        let settings_path = home.join(".claude/settings.json");
+        let content = tokio::fs::read_to_string(&settings_path).await.unwrap();
+        let mut settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["async"] = serde_json::json!(true);
+        tokio::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        install_hooks_at(home).await.unwrap();
+
+        let content = tokio::fs::read_to_string(settings_path).await.unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let user_prompt_submit = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(
+            user_prompt_submit.len(),
+            1,
+            "should update existing hook instead of adding a duplicate"
+        );
+        let hook = &user_prompt_submit[0]["hooks"][0];
+        assert!(
+            hook.get("async").is_none(),
+            "UserPromptSubmit should be rewritten as sync on reinstall"
+        );
     }
 
     #[tokio::test]

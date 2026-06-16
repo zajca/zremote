@@ -217,16 +217,10 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
                                     tracing::warn!(len = data.len(), "browser terminal input exceeds 1 MB, truncating");
                                     data.truncate(MAX_INPUT_BYTES);
                                 }
-                                // Flush buffered output before forwarding input
-                                // to keep output/input ordering correct.
-                                if !output_buf.is_empty() {
-                                    let frame = encode_binary_output(None, &output_buf);
-                                    output_buf.clear();
-                                    coalesce_deadline = None;
-                                    if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
+                                // Forward input immediately. If the browser is behind on
+                                // output, flushing here can block behind WebSocket
+                                // backpressure and make the terminal appear unable to
+                                // accept keystrokes for seconds or minutes.
                                 backend.send_input(&session_id, data.into_bytes()).await;
                             }
                             Ok(BrowserInput::Resize { cols, rows }) => {
@@ -250,16 +244,7 @@ pub async fn handle_terminal_websocket<B: TerminalBackend>(
                             tracing::warn!(len = data.len(), "browser terminal binary input exceeds 1 MB, truncating");
                             data.truncate(MAX_INPUT_BYTES);
                         }
-                        // Flush buffered output before forwarding input
-                        // to keep output/input ordering correct.
-                        if !output_buf.is_empty() {
-                            let frame = encode_binary_output(None, &output_buf);
-                            output_buf.clear();
-                            coalesce_deadline = None;
-                            if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                break;
-                            }
-                        }
+                        // Keep input responsive even when output is backed up.
                         backend.send_input(&session_id, data).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
