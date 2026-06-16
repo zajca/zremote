@@ -58,7 +58,7 @@
 //! complete `Vec<CellRun>` for one viewport state. During scrollback, each offset
 //! produces different cell runs (different grid lines visible). The LRU handles
 //! back-and-forth scrolling (page up, page down, page up) without rebuilding.
-//! `content_generation` invalidates when PTY output arrives.
+//! `content_generation` invalidates when PTY output arrives or the terminal is resized.
 //!
 //! # Font metrics
 //!
@@ -992,6 +992,7 @@ impl Element for TerminalElement {
             if new_cols != current_cols || new_rows != current_rows {
                 let size = TermSize::new(usize::from(new_cols), usize::from(new_rows));
                 term.resize(size);
+                self.content_generation.fetch_add(1, Ordering::Relaxed);
                 let _ = self.resize_tx.send((new_cols, new_rows));
             }
         }
